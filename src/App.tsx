@@ -5,6 +5,10 @@ import CommandBar from "./components/CommandBar";
 import Dashboard from "./pages/Dashboard";
 import Settings from "./pages/Settings";
 import CronDashboard from "./pages/CronDashboard";
+import EmailPage from "./pages/EmailPage";
+import CalendarPage from "./pages/CalendarPage";
+import GitHubPage from "./pages/GitHubPage";
+import NotionPage from "./pages/NotionPage";
 import { useKeyboard } from "./hooks/useKeyboard";
 import VoiceIndicator from "./components/VoiceIndicator";
 import { useVoiceState } from "./hooks/useVoiceState";
@@ -30,8 +34,12 @@ export default function App() {
 
   function renderView() {
     switch (activeView) {
-      case "settings": return <Settings />;
+      case "email": return <EmailPage />;
+      case "calendar": return <CalendarPage />;
+      case "github": return <GitHubPage />;
+      case "notion": return <NotionPage />;
       case "cron": return <CronDashboard />;
+      case "settings": return <Settings />;
       case "home": default: return <Dashboard />;
     }
   }

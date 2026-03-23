@@ -10,6 +10,7 @@ const navItems = [
   { id: "calendar", label: "CAL", icon: "C" },
   { id: "github", label: "GIT", icon: "G" },
   { id: "notion", label: "NOT", icon: "N" },
+  { id: "cron", label: "CRON", icon: "T" },
   { id: "settings", label: "SET", icon: "S" },
 ];
 
