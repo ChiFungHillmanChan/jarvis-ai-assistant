@@ -26,7 +26,7 @@ struct ClaudeContent {
     text: String,
 }
 
-const SYSTEM_PROMPT: &str = "You are JARVIS, a personal AI assistant. Respond concisely in a technical assistant tone. Be direct, not chatty. Example good response: 'Standup rescheduled to 10:00. Calendar updated.' Example bad response: 'Sure! I have gone ahead and moved your standup meeting for you!'";
+const SYSTEM_PROMPT: &str = "You are JARVIS, a personal AI assistant. Respond concisely in a technical assistant tone. Be direct, not chatty. Example good response: 'Standup rescheduled to 10:00. Calendar updated.' Example bad response: 'Sure! I have gone ahead and moved your standup meeting for you!' If the user asks to create a task, reminder, or todo, include on a new line: [TASK:title|description|deadline(YYYY-MM-DD)|priority(0-3)]. Then confirm the creation.";
 
 pub async fn send(
     api_key: &str,
