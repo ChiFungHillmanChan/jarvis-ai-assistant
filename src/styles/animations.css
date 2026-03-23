@@ -1,0 +1,77 @@
+/* ============================================================
+   JARVIS OS — Animations & Motion
+   ============================================================ */
+
+/* ============================================================
+   Keyframes
+   ============================================================ */
+
+/* Pulsing glow — for active indicators and highlights */
+@keyframes glow-pulse {
+  0%, 100% {
+    opacity: 1;
+    text-shadow: 0 0 8px rgba(0, 180, 255, 0.6);
+  }
+  50% {
+    opacity: 0.7;
+    text-shadow: 0 0 20px rgba(0, 180, 255, 0.9), 0 0 40px rgba(0, 180, 255, 0.4);
+  }
+}
+
+/* Fade in from transparent */
+@keyframes fade-in {
+  from {
+    opacity: 0;
+    transform: translateY(4px);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}
+
+/* Horizontal scan line sweep */
+@keyframes scan-line {
+  0% {
+    transform: translateY(-100%);
+    opacity: 0;
+  }
+  10% {
+    opacity: 1;
+  }
+  90% {
+    opacity: 1;
+  }
+  100% {
+    transform: translateY(100vh);
+    opacity: 0;
+  }
+}
+
+/* Border glow pulse — for panel borders */
+@keyframes border-glow {
+  0%, 100% {
+    border-color: var(--border-primary);
+    box-shadow: 0 0 0 rgba(0, 180, 255, 0);
+  }
+  50% {
+    border-color: var(--border-glow);
+    box-shadow: 0 0 12px rgba(0, 180, 255, 0.2), inset 0 0 12px rgba(0, 180, 255, 0.05);
+  }
+}
+
+/* ============================================================
+   Utility classes
+   ============================================================ */
+
+.animate-fade-in {
+  animation: fade-in 0.4s ease forwards;
+}
+
+.animate-glow {
+  animation: glow-pulse 3s ease-in-out infinite;
+}
+
+.animate-border-glow {
+  animation: border-glow 3s ease-in-out infinite;
+}

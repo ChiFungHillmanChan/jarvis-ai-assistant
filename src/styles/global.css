@@ -1,0 +1,172 @@
+/* ============================================================
+   JARVIS OS — Global Stylesheet
+   Holographic cyan theme inspired by Iron Man's JARVIS UI
+   ============================================================ */
+
+:root {
+  /* Backgrounds */
+  --bg-primary: #0a0e1a;
+  --bg-panel: rgba(0, 180, 255, 0.03);
+  --bg-panel-hover: rgba(0, 180, 255, 0.06);
+
+  /* Borders */
+  --border-primary: rgba(0, 180, 255, 0.15);
+  --border-glow: rgba(0, 180, 255, 0.3);
+
+  /* Text */
+  --text-primary: rgba(0, 180, 255, 0.9);
+  --text-secondary: rgba(0, 180, 255, 0.6);
+  --text-muted: rgba(0, 180, 255, 0.4);
+  --text-label: rgba(0, 180, 255, 0.5);
+
+  /* Accents */
+  --accent-urgent: rgba(255, 100, 100, 0.8);
+  --accent-urgent-dim: rgba(255, 100, 100, 0.4);
+  --accent-success: rgba(16, 185, 129, 0.7);
+  --accent-success-dim: rgba(16, 185, 129, 0.4);
+  --accent-warning: rgba(255, 180, 0, 0.8);
+  --accent-warning-dim: rgba(255, 180, 0, 0.4);
+
+  /* Typography */
+  --font-mono: 'JetBrains Mono', 'SF Mono', 'Fira Code', monospace;
+  --font-sans: -apple-system, BlinkMacSystemFont, 'Inter', sans-serif;
+
+  /* Border radii */
+  --radius-sm: 4px;
+  --radius-md: 8px;
+  --radius-lg: 12px;
+}
+
+/* ============================================================
+   Box-sizing reset
+   ============================================================ */
+
+*,
+*::before,
+*::after {
+  box-sizing: border-box;
+  margin: 0;
+  padding: 0;
+}
+
+/* ============================================================
+   Base layout
+   ============================================================ */
+
+html,
+body,
+#root {
+  height: 100%;
+  width: 100%;
+  overflow: hidden;
+}
+
+html {
+  font-size: 16px;
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+}
+
+body {
+  background-color: var(--bg-primary);
+  color: var(--text-primary);
+  font-family: var(--font-sans);
+  position: relative;
+}
+
+/* ============================================================
+   Grid overlay
+   Subtle 24px cyan grid lines rendered via body::before
+   ============================================================ */
+
+body::before {
+  content: '';
+  position: fixed;
+  inset: 0;
+  pointer-events: none;
+  z-index: 0;
+  background-image:
+    linear-gradient(rgba(0, 180, 255, 0.04) 1px, transparent 1px),
+    linear-gradient(90deg, rgba(0, 180, 255, 0.04) 1px, transparent 1px);
+  background-size: 24px 24px;
+}
+
+/* Ensure app content sits above the grid overlay */
+#root {
+  position: relative;
+  z-index: 1;
+}
+
+/* ============================================================
+   Custom scrollbar
+   ============================================================ */
+
+::-webkit-scrollbar {
+  width: 4px;
+  height: 4px;
+}
+
+::-webkit-scrollbar-track {
+  background: transparent;
+}
+
+::-webkit-scrollbar-thumb {
+  background: var(--border-glow);
+  border-radius: 2px;
+}
+
+::-webkit-scrollbar-thumb:hover {
+  background: var(--text-secondary);
+}
+
+* {
+  scrollbar-width: thin;
+  scrollbar-color: var(--border-glow) transparent;
+}
+
+/* ============================================================
+   Utility classes
+   ============================================================ */
+
+/* Translucent panel with cyan border */
+.panel {
+  background: var(--bg-panel);
+  border: 1px solid var(--border-primary);
+  border-radius: var(--radius-md);
+  padding: 16px;
+  transition: background 0.2s ease, border-color 0.2s ease;
+}
+
+.panel:hover {
+  background: var(--bg-panel-hover);
+  border-color: var(--border-glow);
+}
+
+/* Small uppercase monospace label */
+.label {
+  font-family: var(--font-mono);
+  font-size: 10px;
+  font-weight: 500;
+  letter-spacing: 0.15em;
+  text-transform: uppercase;
+  color: var(--text-label);
+}
+
+/* Small monospace system text */
+.system-text {
+  font-family: var(--font-mono);
+  font-size: 11px;
+  font-weight: 400;
+  letter-spacing: 0.1em;
+  color: var(--text-secondary);
+}
+
+/* Tauri drag region */
+.drag-region {
+  -webkit-app-region: drag;
+}
+
+/* Disable drag on interactive elements inside drag regions */
+.no-drag {
+  -webkit-app-region: no-drag;
+}
