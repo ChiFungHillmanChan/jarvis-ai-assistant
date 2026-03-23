@@ -13,6 +13,7 @@ import { useKeyboard } from "./hooks/useKeyboard";
 import VoiceIndicator from "./components/VoiceIndicator";
 import { useVoiceState } from "./hooks/useVoiceState";
 import ToastContainer from "./components/Toast";
+import WindowControls from "./components/WindowControls";
 
 export default function App() {
   const [activeView, setActiveView] = useState("home");
@@ -47,7 +48,10 @@ export default function App() {
 
   return (
     <div style={styles.root}>
-      <div className="drag-region" style={styles.dragBar} />
+      <div className="drag-region" style={styles.titleBar}>
+        <span style={styles.titleText}>JARVIS</span>
+        <WindowControls />
+      </div>
       <div style={styles.layout}>
         <Sidebar activeView={activeView} onNavigate={setActiveView} onChatToggle={toggleChat} />
         <div style={styles.content}>
@@ -64,7 +68,8 @@ export default function App() {
 
 const styles: Record<string, React.CSSProperties> = {
   root: { height: "100vh", display: "flex", flexDirection: "column", overflow: "hidden" },
-  dragBar: { height: 28, flexShrink: 0 },
+  titleBar: { height: 36, flexShrink: 0, display: "flex", justifyContent: "space-between", alignItems: "center", padding: "0 12px" },
+  titleText: { color: "rgba(0, 180, 255, 0.3)", fontFamily: "var(--font-mono)", fontSize: 10, letterSpacing: 2 },
   layout: { flex: 1, display: "flex", overflow: "hidden" },
   content: { flex: 1, display: "flex", flexDirection: "column", overflow: "hidden" },
   mainArea: { flex: 1, overflow: "hidden" },
