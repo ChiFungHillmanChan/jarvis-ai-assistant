@@ -12,6 +12,7 @@ import NotionPage from "./pages/NotionPage";
 import { useKeyboard } from "./hooks/useKeyboard";
 import VoiceIndicator from "./components/VoiceIndicator";
 import { useVoiceState } from "./hooks/useVoiceState";
+import ToastContainer from "./components/Toast";
 
 export default function App() {
   const [activeView, setActiveView] = useState("home");
@@ -56,6 +57,7 @@ export default function App() {
       </div>
       <ChatPanel isOpen={chatOpen} isFullScreen={chatFullScreen} onClose={closeChat} onToggleFullScreen={() => setChatFullScreen((prev) => !prev)} />
       <VoiceIndicator state={voiceState} onStop={stopVoice} />
+      <ToastContainer />
     </div>
   );
 }
