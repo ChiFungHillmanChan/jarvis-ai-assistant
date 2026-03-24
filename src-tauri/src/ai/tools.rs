@@ -394,6 +394,45 @@ pub fn to_claude_format(tools: &[Tool]) -> Vec<serde_json::Value> {
     })).collect()
 }
 
+/// Map tool names to user-friendly status labels for streaming UI.
+pub fn tool_status_label(name: &str) -> &'static str {
+    match name {
+        "search_emails" => "Searching emails...",
+        "read_email" => "Reading email...",
+        "send_email" => "Sending email...",
+        "archive_email" => "Archiving email...",
+        "list_events" => "Checking calendar...",
+        "create_event" => "Creating event...",
+        "update_event" => "Updating event...",
+        "delete_event" => "Deleting event...",
+        "search_notion" => "Searching Notion...",
+        "read_notion_page" => "Reading Notion page...",
+        "create_notion_page" => "Creating Notion page...",
+        "list_github_items" => "Checking GitHub...",
+        "create_github_issue" => "Creating GitHub issue...",
+        "search_notes" => "Searching notes...",
+        "read_note" => "Reading note...",
+        "open_app" => "Opening app...",
+        "open_url" => "Opening URL...",
+        "run_command" => "Running command...",
+        "find_files" => "Finding files...",
+        "open_file" => "Opening file...",
+        "create_task" => "Creating task...",
+        "write_note" => "Writing note...",
+        "system_info" => "Checking system...",
+        "clipboard_read" => "Reading clipboard...",
+        "clipboard_write" => "Copying to clipboard...",
+        "screenshot" => "Taking screenshot...",
+        "manage_window" => "Managing windows...",
+        "system_controls" => "Adjusting system...",
+        "send_notification" => "Sending notification...",
+        "list_processes" => "Listing processes...",
+        "kill_process" => "Stopping process...",
+        "read_file" => "Reading file...",
+        _ => "Processing...",
+    }
+}
+
 /// Truncate tool results to avoid blowing up context windows.
 fn truncate_result(s: String) -> String {
     if s.len() > 4000 {
@@ -827,4 +866,6 @@ Capabilities:
 - Tasks: create tasks and reminders
 - File I/O: read file contents, write notes
 
-You can chain multiple tools in sequence. Think step by step -- gather information first, then act. Always confirm destructive actions in your response text before executing them.";
+You can chain multiple tools in sequence. Think step by step -- gather information first, then act. Always confirm destructive actions in your response text before executing them.
+
+Always attempt tool calls when the user asks about their data (emails, calendar, notes, etc). Do not preemptively refuse -- if authentication is missing, the tool will return a clear error message that guides the user. Never say \"I don't have access\" without first trying the tool.";

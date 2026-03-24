@@ -1,7 +1,7 @@
 use tauri::{
     menu::{Menu, MenuItem},
     tray::TrayIconBuilder,
-    Emitter, Manager,
+    Manager,
 };
 
 pub fn create_tray(app: &tauri::App) -> Result<(), Box<dyn std::error::Error>> {
@@ -18,7 +18,6 @@ pub fn create_tray(app: &tauri::App) -> Result<(), Box<dyn std::error::Error>> {
             "show" => {
                 if crate::wallpaper::is_active() {
                     let _ = crate::wallpaper::raise_for_interaction(app);
-                    let _ = app.emit("wallpaper-raised", true);
                 } else {
                     if let Some(window) = app.get_webview_window("main") {
                         let _ = window.show();
@@ -28,9 +27,7 @@ pub fn create_tray(app: &tauri::App) -> Result<(), Box<dyn std::error::Error>> {
             }
             "wallpaper" => {
                 match crate::wallpaper::toggle_wallpaper(app.clone()) {
-                    Ok(active) => {
-                        let _ = app.emit("wallpaper-status", active);
-                    }
+                    Ok(_active) => {}
                     Err(e) => {
                         log::error!("Failed to toggle wallpaper: {}", e);
                     }
@@ -46,7 +43,6 @@ pub fn create_tray(app: &tauri::App) -> Result<(), Box<dyn std::error::Error>> {
                 let app = tray.app_handle();
                 if crate::wallpaper::is_active() {
                     let _ = crate::wallpaper::raise_for_interaction(app);
-                    let _ = app.emit("wallpaper-raised", true);
                 } else {
                     if let Some(window) = app.get_webview_window("main") {
                         let _ = window.show();

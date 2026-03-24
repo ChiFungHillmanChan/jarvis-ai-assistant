@@ -12,7 +12,7 @@ pub mod wallpaper;
 
 use ai::AiRouter;
 use db::Database;
-use tauri::{Emitter, Manager};
+use tauri::Manager;
 
 pub fn run() {
     dotenvy::dotenv().ok();
@@ -75,6 +75,7 @@ pub fn run() {
             // Auto-briefing on startup (only if enabled)
             let db_brief = std::sync::Arc::clone(&db_arc);
             let auth_brief = std::sync::Arc::clone(&auth_arc);
+            let app_handle_brief = app.handle().clone();
             tauri::async_runtime::spawn(async move {
                 tokio::time::sleep(std::time::Duration::from_secs(3)).await;
                 // Check if auto-briefing is enabled
@@ -107,7 +108,7 @@ pub fn run() {
                     std::env::var("OPENAI_API_KEY").ok(),
                     "claude_primary",
                 );
-                match crate::assistant::briefing::generate_briefing(&db_brief, &router, &auth_brief).await {
+                match crate::assistant::briefing::generate_briefing(&db_brief, &router, &auth_brief, &app_handle_brief).await {
                     Ok(result) => {
                         log::info!("Morning briefing: {}", result.briefing);
                         // Mark as briefed today
@@ -198,12 +199,10 @@ pub fn run() {
                             if let Err(e) = wallpaper::lower_to_background(&app_handle) {
                                 log::error!("Failed to lower wallpaper via shortcut: {}", e);
                             }
-                            let _ = app_handle.emit("wallpaper-raised", false);
                         } else {
                             if let Err(e) = wallpaper::raise_for_interaction(&app_handle) {
                                 log::error!("Failed to raise wallpaper via shortcut: {}", e);
                             }
-                            let _ = app_handle.emit("wallpaper-raised", true);
                         }
                     }
                 }).map_err(|e| format!("Failed to register global shortcut: {}", e))?;

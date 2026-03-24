@@ -15,22 +15,23 @@ pub async fn generate_briefing(
     db: &Arc<Database>,
     router: &AiRouter,
     google_auth: &Arc<crate::auth::google::GoogleAuth>,
+    app_handle: &tauri::AppHandle,
 ) -> Result<BriefingResult, String> {
     let context = DayContext::gather(db)?;
     let prompt = context.to_prompt();
 
     let messages = vec![("user".to_string(), prompt)];
-    let briefing_text = router.send(messages, db, google_auth).await?;
+    let briefing_text = router.send(messages, db, google_auth, app_handle).await?;
 
     Ok(BriefingResult {
         greeting: context.greeting,
         briefing: briefing_text,
         has_overdue: context.tasks_summary.contains("overdue"),
-        task_count: extract_number(&context.tasks_summary),
+        task_count: extract_task_count(&context.tasks_summary),
     })
 }
 
-fn extract_number(s: &str) -> i64 {
+pub fn extract_task_count(s: &str) -> i64 {
     s.split_whitespace()
         .next()
         .and_then(|n| n.parse().ok())

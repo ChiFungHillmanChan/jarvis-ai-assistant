@@ -31,6 +31,7 @@ pub fn get_cron_runs(db: State<Arc<Database>>, job_id: i64, limit: Option<u32>) 
 
 #[tauri::command]
 pub async fn create_custom_cron(
+    app_handle: tauri::AppHandle,
     db: State<'_, Arc<Database>>,
     router: State<'_, AiRouter>,
     google_auth: State<'_, Arc<crate::auth::google::GoogleAuth>>,
@@ -46,7 +47,7 @@ pub async fn create_custom_cron(
     );
 
     let messages = vec![("user".to_string(), prompt)];
-    let response = router.send(messages, &db, &google_auth).await?;
+    let response = router.send(messages, &db, &google_auth, &app_handle).await?;
 
     // Parse AI response as JSON
     let parsed: serde_json::Value = serde_json::from_str(response.trim().trim_start_matches("```json").trim_end_matches("```").trim())

@@ -71,7 +71,7 @@ impl GoogleAuth {
         open::that(auth_url.to_string()).map_err(|e| format!("Failed to open browser: {}", e))?;
         log::info!("Opened browser for Google OAuth at port {}", port);
 
-        let (tx, rx) = oneshot::channel::<String>();
+        let (tx, rx) = oneshot::channel::<Result<String, String>>();
         let tx = std::sync::Mutex::new(Some(tx));
 
         tokio::spawn(async move {
@@ -79,20 +79,27 @@ impl GoogleAuth {
                 let mut buf = [0u8; 4096];
                 if let Ok(n) = tokio::io::AsyncReadExt::read(&mut stream, &mut buf).await {
                     let request = String::from_utf8_lossy(&buf[..n]);
-                    if let Some(code) = extract_code(&request) {
+                    if let Some(err) = extract_error(&request) {
+                        let response = "HTTP/1.1 200 OK\r\nContent-Type: text/html\r\n\r\n<html><body><h1>JARVIS</h1><p>Authentication failed. You can close this tab.</p></body></html>";
+                        let _ = tokio::io::AsyncWriteExt::write_all(&mut stream, response.as_bytes()).await;
+                        if let Some(tx) = tx.lock().unwrap().take() {
+                            let _ = tx.send(Err(err));
+                        }
+                    } else if let Some(code) = extract_code(&request) {
                         let response = "HTTP/1.1 200 OK\r\nContent-Type: text/html\r\n\r\n<html><body><h1>JARVIS</h1><p>Authentication successful. You can close this tab.</p></body></html>";
                         let _ = tokio::io::AsyncWriteExt::write_all(&mut stream, response.as_bytes()).await;
                         if let Some(tx) = tx.lock().unwrap().take() {
-                            let _ = tx.send(code);
+                            let _ = tx.send(Ok(code));
                         }
                     }
                 }
             }
         });
 
-        let code = tokio::time::timeout(std::time::Duration::from_secs(120), rx)
-            .await.map_err(|_| "OAuth timeout: no response within 120 seconds".to_string())?
-            .map_err(|_| "OAuth channel closed".to_string())?;
+        let code = tokio::time::timeout(std::time::Duration::from_secs(30), rx)
+            .await.map_err(|_| "OAuth timeout: no response within 30 seconds. Please try again.".to_string())?
+            .map_err(|_| "OAuth cancelled".to_string())?
+            .map_err(|e| format!("Google OAuth denied: {}", e))?;
 
         let token_result = client
             .exchange_code(AuthorizationCode::new(code))
@@ -155,6 +162,19 @@ impl GoogleAuth {
             );
         }
     }
+}
+
+fn extract_error(request: &str) -> Option<String> {
+    let first_line = request.lines().next()?;
+    let path = first_line.split_whitespace().nth(1)?;
+    let query = path.split('?').nth(1)?;
+    for param in query.split('&') {
+        let mut parts = param.splitn(2, '=');
+        if parts.next()? == "error" {
+            return parts.next().map(|s| s.replace('+', " ").to_string());
+        }
+    }
+    None
 }
 
 fn extract_code(request: &str) -> Option<String> {

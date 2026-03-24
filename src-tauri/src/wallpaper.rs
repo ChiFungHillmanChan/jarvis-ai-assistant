@@ -1,5 +1,5 @@
 use std::sync::atomic::{AtomicBool, Ordering};
-use tauri::Manager;
+use tauri::{Emitter, Manager};
 
 static WALLPAPER_ACTIVE: AtomicBool = AtomicBool::new(false);
 static WALLPAPER_RAISED: AtomicBool = AtomicBool::new(false);
@@ -14,6 +14,11 @@ pub fn is_active() -> bool {
 
 pub fn is_raised() -> bool {
     WALLPAPER_RAISED.load(Ordering::SeqCst)
+}
+
+fn emit_wallpaper_state(app_handle: &tauri::AppHandle) {
+    let _ = app_handle.emit("wallpaper-status", is_active());
+    let _ = app_handle.emit("wallpaper-raised", is_raised());
 }
 
 #[cfg(target_os = "macos")]
@@ -82,6 +87,7 @@ pub fn enable(app_handle: &tauri::AppHandle) -> Result<(), String> {
 
     WALLPAPER_ACTIVE.store(true, Ordering::SeqCst);
     WALLPAPER_RAISED.store(false, Ordering::SeqCst);
+    emit_wallpaper_state(app_handle);
     log::info!("Wallpaper mode enabled -- main window is now desktop wallpaper");
     Ok(())
 }
@@ -120,6 +126,7 @@ pub fn disable(app_handle: &tauri::AppHandle) -> Result<(), String> {
 
     WALLPAPER_ACTIVE.store(false, Ordering::SeqCst);
     WALLPAPER_RAISED.store(false, Ordering::SeqCst);
+    emit_wallpaper_state(app_handle);
     log::info!("Wallpaper mode disabled -- main window restored");
     Ok(())
 }
@@ -154,6 +161,7 @@ pub fn raise_for_interaction(app_handle: &tauri::AppHandle) -> Result<(), String
 
     let _ = main_win.set_focus();
     WALLPAPER_RAISED.store(true, Ordering::SeqCst);
+    emit_wallpaper_state(app_handle);
     log::info!("Wallpaper raised for interaction");
     Ok(())
 }
@@ -185,6 +193,7 @@ pub fn lower_to_background(app_handle: &tauri::AppHandle) -> Result<(), String> 
     }
 
     WALLPAPER_RAISED.store(false, Ordering::SeqCst);
+    emit_wallpaper_state(app_handle);
     log::info!("Wallpaper lowered to background");
     Ok(())
 }
@@ -193,7 +202,8 @@ pub fn lower_to_background(app_handle: &tauri::AppHandle) -> Result<(), String> 
 
 #[tauri::command]
 pub fn enable_wallpaper(app: tauri::AppHandle) -> Result<(), String> {
-    enable(&app)
+    enable(&app)?;
+    raise_for_interaction(&app)
 }
 
 #[tauri::command]

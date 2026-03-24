@@ -28,6 +28,7 @@ export default function Settings() {
   const [loaded, setLoaded] = useState(false);
   const [googleConnected, setGoogleConnected] = useState(false);
   const [connecting, setConnecting] = useState(false);
+  const [googleError, setGoogleError] = useState<string | null>(null);
   const [notionToken, setNotionToken] = useState("");
   const [githubToken, setGithubToken] = useState("");
   const [notionSaved, setNotionSaved] = useState(false);
@@ -87,11 +88,12 @@ export default function Settings() {
 
   async function handleGoogleConnect() {
     setConnecting(true);
+    setGoogleError(null);
     try {
       await googleConnect();
       setGoogleConnected(true);
     } catch (e) {
-      console.error(e);
+      setGoogleError(String(e));
     } finally {
       setConnecting(false);
     }
@@ -230,9 +232,12 @@ export default function Settings() {
             {googleConnected ? (
               <div style={{ color: "rgba(16, 185, 129, 0.7)", fontSize: 12 }}>Connected</div>
             ) : (
-              <button onClick={handleGoogleConnect} disabled={connecting} style={styles.actionBtn}>
-                {connecting ? "CONNECTING..." : "CONNECT GOOGLE"}
-              </button>
+              <>
+                <button onClick={handleGoogleConnect} disabled={connecting} style={styles.actionBtn}>
+                  {connecting ? "CONNECTING..." : "CONNECT GOOGLE"}
+                </button>
+                {googleError && <div style={styles.errorText}>{googleError}</div>}
+              </>
             )}
           </div>
 
@@ -331,7 +336,8 @@ export default function Settings() {
             </div>
             <div style={styles.privacyText}>
               When active, JARVIS goes fullscreen behind all windows.
-              Say "Hey Jarvis", click the tray icon, or press Escape to interact.
+              After enabling, it stays interactive until you send it to the background.
+              To bring it back later, say "Hey Jarvis", click the tray icon, or press Cmd+Shift+W.
               Closing the window sends it back to the background.
             </div>
           </div>

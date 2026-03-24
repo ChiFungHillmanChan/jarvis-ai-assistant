@@ -322,7 +322,7 @@ async fn handle_wake_word_detection(
 
     save_message(&db, "user", &user_text)?;
     let messages = load_recent_messages(&db)?;
-    let response = router.send(messages, &db, &auth).await?;
+    let response = router.send(messages, &db, &auth, &app_handle).await?;
     save_message(&db, "assistant", &response)?;
 
     voice_engine.set_state_and_emit(VoiceState::WakeWordSpeaking);

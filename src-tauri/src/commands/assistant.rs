@@ -8,20 +8,67 @@ use tauri::State;
 
 #[tauri::command]
 pub async fn get_briefing(
+    app_handle: tauri::AppHandle,
     db: State<'_, Arc<Database>>,
     router: State<'_, AiRouter>,
     google_auth: State<'_, Arc<GoogleAuth>>,
 ) -> Result<briefing::BriefingResult, String> {
-    briefing::generate_briefing(&db, &router, &google_auth).await
+    let today = chrono::Local::now().format("%Y-%m-%d").to_string();
+
+    let cached = {
+        let conn = db.conn.lock().map_err(|e| e.to_string())?;
+        let last_date = conn.query_row(
+            "SELECT value FROM user_preferences WHERE key = 'last_briefing_date'",
+            [], |row| row.get::<_, String>(0),
+        ).unwrap_or_default();
+
+        if last_date == today {
+            conn.query_row(
+                "SELECT value FROM user_preferences WHERE key = 'cached_briefing'",
+                [], |row| row.get::<_, String>(0),
+            ).ok()
+        } else {
+            None
+        }
+    };
+
+    if let Some(text) = cached {
+        let context = DayContext::gather(&db)?;
+        return Ok(briefing::BriefingResult {
+            greeting: context.greeting,
+            briefing: text,
+            has_overdue: context.tasks_summary.contains("overdue"),
+            task_count: briefing::extract_task_count(&context.tasks_summary),
+        });
+    }
+
+    let result = briefing::generate_briefing(&db, &router, &google_auth, &app_handle).await?;
+
+    {
+        let conn = db.conn.lock().map_err(|e| e.to_string())?;
+        let _ = conn.execute(
+            "INSERT INTO user_preferences (key, value, updated_at) VALUES ('last_briefing_date', ?1, datetime('now'))
+             ON CONFLICT(key) DO UPDATE SET value = ?1, updated_at = datetime('now')",
+            rusqlite::params![today],
+        );
+        let _ = conn.execute(
+            "INSERT INTO user_preferences (key, value, updated_at) VALUES ('cached_briefing', ?1, datetime('now'))
+             ON CONFLICT(key) DO UPDATE SET value = ?1, updated_at = datetime('now')",
+            rusqlite::params![result.briefing],
+        );
+    }
+
+    Ok(result)
 }
 
 #[tauri::command]
 pub async fn speak_briefing(
+    app_handle: tauri::AppHandle,
     db: State<'_, Arc<Database>>,
     router: State<'_, AiRouter>,
     google_auth: State<'_, Arc<GoogleAuth>>,
 ) -> Result<briefing::BriefingResult, String> {
-    let result = briefing::generate_briefing(&db, &router, &google_auth).await?;
+    let result = briefing::generate_briefing(&db, &router, &google_auth, &app_handle).await?;
 
     // Speak the briefing
     let tts = TextToSpeech::new();
@@ -35,6 +82,7 @@ pub async fn speak_briefing(
 
 #[tauri::command]
 pub async fn ask_jarvis(
+    app_handle: tauri::AppHandle,
     db: State<'_, Arc<Database>>,
     router: State<'_, AiRouter>,
     google_auth: State<'_, Arc<GoogleAuth>>,
@@ -57,11 +105,12 @@ pub async fn ask_jarvis(
     );
 
     let messages = vec![("user".to_string(), prompt)];
-    router.send(messages, &db, &google_auth).await
+    router.send(messages, &db, &google_auth, &app_handle).await
 }
 
 #[tauri::command]
 pub async fn search_conversations(
+    app_handle: tauri::AppHandle,
     db: State<'_, Arc<Database>>,
     router: State<'_, AiRouter>,
     google_auth: State<'_, Arc<GoogleAuth>>,
@@ -101,5 +150,5 @@ pub async fn search_conversations(
     );
 
     let messages = vec![("user".to_string(), prompt)];
-    router.send(messages, &db, &google_auth).await
+    router.send(messages, &db, &google_auth, &app_handle).await
 }
