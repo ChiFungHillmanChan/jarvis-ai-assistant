@@ -21,10 +21,11 @@ pub struct ActionResult {
 /// [NOTE:/path/to/file|content]                -- write a note to file
 /// [SYSTEM_INFO]                               -- get system info
 pub async fn execute_actions(response: &str, db: &Arc<Database>) -> (String, Vec<ActionResult>) {
-    let mut clean_lines = Vec::new();
+    let mut clean_lines: Vec<String> = Vec::new();
     let mut actions = Vec::new();
 
-    for line in response.lines() {
+    for raw_line in response.lines() {
+        let line = raw_line.trim();
         if line.starts_with("[TASK:") && line.ends_with(']') {
             let inner = &line[6..line.len() - 1];
             let parts: Vec<&str> = inner.splitn(4, '|').collect();
@@ -72,32 +73,32 @@ pub async fn execute_actions(response: &str, db: &Arc<Database>) -> (String, Vec
         } else if line.starts_with("[OPEN_APP:") && line.ends_with("]") {
             let app = &line[10..line.len()-1];
             match crate::system::control::open_app(app).await {
-                Ok(msg) => actions.push(ActionResult { action_taken: "open_app".into(), details: msg, success: true }),
-                Err(e) => actions.push(ActionResult { action_taken: "open_app".into(), details: e, success: false }),
+                Ok(msg) => { clean_lines.push(format!("Done: {}", msg)); actions.push(ActionResult { action_taken: "open_app".into(), details: msg, success: true }); },
+                Err(ref e) => { clean_lines.push(format!("Failed: {}", e)); actions.push(ActionResult { action_taken: "open_app".into(), details: e.clone(), success: false }); },
             }
         } else if line.starts_with("[OPEN_URL:") && line.ends_with("]") {
             let url = &line[10..line.len()-1];
             match crate::system::control::open_url(url).await {
-                Ok(msg) => actions.push(ActionResult { action_taken: "open_url".into(), details: msg, success: true }),
-                Err(e) => actions.push(ActionResult { action_taken: "open_url".into(), details: e, success: false }),
+                Ok(msg) => { clean_lines.push(format!("Done: {}", msg)); actions.push(ActionResult { action_taken: "open_url".into(), details: msg, success: true }); },
+                Err(ref e) => { clean_lines.push(format!("Failed: {}", e)); actions.push(ActionResult { action_taken: "open_url".into(), details: e.clone(), success: false }); },
             }
         } else if line.starts_with("[RUN_CMD:") && line.ends_with("]") {
             let cmd = &line[9..line.len()-1];
             match crate::system::control::run_command(cmd).await {
-                Ok(msg) => actions.push(ActionResult { action_taken: "run_command".into(), details: msg, success: true }),
-                Err(e) => actions.push(ActionResult { action_taken: "run_command".into(), details: e, success: false }),
+                Ok(msg) => { clean_lines.push(format!("Result: {}", msg)); actions.push(ActionResult { action_taken: "run_command".into(), details: msg, success: true }); },
+                Err(ref e) => { clean_lines.push(format!("Failed: {}", e)); actions.push(ActionResult { action_taken: "run_command".into(), details: e.clone(), success: false }); },
             }
         } else if line.starts_with("[FIND_FILE:") && line.ends_with("]") {
             let query = &line[11..line.len()-1];
             match crate::system::control::find_files(query, None).await {
-                Ok(files) => actions.push(ActionResult { action_taken: "find_files".into(), details: files.join("\n"), success: true }),
-                Err(e) => actions.push(ActionResult { action_taken: "find_files".into(), details: e, success: false }),
+                Ok(files) => { let detail = files.join("\n"); clean_lines.push(format!("Found:\n{}", detail)); actions.push(ActionResult { action_taken: "find_files".into(), details: detail, success: true }); },
+                Err(ref e) => { clean_lines.push(format!("Failed: {}", e)); actions.push(ActionResult { action_taken: "find_files".into(), details: e.clone(), success: false }); },
             }
         } else if line.starts_with("[OPEN_FILE:") && line.ends_with("]") {
             let path = &line[11..line.len()-1];
             match crate::system::control::open_file(path).await {
-                Ok(msg) => actions.push(ActionResult { action_taken: "open_file".into(), details: msg, success: true }),
-                Err(e) => actions.push(ActionResult { action_taken: "open_file".into(), details: e, success: false }),
+                Ok(msg) => { clean_lines.push(format!("Done: {}", msg)); actions.push(ActionResult { action_taken: "open_file".into(), details: msg, success: true }); },
+                Err(ref e) => { clean_lines.push(format!("Failed: {}", e)); actions.push(ActionResult { action_taken: "open_file".into(), details: e.clone(), success: false }); },
             }
         } else if line.starts_with("[NOTE:") && line.ends_with("]") {
             let inner = &line[6..line.len()-1];
@@ -105,17 +106,17 @@ pub async fn execute_actions(response: &str, db: &Arc<Database>) -> (String, Vec
                 let path = &inner[..idx];
                 let content = &inner[idx+1..];
                 match crate::system::control::write_note(path, content, true).await {
-                    Ok(msg) => actions.push(ActionResult { action_taken: "write_note".into(), details: msg, success: true }),
-                    Err(e) => actions.push(ActionResult { action_taken: "write_note".into(), details: e, success: false }),
+                    Ok(msg) => { clean_lines.push(format!("Done: {}", msg)); actions.push(ActionResult { action_taken: "write_note".into(), details: msg, success: true }); },
+                    Err(ref e) => { clean_lines.push(format!("Failed: {}", e)); actions.push(ActionResult { action_taken: "write_note".into(), details: e.clone(), success: false }); },
                 }
             }
         } else if line.trim() == "[SYSTEM_INFO]" {
             match crate::system::control::system_info().await {
-                Ok(info) => actions.push(ActionResult { action_taken: "system_info".into(), details: info, success: true }),
-                Err(e) => actions.push(ActionResult { action_taken: "system_info".into(), details: e, success: false }),
+                Ok(info) => { clean_lines.push(format!("System:\n{}", info)); actions.push(ActionResult { action_taken: "system_info".into(), details: info, success: true }); },
+                Err(ref e) => { clean_lines.push(format!("Failed: {}", e)); actions.push(ActionResult { action_taken: "system_info".into(), details: e.clone(), success: false }); },
             }
         } else {
-            clean_lines.push(line);
+            clean_lines.push(line.to_string());
         }
     }
 
