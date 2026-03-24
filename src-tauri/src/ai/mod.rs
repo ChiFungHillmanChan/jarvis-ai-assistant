@@ -1,5 +1,6 @@
 pub mod claude;
 pub mod openai;
+pub mod tools;
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub enum AiProvider {

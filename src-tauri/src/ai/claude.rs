@@ -1,62 +1,151 @@
 use reqwest::Client;
 use serde::{Deserialize, Serialize};
+use super::tools;
 
 #[derive(Serialize)]
 struct ClaudeRequest {
     model: String,
     max_tokens: u32,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    system: Option<String>,
+    system: String,
+    tools: Vec<serde_json::Value>,
     messages: Vec<ClaudeMessage>,
 }
 
-#[derive(Serialize, Deserialize, Clone)]
+#[derive(Serialize, Deserialize, Clone, Debug)]
 struct ClaudeMessage {
     role: String,
-    content: String,
+    content: ClaudeContent,
+}
+
+#[derive(Serialize, Deserialize, Clone, Debug)]
+#[serde(untagged)]
+enum ClaudeContent {
+    Text(String),
+    Blocks(Vec<ContentBlock>),
+}
+
+#[derive(Serialize, Deserialize, Clone, Debug)]
+#[serde(tag = "type")]
+enum ContentBlock {
+    #[serde(rename = "text")]
+    Text { text: String },
+    #[serde(rename = "tool_use")]
+    ToolUse { id: String, name: String, input: serde_json::Value },
+    #[serde(rename = "tool_result")]
+    ToolResult { tool_use_id: String, content: String },
 }
 
 #[derive(Deserialize)]
 struct ClaudeResponse {
-    content: Vec<ClaudeContent>,
+    content: Vec<ResponseBlock>,
+    stop_reason: Option<String>,
 }
 
 #[derive(Deserialize)]
-struct ClaudeContent {
-    text: String,
+#[serde(tag = "type")]
+enum ResponseBlock {
+    #[serde(rename = "text")]
+    Text { text: String },
+    #[serde(rename = "tool_use")]
+    ToolUse { id: String, name: String, input: serde_json::Value },
 }
-
-const SYSTEM_PROMPT: &str = "You are JARVIS, a personal AI assistant running on macOS for user Hillman Chan (GitHub: ChiFungHillmanChan). Respond concisely. Be direct, not chatty.\n\nPut each action tag on its OWN LINE.\n\nAction tags:\n[TASK:title|description|deadline(YYYY-MM-DD)|priority(0-3)]\n[OPEN_APP:ExactAppName]\n[OPEN_URL:https://full-url-here]\n[RUN_CMD:shell command]\n[FIND_FILE:filename]\n[OPEN_FILE:/path/to/file]\n[NOTE:~/path/to/file.md|content]\n[SYSTEM_INFO]\n\nURL RULES:\n- When user says 'find' or 'search', ALWAYS use a SEARCH URL, never guess a direct link.\n- GitHub search: https://github.com/search?q=QUERY+user:ChiFungHillmanChan&type=repositories\n- GitHub specific repo (only if you are 100% sure of exact name): https://github.com/ChiFungHillmanChan/exact-name\n- Google search: https://www.google.com/search?q=QUERY\n- YouTube search: https://www.youtube.com/results?search_query=QUERY\n- When unsure of exact URL, use search. Never guess and risk a 404.\n\nExamples:\n- 'find evoke-square on github' -> [OPEN_URL:https://github.com/search?q=evoke-square+user:ChiFungHillmanChan&type=repositories]\n- 'open my jarvis repo' -> [OPEN_URL:https://github.com/ChiFungHillmanChan/jarvis-ai-assistant]\n- 'search google for tauri tutorial' -> [OPEN_URL:https://www.google.com/search?q=tauri+v2+tutorial]\n- 'youtube iron man jarvis' -> [OPEN_URL:https://www.youtube.com/results?search_query=iron+man+jarvis+scene]\n\nUse exact macOS app names: 'Google Chrome' not 'Chrome', 'Visual Studio Code' not 'VS Code'\nCommon apps: Google Chrome, Safari, Firefox, Visual Studio Code, Finder, Terminal, Spotify, Slack, Discord, Notion, Obsidian";
 
 pub async fn send(
     api_key: &str,
     messages: Vec<(String, String)>,
 ) -> Result<String, Box<dyn std::error::Error + Send + Sync>> {
     let client = Client::new();
-    let claude_messages: Vec<ClaudeMessage> = messages
-        .into_iter()
-        .map(|(role, content)| ClaudeMessage { role, content })
-        .collect();
-    let request = ClaudeRequest {
-        model: "claude-sonnet-4-20250514".to_string(),
-        max_tokens: 1024,
-        system: Some(SYSTEM_PROMPT.to_string()),
-        messages: claude_messages,
-    };
-    let response = client
-        .post("https://api.anthropic.com/v1/messages")
-        .header("x-api-key", api_key)
-        .header("anthropic-version", "2023-06-01")
-        .header("content-type", "application/json")
-        .json(&request)
-        .timeout(std::time::Duration::from_secs(10))
-        .send()
-        .await?;
-    if !response.status().is_success() {
-        let status = response.status();
-        let body = response.text().await.unwrap_or_default();
-        return Err(format!("Claude API error {}: {}", status, body).into());
+    let tool_defs = tools::get_tool_definitions();
+    let claude_tools = tools::to_claude_format(&tool_defs);
+
+    let mut claude_messages: Vec<ClaudeMessage> = messages.into_iter().map(|(role, content)| {
+        ClaudeMessage { role, content: ClaudeContent::Text(content) }
+    }).collect();
+
+    let max_iterations = 5;
+    for _ in 0..max_iterations {
+        let request = ClaudeRequest {
+            model: "claude-sonnet-4-20250514".into(),
+            max_tokens: 1024,
+            system: tools::SYSTEM_PROMPT.into(),
+            tools: claude_tools.clone(),
+            messages: claude_messages.clone(),
+        };
+
+        let response = client
+            .post("https://api.anthropic.com/v1/messages")
+            .header("x-api-key", api_key)
+            .header("anthropic-version", "2023-06-01")
+            .header("content-type", "application/json")
+            .json(&request)
+            .timeout(std::time::Duration::from_secs(30))
+            .send().await?;
+
+        if !response.status().is_success() {
+            let status = response.status();
+            let body = response.text().await.unwrap_or_default();
+            return Err(format!("Claude API error {}: {}", status, body).into());
+        }
+
+        let body: ClaudeResponse = response.json().await?;
+
+        // Collect text and tool calls from response
+        let mut text_parts = Vec::new();
+        let mut tool_uses = Vec::new();
+
+        for block in &body.content {
+            match block {
+                ResponseBlock::Text { text } => text_parts.push(text.clone()),
+                ResponseBlock::ToolUse { id, name, input } => {
+                    tool_uses.push((id.clone(), name.clone(), input.clone()));
+                }
+            }
+        }
+
+        // If there are tool calls, execute them and continue
+        if !tool_uses.is_empty() {
+            // Add the assistant response (with tool uses) to messages
+            let assistant_blocks: Vec<ContentBlock> = body.content.iter().map(|b| match b {
+                ResponseBlock::Text { text } => ContentBlock::Text { text: text.clone() },
+                ResponseBlock::ToolUse { id, name, input } => ContentBlock::ToolUse {
+                    id: id.clone(), name: name.clone(), input: input.clone(),
+                },
+            }).collect();
+            claude_messages.push(ClaudeMessage {
+                role: "assistant".into(),
+                content: ClaudeContent::Blocks(assistant_blocks),
+            });
+
+            // Execute tools and add results
+            let mut result_blocks = Vec::new();
+            for (id, name, input) in &tool_uses {
+                let args_str = serde_json::to_string(input).unwrap_or_default();
+                log::info!("JARVIS tool call: {}({})", name, args_str);
+                let result = tools::execute_tool(name, &args_str).await;
+                log::info!("JARVIS tool result: {}", &result[..result.len().min(200)]);
+                result_blocks.push(ContentBlock::ToolResult {
+                    tool_use_id: id.clone(),
+                    content: result,
+                });
+            }
+            claude_messages.push(ClaudeMessage {
+                role: "user".into(),
+                content: ClaudeContent::Blocks(result_blocks),
+            });
+
+            // If stop_reason is "end_turn", we're done even with tool calls
+            if body.stop_reason.as_deref() == Some("end_turn") && !text_parts.is_empty() {
+                return Ok(text_parts.join("\n"));
+            }
+            continue;
+        }
+
+        // No tool calls -- return text
+        if !text_parts.is_empty() {
+            return Ok(text_parts.join("\n"));
+        }
+        return Ok(String::new());
     }
-    let body: ClaudeResponse = response.json().await?;
-    Ok(body.content.first().map(|c| c.text.clone()).unwrap_or_default())
+
+    Ok("I've completed the actions.".into())
 }
