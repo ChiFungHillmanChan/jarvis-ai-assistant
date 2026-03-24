@@ -5,12 +5,12 @@ import { useChat } from "../hooks/useChat";
 interface ChatPanelProps { isOpen: boolean; isFullScreen: boolean; onClose: () => void; onToggleFullScreen: () => void; }
 
 export default function ChatPanel({ isOpen, isFullScreen, onClose, onToggleFullScreen }: ChatPanelProps) {
-  const { messages, loading, error, send, clearChat } = useChat();
+  const { messages, loading, error, send, clearChat, currentStatus, streamingText } = useChat();
   const [input, setInput] = useState("");
   const messagesEndRef = useRef<HTMLDivElement>(null);
   const inputRef = useRef<HTMLInputElement>(null);
 
-  useEffect(() => { messagesEndRef.current?.scrollIntoView({ behavior: "smooth" }); }, [messages]);
+  useEffect(() => { messagesEndRef.current?.scrollIntoView({ behavior: "smooth" }); }, [messages, streamingText]);
   useEffect(() => { if (isOpen) inputRef.current?.focus(); }, [isOpen]);
 
   if (!isOpen) return null;
@@ -36,7 +36,25 @@ export default function ChatPanel({ isOpen, isFullScreen, onClose, onToggleFullS
           <div style={styles.empty}>Start a conversation with JARVIS.</div>
         )}
         {messages.map((msg, i) => <ChatMessageComponent key={msg.id ?? i} message={msg} />)}
-        {loading && <div className="system-text animate-glow" style={{ padding: 8 }}>PROCESSING...</div>}
+        {loading && (
+          <>
+            {streamingText && (
+              <div style={styles.streamingMsg}>
+                <div style={styles.streamingLabel}>JARVIS</div>
+                <div style={styles.streamingBubble}>
+                  {streamingText}
+                  <span style={styles.cursor}>|</span>
+                </div>
+              </div>
+            )}
+            {currentStatus && (
+              <div className="system-text" style={styles.statusIndicator}>{currentStatus}</div>
+            )}
+            {!streamingText && !currentStatus && (
+              <div className="system-text animate-glow" style={{ padding: 8 }}>THINKING...</div>
+            )}
+          </>
+        )}
         {error && <div style={{ color: "var(--accent-urgent)", fontSize: 12, padding: 8 }}>{error}</div>}
         <div ref={messagesEndRef} />
       </div>
@@ -57,4 +75,9 @@ const styles: Record<string, React.CSSProperties> = {
   inputForm: { padding: 12, borderTop: "1px solid rgba(0, 180, 255, 0.1)" },
   input: { width: "100%", background: "rgba(0, 180, 255, 0.03)", border: "1px solid rgba(0, 180, 255, 0.15)", borderRadius: 8, padding: "10px 14px", color: "rgba(0, 180, 255, 0.8)", fontSize: 13, fontFamily: "var(--font-sans)", outline: "none" },
   empty: { color: "rgba(0, 180, 255, 0.2)", fontSize: 12, fontStyle: "italic", textAlign: "center" as const, padding: 40 },
+  streamingMsg: { padding: "8px 0" },
+  streamingLabel: { fontFamily: "var(--font-mono)", fontSize: 9, color: "rgba(0, 180, 255, 0.4)", letterSpacing: 2, textTransform: "uppercase" as const, marginBottom: 4 },
+  streamingBubble: { fontSize: 13, color: "rgba(0, 180, 255, 0.8)", fontFamily: "var(--font-sans)", lineHeight: 1.5, padding: "8px 0", borderLeft: "2px solid rgba(0, 180, 255, 0.12)", paddingLeft: 12 },
+  statusIndicator: { padding: "4px 8px", fontSize: 11, color: "rgba(0, 180, 255, 0.5)", fontFamily: "var(--font-mono)", letterSpacing: 1 },
+  cursor: { color: "rgba(0, 180, 255, 0.6)", animation: "blink 1s step-end infinite" },
 };
