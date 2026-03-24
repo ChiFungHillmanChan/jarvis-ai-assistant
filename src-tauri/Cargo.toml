@@ -25,6 +25,7 @@ env_logger = "0.11"
 dirs = "5"
 chrono = { version = "0.4", features = ["serde"] }
 tauri-plugin-autostart = "2"
+tauri-plugin-global-shortcut = "2"
 dotenvy = "0.15"
 oauth2 = { version = "4.4", features = ["reqwest"] }
 tokio-cron-scheduler = "0.13"

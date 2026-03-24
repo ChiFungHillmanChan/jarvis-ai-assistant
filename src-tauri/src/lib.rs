@@ -12,7 +12,7 @@ pub mod wallpaper;
 
 use ai::AiRouter;
 use db::Database;
-use tauri::Manager;
+use tauri::{Emitter, Manager};
 
 pub fn run() {
     dotenvy::dotenv().ok();
@@ -23,6 +23,7 @@ pub fn run() {
             tauri_plugin_autostart::MacosLauncher::LaunchAgent,
             None,
         ))
+        .plugin(tauri_plugin_global_shortcut::Builder::new().build())
         .setup(|app| {
             let db = Database::new().expect("Failed to initialize database");
             let claude_key = std::env::var("ANTHROPIC_API_KEY").ok();
@@ -180,6 +181,33 @@ pub fn run() {
                         log::warn!("Wallpaper mode startup failed: {}", e);
                     }
                 });
+            }
+
+            // Global shortcut Cmd+Shift+W: raise/lower wallpaper for interaction.
+            // This works at the OS level, bypassing setIgnoresMouseEvents_.
+            {
+                use tauri_plugin_global_shortcut::{GlobalShortcutExt, Shortcut, Code, Modifiers};
+                let shortcut = Shortcut::new(Some(Modifiers::SUPER | Modifiers::SHIFT), Code::KeyW);
+                let app_handle = app.handle().clone();
+                app.global_shortcut().on_shortcut(shortcut, move |_app, _shortcut, event| {
+                    if event.state == tauri_plugin_global_shortcut::ShortcutState::Pressed {
+                        if !wallpaper::is_active() {
+                            return;
+                        }
+                        if wallpaper::is_raised() {
+                            if let Err(e) = wallpaper::lower_to_background(&app_handle) {
+                                log::error!("Failed to lower wallpaper via shortcut: {}", e);
+                            }
+                            let _ = app_handle.emit("wallpaper-raised", false);
+                        } else {
+                            if let Err(e) = wallpaper::raise_for_interaction(&app_handle) {
+                                log::error!("Failed to raise wallpaper via shortcut: {}", e);
+                            }
+                            let _ = app_handle.emit("wallpaper-raised", true);
+                        }
+                    }
+                }).map_err(|e| format!("Failed to register global shortcut: {}", e))?;
+                log::info!("Global shortcut Cmd+Shift+W registered for wallpaper interaction");
             }
 
             log::info!("JARVIS started successfully");
