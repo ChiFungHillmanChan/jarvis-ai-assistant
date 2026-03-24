@@ -190,7 +190,7 @@ pub async fn send_message(
     let messages = context_messages;
 
     let response_text = router.send(messages).await?;
-    let (final_response, _actions) = crate::assistant::actions::execute_actions(&response_text, &db);
+    let (final_response, _actions) = crate::assistant::actions::execute_actions(&response_text, &db).await;
     {
         let conn = db.conn.lock().map_err(|e| e.to_string())?;
         conn.execute("INSERT INTO conversations (role, content) VALUES ('assistant', ?1)", rusqlite::params![final_response])

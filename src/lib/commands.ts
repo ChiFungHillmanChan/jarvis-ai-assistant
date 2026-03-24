@@ -90,3 +90,12 @@ export async function getObsidianNote(path: string): Promise<string> { return in
 export async function saveObsidianNote(path: string, content: string): Promise<void> { return invoke("save_obsidian_note", { path, content }); }
 export async function listObsidianFiles(): Promise<string[]> { return invoke("list_obsidian_files"); }
 export async function saveObsidianKey(key: string): Promise<void> { return invoke("save_obsidian_key", { key }); }
+
+// System Control
+export async function openApplication(name: string): Promise<string> { return invoke("open_application", { name }); }
+export async function openUrl(url: string): Promise<string> { return invoke("open_url", { url }); }
+export async function runShellCommand(command: string): Promise<string> { return invoke("run_shell_command", { command }); }
+export async function findFiles(query: string, path?: string): Promise<string[]> { return invoke("find_files", { query, path }); }
+export async function openFile(path: string): Promise<string> { return invoke("open_file", { path }); }
+export async function getSystemInfo(): Promise<string> { return invoke("get_system_info"); }
+export async function writeQuickNote(path: string, content: string, append: boolean): Promise<string> { return invoke("write_quick_note", { path, content, append }); }

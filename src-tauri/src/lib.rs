@@ -5,6 +5,7 @@ pub mod commands;
 pub mod db;
 pub mod integrations;
 pub mod scheduler;
+pub mod system;
 pub mod tray;
 pub mod voice;
 
@@ -25,7 +26,14 @@ pub fn run() {
             let db = Database::new().expect("Failed to initialize database");
             let claude_key = std::env::var("ANTHROPIC_API_KEY").ok();
             let openai_key = std::env::var("OPENAI_API_KEY").ok();
-            let router = AiRouter::new(claude_key, openai_key, "claude_primary");
+            // Read AI provider preference from DB, default to claude_primary
+            let ai_provider = {
+                let conn = db.conn.lock().unwrap();
+                conn.query_row("SELECT value FROM user_preferences WHERE key = 'ai_provider'", [], |row| row.get::<_, String>(0))
+                    .unwrap_or_else(|_| "claude_primary".to_string())
+            };
+            log::info!("AI provider: {}", ai_provider);
+            let router = AiRouter::new(claude_key, openai_key, &ai_provider);
 
             let google_auth = auth::google::GoogleAuth::new()
                 .unwrap_or_else(|| {
@@ -175,6 +183,13 @@ pub fn run() {
             commands::obsidian::save_obsidian_note,
             commands::obsidian::list_obsidian_files,
             commands::obsidian::save_obsidian_key,
+            commands::system::open_application,
+            commands::system::open_url,
+            commands::system::run_shell_command,
+            commands::system::find_files,
+            commands::system::open_file,
+            commands::system::get_system_info,
+            commands::system::write_quick_note,
         ])
         .run(tauri::generate_context!())
         .expect("error while running JARVIS");
