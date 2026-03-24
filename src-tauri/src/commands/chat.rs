@@ -190,7 +190,14 @@ pub async fn send_message(
     let messages = context_messages;
 
     let response_text = router.send(messages).await?;
-    let (final_response, _actions) = crate::assistant::actions::execute_actions(&response_text, &db).await;
+    // OpenAI function calling handles tool execution natively in ai/openai.rs.
+    // Claude fallback still uses text tags, so run action parsing for that path.
+    let final_response = if matches!(router.provider(), crate::ai::AiProvider::OpenAIOnly | crate::ai::AiProvider::OpenAIPrimary) {
+        response_text
+    } else {
+        let (cleaned, _actions) = crate::assistant::actions::execute_actions(&response_text, &db).await;
+        cleaned
+    };
     {
         let conn = db.conn.lock().map_err(|e| e.to_string())?;
         conn.execute("INSERT INTO conversations (role, content) VALUES ('assistant', ?1)", rusqlite::params![final_response])

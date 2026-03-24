@@ -1,6 +1,7 @@
 pub mod claude;
 pub mod openai;
 
+#[derive(Clone, Copy, PartialEq, Eq)]
 pub enum AiProvider {
     ClaudePrimary,
     OpenAIPrimary,
@@ -23,6 +24,10 @@ impl AiRouter {
             _ => AiProvider::ClaudePrimary,
         };
         AiRouter { claude_key, openai_key, provider }
+    }
+
+    pub fn provider(&self) -> AiProvider {
+        self.provider
     }
 
     pub async fn send(&self, messages: Vec<(String, String)>) -> Result<String, String> {

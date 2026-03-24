@@ -43,8 +43,9 @@ SQLite at `~/Library/Application Support/jarvis/jarvis.db`
 - Database wrapped in `Arc<Database>` -- all commands use `State<Arc<Database>>`
 - AiRouter NOT wrapped in Arc -- use `State<'_, AiRouter>` for async commands
 - GoogleAuth wrapped in `Arc<GoogleAuth>`
-- Action tags in AI responses: `[OPEN_APP:Name]`, `[OPEN_URL:url]`, `[TASK:title|desc|deadline|priority]`, etc. Parsed by `assistant/actions.rs`
-- System prompts in `ai/claude.rs` and `ai/openai.rs` -- includes macOS app names and action tag instructions
+- OpenAI uses native function calling (tool use) in `ai/openai.rs` -- the model decides which tools to call, executes them in a loop, and chains multiple steps before responding. No text tag parsing needed.
+- Claude fallback still uses text action tags: `[OPEN_APP:Name]`, `[OPEN_URL:url]`, `[TASK:title|desc|deadline|priority]`, etc. Parsed by `assistant/actions.rs`
+- `chat.rs` conditionally runs action parsing only for Claude; OpenAI responses are already fully resolved via function calling.
 - AI provider read from `user_preferences` table on startup
 
 ## .env Required
