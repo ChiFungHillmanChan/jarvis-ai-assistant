@@ -73,8 +73,15 @@ export default function JarvisScene() {
     resize();
     window.addEventListener("resize", resize);
 
-    // Mouse controls
-    function onDown(e: MouseEvent) { dragging.current = true; lastM.current = { x: e.clientX, y: e.clientY }; autoRot.current = false; }
+    // Mouse controls -- listen on window so it works even when UI layer is on top
+    function onDown(e: MouseEvent) {
+      // Only start drag if clicking on non-interactive area (not buttons, inputs, panels, sidebar)
+      const target = e.target as HTMLElement;
+      if (target.closest("button, input, select, textarea, .panel, .no-drag, nav, form")) return;
+      dragging.current = true;
+      lastM.current = { x: e.clientX, y: e.clientY };
+      autoRot.current = false;
+    }
     function onMove(e: MouseEvent) {
       if (!dragging.current) return;
       targetRY.current += (e.clientX - lastM.current.x) * 0.005;
@@ -83,7 +90,7 @@ export default function JarvisScene() {
       lastM.current = { x: e.clientX, y: e.clientY };
     }
     function onUp() { dragging.current = false; setTimeout(() => { if (!dragging.current) autoRot.current = true; }, 2000); }
-    canvas.addEventListener("mousedown", onDown);
+    window.addEventListener("mousedown", onDown);
     window.addEventListener("mousemove", onMove);
     window.addEventListener("mouseup", onUp);
 
@@ -366,16 +373,16 @@ export default function JarvisScene() {
     return () => {
       cancelAnimationFrame(animRef.current);
       window.removeEventListener("resize", resize);
+      window.removeEventListener("mousedown", onDown);
       window.removeEventListener("mousemove", onMove);
       window.removeEventListener("mouseup", onUp);
-      canvas.removeEventListener("mousedown", onDown);
     };
   }, []);
 
   return (
     <canvas ref={canvasRef} style={{
       position: "fixed", top: 0, left: 0, width: "100%", height: "100%",
-      zIndex: 1, cursor: "grab",
+      zIndex: 1, pointerEvents: "none",
     }} />
   );
 }

@@ -81,5 +81,5 @@ const styles: Record<string, React.CSSProperties> = {
   titleText: { color: "rgba(0, 180, 255, 0.4)", fontFamily: "var(--font-mono)", fontSize: 10, letterSpacing: 3 },
   layout: { flex: 1, display: "flex", overflow: "hidden" },
   content: { flex: 1, display: "flex", flexDirection: "column", overflow: "hidden" },
-  mainArea: { flex: 1, overflow: "hidden" },
+  mainArea: { flex: 1, overflow: "auto" },
 };
