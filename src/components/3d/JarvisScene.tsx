@@ -17,9 +17,12 @@ const LON_LINES = 16;
 const DETAIL_LINES = 60;
 
 function project(p: Point3D, cx: number, cy: number, fov: number) {
-  const z = p.z + 700;
-  const scale = fov / (fov + z);
-  return { x: cx + p.x * scale, y: cy + p.y * scale, scale: Math.max(scale, 0.1) };
+  // Camera distance scales with fov -- lower fov = closer to sphere
+  const camDist = fov * 1.0;
+  const z = p.z + camDist;
+  if (z <= 1) return { x: cx, y: cy, scale: 0 }; // Behind camera
+  const scale = 400 / z;
+  return { x: cx + p.x * scale, y: cy + p.y * scale, scale: Math.max(scale, 0) };
 }
 
 function rotateY(p: Point3D, a: number): Point3D {
@@ -52,8 +55,8 @@ export default function JarvisScene() {
   const dragging = useRef(false);
   const lastM = useRef({ x: 0, y: 0 });
   const autoRot = useRef(true);
-  const zoomRef = useRef(700);
-  const targetZoom = useRef(700);
+  const zoomRef = useRef(600);
+  const targetZoom = useRef(600);
 
   // Particles stored as spherical coords for stable orbiting
   const particles = useRef<{ theta: number; phi: number; r: number; speed: number; size: number; bright: number }[]>([]);
@@ -77,25 +80,38 @@ export default function JarvisScene() {
 
     // Mouse controls -- listen on window so it works even when UI layer is on top
     function onDown(e: MouseEvent) {
-      // Only start drag if clicking on non-interactive area (not buttons, inputs, panels, sidebar)
       const target = e.target as HTMLElement;
       if (target.closest("button, input, select, textarea, .panel, .no-drag, nav, form")) return;
+      e.preventDefault();
       dragging.current = true;
       lastM.current = { x: e.clientX, y: e.clientY };
       autoRot.current = false;
+      // Prevent text selection while dragging
+      document.body.style.userSelect = "none";
+      document.body.style.webkitUserSelect = "none";
+      document.body.style.cursor = "grabbing";
     }
     function onMove(e: MouseEvent) {
       if (!dragging.current) return;
+      e.preventDefault();
       targetRY.current += (e.clientX - lastM.current.x) * 0.005;
       targetRX.current += (e.clientY - lastM.current.y) * 0.005;
       targetRX.current = Math.max(-1.5, Math.min(1.5, targetRX.current));
       lastM.current = { x: e.clientX, y: e.clientY };
     }
-    function onUp() { dragging.current = false; setTimeout(() => { if (!dragging.current) autoRot.current = true; }, 2000); }
+    function onUp() {
+      dragging.current = false;
+      // Restore text selection
+      document.body.style.userSelect = "";
+      document.body.style.webkitUserSelect = "";
+      document.body.style.cursor = "";
+      setTimeout(() => { if (!dragging.current) autoRot.current = true; }, 2000);
+    }
     function onWheel(e: WheelEvent) {
       e.preventDefault();
-      targetZoom.current += e.deltaY * 0.5;
-      targetZoom.current = Math.max(200, Math.min(1500, targetZoom.current));
+      targetZoom.current += e.deltaY * 0.8;
+      // Allow zooming from way out (2000) to deep inside the sphere (50)
+      targetZoom.current = Math.max(50, Math.min(2000, targetZoom.current));
     }
     window.addEventListener("mousedown", onDown);
     window.addEventListener("mousemove", onMove);
