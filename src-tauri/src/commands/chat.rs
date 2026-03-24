@@ -35,6 +35,26 @@ pub async fn send_message(
         msgs.reverse();
         msgs
     };
+    // Prepend context about user's current status
+    let context_prompt = match crate::assistant::context::DayContext::gather(&db) {
+        Ok(ctx) => format!(
+            "Current user status -- TASKS: {} | CALENDAR: {} | EMAIL: {} | GITHUB: {}",
+            ctx.tasks_summary.lines().next().unwrap_or(""),
+            ctx.calendar_summary.lines().next().unwrap_or(""),
+            ctx.email_summary.lines().next().unwrap_or(""),
+            ctx.github_summary,
+        ),
+        Err(_) => String::new(),
+    };
+
+    let mut context_messages = Vec::new();
+    if !context_prompt.is_empty() {
+        context_messages.push(("user".to_string(), format!("[CONTEXT] {}", context_prompt)));
+        context_messages.push(("assistant".to_string(), "Understood. I have your current status.".to_string()));
+    }
+    context_messages.extend(messages);
+    let messages = context_messages;
+
     let response_text = router.send(messages).await?;
     let (final_response, _actions) = crate::assistant::actions::execute_actions(&response_text, &db);
     {

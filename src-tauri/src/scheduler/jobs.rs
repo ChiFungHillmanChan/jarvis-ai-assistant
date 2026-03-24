@@ -129,11 +129,31 @@ async fn run_proactive_check(db: &Arc<Database>) -> Result<String, String> {
     ).unwrap_or(0);
     if due_today > 0 { alerts.push(format!("{} task(s) due today", due_today)); }
 
-    let upcoming: Option<String> = conn.query_row(
-        "SELECT summary FROM calendar_events WHERE start_time > datetime('now') AND start_time <= datetime('now', '+15 minutes') ORDER BY start_time ASC LIMIT 1",
-        [], |row| row.get(0)
+    let upcoming_meeting: Option<(String, Option<String>, Option<String>)> = conn.query_row(
+        "SELECT summary, description, attendees FROM calendar_events WHERE start_time > datetime('now') AND start_time <= datetime('now', '+15 minutes') ORDER BY start_time ASC LIMIT 1",
+        [], |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?))
     ).ok();
-    if let Some(meeting) = upcoming { alerts.push(format!("Meeting in 15 min: {}", meeting)); }
+    if let Some((summary, description, attendees)) = upcoming_meeting {
+        let mut prep = format!("Meeting in 15 min: {}", summary);
+        if let Some(desc) = description { if !desc.is_empty() { prep.push_str(&format!(" -- {}", desc)); } }
+        if let Some(att) = attendees { if !att.is_empty() { prep.push_str(&format!(" [with: {}]", att)); } }
+        // Check for related tasks
+        let related_tasks: Vec<String> = {
+            let mut stmt = conn.prepare(
+                "SELECT title FROM tasks WHERE status != 'completed' AND (title LIKE ?1 OR description LIKE ?1) LIMIT 3"
+            ).map_err(|e| e.to_string())?;
+            let pattern = format!("%{}%", summary.split_whitespace().next().unwrap_or(&summary));
+            let result = stmt.query_map(rusqlite::params![pattern], |row| row.get::<_, String>(0))
+                .map_err(|e| e.to_string())?
+                .collect::<Result<Vec<_>, _>>()
+                .map_err(|e| e.to_string())?;
+            result
+        };
+        if !related_tasks.is_empty() {
+            prep.push_str(&format!(" | Related tasks: {}", related_tasks.join(", ")));
+        }
+        alerts.push(prep);
+    }
 
     let failed: i64 = conn.query_row(
         "SELECT COUNT(*) FROM cron_runs WHERE status = 'failed' AND started_at > datetime('now', '-1 hour')",

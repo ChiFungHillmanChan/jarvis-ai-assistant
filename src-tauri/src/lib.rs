@@ -52,6 +52,28 @@ pub fn run() {
 
             let voice_engine = std::sync::Arc::new(voice::VoiceEngine::new());
 
+            // Auto-briefing on startup
+            let db_brief = std::sync::Arc::clone(&db_arc);
+            let router_brief = ai::AiRouter::new(
+                std::env::var("ANTHROPIC_API_KEY").ok(),
+                std::env::var("OPENAI_API_KEY").ok(),
+                "claude_primary",
+            );
+            tauri::async_runtime::spawn(async move {
+                tokio::time::sleep(std::time::Duration::from_secs(3)).await;
+                match assistant::briefing::generate_briefing(&db_brief, &router_brief).await {
+                    Ok(result) => {
+                        log::info!("Morning briefing: {}", result.briefing);
+                        let tts = voice::tts::TextToSpeech::new();
+                        let speech = format!("{}. {}", result.greeting, result.briefing);
+                        if let Err(e) = tts.speak(&speech).await {
+                            log::warn!("Briefing TTS failed: {}", e);
+                        }
+                    }
+                    Err(e) => log::warn!("Briefing generation failed: {}", e),
+                }
+            });
+
             app.manage(db_arc);
             app.manage(auth_arc);
             app.manage(router);
