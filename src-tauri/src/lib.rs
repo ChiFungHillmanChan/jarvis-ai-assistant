@@ -8,6 +8,7 @@ pub mod scheduler;
 pub mod system;
 pub mod tray;
 pub mod voice;
+pub mod wallpaper;
 
 use ai::AiRouter;
 use db::Database;
@@ -160,13 +161,41 @@ pub fn run() {
                 });
             }
 
+            // Wallpaper mode: restore previous state
+            let wallpaper_enabled = {
+                let conn = db_arc.conn.lock().unwrap();
+                conn.query_row(
+                    "SELECT value FROM user_preferences WHERE key = 'wallpaper_mode_enabled'",
+                    [],
+                    |row| row.get::<_, String>(0),
+                )
+                .unwrap_or_else(|_| "false".to_string())
+                    == "true"
+            };
+
+            if wallpaper_enabled {
+                let app_handle = app.handle().clone();
+                tauri::async_runtime::spawn(async move {
+                    if let Err(e) = wallpaper::enable_on_startup(app_handle).await {
+                        log::warn!("Wallpaper mode startup failed: {}", e);
+                    }
+                });
+            }
+
             log::info!("JARVIS started successfully");
             Ok(())
         })
         .on_window_event(|window, event| {
             if let tauri::WindowEvent::CloseRequested { api, .. } = event {
                 api.prevent_close();
-                let _ = window.hide();
+                if crate::wallpaper::is_active() {
+                    if let Err(e) = crate::wallpaper::lower_to_background(&window.app_handle()) {
+                        log::warn!("Failed to lower wallpaper: {}", e);
+                        let _ = window.hide();
+                    }
+                } else {
+                    let _ = window.hide();
+                }
             }
         })
         .invoke_handler(tauri::generate_handler![
@@ -234,6 +263,13 @@ pub fn run() {
             commands::system::open_file,
             commands::system::get_system_info,
             commands::system::write_quick_note,
+            wallpaper::enable_wallpaper,
+            wallpaper::disable_wallpaper,
+            wallpaper::toggle_wallpaper,
+            wallpaper::get_wallpaper_status,
+            wallpaper::raise_wallpaper,
+            wallpaper::lower_wallpaper,
+            wallpaper::is_wallpaper_raised,
         ])
         .run(tauri::generate_context!())
         .expect("error while running JARVIS");

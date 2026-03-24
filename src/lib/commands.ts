@@ -104,3 +104,12 @@ export async function findFiles(query: string, path?: string): Promise<string[]>
 export async function openFile(path: string): Promise<string> { return invoke("open_file", { path }); }
 export async function getSystemInfo(): Promise<string> { return invoke("get_system_info"); }
 export async function writeQuickNote(path: string, content: string, append: boolean): Promise<string> { return invoke("write_quick_note", { path, content, append }); }
+
+// Wallpaper
+export async function enableWallpaper(): Promise<void> { return invoke("enable_wallpaper"); }
+export async function disableWallpaper(): Promise<void> { return invoke("disable_wallpaper"); }
+export async function toggleWallpaper(): Promise<boolean> { return invoke("toggle_wallpaper"); }
+export async function getWallpaperStatus(): Promise<boolean> { return invoke("get_wallpaper_status"); }
+export async function raiseWallpaper(): Promise<void> { return invoke("raise_wallpaper"); }
+export async function lowerWallpaper(): Promise<void> { return invoke("lower_wallpaper"); }
+export async function isWallpaperRaised(): Promise<boolean> { return invoke("is_wallpaper_raised"); }

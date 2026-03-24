@@ -427,9 +427,13 @@ async fn record_command_audio(
 }
 
 fn show_main_window(app_handle: &JarvisAppHandle) {
-    if let Some(window) = app_handle.get_webview_window("main") {
-        let _ = window.show();
-        let _ = window.set_focus();
+    if crate::wallpaper::is_active() {
+        let _ = crate::wallpaper::raise_for_interaction(app_handle);
+    } else {
+        if let Some(window) = app_handle.get_webview_window("main") {
+            let _ = window.show();
+            let _ = window.set_focus();
+        }
     }
 }
 

@@ -15,7 +15,11 @@ import {
   disableWakeWord,
   isModelDownloaded,
   downloadModel,
+  getWallpaperStatus,
+  enableWallpaper,
+  disableWallpaper,
 } from "../lib/commands";
+import { listen } from "@tauri-apps/api/event";
 import type { VoiceSettings, WakeWordStatus, VoiceState } from "../lib/types";
 import { useVoiceState } from "../hooks/useVoiceState";
 
@@ -36,6 +40,8 @@ export default function Settings() {
   const [wakeBusy, setWakeBusy] = useState(false);
   const [wakeError, setWakeError] = useState<string | null>(null);
   const { state: voiceState } = useVoiceState();
+  const [wallpaperActive, setWallpaperActive] = useState(false);
+  const [wallpaperBusy, setWallpaperBusy] = useState(false);
 
   useEffect(() => {
     getSettings().then((s) => {
@@ -52,6 +58,14 @@ export default function Settings() {
     getVoiceSettings().then(setVoiceSettingsState);
     listTtsVoices().then(setTtsVoices);
     void refreshWakeStatus();
+  }, []);
+
+  useEffect(() => {
+    getWallpaperStatus().then(setWallpaperActive).catch(() => {});
+    const unlisten = listen<boolean>("wallpaper-status", (event) => {
+      setWallpaperActive(event.payload);
+    });
+    return () => { unlisten.then((fn) => fn()); };
   }, []);
 
   async function refreshWakeStatus() {
@@ -118,6 +132,23 @@ export default function Settings() {
     }
   }
 
+  async function handleWallpaperToggle(enabled: boolean) {
+    setWallpaperBusy(true);
+    try {
+      if (enabled) {
+        await enableWallpaper();
+      } else {
+        await disableWallpaper();
+      }
+      setWallpaperActive(enabled);
+      await updateSetting("wallpaper_mode_enabled", String(enabled));
+    } catch (e) {
+      console.error("Wallpaper toggle failed:", e);
+    } finally {
+      setWallpaperBusy(false);
+    }
+  }
+
   async function handleDownloadModel() {
     setWakeError(null);
     setWakeBusy(true);
@@ -169,196 +200,153 @@ export default function Settings() {
 
   return (
     <div style={styles.container}>
-      <div className="system-text" style={{ marginBottom: 24 }}>SETTINGS</div>
-      <div className="panel" style={{ maxWidth: 500, padding: 16 }}>
-        <div className="label" style={{ marginBottom: 12 }}>AI PROVIDER</div>
-        {options.map((opt) => (
-          <label key={opt.value} style={styles.option}>
-            <input
-              type="radio"
-              name="ai_provider"
-              value={opt.value}
-              checked={aiProvider === opt.value}
-              onChange={() => handleProviderChange(opt.value)}
-              style={styles.radio}
-            />
-            <span style={styles.optionLabel}>{opt.label}</span>
-          </label>
-        ))}
+      <div className="system-text" style={{ marginBottom: 20, fontSize: 14, letterSpacing: 4 }}>
+        SETTINGS
       </div>
 
-      <div className="panel" style={{ maxWidth: 500, padding: 16, marginTop: 12 }}>
-        <div className="label" style={{ marginBottom: 12 }}>API KEYS</div>
-        <div style={styles.hint}>Set in .env file at project root:</div>
-        <code style={styles.code}>ANTHROPIC_API_KEY</code>
-        <code style={styles.code}>OPENAI_API_KEY</code>
-      </div>
-
-      <div className="panel" style={{ maxWidth: 500, padding: 16, marginTop: 12 }}>
-        <div className="label" style={{ marginBottom: 12 }}>GOOGLE SERVICES</div>
-        <div style={styles.hint}>Connect Gmail and Google Calendar</div>
-        {googleConnected ? (
-          <div style={{ color: "rgba(16, 185, 129, 0.7)", fontSize: 12 }}>Connected</div>
-        ) : (
-          <button
-            onClick={handleGoogleConnect}
-            disabled={connecting}
-            style={styles.actionBtn}
-          >
-            {connecting ? "CONNECTING..." : "CONNECT GOOGLE"}
-          </button>
-        )}
-      </div>
-
-      <div className="panel" style={{ maxWidth: 500, padding: 16, marginTop: 12 }}>
-        <div className="label" style={{ marginBottom: 12 }}>NOTION</div>
-        <div style={styles.hint}>Enter your Notion integration token</div>
-        <div style={{ display: "flex", gap: 8 }}>
-          <input
-            type="password"
-            value={notionToken}
-            onChange={(e) => {
-              setNotionToken(e.target.value);
-              setNotionSaved(false);
-            }}
-            placeholder="ntn_..."
-            style={styles.tokenInput}
-          />
-          <button onClick={handleSaveNotion} style={styles.saveBtn}>{notionSaved ? "SAVED" : "SAVE"}</button>
-        </div>
-      </div>
-
-      <div className="panel" style={{ maxWidth: 500, padding: 16, marginTop: 12 }}>
-        <div className="label" style={{ marginBottom: 12 }}>GITHUB</div>
-        <div style={styles.hint}>Enter your GitHub personal access token</div>
-        <div style={{ display: "flex", gap: 8 }}>
-          <input
-            type="password"
-            value={githubToken}
-            onChange={(e) => {
-              setGithubToken(e.target.value);
-              setGithubSaved(false);
-            }}
-            placeholder="ghp_..."
-            style={styles.tokenInput}
-          />
-          <button onClick={handleSaveGitHub} style={styles.saveBtn}>{githubSaved ? "SAVED" : "SAVE"}</button>
-        </div>
-      </div>
-
-      <div className="panel" style={{ maxWidth: 500, padding: 16, marginTop: 12 }}>
-        <div className="label" style={{ marginBottom: 12 }}>OBSIDIAN</div>
-        <div style={styles.hint}>Connect to Obsidian vault via Local REST API plugin</div>
-        <div style={{ display: "flex", gap: 8 }}>
-          <input
-            type="password"
-            value={obsidianKey}
-            onChange={(e) => {
-              setObsidianKey(e.target.value);
-              setObsidianSaved(false);
-            }}
-            placeholder="API key from Obsidian REST API plugin"
-            style={styles.tokenInput}
-          />
-          <button onClick={handleSaveObsidian} style={styles.saveBtn}>{obsidianSaved ? "SAVED" : "SAVE"}</button>
-        </div>
-        <div style={{ color: "rgba(0, 180, 255, 0.3)", fontSize: 9, marginTop: 6 }}>
-          Install "Local REST API" plugin in Obsidian, enable it, copy the API key
-        </div>
-      </div>
-
-      <div className="panel" style={{ maxWidth: 500, padding: 16, marginTop: 12 }}>
-        <div className="label" style={{ marginBottom: 12 }}>VOICE</div>
-        <div style={styles.hint}>Cmd+Shift+J to start/stop voice input</div>
-        <label style={styles.option}>
-          <input
-            type="checkbox"
-            checked={voiceSettings?.tts_enabled ?? true}
-            onChange={(e) => {
-              void setVoiceSetting("tts_enabled", String(e.target.checked));
-              setVoiceSettingsState((prev) =>
-                prev ? { ...prev, tts_enabled: e.target.checked } : prev,
-              );
-            }}
-            style={styles.radio}
-          />
-          <span style={styles.optionLabel}>Enable text-to-speech</span>
-        </label>
-        {ttsVoices.length > 0 && (
-          <div style={{ marginTop: 8 }}>
-            <div style={{ color: "rgba(0, 180, 255, 0.5)", fontSize: 10, marginBottom: 4 }}>TTS Voice</div>
-            <select
-              value={voiceSettings?.tts_voice ?? "Samantha"}
-              onChange={(e) => {
-                void setVoiceSetting("tts_voice", e.target.value);
-                setVoiceSettingsState((prev) =>
-                  prev ? { ...prev, tts_voice: e.target.value } : prev,
-                );
-              }}
-              style={styles.select}
-            >
-              {ttsVoices.map((voice) => <option key={voice} value={voice}>{voice}</option>)}
-            </select>
+      <div style={styles.grid}>
+        {/* Left column */}
+        <div style={styles.column}>
+          <div className="panel" style={styles.panel}>
+            <div className="label" style={styles.sectionTitle}>AI PROVIDER</div>
+            {options.map((opt) => (
+              <label key={opt.value} style={styles.option}>
+                <input type="radio" name="ai_provider" value={opt.value} checked={aiProvider === opt.value} onChange={() => handleProviderChange(opt.value)} style={styles.radio} />
+                <span style={styles.optionLabel}>{opt.label}</span>
+              </label>
+            ))}
           </div>
-        )}
-      </div>
 
-      <div className="panel" style={{ maxWidth: 500, padding: 16, marginTop: 12 }}>
-        <div className="label" style={{ marginBottom: 12 }}>WAKE WORD</div>
-        <div style={styles.hint}>Always-on local wake-word detection for “Hey Jarvis”</div>
-        <label style={styles.option}>
-          <input
-            type="checkbox"
-            checked={wakeStatus?.enabled ?? false}
-            disabled={!wakeCanEnable || wakeBusy || modelDownloading !== null}
-            onChange={(e) => {
-              void handleWakeToggle(e.target.checked);
-            }}
-            style={styles.radio}
-          />
-          <span style={styles.optionLabel}>Enable wake word</span>
-        </label>
-        <div style={styles.statusText}>{getWakeStatusLine(voiceState)}</div>
-        <button
-          onClick={() => { void handleDownloadModel(); }}
-          disabled={wakeBusy || modelDownloading !== null || wakeStatus?.model_downloaded}
-          style={styles.actionBtn}
-        >
-          {modelDownloading !== null
-            ? "DOWNLOADING..."
-            : wakeStatus?.model_downloaded
-              ? "MODEL READY"
-              : "DOWNLOAD MODEL"}
-        </button>
-        {modelDownloading !== null && (
-          <div style={styles.progressShell}>
-            <div style={{ ...styles.progressFill, width: `${modelDownloading}%` }} />
+          <div className="panel" style={styles.panel}>
+            <div className="label" style={styles.sectionTitle}>API KEYS</div>
+            <div style={styles.hint}>Set in .env file at project root:</div>
+            <code style={styles.code}>ANTHROPIC_API_KEY</code>
+            <code style={styles.code}>OPENAI_API_KEY</code>
           </div>
-        )}
-        <div style={styles.privacyText}>
-          Wake-word audio is processed locally for detection. After activation, full commands use cloud speech-to-text first when `OPENAI_API_KEY` is configured, then fall back to local Whisper.
-        </div>
-        {wakeError && <div style={styles.errorText}>{wakeError}</div>}
-      </div>
 
-      <div className="panel" style={{ maxWidth: 500, padding: 16, marginTop: 12 }}>
-        <div className="label" style={{ marginBottom: 12 }}>ASSISTANT</div>
-        <label style={styles.option}>
-          <input
-            type="checkbox"
-            defaultChecked={true}
-            onChange={(e) => void updateSetting("auto_briefing", String(e.target.checked))}
-            style={styles.radio}
-          />
-          <span style={styles.optionLabel}>Speak morning briefing on startup (once per day)</span>
-        </label>
+          <div className="panel" style={styles.panel}>
+            <div className="label" style={styles.sectionTitle}>GOOGLE SERVICES</div>
+            <div style={styles.hint}>Connect Gmail and Google Calendar</div>
+            {googleConnected ? (
+              <div style={{ color: "rgba(16, 185, 129, 0.7)", fontSize: 12 }}>Connected</div>
+            ) : (
+              <button onClick={handleGoogleConnect} disabled={connecting} style={styles.actionBtn}>
+                {connecting ? "CONNECTING..." : "CONNECT GOOGLE"}
+              </button>
+            )}
+          </div>
+
+          <div className="panel" style={styles.panel}>
+            <div className="label" style={styles.sectionTitle}>NOTION</div>
+            <div style={styles.hint}>Enter your Notion integration token</div>
+            <div style={{ display: "flex", gap: 8 }}>
+              <input type="password" value={notionToken} onChange={(e) => { setNotionToken(e.target.value); setNotionSaved(false); }} placeholder="ntn_..." style={styles.tokenInput} />
+              <button onClick={handleSaveNotion} style={styles.saveBtn}>{notionSaved ? "SAVED" : "SAVE"}</button>
+            </div>
+          </div>
+
+          <div className="panel" style={styles.panel}>
+            <div className="label" style={styles.sectionTitle}>GITHUB</div>
+            <div style={styles.hint}>Enter your GitHub personal access token</div>
+            <div style={{ display: "flex", gap: 8 }}>
+              <input type="password" value={githubToken} onChange={(e) => { setGithubToken(e.target.value); setGithubSaved(false); }} placeholder="ghp_..." style={styles.tokenInput} />
+              <button onClick={handleSaveGitHub} style={styles.saveBtn}>{githubSaved ? "SAVED" : "SAVE"}</button>
+            </div>
+          </div>
+
+          <div className="panel" style={styles.panel}>
+            <div className="label" style={styles.sectionTitle}>OBSIDIAN</div>
+            <div style={styles.hint}>Connect to Obsidian vault via Local REST API plugin</div>
+            <div style={{ display: "flex", gap: 8 }}>
+              <input type="password" value={obsidianKey} onChange={(e) => { setObsidianKey(e.target.value); setObsidianSaved(false); }} placeholder="API key from Obsidian REST API plugin" style={styles.tokenInput} />
+              <button onClick={handleSaveObsidian} style={styles.saveBtn}>{obsidianSaved ? "SAVED" : "SAVE"}</button>
+            </div>
+            <div style={{ color: "rgba(0, 180, 255, 0.3)", fontSize: 9, marginTop: 6 }}>
+              Install "Local REST API" plugin in Obsidian, enable it, copy the API key
+            </div>
+          </div>
+        </div>
+
+        {/* Right column */}
+        <div style={styles.column}>
+          <div className="panel" style={styles.panel}>
+            <div className="label" style={styles.sectionTitle}>VOICE</div>
+            <div style={styles.hint}>Cmd+Shift+J to start/stop voice input</div>
+            <label style={styles.option}>
+              <input type="checkbox" checked={voiceSettings?.tts_enabled ?? true} onChange={(e) => { void setVoiceSetting("tts_enabled", String(e.target.checked)); setVoiceSettingsState((prev) => prev ? { ...prev, tts_enabled: e.target.checked } : prev); }} style={styles.radio} />
+              <span style={styles.optionLabel}>Enable text-to-speech</span>
+            </label>
+            {ttsVoices.length > 0 && (
+              <div style={{ marginTop: 8 }}>
+                <div style={{ color: "rgba(0, 180, 255, 0.5)", fontSize: 10, marginBottom: 4 }}>TTS Voice</div>
+                <select value={voiceSettings?.tts_voice ?? "Samantha"} onChange={(e) => { void setVoiceSetting("tts_voice", e.target.value); setVoiceSettingsState((prev) => prev ? { ...prev, tts_voice: e.target.value } : prev); }} style={styles.select}>
+                  {ttsVoices.map((voice) => <option key={voice} value={voice}>{voice}</option>)}
+                </select>
+              </div>
+            )}
+          </div>
+
+          <div className="panel" style={styles.panel}>
+            <div className="label" style={styles.sectionTitle}>WAKE WORD</div>
+            <div style={styles.hint}>Always-on local wake-word detection for "Hey Jarvis"</div>
+            <label style={styles.option}>
+              <input type="checkbox" checked={wakeStatus?.enabled ?? false} disabled={!wakeCanEnable || wakeBusy || modelDownloading !== null} onChange={(e) => { void handleWakeToggle(e.target.checked); }} style={styles.radio} />
+              <span style={styles.optionLabel}>Enable wake word</span>
+            </label>
+            <div style={styles.statusText}>{getWakeStatusLine(voiceState)}</div>
+            <button onClick={() => { void handleDownloadModel(); }} disabled={wakeBusy || modelDownloading !== null || wakeStatus?.model_downloaded} style={styles.actionBtn}>
+              {modelDownloading !== null ? "DOWNLOADING..." : wakeStatus?.model_downloaded ? "MODEL READY" : "DOWNLOAD MODEL"}
+            </button>
+            {modelDownloading !== null && (
+              <div style={styles.progressShell}>
+                <div style={{ ...styles.progressFill, width: `${modelDownloading}%` }} />
+              </div>
+            )}
+            <div style={styles.privacyText}>
+              Wake-word audio is processed locally for detection. After activation, full commands use cloud speech-to-text first when OPENAI_API_KEY is configured, then fall back to local Whisper.
+            </div>
+            {wakeError && <div style={styles.errorText}>{wakeError}</div>}
+          </div>
+
+          <div className="panel" style={styles.panel}>
+            <div className="label" style={styles.sectionTitle}>ASSISTANT</div>
+            <label style={styles.option}>
+              <input type="checkbox" defaultChecked={true} onChange={(e) => void updateSetting("auto_briefing", String(e.target.checked))} style={styles.radio} />
+              <span style={styles.optionLabel}>Speak morning briefing on startup (once per day)</span>
+            </label>
+          </div>
+
+          <div className="panel" style={styles.panel}>
+            <div className="label" style={styles.sectionTitle}>WALLPAPER MODE</div>
+            <div style={styles.hint}>
+              Turn the full JARVIS app into a live macOS desktop wallpaper.
+              The entire UI renders behind all windows and desktop icons.
+            </div>
+            <label style={styles.option}>
+              <input type="checkbox" checked={wallpaperActive} disabled={wallpaperBusy} onChange={(e) => { void handleWallpaperToggle(e.target.checked); }} style={styles.radio} />
+              <span style={styles.optionLabel}>Enable wallpaper mode</span>
+            </label>
+            <div style={styles.statusText}>
+              {wallpaperBusy ? "Toggling..." : wallpaperActive ? "Wallpaper active -- full JARVIS on desktop" : "Wallpaper inactive"}
+            </div>
+            <div style={styles.privacyText}>
+              When active, JARVIS goes fullscreen behind all windows.
+              Say "Hey Jarvis", click the tray icon, or press Escape to interact.
+              Closing the window sends it back to the background.
+            </div>
+          </div>
+        </div>
       </div>
     </div>
   );
 }
 
 const styles: Record<string, React.CSSProperties> = {
-  container: { padding: 24, height: "100%", overflowY: "auto" },
+  container: { padding: 24, paddingBottom: 48 },
+  grid: { display: "grid", gridTemplateColumns: "1fr 1fr", gap: 12, alignItems: "start" },
+  column: { display: "flex", flexDirection: "column" as const, gap: 12 },
+  panel: { padding: 16 },
+  sectionTitle: { marginBottom: 12 },
   option: { display: "flex", alignItems: "center", gap: 8, marginBottom: 10, cursor: "pointer" },
   radio: { accentColor: "rgba(0, 180, 255, 0.8)" },
   optionLabel: { color: "rgba(0, 180, 255, 0.7)", fontSize: 13 },
