@@ -16,6 +16,7 @@ pub async fn run_job(db: &Arc<Database>, auth: &Arc<GoogleAuth>, action_type: &s
         "notion_sync" => run_notion_sync(db).await,
         "github_digest" => run_github_digest(db).await,
         "auto_archive_emails" => run_auto_archive(db, auth).await,
+        "proactive_check" => run_proactive_check(db).await,
         other => Err(format!("Unknown job type: {}", other)),
     };
 
@@ -110,6 +111,47 @@ async fn run_deadline_monitor(db: &Arc<Database>) -> Result<String, String> {
         log::warn!("Deadline approaching: '{}' (id={}) due {}", title, id, deadline);
     }
     Ok(format!("{} tasks with deadlines within 3 days", warnings.len()))
+}
+
+async fn run_proactive_check(db: &Arc<Database>) -> Result<String, String> {
+    let conn = db.conn.lock().map_err(|e| e.to_string())?;
+    let mut alerts = Vec::new();
+
+    let overdue: i64 = conn.query_row(
+        "SELECT COUNT(*) FROM tasks WHERE status != 'completed' AND deadline IS NOT NULL AND deadline < date('now')",
+        [], |r| r.get(0)
+    ).unwrap_or(0);
+    if overdue > 0 { alerts.push(format!("{} overdue task(s)", overdue)); }
+
+    let due_today: i64 = conn.query_row(
+        "SELECT COUNT(*) FROM tasks WHERE status != 'completed' AND deadline = date('now')",
+        [], |r| r.get(0)
+    ).unwrap_or(0);
+    if due_today > 0 { alerts.push(format!("{} task(s) due today", due_today)); }
+
+    let upcoming: Option<String> = conn.query_row(
+        "SELECT summary FROM calendar_events WHERE start_time > datetime('now') AND start_time <= datetime('now', '+15 minutes') ORDER BY start_time ASC LIMIT 1",
+        [], |row| row.get(0)
+    ).ok();
+    if let Some(meeting) = upcoming { alerts.push(format!("Meeting in 15 min: {}", meeting)); }
+
+    let failed: i64 = conn.query_row(
+        "SELECT COUNT(*) FROM cron_runs WHERE status = 'failed' AND started_at > datetime('now', '-1 hour')",
+        [], |r| r.get(0)
+    ).unwrap_or(0);
+    if failed > 0 { alerts.push(format!("{} cron job(s) failed in the last hour", failed)); }
+
+    if alerts.is_empty() {
+        Ok("No alerts".to_string())
+    } else {
+        let alert_text = alerts.join("; ");
+        conn.execute(
+            "INSERT INTO user_preferences (key, value, updated_at) VALUES ('last_alerts', ?1, datetime('now'))
+             ON CONFLICT(key) DO UPDATE SET value = ?1, updated_at = datetime('now')",
+            rusqlite::params![alert_text],
+        ).map_err(|e| e.to_string())?;
+        Ok(format!("Alerts: {}", alert_text))
+    }
 }
 
 async fn run_auto_archive(db: &Arc<Database>, auth: &Arc<GoogleAuth>) -> Result<String, String> {
