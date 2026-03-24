@@ -1,26 +1,52 @@
-import { useEffect, useRef } from "react";
+import { useEffect, useRef, useCallback } from "react";
+import { invoke } from "@tauri-apps/api/core";
 
 /**
- * JARVIS Holographic Sphere -- inspired by the Iron Man movie.
- * Massive glowing sphere with latitude/longitude grid lines,
- * orbiting rings, energy particles, bright pulsing core,
- * and tons of flowing detail lines.
+ * JARVIS Interactive Data Sphere
+ *
+ * Each particle is a real data node (task, email, meeting, PR, note).
+ * Click a node to zoom in with smooth animation.
+ * AI interactions target specific nodes and the sphere rotates to them.
  */
 
 interface Point3D { x: number; y: number; z: number; }
 
+interface DataNode {
+  id: string;
+  type: "task" | "email" | "meeting" | "github" | "notion" | "cron" | "particle";
+  label: string;
+  sublabel?: string;
+  urgent?: boolean;
+  // Spherical coordinates
+  theta: number;
+  phi: number;
+  r: number;
+  // Animation
+  speed: number;
+  size: number;
+  pulsePhase: number;
+}
+
 const SPHERE_RADIUS = 280;
 const CORE_RADIUS = 45;
-const PARTICLE_COUNT = 350;
 const LAT_LINES = 12;
 const LON_LINES = 16;
-const DETAIL_LINES = 60;
+const NODE_HOVER_DIST = 18;
+
+const TYPE_COLORS: Record<string, { r: number; g: number; b: number }> = {
+  task:     { r: 0,   g: 180, b: 255 },  // cyan
+  email:    { r: 100, g: 200, b: 255 },  // light cyan
+  meeting:  { r: 255, g: 180, b: 0   },  // amber
+  github:   { r: 16,  g: 185, b: 129 },  // green
+  notion:   { r: 180, g: 130, b: 255 },  // purple
+  cron:     { r: 0,   g: 220, b: 200 },  // teal
+  particle: { r: 0,   g: 160, b: 255 },  // dim cyan
+};
 
 function project(p: Point3D, cx: number, cy: number, fov: number) {
-  // Camera distance scales with fov -- lower fov = closer to sphere
   const camDist = fov * 1.0;
   const z = p.z + camDist;
-  if (z <= 1) return { x: cx, y: cy, scale: 0 }; // Behind camera
+  if (z <= 1) return { x: cx, y: cy, scale: 0 };
   const scale = 400 / z;
   return { x: cx + p.x * scale, y: cy + p.y * scale, scale: Math.max(scale, 0) };
 }
@@ -29,19 +55,24 @@ function rotateY(p: Point3D, a: number): Point3D {
   const c = Math.cos(a), s = Math.sin(a);
   return { x: p.x * c - p.z * s, y: p.y, z: p.x * s + p.z * c };
 }
-
 function rotateX(p: Point3D, a: number): Point3D {
   const c = Math.cos(a), s = Math.sin(a);
   return { x: p.x, y: p.y * c - p.z * s, z: p.y * s + p.z * c };
 }
-
 function rotateZ(p: Point3D, a: number): Point3D {
   const c = Math.cos(a), s = Math.sin(a);
   return { x: p.x * c - p.y * s, y: p.x * s + p.y * c, z: p.z };
 }
-
 function transform(p: Point3D, ry: number, rx: number): Point3D {
   return rotateX(rotateY(p, ry), rx);
+}
+function sphereToCart(theta: number, phi: number, r: number): Point3D {
+  return { x: r * Math.sin(phi) * Math.cos(theta), y: r * Math.cos(phi), z: r * Math.sin(phi) * Math.sin(theta) };
+}
+
+// Easing function
+function easeInOut(t: number): number {
+  return t < 0.5 ? 2 * t * t : 1 - Math.pow(-2 * t + 2, 2) / 2;
 }
 
 export default function JarvisScene() {
@@ -52,17 +83,102 @@ export default function JarvisScene() {
   const rotXRef = useRef(0.25);
   const targetRY = useRef(0);
   const targetRX = useRef(0.25);
+  const zoomRef = useRef(600);
+  const targetZoom = useRef(600);
   const dragging = useRef(false);
   const lastM = useRef({ x: 0, y: 0 });
   const autoRot = useRef(true);
-  const zoomRef = useRef(600);
-  const targetZoom = useRef(600);
+  const mousePos = useRef({ x: 0, y: 0 });
 
-  // Particles stored as spherical coords for stable orbiting
-  const particles = useRef<{ theta: number; phi: number; r: number; speed: number; size: number; bright: number }[]>([]);
+  // Data nodes
+  const nodes = useRef<DataNode[]>([]);
+  const dataLoaded = useRef(false);
 
-  // Random detail lines (arcs on the sphere surface)
-  const detailArcs = useRef<{ theta1: number; phi1: number; theta2: number; phi2: number; speed: number }[]>([]);
+  // Focus animation state
+  const focusTarget = useRef<DataNode | null>(null);
+  const focusProgress = useRef(0); // 0 to 1
+  const focusStartRY = useRef(0);
+  const focusStartRX = useRef(0);
+  const focusStartZoom = useRef(600);
+  const focusedNode = useRef<DataNode | null>(null);
+
+  // Tooltip
+  const hoveredNode = useRef<DataNode | null>(null);
+
+  // Load real data from backend
+  const loadData = useCallback(async () => {
+    const dataNodes: DataNode[] = [];
+    let idx = 0;
+
+    function addNode(type: DataNode["type"], label: string, sublabel?: string, urgent?: boolean) {
+      const theta = (idx * 2.399) % (Math.PI * 2); // golden angle distribution
+      const phi = Math.acos(1 - 2 * ((idx * 0.618) % 1));
+      const layer = type === "particle" ? 0.6 + Math.random() * 0.4 : 0.85 + Math.random() * 0.15;
+      dataNodes.push({
+        id: `${type}-${idx}`,
+        type, label, sublabel, urgent,
+        theta, phi,
+        r: SPHERE_RADIUS * layer,
+        speed: (0.0005 + Math.random() * 0.002) * (Math.random() > 0.5 ? 1 : -1),
+        size: type === "particle" ? 1 : 2.5 + Math.random() * 1.5,
+        pulsePhase: Math.random() * Math.PI * 2,
+      });
+      idx++;
+    }
+
+    try {
+      // Load tasks
+      const tasks: { id: number; title: string; deadline: string | null; status: string; priority: number }[] = await invoke("get_tasks");
+      for (const t of tasks.slice(0, 15)) {
+        addNode("task", t.title, t.deadline ? `Due: ${t.deadline}` : undefined, t.priority >= 2);
+      }
+
+      // Load emails
+      const emails: { id: number; subject: string | null; sender: string }[] = await invoke("get_emails", { limit: 10 });
+      for (const e of emails.slice(0, 10)) {
+        addNode("email", e.subject || "(No subject)", e.sender);
+      }
+
+      // Load calendar
+      const events: { id: number; summary: string; start_time: string }[] = await invoke("get_todays_events");
+      for (const ev of events.slice(0, 8)) {
+        addNode("meeting", ev.summary, new Date(ev.start_time).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" }));
+      }
+
+      // Load github
+      const ghItems: { id: number; title: string; repo: string; item_type: string }[] = await invoke("get_github_items", { item_type: null });
+      for (const g of ghItems.slice(0, 8)) {
+        addNode("github", g.title, `${g.repo} [${g.item_type}]`);
+      }
+
+      // Load cron jobs
+      const crons: { id: number; name: string; status: string; last_run: string | null }[] = await invoke("get_cron_jobs");
+      for (const c of crons) {
+        addNode("cron", c.name, c.status);
+      }
+    } catch {
+      // Backend may not be ready yet -- that's OK, use particles only
+    }
+
+    // Fill remaining space with ambient particles
+    const targetTotal = 200;
+    while (idx < targetTotal) {
+      addNode("particle", "", undefined);
+    }
+
+    nodes.current = dataNodes;
+    dataLoaded.current = true;
+  }, []);
+
+  // Focus on a node -- smooth animation
+  const focusOnNode = useCallback((node: DataNode) => {
+    focusTarget.current = node;
+    focusProgress.current = 0;
+    focusStartRY.current = rotYRef.current;
+    focusStartRX.current = rotXRef.current;
+    focusStartZoom.current = zoomRef.current;
+    autoRot.current = false;
+  }, []);
 
   useEffect(() => {
     const canvas = canvasRef.current;
@@ -78,20 +194,32 @@ export default function JarvisScene() {
     resize();
     window.addEventListener("resize", resize);
 
-    // Mouse controls -- listen on window so it works even when UI layer is on top
+    // Load data after a short delay
+    setTimeout(() => loadData(), 1000);
+    // Refresh data every 30 seconds
+    const dataInterval = setInterval(() => loadData(), 30000);
+
+    // Mouse controls
     function onDown(e: MouseEvent) {
       const target = e.target as HTMLElement;
       if (target.closest("button, input, select, textarea, .panel, .no-drag, nav, form")) return;
       e.preventDefault();
+      document.body.style.userSelect = "none";
+      document.body.style.webkitUserSelect = "none";
+
+      // Check if clicking on a node
+      if (hoveredNode.current && hoveredNode.current.type !== "particle") {
+        focusOnNode(hoveredNode.current);
+        return;
+      }
+
       dragging.current = true;
       lastM.current = { x: e.clientX, y: e.clientY };
       autoRot.current = false;
-      // Prevent text selection while dragging
-      document.body.style.userSelect = "none";
-      document.body.style.webkitUserSelect = "none";
       document.body.style.cursor = "grabbing";
     }
     function onMove(e: MouseEvent) {
+      mousePos.current = { x: e.clientX, y: e.clientY };
       if (!dragging.current) return;
       e.preventDefault();
       targetRY.current += (e.clientX - lastM.current.x) * 0.005;
@@ -101,67 +229,68 @@ export default function JarvisScene() {
     }
     function onUp() {
       dragging.current = false;
-      // Restore text selection
       document.body.style.userSelect = "";
       document.body.style.webkitUserSelect = "";
       document.body.style.cursor = "";
-      setTimeout(() => { if (!dragging.current) autoRot.current = true; }, 2000);
+      setTimeout(() => { if (!dragging.current && !focusTarget.current) autoRot.current = true; }, 2000);
     }
     function onWheel(e: WheelEvent) {
       e.preventDefault();
       targetZoom.current += e.deltaY * 0.8;
-      // Allow zooming from way out (2000) to deep inside the sphere (50)
       targetZoom.current = Math.max(50, Math.min(2000, targetZoom.current));
+      // If zooming out while focused, dismiss focus
+      if (focusedNode.current && e.deltaY > 0) {
+        focusedNode.current = null;
+        focusTarget.current = null;
+        targetZoom.current = 600;
+        autoRot.current = true;
+      }
     }
+    function onDblClick() {
+      // Double click to unfocus
+      if (focusedNode.current) {
+        focusedNode.current = null;
+        focusTarget.current = null;
+        targetZoom.current = 600;
+        autoRot.current = true;
+      }
+    }
+
     window.addEventListener("mousedown", onDown);
     window.addEventListener("mousemove", onMove);
     window.addEventListener("mouseup", onUp);
     window.addEventListener("wheel", onWheel, { passive: false });
-
-    // Init particles on sphere surface + some inside
-    particles.current = [];
-    for (let i = 0; i < PARTICLE_COUNT; i++) {
-      const onSurface = Math.random() > 0.3;
-      particles.current.push({
-        theta: Math.random() * Math.PI * 2,
-        phi: Math.acos(2 * Math.random() - 1),
-        r: onSurface ? SPHERE_RADIUS * (0.85 + Math.random() * 0.2) : CORE_RADIUS + Math.random() * (SPHERE_RADIUS - CORE_RADIUS),
-        speed: (0.001 + Math.random() * 0.004) * (Math.random() > 0.5 ? 1 : -1),
-        size: 0.5 + Math.random() * 2,
-        bright: 0.3 + Math.random() * 0.7,
-      });
-    }
-
-    // Init detail arcs (random arcs along sphere surface)
-    detailArcs.current = [];
-    for (let i = 0; i < DETAIL_LINES; i++) {
-      const t1 = Math.random() * Math.PI * 2;
-      const p1 = Math.random() * Math.PI;
-      const spread = 0.3 + Math.random() * 0.8;
-      detailArcs.current.push({
-        theta1: t1, phi1: p1,
-        theta2: t1 + (Math.random() - 0.5) * spread,
-        phi2: p1 + (Math.random() - 0.5) * spread,
-        speed: (Math.random() - 0.5) * 0.003,
-      });
-    }
-
-    function sphereToCart(theta: number, phi: number, r: number): Point3D {
-      return {
-        x: r * Math.sin(phi) * Math.cos(theta),
-        y: r * Math.cos(phi),
-        z: r * Math.sin(phi) * Math.sin(theta),
-      };
-    }
+    window.addEventListener("dblclick", onDblClick);
 
     function animate() {
       if (!canvas || !ctx) return;
       time.current += 0.006;
       const w = canvas.width, h = canvas.height;
       const cx = w / 2, cy = h / 2;
-      // Smooth zoom interpolation
+
+      // Smooth zoom + rotation
       zoomRef.current += (targetZoom.current - zoomRef.current) * 0.08;
       const fov = zoomRef.current;
+
+      // Focus animation
+      if (focusTarget.current && focusProgress.current < 1) {
+        focusProgress.current = Math.min(1, focusProgress.current + 0.015);
+        const t = easeInOut(focusProgress.current);
+
+        // Calculate target rotation to face the node
+        const node = focusTarget.current;
+        const targetTheta = -node.theta + Math.PI / 2;
+        const targetPhi = -(node.phi - Math.PI / 2);
+
+        targetRY.current = focusStartRY.current + (targetTheta - focusStartRY.current) * t;
+        targetRX.current = focusStartRX.current + (targetPhi - focusStartRX.current) * t;
+        targetZoom.current = focusStartZoom.current + (180 - focusStartZoom.current) * t;
+
+        if (focusProgress.current >= 1) {
+          focusedNode.current = focusTarget.current;
+          focusTarget.current = null;
+        }
+      }
 
       if (autoRot.current) targetRY.current += 0.002;
       rotYRef.current += (targetRY.current - rotYRef.current) * 0.06;
@@ -172,225 +301,310 @@ export default function JarvisScene() {
       ctx.fillStyle = "#060a14";
       ctx.fillRect(0, 0, w, h);
 
-      // Ambient glow
       const ambGlow = ctx.createRadialGradient(cx, cy, 0, cx, cy, SPHERE_RADIUS * 1.8);
       ambGlow.addColorStop(0, "rgba(0, 60, 120, 0.15)");
       ambGlow.addColorStop(0.3, "rgba(0, 30, 60, 0.08)");
-      ambGlow.addColorStop(0.6, "rgba(0, 15, 30, 0.03)");
       ambGlow.addColorStop(1, "rgba(0, 0, 0, 0)");
       ctx.fillStyle = ambGlow;
       ctx.fillRect(0, 0, w, h);
 
-      // === LATITUDE LINES (horizontal rings) ===
+      // === GRID LINES ===
+      // Latitude
       for (let i = 1; i < LAT_LINES; i++) {
         const phi = (i / LAT_LINES) * Math.PI;
         const ringR = SPHERE_RADIUS * Math.sin(phi);
         const ringY = SPHERE_RADIUS * Math.cos(phi);
-        const segs = 60;
-
         ctx.beginPath();
-        for (let s = 0; s <= segs; s++) {
-          const theta = (s / segs) * Math.PI * 2;
-          let p: Point3D = { x: ringR * Math.cos(theta), y: ringY, z: ringR * Math.sin(theta) };
-          p = transform(p, ry, rx);
+        for (let s = 0; s <= 60; s++) {
+          const theta = (s / 60) * Math.PI * 2;
+          const p = transform({ x: ringR * Math.cos(theta), y: ringY, z: ringR * Math.sin(theta) }, ry, rx);
           const pr = project(p, cx, cy, fov);
-          if (s === 0) ctx.moveTo(pr.x, pr.y);
-          else ctx.lineTo(pr.x, pr.y);
+          if (s === 0) ctx.moveTo(pr.x, pr.y); else ctx.lineTo(pr.x, pr.y);
         }
-        ctx.strokeStyle = `rgba(0, 160, 255, ${0.06 + (i === LAT_LINES / 2 ? 0.06 : 0)})`;
-        ctx.lineWidth = i === LAT_LINES / 2 ? 1.2 : 0.6;
-        ctx.stroke();
-      }
-
-      // === LONGITUDE LINES (vertical meridians) ===
-      for (let i = 0; i < LON_LINES; i++) {
-        const theta = (i / LON_LINES) * Math.PI * 2;
-        const segs = 40;
-
-        ctx.beginPath();
-        for (let s = 0; s <= segs; s++) {
-          const phi = (s / segs) * Math.PI;
-          let p = sphereToCart(theta, phi, SPHERE_RADIUS);
-          p = transform(p, ry, rx);
-          const pr = project(p, cx, cy, fov);
-          if (s === 0) ctx.moveTo(pr.x, pr.y);
-          else ctx.lineTo(pr.x, pr.y);
-        }
-        ctx.strokeStyle = "rgba(0, 160, 255, 0.05)";
+        ctx.strokeStyle = `rgba(0, 160, 255, ${0.04 + (i === LAT_LINES / 2 ? 0.04 : 0)})`;
         ctx.lineWidth = 0.5;
         ctx.stroke();
       }
-
-      // === DETAIL ARC LINES (flowing energy on surface) ===
-      for (const arc of detailArcs.current) {
-        arc.theta1 += arc.speed;
-        arc.theta2 += arc.speed;
-
-        const steps = 15;
+      // Longitude
+      for (let i = 0; i < LON_LINES; i++) {
+        const theta = (i / LON_LINES) * Math.PI * 2;
         ctx.beginPath();
-        for (let s = 0; s <= steps; s++) {
-          const t = s / steps;
-          const theta = arc.theta1 + (arc.theta2 - arc.theta1) * t;
-          const phi = arc.phi1 + (arc.phi2 - arc.phi1) * t;
-          let p = sphereToCart(theta, phi, SPHERE_RADIUS * 0.98);
+        for (let s = 0; s <= 40; s++) {
+          const phi = (s / 40) * Math.PI;
+          let p = sphereToCart(theta, phi, SPHERE_RADIUS);
           p = transform(p, ry, rx);
           const pr = project(p, cx, cy, fov);
-          if (s === 0) ctx.moveTo(pr.x, pr.y);
-          else ctx.lineTo(pr.x, pr.y);
+          if (s === 0) ctx.moveTo(pr.x, pr.y); else ctx.lineTo(pr.x, pr.y);
         }
-        ctx.strokeStyle = `rgba(0, 200, 255, ${0.08 + Math.sin(time.current * 2 + arc.theta1) * 0.04})`;
+        ctx.strokeStyle = "rgba(0, 160, 255, 0.03)";
         ctx.lineWidth = 0.4;
         ctx.stroke();
       }
 
-      // === ORBITAL RINGS (tilted, with energy dots) ===
-      const rings = [
-        { r: SPHERE_RADIUS * 1.1, tiltX: 0.5, tiltZ: 0.2, speed: 0.4, opacity: 0.12, width: 1.2 },
-        { r: SPHERE_RADIUS * 0.75, tiltX: 1.2, tiltZ: 0.6, speed: -0.3, opacity: 0.1, width: 1 },
-        { r: SPHERE_RADIUS * 1.25, tiltX: 0.1, tiltZ: 1.0, speed: 0.25, opacity: 0.08, width: 0.8 },
-        { r: SPHERE_RADIUS * 0.55, tiltX: 0.8, tiltZ: 0.3, speed: 0.55, opacity: 0.1, width: 1 },
-        { r: SPHERE_RADIUS * 1.4, tiltX: 0.3, tiltZ: 0.7, speed: -0.2, opacity: 0.06, width: 0.6 },
-        { r: SPHERE_RADIUS * 0.9, tiltX: 1.5, tiltZ: 0.1, speed: 0.35, opacity: 0.09, width: 0.9 },
-        { r: SPHERE_RADIUS * 1.05, tiltX: 0.7, tiltZ: 1.3, speed: -0.45, opacity: 0.07, width: 0.7 },
+      // === ORBITAL RINGS ===
+      const ringDefs = [
+        { r: SPHERE_RADIUS * 1.1, tx: 0.5, tz: 0.2, spd: 0.4, op: 0.1 },
+        { r: SPHERE_RADIUS * 0.75, tx: 1.2, tz: 0.6, spd: -0.3, op: 0.08 },
+        { r: SPHERE_RADIUS * 1.25, tx: 0.1, tz: 1.0, spd: 0.25, op: 0.06 },
+        { r: SPHERE_RADIUS * 0.55, tx: 0.8, tz: 0.3, spd: 0.55, op: 0.08 },
+        { r: SPHERE_RADIUS * 1.05, tx: 0.7, tz: 1.3, spd: -0.45, op: 0.06 },
       ];
-
-      for (const ring of rings) {
-        const segs = 80;
+      for (const ring of ringDefs) {
         ctx.beginPath();
-        for (let s = 0; s <= segs; s++) {
-          const a = (s / segs) * Math.PI * 2;
+        for (let s = 0; s <= 80; s++) {
+          const a = (s / 80) * Math.PI * 2;
           let p: Point3D = { x: Math.cos(a) * ring.r, y: Math.sin(a) * ring.r, z: 0 };
-          p = rotateX(p, ring.tiltX);
-          p = rotateZ(p, ring.tiltZ);
-          p = transform(p, ry, rx);
+          p = rotateX(p, ring.tx); p = rotateZ(p, ring.tz); p = transform(p, ry, rx);
           const pr = project(p, cx, cy, fov);
-          if (s === 0) ctx.moveTo(pr.x, pr.y);
-          else ctx.lineTo(pr.x, pr.y);
+          if (s === 0) ctx.moveTo(pr.x, pr.y); else ctx.lineTo(pr.x, pr.y);
         }
-        ctx.strokeStyle = `rgba(0, 180, 255, ${ring.opacity})`;
-        ctx.lineWidth = ring.width;
+        ctx.strokeStyle = `rgba(0, 180, 255, ${ring.op})`;
+        ctx.lineWidth = 0.8;
         ctx.stroke();
 
         // Energy dot
-        const da = time.current * ring.speed;
+        const da = time.current * ring.spd;
         let dp: Point3D = { x: Math.cos(da) * ring.r, y: Math.sin(da) * ring.r, z: 0 };
-        dp = rotateX(dp, ring.tiltX);
-        dp = rotateZ(dp, ring.tiltZ);
-        dp = transform(dp, ry, rx);
+        dp = rotateX(dp, ring.tx); dp = rotateZ(dp, ring.tz); dp = transform(dp, ry, rx);
         const dpr = project(dp, cx, cy, fov);
-
-        const gs = 18 * dpr.scale;
+        const gs = 12 * dpr.scale;
         const dg = ctx.createRadialGradient(dpr.x, dpr.y, 0, dpr.x, dpr.y, gs);
-        dg.addColorStop(0, "rgba(100, 220, 255, 0.6)");
-        dg.addColorStop(0.3, "rgba(0, 180, 255, 0.2)");
+        dg.addColorStop(0, "rgba(100, 220, 255, 0.5)");
         dg.addColorStop(1, "rgba(0, 180, 255, 0)");
         ctx.beginPath(); ctx.arc(dpr.x, dpr.y, gs, 0, Math.PI * 2); ctx.fillStyle = dg; ctx.fill();
-        ctx.beginPath(); ctx.arc(dpr.x, dpr.y, 2.5 * dpr.scale, 0, Math.PI * 2);
-        ctx.fillStyle = "rgba(180, 240, 255, 0.95)"; ctx.fill();
+        ctx.beginPath(); ctx.arc(dpr.x, dpr.y, 2 * dpr.scale, 0, Math.PI * 2);
+        ctx.fillStyle = "rgba(180, 240, 255, 0.9)"; ctx.fill();
       }
 
       // === CORE ===
       const breath = 1 + Math.sin(time.current * 2.5) * 0.08;
       const cR = CORE_RADIUS * breath;
-
-      // Bright core glow (multiple layers)
       for (let layer = 0; layer < 3; layer++) {
         const glowR = cR * (3 - layer);
-        const glowAlpha = [0.12, 0.06, 0.03][layer];
+        const glowAlpha = [0.1, 0.05, 0.025][layer];
         const cg = ctx.createRadialGradient(cx, cy, 0, cx, cy, glowR);
-        cg.addColorStop(0, `rgba(80, 200, 255, ${glowAlpha + Math.sin(time.current * 2.5) * 0.02})`);
-        cg.addColorStop(0.5, `rgba(0, 120, 255, ${glowAlpha * 0.3})`);
+        cg.addColorStop(0, `rgba(80, 200, 255, ${glowAlpha})`);
         cg.addColorStop(1, "rgba(0, 60, 120, 0)");
         ctx.beginPath(); ctx.arc(cx, cy, glowR, 0, Math.PI * 2); ctx.fillStyle = cg; ctx.fill();
       }
-
-      // Core wireframe (double icosahedron)
+      // Wireframe core
       const t2 = (1 + Math.sqrt(5)) / 2;
-      const rawVerts: Point3D[] = [
+      const rawV: Point3D[] = [
         {x:-1,y:t2,z:0},{x:1,y:t2,z:0},{x:-1,y:-t2,z:0},{x:1,y:-t2,z:0},
         {x:0,y:-1,z:t2},{x:0,y:1,z:t2},{x:0,y:-1,z:-t2},{x:0,y:1,z:-t2},
         {x:t2,y:0,z:-1},{x:t2,y:0,z:1},{x:-t2,y:0,z:-1},{x:-t2,y:0,z:1},
       ];
-      const edges = [
-        [0,1],[0,5],[0,7],[0,10],[0,11],[1,5],[1,7],[1,8],[1,9],
-        [2,3],[2,4],[2,6],[2,10],[2,11],[3,4],[3,6],[3,8],[3,9],
-        [4,5],[4,9],[4,11],[5,9],[5,11],[6,7],[6,8],[6,10],[7,8],[7,10],[8,9],[10,11],
-      ];
+      const edges = [[0,1],[0,5],[0,7],[0,10],[0,11],[1,5],[1,7],[1,8],[1,9],[2,3],[2,4],[2,6],[2,10],[2,11],[3,4],[3,6],[3,8],[3,9],[4,5],[4,9],[4,11],[5,9],[5,11],[6,7],[6,8],[6,10],[7,8],[7,10],[8,9],[10,11]];
+      const coreRot = time.current * 0.3;
+      ctx.strokeStyle = "rgba(100, 220, 255, 0.2)";
+      ctx.lineWidth = 0.7;
+      for (const [a, b] of edges) {
+        const len = Math.sqrt(rawV[a].x**2 + rawV[a].y**2 + rawV[a].z**2);
+        let pa = { x: rawV[a].x/len*cR, y: rawV[a].y/len*cR, z: rawV[a].z/len*cR };
+        let pb = { x: rawV[b].x/len*cR, y: rawV[b].y/len*cR, z: rawV[b].z/len*cR };
+        pa = rotateY(pa, coreRot); pa = rotateX(pa, coreRot*0.7); pa = transform(pa, ry, rx);
+        pb = rotateY(pb, coreRot); pb = rotateX(pb, coreRot*0.7); pb = transform(pb, ry, rx);
+        const pra = project(pa, cx, cy, fov), prb = project(pb, cx, cy, fov);
+        ctx.beginPath(); ctx.moveTo(pra.x, pra.y); ctx.lineTo(prb.x, prb.y); ctx.stroke();
+      }
 
-      for (let layer = 0; layer < 2; layer++) {
-        const scale = layer === 0 ? cR : cR * 0.6;
-        const rot = time.current * (0.4 + layer * 0.2) * (layer === 0 ? 1 : -1);
-        const alpha = layer === 0 ? 0.35 : 0.2;
+      // === DATA NODES ===
+      hoveredNode.current = null;
+      const mx = mousePos.current.x, my = mousePos.current.y;
 
-        const verts = rawVerts.map(v => {
-          const len = Math.sqrt(v.x*v.x + v.y*v.y + v.z*v.z);
-          return { x: v.x/len * scale, y: v.y/len * scale, z: v.z/len * scale };
-        });
+      // Transform + sort back to front
+      const transformed = nodes.current.map(node => {
+        node.theta += node.speed;
+        const cart = sphereToCart(node.theta, node.phi, node.r);
+        const tp = transform(cart, ry, rx);
+        const pr = project(tp, cx, cy, fov);
+        return { node, pr, tz: tp.z };
+      });
+      transformed.sort((a, b) => b.tz - a.tz);
 
-        ctx.strokeStyle = `rgba(100, 220, 255, ${alpha})`;
-        ctx.lineWidth = layer === 0 ? 1 : 0.6;
-        for (const [a, b] of edges) {
-          let pa = rotateY(verts[a], rot); pa = rotateX(pa, rot * 0.7);
-          pa = transform(pa, ry, rx);
-          let pb = rotateY(verts[b], rot); pb = rotateX(pb, rot * 0.7);
-          pb = transform(pb, ry, rx);
-          const pra = project(pa, cx, cy, fov);
-          const prb = project(pb, cx, cy, fov);
-          ctx.beginPath(); ctx.moveTo(pra.x, pra.y); ctx.lineTo(prb.x, prb.y); ctx.stroke();
+      // Draw connections between nearby non-particle nodes
+      ctx.lineWidth = 0.3;
+      for (let i = 0; i < transformed.length; i++) {
+        if (transformed[i].node.type === "particle") continue;
+        for (let j = i + 1; j < transformed.length; j++) {
+          if (transformed[j].node.type === "particle") continue;
+          const dx = transformed[i].pr.x - transformed[j].pr.x;
+          const dy = transformed[i].pr.y - transformed[j].pr.y;
+          const dist = Math.sqrt(dx*dx + dy*dy);
+          if (dist < 80) {
+            const alpha = (1 - dist / 80) * 0.08;
+            ctx.beginPath();
+            ctx.moveTo(transformed[i].pr.x, transformed[i].pr.y);
+            ctx.lineTo(transformed[j].pr.x, transformed[j].pr.y);
+            ctx.strokeStyle = `rgba(0, 180, 255, ${alpha})`;
+            ctx.stroke();
+          }
         }
       }
 
-      // Core center bright dot
-      const centerGlow = ctx.createRadialGradient(cx, cy, 0, cx, cy, cR * 0.4);
-      centerGlow.addColorStop(0, `rgba(200, 240, 255, ${0.3 + Math.sin(time.current * 3) * 0.1})`);
-      centerGlow.addColorStop(1, "rgba(0, 120, 255, 0)");
-      ctx.beginPath(); ctx.arc(cx, cy, cR * 0.4, 0, Math.PI * 2); ctx.fillStyle = centerGlow; ctx.fill();
+      // Draw nodes
+      for (const { node, pr } of transformed) {
+        const col = TYPE_COLORS[node.type] || TYPE_COLORS.particle;
+        const sz = node.size * pr.scale * 1.5;
+        if (sz < 0.2 || pr.scale <= 0) continue;
 
-      // === PARTICLES ===
-      const pts = particles.current;
-      for (const p of pts) {
-        p.theta += p.speed;
+        const pulse = node.type !== "particle" ? 1 + Math.sin(time.current * 2 + node.pulsePhase) * 0.15 : 1;
+        const finalSz = sz * pulse;
 
-        let cart = sphereToCart(p.theta, p.phi, p.r);
-        cart = transform(cart, ry, rx);
-        const pr = project(cart, cx, cy, fov);
-        const sz = p.size * pr.scale * 1.5;
-        if (sz < 0.2) continue;
+        // Check hover
+        const dx = mx - pr.x, dy = my - pr.y;
+        const isHovered = node.type !== "particle" && Math.sqrt(dx*dx + dy*dy) < NODE_HOVER_DIST * pr.scale;
+        const isFocused = focusedNode.current?.id === node.id;
 
+        if (isHovered) hoveredNode.current = node;
+
+        // Glow for data nodes
+        if (node.type !== "particle") {
+          const glowSize = finalSz * (isHovered ? 6 : isFocused ? 8 : 4);
+          const glowAlpha = (isHovered ? 0.15 : isFocused ? 0.2 : 0.06) * pr.scale;
+          const ng = ctx.createRadialGradient(pr.x, pr.y, 0, pr.x, pr.y, glowSize);
+          ng.addColorStop(0, `rgba(${col.r}, ${col.g}, ${col.b}, ${glowAlpha})`);
+          ng.addColorStop(1, `rgba(${col.r}, ${col.g}, ${col.b}, 0)`);
+          ctx.beginPath(); ctx.arc(pr.x, pr.y, glowSize, 0, Math.PI * 2); ctx.fillStyle = ng; ctx.fill();
+        }
+
+        // Urgent ring
+        if (node.urgent) {
+          ctx.beginPath();
+          ctx.arc(pr.x, pr.y, finalSz * 2.5, 0, Math.PI * 2);
+          ctx.strokeStyle = `rgba(255, 100, 100, ${0.3 + Math.sin(time.current * 3) * 0.15})`;
+          ctx.lineWidth = 1;
+          ctx.stroke();
+        }
+
+        // Node dot
         ctx.beginPath();
-        ctx.arc(pr.x, pr.y, sz, 0, Math.PI * 2);
-        ctx.fillStyle = `rgba(100, 220, 255, ${p.bright * pr.scale * 0.7})`;
+        ctx.arc(pr.x, pr.y, finalSz, 0, Math.PI * 2);
+        const nodeAlpha = node.type === "particle" ? 0.3 * pr.scale : (isHovered ? 1 : 0.8) * pr.scale;
+        ctx.fillStyle = `rgba(${col.r}, ${col.g}, ${col.b}, ${nodeAlpha})`;
         ctx.fill();
 
-        if (sz > 1.2) {
-          const pg = ctx.createRadialGradient(pr.x, pr.y, 0, pr.x, pr.y, sz * 4);
-          pg.addColorStop(0, `rgba(0, 180, 255, ${0.06 * pr.scale})`);
-          pg.addColorStop(1, "rgba(0, 0, 0, 0)");
-          ctx.beginPath(); ctx.arc(pr.x, pr.y, sz * 4, 0, Math.PI * 2); ctx.fillStyle = pg; ctx.fill();
+        // Hover ring
+        if (isHovered) {
+          ctx.beginPath();
+          ctx.arc(pr.x, pr.y, finalSz * 3, 0, Math.PI * 2);
+          ctx.strokeStyle = `rgba(${col.r}, ${col.g}, ${col.b}, 0.5)`;
+          ctx.lineWidth = 1;
+          ctx.stroke();
+        }
+
+        // Label for data nodes (only when close enough or hovered/focused)
+        if (node.type !== "particle" && node.label && (pr.scale > 0.5 || isHovered || isFocused)) {
+          const labelAlpha = isHovered || isFocused ? 0.9 : Math.min(pr.scale * 0.8, 0.6);
+          const fontSize = isHovered || isFocused ? 11 : Math.max(8, 10 * pr.scale);
+
+          ctx.font = `${fontSize}px "JetBrains Mono", monospace`;
+          ctx.fillStyle = `rgba(${col.r}, ${col.g}, ${col.b}, ${labelAlpha})`;
+          ctx.textAlign = "left";
+
+          const labelX = pr.x + finalSz + 6;
+          const labelY = pr.y;
+
+          // Type tag
+          ctx.font = `bold ${fontSize * 0.7}px "JetBrains Mono", monospace`;
+          ctx.fillText(node.type.toUpperCase(), labelX, labelY - fontSize * 0.4);
+
+          // Title
+          ctx.font = `${fontSize}px "JetBrains Mono", monospace`;
+          const maxChars = isFocused ? 40 : isHovered ? 30 : 20;
+          const title = node.label.length > maxChars ? node.label.slice(0, maxChars) + "..." : node.label;
+          ctx.fillText(title, labelX, labelY + fontSize * 0.4);
+
+          // Sublabel
+          if (node.sublabel && (isHovered || isFocused)) {
+            ctx.font = `${fontSize * 0.8}px "JetBrains Mono", monospace`;
+            ctx.fillStyle = `rgba(${col.r}, ${col.g}, ${col.b}, ${labelAlpha * 0.6})`;
+            ctx.fillText(node.sublabel, labelX, labelY + fontSize * 1.2);
+          }
+        }
+
+        // Focused node -- draw expanded detail box
+        if (isFocused && pr.scale > 0.3) {
+          const boxX = pr.x + finalSz + 20;
+          const boxY = pr.y - 30;
+          const boxW = 220;
+          const boxH = 60;
+
+          ctx.fillStyle = `rgba(10, 14, 26, 0.85)`;
+          ctx.strokeStyle = `rgba(${col.r}, ${col.g}, ${col.b}, 0.3)`;
+          ctx.lineWidth = 1;
+          ctx.beginPath();
+          ctx.roundRect(boxX, boxY, boxW, boxH, 6);
+          ctx.fill();
+          ctx.stroke();
+
+          // Connection line from node to box
+          ctx.beginPath();
+          ctx.moveTo(pr.x + finalSz, pr.y);
+          ctx.lineTo(boxX, boxY + boxH / 2);
+          ctx.strokeStyle = `rgba(${col.r}, ${col.g}, ${col.b}, 0.2)`;
+          ctx.stroke();
+
+          ctx.font = "bold 9px 'JetBrains Mono', monospace";
+          ctx.fillStyle = `rgba(${col.r}, ${col.g}, ${col.b}, 0.6)`;
+          ctx.fillText(node.type.toUpperCase(), boxX + 10, boxY + 16);
+
+          ctx.font = "12px 'JetBrains Mono', monospace";
+          ctx.fillStyle = `rgba(${col.r}, ${col.g}, ${col.b}, 0.9)`;
+          const boxTitle = node.label.length > 28 ? node.label.slice(0, 28) + "..." : node.label;
+          ctx.fillText(boxTitle, boxX + 10, boxY + 32);
+
+          if (node.sublabel) {
+            ctx.font = "10px 'JetBrains Mono', monospace";
+            ctx.fillStyle = `rgba(${col.r}, ${col.g}, ${col.b}, 0.5)`;
+            ctx.fillText(node.sublabel, boxX + 10, boxY + 48);
+          }
         }
       }
 
-      // === ENERGY PULSE WAVES ===
-      for (let i = 0; i < 3; i++) {
-        const phase = (time.current * 0.3 + i * 0.33) % 1;
-        const pr = CORE_RADIUS + phase * (SPHERE_RADIUS * 1.1 - CORE_RADIUS);
-        const alpha = (1 - phase) * 0.08;
-        if (alpha < 0.005) continue;
-        const projScale = project({ x: 0, y: 0, z: 0 }, cx, cy, fov).scale;
-        ctx.beginPath();
-        ctx.arc(cx, cy, pr * projScale, 0, Math.PI * 2);
-        ctx.strokeStyle = `rgba(0, 200, 255, ${alpha})`;
-        ctx.lineWidth = 2 * (1 - phase);
-        ctx.stroke();
+      // === ENERGY PULSES ===
+      for (let i = 0; i < 2; i++) {
+        const phase = (time.current * 0.3 + i * 0.5) % 1;
+        const pr2 = CORE_RADIUS + phase * (SPHERE_RADIUS * 1.1 - CORE_RADIUS);
+        const alpha = (1 - phase) * 0.06;
+        if (alpha > 0.005) {
+          const ps = project({ x: 0, y: 0, z: 0 }, cx, cy, fov).scale;
+          ctx.beginPath(); ctx.arc(cx, cy, pr2 * ps, 0, Math.PI * 2);
+          ctx.strokeStyle = `rgba(0, 200, 255, ${alpha})`; ctx.lineWidth = 1.5; ctx.stroke();
+        }
       }
 
-      // === OUTER SPHERE BOUNDARY (faint) ===
-      const outerScale = project({ x: 0, y: 0, z: 0 }, cx, cy, fov).scale;
-      ctx.beginPath();
-      ctx.arc(cx, cy, SPHERE_RADIUS * outerScale, 0, Math.PI * 2);
-      ctx.strokeStyle = "rgba(0, 160, 255, 0.04)";
-      ctx.lineWidth = 1;
-      ctx.stroke();
+      // === LEGEND (bottom left) ===
+      if (zoomRef.current > 400) {
+        const legendX = 20, legendY = h - 120;
+        ctx.font = "9px 'JetBrains Mono', monospace";
+        const types: DataNode["type"][] = ["task", "email", "meeting", "github", "notion", "cron"];
+        types.forEach((type, i) => {
+          const col = TYPE_COLORS[type];
+          ctx.beginPath();
+          ctx.arc(legendX + 6, legendY + i * 16, 4, 0, Math.PI * 2);
+          ctx.fillStyle = `rgba(${col.r}, ${col.g}, ${col.b}, 0.8)`;
+          ctx.fill();
+          ctx.fillStyle = `rgba(${col.r}, ${col.g}, ${col.b}, 0.5)`;
+          ctx.fillText(type.toUpperCase(), legendX + 16, legendY + i * 16 + 3);
+        });
+      }
+
+      // Scan line
+      const scanY = ((time.current * 60) % h);
+      const scanGrad = ctx.createLinearGradient(0, scanY - 15, 0, scanY + 15);
+      scanGrad.addColorStop(0, "rgba(0, 180, 255, 0)");
+      scanGrad.addColorStop(0.5, "rgba(0, 180, 255, 0.015)");
+      scanGrad.addColorStop(1, "rgba(0, 180, 255, 0)");
+      ctx.fillStyle = scanGrad;
+      ctx.fillRect(0, scanY - 15, w, 30);
+
+      // Cursor hint
+      if (hoveredNode.current && hoveredNode.current.type !== "particle") {
+        canvas.style.cursor = "pointer";
+      } else {
+        canvas.style.cursor = "";
+      }
 
       animRef.current = requestAnimationFrame(animate);
     }
@@ -398,18 +612,19 @@ export default function JarvisScene() {
     animRef.current = requestAnimationFrame(animate);
     return () => {
       cancelAnimationFrame(animRef.current);
+      clearInterval(dataInterval);
       window.removeEventListener("resize", resize);
       window.removeEventListener("mousedown", onDown);
       window.removeEventListener("mousemove", onMove);
       window.removeEventListener("mouseup", onUp);
       window.removeEventListener("wheel", onWheel);
+      window.removeEventListener("dblclick", onDblClick);
     };
-  }, []);
+  }, [loadData, focusOnNode]);
 
   return (
     <canvas ref={canvasRef} style={{
-      position: "fixed", top: 0, left: 0, width: "100%", height: "100%",
-      zIndex: 1, pointerEvents: "none",
+      position: "fixed", top: 0, left: 0, width: "100%", height: "100%", zIndex: 1,
     }} />
   );
 }
