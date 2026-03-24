@@ -1,3 +1,4 @@
+pub mod assistant;
 pub mod calendar;
 pub mod chat;
 pub mod cron;

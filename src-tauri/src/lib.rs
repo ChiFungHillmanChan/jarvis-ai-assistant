@@ -1,4 +1,5 @@
 pub mod ai;
+pub mod assistant;
 pub mod auth;
 pub mod commands;
 pub mod db;
@@ -102,6 +103,9 @@ pub fn run() {
             voice::commands::get_voice_settings,
             voice::commands::set_voice_setting,
             voice::commands::list_tts_voices,
+            commands::assistant::get_briefing,
+            commands::assistant::speak_briefing,
+            commands::assistant::ask_jarvis,
         ])
         .run(tauri::generate_context!())
         .expect("error while running JARVIS");
