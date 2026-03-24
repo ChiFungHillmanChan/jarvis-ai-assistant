@@ -107,6 +107,15 @@ export default function Settings() {
           </div>
         )}
       </div>
+      <div className="panel" style={{ maxWidth: 500, padding: 16, marginTop: 12 }}>
+        <div className="label" style={{ marginBottom: 12 }}>ASSISTANT</div>
+        <label style={styles.option}>
+          <input type="checkbox" defaultChecked={true}
+            onChange={(e) => updateSetting("auto_briefing", String(e.target.checked))}
+            style={styles.radio} />
+          <span style={styles.optionLabel}>Speak morning briefing on startup (once per day)</span>
+        </label>
+      </div>
     </div>
   );
 }

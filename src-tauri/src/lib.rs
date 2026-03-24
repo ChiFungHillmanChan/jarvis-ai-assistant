@@ -52,19 +52,60 @@ pub fn run() {
 
             let voice_engine = std::sync::Arc::new(voice::VoiceEngine::new());
 
-            // Auto-briefing on startup
+            // Auto-briefing on startup (only if enabled)
             let db_brief = std::sync::Arc::clone(&db_arc);
-            let router_brief = ai::AiRouter::new(
-                std::env::var("ANTHROPIC_API_KEY").ok(),
-                std::env::var("OPENAI_API_KEY").ok(),
-                "claude_primary",
-            );
             tauri::async_runtime::spawn(async move {
                 tokio::time::sleep(std::time::Duration::from_secs(3)).await;
-                match assistant::briefing::generate_briefing(&db_brief, &router_brief).await {
+                // Check if auto-briefing is enabled
+                let enabled = {
+                    let conn = db_brief.conn.lock().unwrap();
+                    conn.query_row(
+                        "SELECT value FROM user_preferences WHERE key = 'auto_briefing'",
+                        [], |row| row.get::<_, String>(0)
+                    ).unwrap_or_else(|_| "true".to_string()) == "true"
+                };
+                if !enabled {
+                    log::info!("Auto-briefing disabled");
+                    return;
+                }
+                // Check if we already briefed today
+                let already_briefed = {
+                    let conn = db_brief.conn.lock().unwrap();
+                    conn.query_row(
+                        "SELECT value FROM user_preferences WHERE key = 'last_briefing_date'",
+                        [], |row| row.get::<_, String>(0)
+                    ).unwrap_or_default() == chrono::Local::now().format("%Y-%m-%d").to_string()
+                };
+                if already_briefed {
+                    log::info!("Already briefed today, skipping");
+                    return;
+                }
+
+                let router = crate::ai::AiRouter::new(
+                    std::env::var("ANTHROPIC_API_KEY").ok(),
+                    std::env::var("OPENAI_API_KEY").ok(),
+                    "claude_primary",
+                );
+                match crate::assistant::briefing::generate_briefing(&db_brief, &router).await {
                     Ok(result) => {
                         log::info!("Morning briefing: {}", result.briefing);
-                        let tts = voice::tts::TextToSpeech::new();
+                        // Mark as briefed today
+                        {
+                            let conn = db_brief.conn.lock().unwrap();
+                            let today = chrono::Local::now().format("%Y-%m-%d").to_string();
+                            let _ = conn.execute(
+                                "INSERT INTO user_preferences (key, value, updated_at) VALUES ('last_briefing_date', ?1, datetime('now'))
+                                 ON CONFLICT(key) DO UPDATE SET value = ?1, updated_at = datetime('now')",
+                                rusqlite::params![today],
+                            );
+                            // Cache the briefing text
+                            let _ = conn.execute(
+                                "INSERT INTO user_preferences (key, value, updated_at) VALUES ('cached_briefing', ?1, datetime('now'))
+                                 ON CONFLICT(key) DO UPDATE SET value = ?1, updated_at = datetime('now')",
+                                rusqlite::params![result.briefing],
+                            );
+                        }
+                        let tts = crate::voice::tts::TextToSpeech::new();
                         let speech = format!("{}. {}", result.greeting, result.briefing);
                         if let Err(e) = tts.speak(&speech).await {
                             log::warn!("Briefing TTS failed: {}", e);

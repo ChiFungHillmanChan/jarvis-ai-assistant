@@ -95,22 +95,30 @@ pub async fn send_message(
         msgs.reverse();
         msgs
     };
-    // Prepend context about user's current status
-    let context_prompt = match crate::assistant::context::DayContext::gather(&db) {
-        Ok(ctx) => format!(
-            "Current user status -- TASKS: {} | CALENDAR: {} | EMAIL: {} | GITHUB: {}",
-            ctx.tasks_summary.lines().next().unwrap_or(""),
-            ctx.calendar_summary.lines().next().unwrap_or(""),
-            ctx.email_summary.lines().next().unwrap_or(""),
-            ctx.github_summary,
-        ),
-        Err(_) => String::new(),
+    // Only add context for questions about personal data (saves tokens)
+    let needs_context = {
+        let msg_lower = message.to_lowercase();
+        msg_lower.contains("task") || msg_lower.contains("meeting") || msg_lower.contains("email")
+        || msg_lower.contains("deadline") || msg_lower.contains("schedule") || msg_lower.contains("today")
+        || msg_lower.contains("calendar") || msg_lower.contains("work on") || msg_lower.contains("priority")
+        || msg_lower.contains("github") || msg_lower.contains("pr") || msg_lower.contains("issue")
+        || msg_lower.contains("notion") || msg_lower.contains("what should") || msg_lower.contains("remind")
+        || msg_lower.contains("status") || msg_lower.contains("busy") || msg_lower.contains("free")
     };
 
     let mut context_messages = Vec::new();
-    if !context_prompt.is_empty() {
-        context_messages.push(("user".to_string(), format!("[CONTEXT] {}", context_prompt)));
-        context_messages.push(("assistant".to_string(), "Understood. I have your current status.".to_string()));
+    if needs_context {
+        if let Ok(ctx) = crate::assistant::context::DayContext::gather(&db) {
+            let context_prompt = format!(
+                "[CONTEXT] TASKS: {} | CALENDAR: {} | EMAIL: {} | GITHUB: {}",
+                ctx.tasks_summary.lines().next().unwrap_or(""),
+                ctx.calendar_summary.lines().next().unwrap_or(""),
+                ctx.email_summary.lines().next().unwrap_or(""),
+                ctx.github_summary,
+            );
+            context_messages.push(("user".to_string(), context_prompt));
+            context_messages.push(("assistant".to_string(), "Understood.".to_string()));
+        }
     }
     context_messages.extend(messages);
     let messages = context_messages;
