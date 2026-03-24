@@ -1,4 +1,5 @@
 import { useState, useCallback } from "react";
+import { getCurrentWindow } from "@tauri-apps/api/window";
 import Sidebar from "./components/Sidebar";
 import ChatPanel from "./components/ChatPanel";
 import CommandBar from "./components/CommandBar";
@@ -48,7 +49,7 @@ export default function App() {
 
   return (
     <div style={styles.root}>
-      <div className="drag-region" style={styles.titleBar}>
+      <div className="drag-region" style={styles.titleBar} onMouseDown={(e) => { if ((e.target as HTMLElement).closest('.no-drag')) return; getCurrentWindow().startDragging(); }}>
         <span style={styles.titleText}>JARVIS</span>
         <WindowControls />
       </div>
