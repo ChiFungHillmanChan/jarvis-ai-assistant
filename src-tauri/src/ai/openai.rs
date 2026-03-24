@@ -1,6 +1,10 @@
+use futures_util::StreamExt;
 use reqwest::Client;
 use serde::{Deserialize, Serialize};
+use serde_json::json;
+use std::collections::HashMap;
 use super::tools;
+use tauri::Emitter;
 
 #[derive(Serialize)]
 struct OpenAIRequest {
@@ -8,6 +12,7 @@ struct OpenAIRequest {
     messages: Vec<OpenAIMessage>,
     tools: Vec<serde_json::Value>,
     max_completion_tokens: u32,
+    stream: bool,
 }
 
 #[derive(Serialize, Deserialize, Clone, Debug)]
@@ -35,16 +40,36 @@ struct FunctionCall {
     arguments: String,
 }
 
+// OpenAIResponse and OpenAIChoice are no longer needed (SSE replaces JSON parsing)
+
 #[derive(Deserialize)]
-struct OpenAIResponse {
-    choices: Vec<OpenAIChoice>,
+struct SseChunk {
+    choices: Vec<SseChoice>,
 }
 
 #[derive(Deserialize)]
-struct OpenAIChoice {
-    message: OpenAIMessage,
-    #[allow(dead_code)]
+struct SseChoice {
+    delta: Option<SseDeltaContent>,
     finish_reason: Option<String>,
+}
+
+#[derive(Deserialize)]
+struct SseDeltaContent {
+    content: Option<String>,
+    tool_calls: Option<Vec<SseToolCallDelta>>,
+}
+
+#[derive(Deserialize)]
+struct SseToolCallDelta {
+    index: usize,
+    id: Option<String>,
+    function: Option<SseFunctionDelta>,
+}
+
+#[derive(Deserialize)]
+struct SseFunctionDelta {
+    name: Option<String>,
+    arguments: Option<String>,
 }
 
 pub async fn send(
@@ -52,8 +77,11 @@ pub async fn send(
     messages: Vec<(String, String)>,
     db: &crate::db::Database,
     google_auth: &std::sync::Arc<crate::auth::google::GoogleAuth>,
+    app_handle: &tauri::AppHandle,
 ) -> Result<String, Box<dyn std::error::Error + Send + Sync>> {
-    let client = Client::new();
+    let client = Client::builder()
+        .read_timeout(std::time::Duration::from_secs(60))
+        .build()?;
     let tool_defs = tools::get_tool_definitions();
     let openai_tools = tools::to_openai_format(&tool_defs);
 
@@ -72,6 +100,7 @@ pub async fn send(
             messages: openai_messages.clone(),
             tools: openai_tools.clone(),
             max_completion_tokens: 4096,
+            stream: true,
         };
 
         let response = client
@@ -79,7 +108,6 @@ pub async fn send(
             .header("Authorization", format!("Bearer {}", api_key))
             .header("Content-Type", "application/json")
             .json(&request)
-            .timeout(std::time::Duration::from_secs(30))
             .send().await?;
 
         if !response.status().is_success() {
@@ -88,27 +116,130 @@ pub async fn send(
             return Err(format!("OpenAI API error {}: {}", status, body).into());
         }
 
-        let body: OpenAIResponse = response.json().await?;
-        let choice = body.choices.first().ok_or("No response from OpenAI")?;
+        let mut stream = response.bytes_stream();
+        let mut buffer = String::new();
+        let mut text_parts: Vec<String> = Vec::new();
+        let mut tool_map: HashMap<usize, (String, String, String)> = HashMap::new(); // index -> (call_id, fn_name, arguments)
+        let mut finish_reason: Option<String> = None;
 
-        if let Some(tool_calls) = &choice.message.tool_calls {
-            if !tool_calls.is_empty() {
-                openai_messages.push(choice.message.clone());
-                for tc in tool_calls {
-                    log::info!("JARVIS tool call: {}({})", tc.function.name, tc.function.arguments);
-                    let result = tools::execute_tool(&tc.function.name, &tc.function.arguments, db, google_auth).await;
-                    log::info!("JARVIS tool result: {}", &result[..result.len().min(200)]);
-                    openai_messages.push(OpenAIMessage {
-                        role: "tool".into(), content: Some(result),
-                        tool_calls: None, tool_call_id: Some(tc.id.clone()),
-                    });
+        while let Some(chunk_result) = stream.next().await {
+            let chunk = match chunk_result {
+                Ok(bytes) => bytes,
+                Err(e) => {
+                    let _ = app_handle.emit("chat-state", json!({"state": "idle"}));
+                    return Err(format!("Stream error: {}", e).into());
                 }
-                continue;
+            };
+
+            buffer.push_str(&String::from_utf8_lossy(&chunk));
+
+            // Process complete SSE events
+            while let Some(pos) = buffer.find("\n\n") {
+                let event_block = buffer[..pos].to_string();
+                buffer = buffer[pos + 2..].to_string();
+
+                let mut data_str = String::new();
+                for line in event_block.lines() {
+                    if line.starts_with(':') { continue; }
+                    if let Some(rest) = line.strip_prefix("data: ") {
+                        data_str = rest.to_string();
+                    }
+                }
+
+                if data_str.is_empty() { continue; }
+                if data_str == "[DONE]" { continue; }
+
+                let chunk: SseChunk = match serde_json::from_str(&data_str) {
+                    Ok(c) => c,
+                    Err(_) => continue,
+                };
+
+                for choice in &chunk.choices {
+                    if let Some(ref delta) = choice.delta {
+                        // Text content
+                        if let Some(ref content) = delta.content {
+                            text_parts.push(content.clone());
+                            let _ = app_handle.emit("chat-token", json!({"token": content, "done": false}));
+                        }
+
+                        // Tool calls
+                        if let Some(ref tool_calls) = delta.tool_calls {
+                            for tc in tool_calls {
+                                let entry = tool_map.entry(tc.index).or_insert_with(|| (String::new(), String::new(), String::new()));
+                                if let Some(ref id) = tc.id {
+                                    entry.0 = id.clone();
+                                }
+                                if let Some(ref func) = tc.function {
+                                    if let Some(ref name) = func.name {
+                                        entry.1 = name.clone();
+                                        let label = tools::tool_status_label(name);
+                                        let _ = app_handle.emit("chat-status", json!({"status": label}));
+                                    }
+                                    if let Some(ref args) = func.arguments {
+                                        entry.2.push_str(args);
+                                    }
+                                }
+                            }
+                        }
+                    }
+
+                    if let Some(ref fr) = choice.finish_reason {
+                        finish_reason = Some(fr.clone());
+                    }
+                }
             }
         }
 
-        return Ok(choice.message.content.clone().unwrap_or_default());
+        // Handle tool calls
+        if finish_reason.as_deref() == Some("tool_calls") && !tool_map.is_empty() {
+            let text_content = text_parts.join("");
+            let mut tool_calls_vec: Vec<ToolCall> = Vec::new();
+            let mut sorted_indices: Vec<usize> = tool_map.keys().copied().collect();
+            sorted_indices.sort();
+            for idx in &sorted_indices {
+                let (ref call_id, ref fn_name, ref args) = tool_map[idx];
+                tool_calls_vec.push(ToolCall {
+                    id: call_id.clone(),
+                    call_type: "function".into(),
+                    function: FunctionCall {
+                        name: fn_name.clone(),
+                        arguments: args.clone(),
+                    },
+                });
+            }
+
+            // Push assistant message with tool calls
+            openai_messages.push(OpenAIMessage {
+                role: "assistant".into(),
+                content: if text_content.is_empty() { None } else { Some(text_content) },
+                tool_calls: Some(tool_calls_vec.clone()),
+                tool_call_id: None,
+            });
+
+            // Execute each tool and push results
+            for tc in &tool_calls_vec {
+                log::info!("JARVIS tool call: {}({})", tc.function.name, tc.function.arguments);
+                let _ = app_handle.emit("chat-tool-call", json!({"tool_name": tc.function.name}));
+                let label = tools::tool_status_label(&tc.function.name);
+                let _ = app_handle.emit("chat-status", json!({"status": format!("Running: {}", label)}));
+                let result = tools::execute_tool(&tc.function.name, &tc.function.arguments, db, google_auth).await;
+                log::info!("JARVIS tool result: {}", &result[..result.len().min(200)]);
+                openai_messages.push(OpenAIMessage {
+                    role: "tool".into(),
+                    content: Some(result),
+                    tool_calls: None,
+                    tool_call_id: Some(tc.id.clone()),
+                });
+            }
+            let _ = app_handle.emit("chat-status", json!({"status": "Composing response..."}));
+            continue;
+        }
+
+        // No tool calls -- emit done and return the text
+        let _ = app_handle.emit("chat-token", json!({"token": "", "done": true}));
+        return Ok(text_parts.join(""));
     }
 
+    let _ = app_handle.emit("chat-token", json!({"token": "", "done": true}));
     Ok("I've completed the actions.".into())
 }

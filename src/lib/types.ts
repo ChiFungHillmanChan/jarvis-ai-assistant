@@ -115,6 +115,29 @@ export type VoiceState =
   | { ModelDownloading: number }
   | { Error: string };
 
+export type AiState = "idle" | "thinking" | "speaking";
+
+export interface ChatTokenPayload {
+  token: string;
+  done: boolean;
+}
+
+export interface ChatStatusPayload {
+  status: string;
+}
+
+export interface ChatStatePayload {
+  state: AiState;
+}
+
+export interface TtsAmplitudePayload {
+  amplitude: number;
+}
+
+export interface ToolCallPayload {
+  tool_name: string;
+}
+
 export interface VoiceSettings {
   enabled: boolean;
   tts_voice: string;

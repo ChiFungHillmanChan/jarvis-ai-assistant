@@ -27,6 +27,16 @@ interface DataNode {
   pulsePhase: number;
 }
 
+interface EnergyArc {
+  targetIdx: number;
+  progress: number;
+  speed: number;
+  trail: { x: number; y: number }[];
+  color: { r: number; g: number; b: number };
+  active: boolean;
+  side: number;
+}
+
 const SPHERE_RADIUS = 280;
 const CORE_RADIUS = 45;
 const LAT_LINES = 12;
@@ -77,9 +87,12 @@ function easeInOut(t: number): number {
 
 interface JarvisSceneProps {
   activityLevel?: "idle" | "listening" | "processing" | "active";
+  ttsAmplitude?: number;
+  pendingToolCall?: string | null;
+  onToolCallConsumed?: () => void;
 }
 
-export default function JarvisScene({ activityLevel = "idle" }: JarvisSceneProps) {
+export default function JarvisScene({ activityLevel = "idle", ttsAmplitude = 0, pendingToolCall = null, onToolCallConsumed }: JarvisSceneProps) {
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const animRef = useRef(0);
   const time = useRef(0);
@@ -94,6 +107,10 @@ export default function JarvisScene({ activityLevel = "idle" }: JarvisSceneProps
   const lastM = useRef({ x: 0, y: 0 });
   const autoRot = useRef(true);
   const mousePos = useRef({ x: 0, y: 0 });
+  const speakingAlpha = useRef(0);
+  const ttsAmpRef = useRef(0);
+  const arcsRef = useRef<EnergyArc[]>([]);
+  const ringSpeedRef = useRef(1.0);
 
   // Data nodes
   const nodes = useRef<DataNode[]>([]);
@@ -112,11 +129,71 @@ export default function JarvisScene({ activityLevel = "idle" }: JarvisSceneProps
 
   // Load real data from backend
   const loadData = useCallback(async () => {
+    type FreshItem = { type: DataNode["type"]; label: string; sublabel?: string; urgent?: boolean };
+    const freshItems: FreshItem[] = [];
+
+    try {
+      const tasks: { id: number; title: string; deadline: string | null; status: string; priority: number }[] = await invoke("get_tasks");
+      for (const t of tasks.slice(0, 15)) {
+        freshItems.push({ type: "task", label: t.title, sublabel: t.deadline ? `Due: ${t.deadline}` : undefined, urgent: t.priority >= 2 });
+      }
+
+      const emails: { id: number; subject: string | null; sender: string }[] = await invoke("get_emails", { limit: 10 });
+      for (const e of emails.slice(0, 10)) {
+        freshItems.push({ type: "email", label: e.subject || "(No subject)", sublabel: e.sender });
+      }
+
+      const events: { id: number; summary: string; start_time: string }[] = await invoke("get_todays_events");
+      for (const ev of events.slice(0, 8)) {
+        freshItems.push({ type: "meeting", label: ev.summary, sublabel: new Date(ev.start_time).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" }) });
+      }
+
+      const ghItems: { id: number; title: string; repo: string; item_type: string }[] = await invoke("get_github_items", { item_type: null });
+      for (const g of ghItems.slice(0, 8)) {
+        freshItems.push({ type: "github", label: g.title, sublabel: `${g.repo} [${g.item_type}]` });
+      }
+
+      const crons: { id: number; name: string; status: string; last_run: string | null }[] = await invoke("get_cron_jobs");
+      for (const c of crons) {
+        freshItems.push({ type: "cron", label: c.name, sublabel: c.status });
+      }
+    } catch {
+      // Backend may not be ready yet -- particles only on initial load
+    }
+
+    // On refresh: update labels/urgency in-place, preserve all positions
+    if (dataLoaded.current && nodes.current.length > 0) {
+      const freshByType: Record<string, FreshItem[]> = {};
+      for (const item of freshItems) {
+        if (!freshByType[item.type]) freshByType[item.type] = [];
+        freshByType[item.type].push(item);
+      }
+
+      const existingByType: Record<string, DataNode[]> = {};
+      for (const node of nodes.current) {
+        if (node.type === "particle") continue;
+        if (!existingByType[node.type]) existingByType[node.type] = [];
+        existingByType[node.type].push(node);
+      }
+
+      for (const type of Object.keys(existingByType)) {
+        const existing = existingByType[type];
+        const fresh = freshByType[type] || [];
+        for (let i = 0; i < existing.length && i < fresh.length; i++) {
+          existing[i].label = fresh[i].label;
+          existing[i].sublabel = fresh[i].sublabel;
+          existing[i].urgent = fresh[i].urgent;
+        }
+      }
+      return;
+    }
+
+    // Initial load: create all nodes with positions
     const dataNodes: DataNode[] = [];
     let idx = 0;
 
     function addNode(type: DataNode["type"], label: string, sublabel?: string, urgent?: boolean) {
-      const theta = (idx * 2.399) % (Math.PI * 2); // golden angle distribution
+      const theta = (idx * 2.399) % (Math.PI * 2);
       const phi = Math.acos(1 - 2 * ((idx * 0.618) % 1));
       const layer = type === "particle" ? 0.6 + Math.random() * 0.4 : 0.85 + Math.random() * 0.15;
       dataNodes.push({
@@ -131,41 +208,10 @@ export default function JarvisScene({ activityLevel = "idle" }: JarvisSceneProps
       idx++;
     }
 
-    try {
-      // Load tasks
-      const tasks: { id: number; title: string; deadline: string | null; status: string; priority: number }[] = await invoke("get_tasks");
-      for (const t of tasks.slice(0, 15)) {
-        addNode("task", t.title, t.deadline ? `Due: ${t.deadline}` : undefined, t.priority >= 2);
-      }
-
-      // Load emails
-      const emails: { id: number; subject: string | null; sender: string }[] = await invoke("get_emails", { limit: 10 });
-      for (const e of emails.slice(0, 10)) {
-        addNode("email", e.subject || "(No subject)", e.sender);
-      }
-
-      // Load calendar
-      const events: { id: number; summary: string; start_time: string }[] = await invoke("get_todays_events");
-      for (const ev of events.slice(0, 8)) {
-        addNode("meeting", ev.summary, new Date(ev.start_time).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" }));
-      }
-
-      // Load github
-      const ghItems: { id: number; title: string; repo: string; item_type: string }[] = await invoke("get_github_items", { item_type: null });
-      for (const g of ghItems.slice(0, 8)) {
-        addNode("github", g.title, `${g.repo} [${g.item_type}]`);
-      }
-
-      // Load cron jobs
-      const crons: { id: number; name: string; status: string; last_run: string | null }[] = await invoke("get_cron_jobs");
-      for (const c of crons) {
-        addNode("cron", c.name, c.status);
-      }
-    } catch {
-      // Backend may not be ready yet -- that's OK, use particles only
+    for (const item of freshItems) {
+      addNode(item.type, item.label, item.sublabel, item.urgent);
     }
 
-    // Fill remaining space with ambient particles
     const targetTotal = 200;
     while (idx < targetTotal) {
       addNode("particle", "", undefined);
@@ -184,6 +230,39 @@ export default function JarvisScene({ activityLevel = "idle" }: JarvisSceneProps
     focusStartZoom.current = zoomRef.current;
     autoRot.current = false;
   }, []);
+
+  useEffect(() => {
+    ttsAmpRef.current = ttsAmplitude;
+  }, [ttsAmplitude]);
+
+  useEffect(() => {
+    if (pendingToolCall && nodes.current.length > 0) {
+      const name = pendingToolCall.toLowerCase();
+      let nodeType = "task";
+      if (name.includes("calendar") || name.includes("event")) nodeType = "meeting";
+      else if (name.includes("email") || name.includes("gmail")) nodeType = "email";
+      else if (name.includes("github") || name.includes("pr") || name.includes("issue")) nodeType = "github";
+      else if (name.includes("notion")) nodeType = "notion";
+      else if (name.includes("cron") || name.includes("schedule")) nodeType = "cron";
+      else if (name.includes("note") || name.includes("obsidian")) nodeType = "notion";
+
+      const candidates = nodes.current.filter(n => n.type === nodeType);
+      const target = candidates.length > 0
+        ? candidates[Math.floor(Math.random() * candidates.length)]
+        : nodes.current[Math.floor(Math.random() * nodes.current.length)];
+
+      const targetIdx = nodes.current.indexOf(target);
+      const color = TYPE_COLORS[target.type] || TYPE_COLORS.task;
+
+      arcsRef.current.push({
+        targetIdx, progress: 0,
+        speed: 0.025 + Math.random() * 0.015,
+        trail: [], color, active: true,
+        side: arcsRef.current.length % 2 === 0 ? 1 : -1,
+      });
+      onToolCallConsumed?.();
+    }
+  }, [pendingToolCall, onToolCallConsumed]);
 
   useEffect(() => {
     const canvas = canvasRef.current;
@@ -269,6 +348,7 @@ export default function JarvisScene({ activityLevel = "idle" }: JarvisSceneProps
 
     function animate() {
       if (!canvas || !ctx) return;
+      try {
       time.current += 0.006;
       const w = canvas.width, h = canvas.height;
       const cx = w / 2, cy = h / 2;
@@ -279,6 +359,19 @@ export default function JarvisScene({ activityLevel = "idle" }: JarvisSceneProps
         : activityLevel === "listening" ? 0.4 : 0.0;
       activityRef.current += (targetAct - activityRef.current) * 0.03;
       const act = activityRef.current;
+
+      // Speaking crossfade
+      const isSpeaking = ttsAmpRef.current > 0.01;
+      const speakTarget = isSpeaking ? 1 : 0;
+      const speakSpeed = isSpeaking ? 0.06 : 0.035;
+      speakingAlpha.current += (speakTarget - speakingAlpha.current) * speakSpeed;
+      const spkAlpha = speakingAlpha.current;
+
+      // Ring speed multiplier
+      const ringTarget = activityLevel === "processing" ? 3.0 : activityLevel === "listening" ? 1.2 : 1.0;
+      const ringLerp = ringTarget > ringSpeedRef.current ? 0.05 : 0.03;
+      ringSpeedRef.current += (ringTarget - ringSpeedRef.current) * ringLerp;
+      const ringMult = ringSpeedRef.current;
 
       // Smooth zoom + rotation
       zoomRef.current += (targetZoom.current - zoomRef.current) * 0.08;
@@ -375,7 +468,7 @@ export default function JarvisScene({ activityLevel = "idle" }: JarvisSceneProps
         ctx.stroke();
 
         // Energy dot (speed increases with activity)
-        const da = time.current * ring.spd * (1 + act * 2.0);
+        const da = time.current * ring.spd * ringMult;
         let dp: Point3D = { x: Math.cos(da) * ring.r, y: Math.sin(da) * ring.r, z: 0 };
         dp = rotateX(dp, ring.tx); dp = rotateZ(dp, ring.tz); dp = transform(dp, ry, rx);
         const dpr = project(dp, cx, cy, fov);
@@ -386,13 +479,26 @@ export default function JarvisScene({ activityLevel = "idle" }: JarvisSceneProps
         ctx.beginPath(); ctx.arc(dpr.x, dpr.y, gs, 0, Math.PI * 2); ctx.fillStyle = dg; ctx.fill();
         ctx.beginPath(); ctx.arc(dpr.x, dpr.y, 2 * dpr.scale, 0, Math.PI * 2);
         ctx.fillStyle = "rgba(180, 240, 255, 0.9)"; ctx.fill();
+        if (ringMult > 1.5) {
+          for (let ti = 1; ti <= 4; ti++) {
+            const trailA = da - ti * 0.15 * ring.spd;
+            let tp: Point3D = { x: Math.cos(trailA) * ring.r, y: Math.sin(trailA) * ring.r, z: 0 };
+            tp = rotateX(tp, ring.tx); tp = rotateZ(tp, ring.tz); tp = transform(tp, ry, rx);
+            const tpr = project(tp, cx, cy, fov);
+            const trailAlpha = 0.9 - ti * 0.22;
+            if (trailAlpha > 0) {
+              ctx.beginPath(); ctx.arc(tpr.x, tpr.y, 1.5 * tpr.scale, 0, Math.PI * 2);
+              ctx.fillStyle = `rgba(180, 240, 255, ${trailAlpha})`; ctx.fill();
+            }
+          }
+        }
       }
 
       // === CORE === (modulated by activity level)
       const breathAmp = 0.08 + act * 0.17;
       const breathSpd = 2.5 + act * 3.0;
       const breath = 1 + Math.sin(time.current * breathSpd) * breathAmp;
-      const cR = CORE_RADIUS * breath;
+      const cR = CORE_RADIUS * breath * (1 + spkAlpha * 0.15);
       for (let layer = 0; layer < 3; layer++) {
         const glowR = cR * (3 - layer);
         const glowBase = [0.1, 0.05, 0.025][layer];
@@ -411,7 +517,8 @@ export default function JarvisScene({ activityLevel = "idle" }: JarvisSceneProps
       ];
       const edges = [[0,1],[0,5],[0,7],[0,10],[0,11],[1,5],[1,7],[1,8],[1,9],[2,3],[2,4],[2,6],[2,10],[2,11],[3,4],[3,6],[3,8],[3,9],[4,5],[4,9],[4,11],[5,9],[5,11],[6,7],[6,8],[6,10],[7,8],[7,10],[8,9],[10,11]];
       const coreRot = time.current * (0.3 + act * 0.9);
-      ctx.strokeStyle = "rgba(100, 220, 255, 0.2)";
+      const coreAlpha = 0.2 * (1 - spkAlpha * 0.7);
+      ctx.strokeStyle = `rgba(100, 220, 255, ${coreAlpha})`;
       ctx.lineWidth = 0.7;
       for (const [a, b] of edges) {
         const len = Math.sqrt(rawV[a].x**2 + rawV[a].y**2 + rawV[a].z**2);
@@ -421,6 +528,45 @@ export default function JarvisScene({ activityLevel = "idle" }: JarvisSceneProps
         pb = rotateY(pb, coreRot); pb = rotateX(pb, coreRot*0.7); pb = transform(pb, ry, rx);
         const pra = project(pa, cx, cy, fov), prb = project(pb, cx, cy, fov);
         ctx.beginPath(); ctx.moveTo(pra.x, pra.y); ctx.lineTo(prb.x, prb.y); ctx.stroke();
+      }
+
+      // === RADIAL WAVEFORM (speaking state) ===
+      if (spkAlpha > 0.01) {
+        const waveAlpha = spkAlpha;
+        const amp = ttsAmpRef.current;
+        const barCount = 48;
+        const innerR = 18;
+        const maxOuterR = 55;
+
+        ctx.strokeStyle = `rgba(0, 180, 255, ${0.3 * waveAlpha})`;
+        ctx.lineWidth = 1;
+        ctx.beginPath(); ctx.arc(cx, cy, innerR, 0, Math.PI * 2); ctx.stroke();
+
+        ctx.fillStyle = `rgba(0, 180, 255, ${0.9 * waveAlpha})`;
+        ctx.beginPath(); ctx.arc(cx, cy, 3, 0, Math.PI * 2); ctx.fill();
+
+        for (let bi = 0; bi < barCount; bi++) {
+          const angle = (bi / barCount) * Math.PI * 2;
+          const barAmp = amp * (0.3 + 0.7 * (
+            0.5 * Math.sin(time.current * 0.07 + bi * 0.5) +
+            0.3 * Math.sin(time.current * 0.11 + bi * 0.8) +
+            0.2 * Math.sin(time.current * 0.15 + bi * 1.3)
+          ));
+          const norm = Math.max(0, Math.min(1, (barAmp + 1) / 2));
+          const barLen = innerR + norm * (maxOuterR - innerR);
+
+          const x1 = cx + Math.cos(angle) * innerR;
+          const y1 = cy + Math.sin(angle) * innerR;
+          const x2 = cx + Math.cos(angle) * barLen;
+          const y2 = cy + Math.sin(angle) * barLen;
+
+          ctx.strokeStyle = `rgba(0, 180, 255, ${(0.4 + norm * 0.5) * waveAlpha})`;
+          ctx.lineWidth = 2.5;
+          ctx.beginPath(); ctx.moveTo(x1, y1); ctx.lineTo(x2, y2); ctx.stroke();
+
+          ctx.fillStyle = `rgba(0, 180, 255, ${norm * 0.9 * waveAlpha})`;
+          ctx.beginPath(); ctx.arc(x2, y2, 2, 0, Math.PI * 2); ctx.fill();
+        }
       }
 
       // === DATA NODES ===
@@ -464,7 +610,14 @@ export default function JarvisScene({ activityLevel = "idle" }: JarvisSceneProps
         if (sz < 0.2 || pr.scale <= 0) continue;
 
         const pulse = node.type !== "particle" ? 1 + Math.sin(time.current * 2 + node.pulsePhase) * 0.15 : 1;
-        const finalSz = sz * pulse;
+
+        const flashAlpha = (node as any)._flashAlpha || 0;
+        const flashScale = (node as any)._flashScale || 1;
+        if (flashAlpha > 0.01) {
+          (node as any)._flashAlpha *= 0.96;
+          (node as any)._flashScale += (1 - (node as any)._flashScale) * 0.08;
+        }
+        const finalSz = sz * pulse * flashScale;
 
         // Check hover
         const dx = mx - pr.x, dy = my - pr.y;
@@ -498,6 +651,13 @@ export default function JarvisScene({ activityLevel = "idle" }: JarvisSceneProps
         const nodeAlpha = node.type === "particle" ? 0.3 * pr.scale : (isHovered ? 1 : 0.8) * pr.scale;
         ctx.fillStyle = `rgba(${col.r}, ${col.g}, ${col.b}, ${nodeAlpha})`;
         ctx.fill();
+
+        // Flash glow ring (energy arc arrival effect)
+        if (flashAlpha > 0.1) {
+          ctx.strokeStyle = `rgba(${col.r}, ${col.g}, ${col.b}, ${flashAlpha * 0.5})`;
+          ctx.lineWidth = 1.5;
+          ctx.beginPath(); ctx.arc(pr.x, pr.y, finalSz + 6 * flashAlpha, 0, Math.PI * 2); ctx.stroke();
+        }
 
         // Hover ring
         if (isHovered) {
@@ -607,6 +767,57 @@ export default function JarvisScene({ activityLevel = "idle" }: JarvisSceneProps
         });
       }
 
+      // === ENERGY ARCS ===
+      const arcs = arcsRef.current;
+      for (let ai = arcs.length - 1; ai >= 0; ai--) {
+        const arc = arcs[ai];
+        if (!arc.active) { arcs.splice(ai, 1); continue; }
+
+        const targetNode = nodes.current[arc.targetIdx];
+        if (!targetNode) { arcs.splice(ai, 1); continue; }
+
+        const tCart = sphereToCart(targetNode.theta, targetNode.phi, targetNode.r);
+        const tRot = transform(tCart, ry, rx);
+        const tProj = project(tRot, cx, cy, fov);
+
+        arc.progress += arc.speed;
+        const prog = Math.min(1, arc.progress);
+        const eased = 1 - Math.pow(1 - prog, 3);
+
+        const midX = cx + (tProj.x - cx) * 0.5 + Math.sin(prog * Math.PI) * 40 * arc.side;
+        const midY = cy + (tProj.y - cy) * 0.5 - Math.sin(prog * Math.PI) * 30;
+        const headX = (1-eased)*(1-eased)*cx + 2*(1-eased)*eased*midX + eased*eased*tProj.x;
+        const headY = (1-eased)*(1-eased)*cy + 2*(1-eased)*eased*midY + eased*eased*tProj.y;
+
+        arc.trail.push({ x: headX, y: headY });
+        if (arc.trail.length > 15) arc.trail.shift();
+
+        for (let ti = 1; ti < arc.trail.length; ti++) {
+          const trailAlpha = (ti / arc.trail.length) * 0.7;
+          const trailWidth = (ti / arc.trail.length) * 2.5;
+          ctx.strokeStyle = `rgba(${arc.color.r}, ${arc.color.g}, ${arc.color.b}, ${trailAlpha})`;
+          ctx.lineWidth = trailWidth;
+          ctx.beginPath();
+          ctx.moveTo(arc.trail[ti-1].x, arc.trail[ti-1].y);
+          ctx.lineTo(arc.trail[ti].x, arc.trail[ti].y);
+          ctx.stroke();
+        }
+
+        if (prog < 1) {
+          const hg = ctx.createRadialGradient(headX, headY, 0, headX, headY, 8);
+          hg.addColorStop(0, `rgba(${arc.color.r}, ${arc.color.g}, ${arc.color.b}, 0.9)`);
+          hg.addColorStop(1, `rgba(${arc.color.r}, ${arc.color.g}, ${arc.color.b}, 0)`);
+          ctx.beginPath(); ctx.arc(headX, headY, 8, 0, Math.PI * 2);
+          ctx.fillStyle = hg; ctx.fill();
+        }
+
+        if (prog >= 1) {
+          arc.active = false;
+          (targetNode as any)._flashAlpha = 1.0;
+          (targetNode as any)._flashScale = 1.8;
+        }
+      }
+
       // Scan line
       const scanY = ((time.current * 60) % h);
       const scanGrad = ctx.createLinearGradient(0, scanY - 15, 0, scanY + 15);
@@ -623,6 +834,9 @@ export default function JarvisScene({ activityLevel = "idle" }: JarvisSceneProps
         canvas.style.cursor = "";
       }
 
+      } catch (e) {
+        console.error("[JarvisScene] Animation error:", e);
+      }
       animRef.current = requestAnimationFrame(animate);
     }
 

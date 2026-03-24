@@ -2,8 +2,9 @@ use crate::ai::AiRouter;
 use crate::db::Database;
 use crate::voice::VoiceEngine;
 use serde::{Deserialize, Serialize};
+use serde_json::json;
 use std::sync::Arc;
-use tauri::State;
+use tauri::{Emitter, State};
 
 #[derive(Serialize, Deserialize, Clone)]
 pub struct ChatMessage {
@@ -15,6 +16,7 @@ pub struct ChatMessage {
 
 #[tauri::command]
 pub async fn send_message(
+    app_handle: tauri::AppHandle,
     db: State<'_, Arc<Database>>,
     router: State<'_, AiRouter>,
     google_auth: State<'_, Arc<crate::auth::google::GoogleAuth>>,
@@ -25,6 +27,14 @@ pub async fn send_message(
         let conn = db.conn.lock().map_err(|e| e.to_string())?;
         conn.execute("INSERT INTO conversations (role, content) VALUES ('user', ?1)", rusqlite::params![message])
             .map_err(|e| e.to_string())?;
+    }
+
+    // Cancel any in-progress TTS from previous response
+    {
+        let tts = engine.tts.lock().map_err(|e| e.to_string())?.clone();
+        tts.cancel();
+        let _ = app_handle.emit("chat-state", json!({"state": "idle"}));
+        let _ = app_handle.emit("tts-amplitude", json!({"amplitude": 0.0}));
     }
 
     // Check if user is searching conversation history
@@ -71,7 +81,14 @@ pub async fn send_message(
                     search_context, message
                 );
                 let search_messages = vec![("user".to_string(), search_prompt)];
-                let search_response = router.send(search_messages, &db, &google_auth).await?;
+                let _ = app_handle.emit("chat-state", json!({"state": "thinking"}));
+                let search_response = match router.send(search_messages, &db, &google_auth, &app_handle).await {
+                    Ok(r) => r,
+                    Err(e) => {
+                        let _ = app_handle.emit("chat-state", json!({"state": "idle"}));
+                        return Err(e);
+                    }
+                };
 
                 {
                     let conn3 = db.conn.lock().map_err(|e| e.to_string())?;
@@ -79,11 +96,12 @@ pub async fn send_message(
                         .map_err(|e| e.to_string())?;
                 }
 
-                // Speak the search response via TTS
+                // Speak the search response via sentence-queued TTS
                 {
                     let tts = engine.tts.lock().map_err(|e| e.to_string())?.clone();
-                    if let Err(e) = tts.speak(&search_response).await {
+                    if let Err(e) = tts.speak_queued(&search_response, &app_handle).await {
                         log::warn!("Chat TTS failed: {}", e);
+                        let _ = app_handle.emit("chat-state", json!({"state": "idle"}));
                     }
                 }
 
@@ -200,8 +218,15 @@ pub async fn send_message(
     context_messages.extend(messages);
     let messages = context_messages;
 
-    let response_text = router.send(messages, &db, &google_auth).await?;
-    // Both OpenAI and Claude now handle tool execution natively via function calling / tool use.
+    log::info!("[STREAM-DEBUG] Emitting chat-state: thinking");
+    let _ = app_handle.emit("chat-state", json!({"state": "thinking"}));
+    let response_text = match router.send(messages, &db, &google_auth, &app_handle).await {
+        Ok(r) => r,
+        Err(e) => {
+            let _ = app_handle.emit("chat-state", json!({"state": "idle"}));
+            return Err(e);
+        }
+    };
     let final_response = response_text;
     {
         let conn = db.conn.lock().map_err(|e| e.to_string())?;
@@ -209,11 +234,13 @@ pub async fn send_message(
             .map_err(|e| e.to_string())?;
     }
 
-    // Speak the response via TTS
+    // Speak the response via sentence-queued TTS (emits its own chat-state events)
+    log::info!("[STREAM-DEBUG] Starting sentence-queued TTS, response len={}", final_response.len());
     {
         let tts = engine.tts.lock().map_err(|e| e.to_string())?.clone();
-        if let Err(e) = tts.speak(&final_response).await {
+        if let Err(e) = tts.speak_queued(&final_response, &app_handle).await {
             log::warn!("Chat TTS failed: {}", e);
+            let _ = app_handle.emit("chat-state", json!({"state": "idle"}));
         }
     }
 

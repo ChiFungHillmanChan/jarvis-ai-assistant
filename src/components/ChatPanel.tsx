@@ -37,23 +37,22 @@ export default function ChatPanel({ isOpen, isFullScreen, onClose, onToggleFullS
         )}
         {messages.map((msg, i) => <ChatMessageComponent key={msg.id ?? i} message={msg} />)}
         {loading && (
-          <>
+          <div style={styles.liveResponse}>
+            {/* Status bar: always visible during loading */}
+            <div style={styles.statusBar}>
+              <span style={streamingText ? styles.statusDotActive : (currentStatus ? styles.statusDotCyan : styles.statusDotAmber)} />
+              <span style={styles.statusText}>
+                {streamingText ? "RESPONDING" : currentStatus || "PROCESSING..."}
+              </span>
+            </div>
+            {/* Streaming text: grows as tokens arrive */}
             {streamingText && (
-              <div style={styles.streamingMsg}>
-                <div style={styles.streamingLabel}>JARVIS</div>
-                <div style={styles.streamingBubble}>
-                  {streamingText}
-                  <span style={styles.cursor}>|</span>
-                </div>
+              <div style={styles.streamingBubble}>
+                {streamingText}
+                <span style={styles.cursor}>|</span>
               </div>
             )}
-            {currentStatus && (
-              <div className="system-text" style={styles.statusIndicator}>{currentStatus}</div>
-            )}
-            {!streamingText && !currentStatus && (
-              <div className="system-text animate-glow" style={{ padding: 8 }}>THINKING...</div>
-            )}
-          </>
+          </div>
         )}
         {error && <div style={{ color: "var(--accent-urgent)", fontSize: 12, padding: 8 }}>{error}</div>}
         <div ref={messagesEndRef} />
@@ -75,9 +74,12 @@ const styles: Record<string, React.CSSProperties> = {
   inputForm: { padding: 12, borderTop: "1px solid rgba(0, 180, 255, 0.1)" },
   input: { width: "100%", background: "rgba(0, 180, 255, 0.03)", border: "1px solid rgba(0, 180, 255, 0.15)", borderRadius: 8, padding: "10px 14px", color: "rgba(0, 180, 255, 0.8)", fontSize: 13, fontFamily: "var(--font-sans)", outline: "none" },
   empty: { color: "rgba(0, 180, 255, 0.2)", fontSize: 12, fontStyle: "italic", textAlign: "center" as const, padding: 40 },
-  streamingMsg: { padding: "8px 0" },
-  streamingLabel: { fontFamily: "var(--font-mono)", fontSize: 9, color: "rgba(0, 180, 255, 0.4)", letterSpacing: 2, textTransform: "uppercase" as const, marginBottom: 4 },
-  streamingBubble: { fontSize: 13, color: "rgba(0, 180, 255, 0.8)", fontFamily: "var(--font-sans)", lineHeight: 1.5, padding: "8px 0", borderLeft: "2px solid rgba(0, 180, 255, 0.12)", paddingLeft: 12 },
-  statusIndicator: { padding: "4px 8px", fontSize: 11, color: "rgba(0, 180, 255, 0.5)", fontFamily: "var(--font-mono)", letterSpacing: 1 },
-  cursor: { color: "rgba(0, 180, 255, 0.6)", animation: "blink 1s step-end infinite" },
+  liveResponse: { margin: "8px 0", background: "rgba(0, 180, 255, 0.03)", border: "1px solid rgba(0, 180, 255, 0.1)", borderRadius: 8, overflow: "hidden" },
+  statusBar: { display: "flex", alignItems: "center", gap: 8, padding: "8px 12px", borderBottom: "1px solid rgba(0, 180, 255, 0.06)", background: "rgba(0, 180, 255, 0.02)" },
+  statusText: { fontSize: 11, color: "rgba(0, 180, 255, 0.6)", fontFamily: "var(--font-mono)", letterSpacing: 1.5 },
+  statusDotAmber: { display: "inline-block", width: 8, height: 8, borderRadius: "50%", background: "rgba(255, 180, 0, 0.7)", animation: "glow-pulse 1s ease-in-out infinite", flexShrink: 0 },
+  statusDotCyan: { display: "inline-block", width: 8, height: 8, borderRadius: "50%", background: "rgba(0, 180, 255, 0.6)", animation: "glow-pulse 1.5s ease-in-out infinite", flexShrink: 0 },
+  statusDotActive: { display: "inline-block", width: 8, height: 8, borderRadius: "50%", background: "rgba(16, 185, 129, 0.7)", animation: "glow-pulse 1s ease-in-out infinite", flexShrink: 0 },
+  streamingBubble: { fontSize: 13, color: "rgba(0, 180, 255, 0.85)", fontFamily: "var(--font-sans)", lineHeight: 1.6, padding: "12px 14px", whiteSpace: "pre-wrap" as const },
+  cursor: { color: "rgba(0, 180, 255, 0.5)", animation: "blink 1s step-end infinite" },
 };

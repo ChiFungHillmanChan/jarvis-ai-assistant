@@ -1,4 +1,4 @@
-import { useState, useCallback, useEffect } from "react";
+import { useState, useCallback, useEffect, useRef } from "react";
 import { getCurrentWindow } from "@tauri-apps/api/window";
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
@@ -25,6 +25,11 @@ export default function App() {
   const [chatFullScreen, setChatFullScreen] = useState(false);
   const [wallpaperActive, setWallpaperActive] = useState(false);
   const [wallpaperRaised, setWallpaperRaised] = useState(false);
+  const [aiState, setAiState] = useState<"idle" | "thinking" | "speaking">("idle");
+  const [pageTransition, setPageTransition] = useState(false);
+  const [ttsAmplitude, setTtsAmplitude] = useState(0);
+  const [pendingToolCall, setPendingToolCall] = useState<string | null>(null);
+  const prevView = useRef(activeView);
 
   const toggleChat = useCallback(() => { setChatOpen((prev) => !prev); setChatFullScreen(false); }, []);
   const closeChat = useCallback(() => { setChatOpen(false); setChatFullScreen(false); }, []);
@@ -48,7 +53,48 @@ export default function App() {
     };
   }, []);
 
+  // Listen for AI chat state changes
+  useEffect(() => {
+    const unlistenAi = listen<{ state: "idle" | "thinking" | "speaking" }>("chat-state", (event) => {
+      setAiState(event.payload.state);
+      // Auto-open chat panel when AI starts thinking (e.g. from voice input)
+      if (event.payload.state === "thinking" && !chatOpen) {
+        setChatOpen(true);
+      }
+    });
+    return () => { unlistenAi.then((fn) => fn()); };
+  }, [chatOpen]);
+
+  // Listen for TTS amplitude and tool call events
+  useEffect(() => {
+    const unlistenAmp = listen<{ amplitude: number }>("tts-amplitude", (event) => {
+      setTtsAmplitude(event.payload.amplitude);
+    });
+    const unlistenTool = listen<{ tool_name: string }>("chat-tool-call", (event) => {
+      setPendingToolCall(event.payload.tool_name);
+    });
+    return () => {
+      unlistenAmp.then((fn) => fn());
+      unlistenTool.then((fn) => fn());
+    };
+  }, []);
+
+  // Page transition pulse
+  useEffect(() => {
+    if (prevView.current !== activeView) {
+      prevView.current = activeView;
+      setPageTransition(true);
+      const timer = setTimeout(() => setPageTransition(false), 250);
+      return () => clearTimeout(timer);
+    }
+  }, [activeView]);
+
   function getActivityLevel(): "idle" | "listening" | "processing" | "active" {
+    // Page transition pulse
+    if (pageTransition) return "processing";
+    // AI states take priority
+    if (aiState === "speaking") return "active";
+    if (aiState === "thinking") return "processing";
     if (voiceState === "Speaking" || voiceState === "WakeWordSpeaking") return "active";
     if (voiceState === "Processing" || voiceState === "WakeWordDetected" || voiceState === "WakeWordProcessing" || (typeof voiceState === "object" && "ModelDownloading" in voiceState)) return "processing";
     if (voiceState === "Listening" || voiceState === "WakeWordListening") return "listening";
@@ -89,7 +135,7 @@ export default function App() {
 
   return (
     <div style={styles.root}>
-      <JarvisScene activityLevel={getActivityLevel()} />
+      <JarvisScene activityLevel={getActivityLevel()} ttsAmplitude={ttsAmplitude} pendingToolCall={pendingToolCall} onToolCallConsumed={() => setPendingToolCall(null)} />
 
       <div style={styles.uiLayer}>
         <div className="drag-region" style={styles.titleBar} onMouseDown={(e) => { if ((e.target as HTMLElement).closest('.no-drag')) return; getCurrentWindow().startDragging(); }}>

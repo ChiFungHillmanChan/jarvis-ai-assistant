@@ -1,6 +1,10 @@
+use futures_util::StreamExt;
 use reqwest::Client;
 use serde::{Deserialize, Serialize};
+use serde_json::json;
+use std::collections::HashMap;
 use super::tools;
+use tauri::Emitter;
 
 #[derive(Serialize)]
 struct ClaudeRequest {
@@ -9,6 +13,7 @@ struct ClaudeRequest {
     system: String,
     tools: Vec<serde_json::Value>,
     messages: Vec<ClaudeMessage>,
+    stream: bool,
 }
 
 #[derive(Serialize, Deserialize, Clone, Debug)]
@@ -35,19 +40,32 @@ enum ContentBlock {
     ToolResult { tool_use_id: String, content: String },
 }
 
+// ClaudeResponse and ResponseBlock are no longer needed (SSE replaces JSON parsing)
+
 #[derive(Deserialize)]
-struct ClaudeResponse {
-    content: Vec<ResponseBlock>,
+struct SseEvent {
+    #[serde(rename = "type")]
+    event_type: String,
+    index: Option<usize>,
+    delta: Option<SseDelta>,
+    content_block: Option<SseContentBlock>,
+}
+
+#[derive(Deserialize)]
+struct SseDelta {
+    #[serde(rename = "type")]
+    delta_type: Option<String>,
+    text: Option<String>,
+    partial_json: Option<String>,
     stop_reason: Option<String>,
 }
 
 #[derive(Deserialize)]
-#[serde(tag = "type")]
-enum ResponseBlock {
-    #[serde(rename = "text")]
-    Text { text: String },
-    #[serde(rename = "tool_use")]
-    ToolUse { id: String, name: String, input: serde_json::Value },
+struct SseContentBlock {
+    #[serde(rename = "type")]
+    block_type: String,
+    id: Option<String>,
+    name: Option<String>,
 }
 
 pub async fn send(
@@ -55,8 +73,11 @@ pub async fn send(
     messages: Vec<(String, String)>,
     db: &crate::db::Database,
     google_auth: &std::sync::Arc<crate::auth::google::GoogleAuth>,
+    app_handle: &tauri::AppHandle,
 ) -> Result<String, Box<dyn std::error::Error + Send + Sync>> {
-    let client = Client::new();
+    let client = Client::builder()
+        .read_timeout(std::time::Duration::from_secs(60))
+        .build()?;
     let tool_defs = tools::get_tool_definitions();
     let claude_tools = tools::to_claude_format(&tool_defs);
 
@@ -72,6 +93,7 @@ pub async fn send(
             system: tools::SYSTEM_PROMPT.into(),
             tools: claude_tools.clone(),
             messages: claude_messages.clone(),
+            stream: true,
         };
 
         let response = client
@@ -80,7 +102,6 @@ pub async fn send(
             .header("anthropic-version", "2023-06-01")
             .header("content-type", "application/json")
             .json(&request)
-            .timeout(std::time::Duration::from_secs(30))
             .send().await?;
 
         if !response.status().is_success() {
@@ -89,30 +110,126 @@ pub async fn send(
             return Err(format!("Claude API error {}: {}", status, body).into());
         }
 
-        let body: ClaudeResponse = response.json().await?;
+        let mut stream = response.bytes_stream();
+        let mut buffer = String::new();
+        let mut text_parts: Vec<String> = Vec::new();
+        let mut tool_map: HashMap<usize, (String, String, String)> = HashMap::new();
+        let mut stop_reason: Option<String> = None;
 
-        // Collect text and tool calls from response
-        let mut text_parts = Vec::new();
-        let mut tool_uses = Vec::new();
+        while let Some(chunk_result) = stream.next().await {
+            let chunk = match chunk_result {
+                Ok(bytes) => bytes,
+                Err(e) => {
+                    let _ = app_handle.emit("chat-state", json!({"state": "idle"}));
+                    return Err(format!("Stream error: {}", e).into());
+                }
+            };
 
-        for block in &body.content {
-            match block {
-                ResponseBlock::Text { text } => text_parts.push(text.clone()),
-                ResponseBlock::ToolUse { id, name, input } => {
-                    tool_uses.push((id.clone(), name.clone(), input.clone()));
+            buffer.push_str(&String::from_utf8_lossy(&chunk));
+
+            // Process complete SSE events (separated by \n\n)
+            while let Some(pos) = buffer.find("\n\n") {
+                let event_block = buffer[..pos].to_string();
+                buffer = buffer[pos + 2..].to_string();
+
+                // Parse SSE lines
+                let mut event_type = String::new();
+                let mut data_str = String::new();
+
+                for line in event_block.lines() {
+                    if line.starts_with(':') { continue; }
+                    if let Some(rest) = line.strip_prefix("event: ") {
+                        event_type = rest.to_string();
+                    } else if let Some(rest) = line.strip_prefix("data: ") {
+                        data_str = rest.to_string();
+                    }
+                }
+
+                if data_str.is_empty() { continue; }
+                if data_str == "[DONE]" { continue; }
+
+                // Handle error events
+                if event_type == "error" {
+                    log::error!("Claude SSE error: {}", data_str);
+                    let _ = app_handle.emit("chat-state", json!({"state": "idle"}));
+                    return Err(format!("Claude stream error: {}", data_str).into());
+                }
+
+                // Parse the data JSON
+                let sse: SseEvent = match serde_json::from_str(&data_str) {
+                    Ok(e) => e,
+                    Err(e) => {
+                        log::warn!("[STREAM-DEBUG] SSE parse failed: {} | data: {}", e, &data_str[..data_str.len().min(200)]);
+                        continue;
+                    }
+                };
+
+                log::info!("[STREAM-DEBUG] SSE event: {}", sse.event_type);
+                match sse.event_type.as_str() {
+                    "content_block_start" => {
+                        if let Some(ref cb) = sse.content_block {
+                            if cb.block_type == "tool_use" {
+                                if let (Some(ref id), Some(ref name), Some(idx)) = (&cb.id, &cb.name, sse.index) {
+                                    tool_map.insert(idx, (id.clone(), name.clone(), String::new()));
+                                    let label = tools::tool_status_label(name);
+                                    let _ = app_handle.emit("chat-status", json!({"status": label}));
+                                }
+                            }
+                        }
+                    }
+                    "content_block_delta" => {
+                        if let Some(ref delta) = sse.delta {
+                            match delta.delta_type.as_deref() {
+                                Some("text_delta") => {
+                                    if let Some(ref text) = delta.text {
+                                        text_parts.push(text.clone());
+                                        let _ = app_handle.emit("chat-token", json!({"token": text, "done": false}));
+                                    }
+                                }
+                                Some("input_json_delta") => {
+                                    if let (Some(ref pj), Some(idx)) = (&delta.partial_json, sse.index) {
+                                        if let Some(entry) = tool_map.get_mut(&idx) {
+                                            entry.2.push_str(pj);
+                                        }
+                                    }
+                                }
+                                _ => {}
+                            }
+                        }
+                    }
+                    "message_delta" => {
+                        if let Some(ref delta) = sse.delta {
+                            if let Some(ref sr) = delta.stop_reason {
+                                stop_reason = Some(sr.clone());
+                            }
+                        }
+                    }
+                    _ => {}
                 }
             }
         }
 
+        // Collect tool calls from the map
+        let tool_uses: Vec<(String, String, serde_json::Value)> = tool_map
+            .into_values()
+            .map(|(id, name, json_str)| {
+                let input = serde_json::from_str(&json_str).unwrap_or_default();
+                (id, name, input)
+            })
+            .collect();
+
         // If there are tool calls, execute them and continue
         if !tool_uses.is_empty() {
-            // Add the assistant response (with tool uses) to messages
-            let assistant_blocks: Vec<ContentBlock> = body.content.iter().map(|b| match b {
-                ResponseBlock::Text { text } => ContentBlock::Text { text: text.clone() },
-                ResponseBlock::ToolUse { id, name, input } => ContentBlock::ToolUse {
+            // Build assistant message with text and tool_use blocks
+            let mut assistant_blocks: Vec<ContentBlock> = Vec::new();
+            for text in &text_parts {
+                assistant_blocks.push(ContentBlock::Text { text: text.clone() });
+            }
+            for (id, name, input) in &tool_uses {
+                assistant_blocks.push(ContentBlock::ToolUse {
                     id: id.clone(), name: name.clone(), input: input.clone(),
-                },
-            }).collect();
+                });
+            }
             claude_messages.push(ClaudeMessage {
                 role: "assistant".into(),
                 content: ClaudeContent::Blocks(assistant_blocks),
@@ -123,6 +240,9 @@ pub async fn send(
             for (id, name, input) in &tool_uses {
                 let args_str = serde_json::to_string(input).unwrap_or_default();
                 log::info!("JARVIS tool call: {}({})", name, args_str);
+                let _ = app_handle.emit("chat-tool-call", json!({"tool_name": name}));
+                let label = tools::tool_status_label(name);
+                let _ = app_handle.emit("chat-status", json!({"status": format!("Running: {}", label)}));
                 let result = tools::execute_tool(name, &args_str, db, google_auth).await;
                 log::info!("JARVIS tool result: {}", &result[..result.len().min(200)]);
                 result_blocks.push(ContentBlock::ToolResult {
@@ -136,18 +256,22 @@ pub async fn send(
             });
 
             // If stop_reason is "end_turn", we're done even with tool calls
-            if body.stop_reason.as_deref() == Some("end_turn") && !text_parts.is_empty() {
-                return Ok(text_parts.join("\n"));
+            if stop_reason.as_deref() == Some("end_turn") && !text_parts.is_empty() {
+                let _ = app_handle.emit("chat-token", json!({"token": "", "done": true}));
+                return Ok(text_parts.join(""));
             }
+            let _ = app_handle.emit("chat-status", json!({"status": "Composing response..."}));
             continue;
         }
 
-        // No tool calls -- return text
+        // No tool calls -- emit done and return text
+        let _ = app_handle.emit("chat-token", json!({"token": "", "done": true}));
         if !text_parts.is_empty() {
-            return Ok(text_parts.join("\n"));
+            return Ok(text_parts.join(""));
         }
         return Ok(String::new());
     }
 
+    let _ = app_handle.emit("chat-token", json!({"token": "", "done": true}));
     Ok("I've completed the actions.".into())
 }

@@ -1,8 +1,9 @@
 use crate::ai::AiRouter;
 use crate::db::Database;
 use crate::voice::{VoiceEngine, VoiceState};
+use serde_json::json;
 use std::sync::Arc;
-use tauri::State;
+use tauri::{Emitter, State};
 
 #[tauri::command]
 pub async fn start_listening(engine: State<'_, Arc<VoiceEngine>>) -> Result<String, String> {
@@ -23,13 +24,42 @@ pub async fn start_listening(engine: State<'_, Arc<VoiceEngine>>) -> Result<Stri
 
 #[tauri::command]
 pub async fn stop_listening(
+    app_handle: tauri::AppHandle,
     engine: State<'_, Arc<VoiceEngine>>,
     router: State<'_, AiRouter>,
     db: State<'_, Arc<Database>>,
     google_auth: State<'_, Arc<crate::auth::google::GoogleAuth>>,
 ) -> Result<String, String> {
     let samples = engine.audio_router.lock().map_err(|e| e.to_string())?.stop_ptt();
+
+    let duration_secs = samples.len() as f32 / 16000.0;
+    let rms = if samples.is_empty() { 0.0 } else {
+        (samples.iter().map(|s| s * s).sum::<f32>() / samples.len() as f32).sqrt()
+    };
+
     if samples.is_empty() {
+        engine.set_state_and_emit(VoiceState::Idle);
+        return Ok(String::new());
+    }
+
+    // Require at least 0.5 seconds of audio to avoid Whisper hallucination
+    if samples.len() < 8000 {
+        log::warn!("Audio too short ({:.2}s), skipping transcription", duration_secs);
+        engine.set_state_and_emit(VoiceState::Idle);
+        return Ok(String::new());
+    }
+
+    // Check if audio is essentially silence (RMS < threshold)
+    // MacBook Pro built-in mic produces low RMS (~0.003 for quiet speech)
+    if rms < 0.001 {
+        log::warn!("Audio is silence (RMS {:.4}), skipping transcription", rms);
+        // RMS exactly 0.0 with substantial samples = macOS blocking mic (all-zero buffer)
+        if rms == 0.0 && samples.len() > 16000 {
+            let error = "Microphone permission denied. Grant access in System Settings > Privacy & Security > Microphone.".to_string();
+            engine.set_state_and_emit(VoiceState::Error(error.clone()));
+            let _ = app_handle.emit("voice-error", json!({"error": error}));
+            return Err(error);
+        }
         engine.set_state_and_emit(VoiceState::Idle);
         return Ok(String::new());
     }
@@ -49,12 +79,16 @@ pub async fn stop_listening(
         return Ok(String::new());
     }
 
-    // Save user message
+    // Save user message and notify chat panel
     {
         let conn = db.conn.lock().map_err(|e| e.to_string())?;
         conn.execute("INSERT INTO conversations (role, content) VALUES ('user', ?1)", rusqlite::params![text])
             .map_err(|e| e.to_string())?;
     }
+    let _ = app_handle.emit("chat-new-message", json!({
+        "role": "user", "content": text
+    }));
+    let _ = app_handle.emit("chat-state", json!({"state": "thinking"}));
 
     // Get AI response
     let messages = {
@@ -70,7 +104,7 @@ pub async fn stop_listening(
         msgs
     };
 
-    let response = match router.send(messages, &db, &google_auth).await {
+    let response = match router.send(messages, &db, &google_auth, &app_handle).await {
         Ok(response) => response,
         Err(e) => {
             engine.set_state_and_emit(VoiceState::Error(e.clone()));
@@ -78,24 +112,26 @@ pub async fn stop_listening(
         }
     };
 
-    // Save assistant response
+    // Save assistant response and notify chat panel
     {
         let conn = db.conn.lock().map_err(|e| e.to_string())?;
         conn.execute("INSERT INTO conversations (role, content) VALUES ('assistant', ?1)", rusqlite::params![response])
             .map_err(|e| e.to_string())?;
     }
+    let _ = app_handle.emit("chat-new-message", json!({
+        "role": "assistant", "content": response
+    }));
 
-    // Speak response — mute capture during TTS to prevent audio feedback
-    engine.set_state_and_emit(VoiceState::Speaking);
+    // Speak response via sentence-queued TTS -- mute capture during TTS to prevent audio feedback
     engine.audio_router.lock().map_err(|e| e.to_string())?.mute();
     {
         let tts = engine.tts.lock().map_err(|e| e.to_string())?.clone();
-        if let Err(e) = tts.speak(&response).await {
+        if let Err(e) = tts.speak_queued(&response, &app_handle).await {
             log::warn!("TTS failed: {}", e);
+            let _ = app_handle.emit("chat-state", json!({"state": "idle"}));
         }
     }
     engine.audio_router.lock().map_err(|e| e.to_string())?.unmute();
-
     engine.set_state_and_emit(VoiceState::Idle);
     Ok(response)
 }
