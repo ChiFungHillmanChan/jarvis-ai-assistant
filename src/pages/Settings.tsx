@@ -1,5 +1,5 @@
 import { useEffect, useState } from "react";
-import { getSettings, updateSetting, googleConnect, googleStatus, saveNotionToken, saveGitHubToken, getVoiceSettings, setVoiceSetting, listTtsVoices } from "../lib/commands";
+import { getSettings, updateSetting, googleConnect, googleStatus, saveNotionToken, saveGitHubToken, saveObsidianKey, getVoiceSettings, setVoiceSetting, listTtsVoices } from "../lib/commands";
 import type { VoiceSettings } from "../lib/types";
 
 export default function Settings() {
@@ -11,6 +11,8 @@ export default function Settings() {
   const [githubToken, setGithubToken] = useState("");
   const [notionSaved, setNotionSaved] = useState(false);
   const [githubSaved, setGithubSaved] = useState(false);
+  const [obsidianKey, setObsidianKey] = useState("");
+  const [obsidianSaved, setObsidianSaved] = useState(false);
   const [voiceSettings, setVoiceSettingsState] = useState<VoiceSettings | null>(null);
   const [ttsVoices, setTtsVoices] = useState<string[]>([]);
 
@@ -29,6 +31,11 @@ export default function Settings() {
     if (!githubToken.trim()) return;
     await saveGitHubToken(githubToken);
     setGithubSaved(true);
+  }
+  async function handleSaveObsidian() {
+    if (!obsidianKey.trim()) return;
+    await saveObsidianKey(obsidianKey);
+    setObsidianSaved(true);
   }
 
   if (!loaded) return (<div style={{ padding: 24 }}><div className="system-text animate-glow">LOADING SETTINGS...</div></div>);
@@ -85,6 +92,18 @@ export default function Settings() {
           <input type="password" value={githubToken} onChange={(e) => { setGithubToken(e.target.value); setGithubSaved(false); }}
             placeholder="ghp_..." style={styles.tokenInput} />
           <button onClick={handleSaveGitHub} style={styles.saveBtn}>{githubSaved ? "SAVED" : "SAVE"}</button>
+        </div>
+      </div>
+      <div className="panel" style={{ maxWidth: 500, padding: 16, marginTop: 12 }}>
+        <div className="label" style={{ marginBottom: 12 }}>OBSIDIAN</div>
+        <div style={styles.hint}>Connect to Obsidian vault via Local REST API plugin</div>
+        <div style={{ display: "flex", gap: 8 }}>
+          <input type="password" value={obsidianKey} onChange={(e) => { setObsidianKey(e.target.value); setObsidianSaved(false); }}
+            placeholder="API key from Obsidian REST API plugin" style={styles.tokenInput} />
+          <button onClick={handleSaveObsidian} style={styles.saveBtn}>{obsidianSaved ? "SAVED" : "SAVE"}</button>
+        </div>
+        <div style={{ color: "rgba(0, 180, 255, 0.3)", fontSize: 9, marginTop: 6 }}>
+          Install "Local REST API" plugin in Obsidian, enable it, copy the API key
         </div>
       </div>
       <div className="panel" style={{ maxWidth: 500, padding: 16, marginTop: 12 }}>

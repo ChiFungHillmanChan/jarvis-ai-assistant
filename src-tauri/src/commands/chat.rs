@@ -96,14 +96,17 @@ pub async fn send_message(
         msgs
     };
     // Only add context for questions about personal data (saves tokens)
+    let msg_lower = message.to_lowercase();
     let needs_context = {
-        let msg_lower = message.to_lowercase();
         msg_lower.contains("task") || msg_lower.contains("meeting") || msg_lower.contains("email")
         || msg_lower.contains("deadline") || msg_lower.contains("schedule") || msg_lower.contains("today")
         || msg_lower.contains("calendar") || msg_lower.contains("work on") || msg_lower.contains("priority")
         || msg_lower.contains("github") || msg_lower.contains("pr") || msg_lower.contains("issue")
         || msg_lower.contains("notion") || msg_lower.contains("what should") || msg_lower.contains("remind")
         || msg_lower.contains("status") || msg_lower.contains("busy") || msg_lower.contains("free")
+        || msg_lower.contains("obsidian") || msg_lower.contains("notes") || msg_lower.contains("vault")
+        || msg_lower.contains("job") || msg_lower.contains("resume") || msg_lower.contains("interview")
+        || msg_lower.contains("application")
     };
 
     let mut context_messages = Vec::new();
@@ -120,6 +123,69 @@ pub async fn send_message(
             context_messages.push(("assistant".to_string(), "Understood.".to_string()));
         }
     }
+    // Search Obsidian for relevant notes if message mentions notes/jobs/personal topics
+    let obsidian_keywords = [
+        "obsidian", "notes", "vault", "job", "resume", "interview",
+        "application", "career", "cover letter",
+    ];
+    if obsidian_keywords.iter().any(|kw| msg_lower.contains(kw)) {
+        let obs_key = {
+            let conn = db.conn.lock().map_err(|e| e.to_string())?;
+            conn.query_row(
+                "SELECT value FROM user_preferences WHERE key = 'obsidian_api_key'",
+                [],
+                |row| row.get::<_, String>(0),
+            )
+            .ok()
+        };
+        if let Some(key) = obs_key {
+            let search_term = message
+                .split_whitespace()
+                .filter(|w| w.len() > 3)
+                .take(3)
+                .collect::<Vec<_>>()
+                .join(" ");
+            if let Ok(notes) =
+                crate::integrations::obsidian::search_vault(&key, &search_term).await
+            {
+                let note_context: String = notes
+                    .iter()
+                    .take(3)
+                    .map(|n| {
+                        format!(
+                            "- {} {}",
+                            n.path,
+                            n.content
+                                .as_deref()
+                                .unwrap_or("")
+                                .chars()
+                                .take(200)
+                                .collect::<String>()
+                        )
+                    })
+                    .collect::<Vec<_>>()
+                    .join("\n");
+                if !note_context.is_empty() {
+                    let len = context_messages.len();
+                    context_messages.insert(
+                        if len > 0 { len - 1 } else { 0 },
+                        (
+                            "user".to_string(),
+                            format!("[OBSIDIAN NOTES]\n{}", note_context),
+                        ),
+                    );
+                    context_messages.insert(
+                        if len > 0 { len } else { 1 },
+                        (
+                            "assistant".to_string(),
+                            "I see the relevant notes from your Obsidian vault.".to_string(),
+                        ),
+                    );
+                }
+            }
+        }
+    }
+
     context_messages.extend(messages);
     let messages = context_messages;
 

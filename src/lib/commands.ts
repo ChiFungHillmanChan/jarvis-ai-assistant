@@ -83,3 +83,10 @@ export async function getBriefing(): Promise<BriefingResult> { return invoke("ge
 export async function speakBriefing(): Promise<BriefingResult> { return invoke("speak_briefing"); }
 export async function askJarvis(question: string): Promise<string> { return invoke("ask_jarvis", { question }); }
 export async function searchConversations(query: string): Promise<string> { return invoke("search_conversations", { query }); }
+
+// Obsidian
+export async function searchObsidian(query: string): Promise<{ path: string; content: string | null }[]> { return invoke("search_obsidian", { query }); }
+export async function getObsidianNote(path: string): Promise<string> { return invoke("get_obsidian_note", { path }); }
+export async function saveObsidianNote(path: string, content: string): Promise<void> { return invoke("save_obsidian_note", { path, content }); }
+export async function listObsidianFiles(): Promise<string[]> { return invoke("list_obsidian_files"); }
+export async function saveObsidianKey(key: string): Promise<void> { return invoke("save_obsidian_key", { key }); }

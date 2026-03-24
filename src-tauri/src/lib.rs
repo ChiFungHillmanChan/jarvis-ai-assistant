@@ -170,6 +170,11 @@ pub fn run() {
             commands::assistant::speak_briefing,
             commands::assistant::ask_jarvis,
             commands::assistant::search_conversations,
+            commands::obsidian::search_obsidian,
+            commands::obsidian::get_obsidian_note,
+            commands::obsidian::save_obsidian_note,
+            commands::obsidian::list_obsidian_files,
+            commands::obsidian::save_obsidian_key,
         ])
         .run(tauri::generate_context!())
         .expect("error while running JARVIS");
