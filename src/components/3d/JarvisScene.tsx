@@ -52,6 +52,8 @@ export default function JarvisScene() {
   const dragging = useRef(false);
   const lastM = useRef({ x: 0, y: 0 });
   const autoRot = useRef(true);
+  const zoomRef = useRef(700);
+  const targetZoom = useRef(700);
 
   // Particles stored as spherical coords for stable orbiting
   const particles = useRef<{ theta: number; phi: number; r: number; speed: number; size: number; bright: number }[]>([]);
@@ -90,9 +92,15 @@ export default function JarvisScene() {
       lastM.current = { x: e.clientX, y: e.clientY };
     }
     function onUp() { dragging.current = false; setTimeout(() => { if (!dragging.current) autoRot.current = true; }, 2000); }
+    function onWheel(e: WheelEvent) {
+      e.preventDefault();
+      targetZoom.current += e.deltaY * 0.5;
+      targetZoom.current = Math.max(200, Math.min(1500, targetZoom.current));
+    }
     window.addEventListener("mousedown", onDown);
     window.addEventListener("mousemove", onMove);
     window.addEventListener("mouseup", onUp);
+    window.addEventListener("wheel", onWheel, { passive: false });
 
     // Init particles on sphere surface + some inside
     particles.current = [];
@@ -135,7 +143,9 @@ export default function JarvisScene() {
       time.current += 0.006;
       const w = canvas.width, h = canvas.height;
       const cx = w / 2, cy = h / 2;
-      const fov = 500;
+      // Smooth zoom interpolation
+      zoomRef.current += (targetZoom.current - zoomRef.current) * 0.08;
+      const fov = zoomRef.current;
 
       if (autoRot.current) targetRY.current += 0.002;
       rotYRef.current += (targetRY.current - rotYRef.current) * 0.06;
@@ -376,6 +386,7 @@ export default function JarvisScene() {
       window.removeEventListener("mousedown", onDown);
       window.removeEventListener("mousemove", onMove);
       window.removeEventListener("mouseup", onUp);
+      window.removeEventListener("wheel", onWheel);
     };
   }, []);
 
