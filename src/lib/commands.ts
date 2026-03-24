@@ -82,3 +82,4 @@ export async function toggleCronJob(jobId: number): Promise<string> { return inv
 export async function getBriefing(): Promise<BriefingResult> { return invoke("get_briefing"); }
 export async function speakBriefing(): Promise<BriefingResult> { return invoke("speak_briefing"); }
 export async function askJarvis(question: string): Promise<string> { return invoke("ask_jarvis", { question }); }
+export async function searchConversations(query: string): Promise<string> { return invoke("search_conversations", { query }); }

@@ -128,6 +128,7 @@ pub fn run() {
             commands::assistant::get_briefing,
             commands::assistant::speak_briefing,
             commands::assistant::ask_jarvis,
+            commands::assistant::search_conversations,
         ])
         .run(tauri::generate_context!())
         .expect("error while running JARVIS");
