@@ -3,6 +3,6 @@
 <plist version="1.0">
 <dict>
   <key>NSMicrophoneUsageDescription</key>
-  <string>JARVIS needs microphone access for voice commands</string>
+  <string>JARVIS needs microphone access for push-to-talk and always-on wake word listening</string>
 </dict>
 </plist>

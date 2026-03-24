@@ -27,12 +27,19 @@ export default function App() {
 
   const { state: voiceState, startVoice, stopVoice } = useVoiceState();
 
+  function getActivityLevel(): "idle" | "listening" | "processing" | "active" {
+    if (voiceState === "Speaking" || voiceState === "WakeWordSpeaking") return "active";
+    if (voiceState === "Processing" || voiceState === "WakeWordDetected" || voiceState === "WakeWordProcessing" || (typeof voiceState === "object" && "ModelDownloading" in voiceState)) return "processing";
+    if (voiceState === "Listening" || voiceState === "WakeWordListening") return "listening";
+    return "idle";
+  }
+
   useKeyboard({
     "cmd+k": toggleChat,
     escape: closeChat,
     "cmd+shift+j": () => {
       if (voiceState === "Listening") { stopVoice(); }
-      else if (voiceState === "Idle") { startVoice(); }
+      else if (voiceState === "Idle" || voiceState === "WakeWordListening") { startVoice(); }
     },
   });
 
@@ -51,7 +58,7 @@ export default function App() {
   return (
     <div style={styles.root}>
       {/* 3D atom field background -- renders behind UI */}
-      <JarvisScene />
+      <JarvisScene activityLevel={getActivityLevel()} />
 
       {/* UI layer -- floats above 3D */}
       <div style={styles.uiLayer}>

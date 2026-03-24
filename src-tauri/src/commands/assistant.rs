@@ -1,5 +1,6 @@
 use crate::ai::AiRouter;
 use crate::assistant::{briefing, context::DayContext};
+use crate::auth::google::GoogleAuth;
 use crate::db::Database;
 use crate::voice::tts::TextToSpeech;
 use std::sync::Arc;
@@ -9,16 +10,18 @@ use tauri::State;
 pub async fn get_briefing(
     db: State<'_, Arc<Database>>,
     router: State<'_, AiRouter>,
+    google_auth: State<'_, Arc<GoogleAuth>>,
 ) -> Result<briefing::BriefingResult, String> {
-    briefing::generate_briefing(&db, &router).await
+    briefing::generate_briefing(&db, &router, &google_auth).await
 }
 
 #[tauri::command]
 pub async fn speak_briefing(
     db: State<'_, Arc<Database>>,
     router: State<'_, AiRouter>,
+    google_auth: State<'_, Arc<GoogleAuth>>,
 ) -> Result<briefing::BriefingResult, String> {
-    let result = briefing::generate_briefing(&db, &router).await?;
+    let result = briefing::generate_briefing(&db, &router, &google_auth).await?;
 
     // Speak the briefing
     let tts = TextToSpeech::new();
@@ -34,6 +37,7 @@ pub async fn speak_briefing(
 pub async fn ask_jarvis(
     db: State<'_, Arc<Database>>,
     router: State<'_, AiRouter>,
+    google_auth: State<'_, Arc<GoogleAuth>>,
     question: String,
 ) -> Result<String, String> {
     // Build context + question
@@ -53,13 +57,14 @@ pub async fn ask_jarvis(
     );
 
     let messages = vec![("user".to_string(), prompt)];
-    router.send(messages).await
+    router.send(messages, &db, &google_auth).await
 }
 
 #[tauri::command]
 pub async fn search_conversations(
     db: State<'_, Arc<Database>>,
     router: State<'_, AiRouter>,
+    google_auth: State<'_, Arc<GoogleAuth>>,
     query: String,
 ) -> Result<String, String> {
     // Search conversations for relevant messages
@@ -96,5 +101,5 @@ pub async fn search_conversations(
     );
 
     let messages = vec![("user".to_string(), prompt)];
-    router.send(messages).await
+    router.send(messages, &db, &google_auth).await
 }

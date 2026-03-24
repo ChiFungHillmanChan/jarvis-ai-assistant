@@ -1,6 +1,9 @@
 use hound::{WavSpec, WavWriter};
 use reqwest::multipart;
 use std::io::Cursor;
+use std::path::Path;
+use std::sync::Arc;
+use whisper_rs::{FullParams, SamplingStrategy, WhisperContext, WhisperContextParameters};
 
 #[derive(Clone)]
 pub struct Transcriber {
@@ -77,5 +80,66 @@ impl Transcriber {
         }
 
         Ok(cursor.into_inner())
+    }
+}
+
+#[derive(Clone)]
+pub struct LocalTranscriber {
+    ctx: Arc<WhisperContext>,
+}
+
+impl LocalTranscriber {
+    pub fn new(model_path: &Path) -> Result<Self, String> {
+        let path = model_path
+            .to_str()
+            .ok_or("Model path is not valid UTF-8")?;
+        let params = WhisperContextParameters::default();
+        let ctx = WhisperContext::new_with_params(path, params)
+            .map_err(|e| format!("Failed to load Whisper model: {}", e))?;
+        log::info!("Loaded local Whisper model from {}", path);
+        Ok(Self { ctx: Arc::new(ctx) })
+    }
+
+    pub fn transcribe(&self, audio_data: &[f32]) -> Result<String, String> {
+        if audio_data.len() < 1600 {
+            return Ok(String::new());
+        }
+
+        let mut state = self
+            .ctx
+            .create_state()
+            .map_err(|e| format!("Failed to create Whisper state: {}", e))?;
+
+        let mut params = FullParams::new(SamplingStrategy::Greedy { best_of: 1 });
+        params.set_language(Some("en"));
+        params.set_translate(false);
+        params.set_print_special(false);
+        params.set_print_progress(false);
+        params.set_print_realtime(false);
+        params.set_print_timestamps(false);
+        params.set_suppress_blank(true);
+        params.set_single_segment(true);
+
+        state
+            .full(params, audio_data)
+            .map_err(|e| format!("Local Whisper transcription failed: {}", e))?;
+
+        let segments = state.full_n_segments();
+
+        let mut text = String::new();
+        for idx in 0..segments {
+            let Some(segment) = state.get_segment(idx) else {
+                continue;
+            };
+            let segment = segment
+                .to_str_lossy()
+                .map_err(|e| format!("Failed to read Whisper segment: {}", e))?;
+            text.push_str(segment.trim());
+            text.push(' ');
+        }
+
+        let text = text.trim().to_string();
+        log::info!("Locally transcribed: \"{}\"", text);
+        Ok(text)
     }
 }

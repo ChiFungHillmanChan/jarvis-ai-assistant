@@ -1,12 +1,16 @@
-pub mod capture;
+pub mod audio_router;
 pub mod commands;
+pub mod model_manager;
 pub mod transcribe;
 pub mod tts;
+pub mod wake_commands;
+pub mod wake_word;
 
-use capture::AudioCapture;
-use transcribe::Transcriber;
+use audio_router::AudioRouter;
+use transcribe::{LocalTranscriber, Transcriber};
 use tts::TextToSpeech;
 use std::sync::Mutex;
+use tauri::Emitter;
 
 #[derive(Clone, serde::Serialize, Debug, PartialEq)]
 pub enum VoiceState {
@@ -14,22 +18,32 @@ pub enum VoiceState {
     Listening,
     Processing,
     Speaking,
+    WakeWordListening,
+    WakeWordDetected,
+    WakeWordProcessing,
+    WakeWordSpeaking,
+    ModelDownloading(u32),
     Error(String),
     Disabled,
 }
 
+pub type JarvisAppHandle = tauri::AppHandle<tauri::Wry>;
+
 pub struct VoiceEngine {
-    pub capture: Mutex<AudioCapture>,
+    pub audio_router: Mutex<AudioRouter>,
     pub transcriber: Mutex<Option<Transcriber>>,
     pub tts: Mutex<TextToSpeech>,
     pub state: Mutex<VoiceState>,
     pub muted: Mutex<bool>,
+    pub app_handle: Option<JarvisAppHandle>,
 }
 
 impl VoiceEngine {
-    pub fn new() -> Self {
-        // AudioCapture::new() constructs empty state and cannot fail in practice
-        let capture = AudioCapture::new().expect("AudioCapture init should not fail");
+    pub fn new(db: &crate::db::Database, app_handle: Option<JarvisAppHandle>) -> Self {
+        let mut router = AudioRouter::new();
+        if let Err(e) = router.start() {
+            log::warn!("AudioRouter start failed (will retry on first use): {}", e);
+        }
 
         let transcriber = match std::env::var("OPENAI_API_KEY") {
             Ok(key) if !key.is_empty() => {
@@ -41,24 +55,75 @@ impl VoiceEngine {
             _ => { log::info!("No OPENAI_API_KEY set. Voice STT disabled."); None }
         };
 
+        let tts = TextToSpeech::from_db(db);
+        log::info!("TTS initialized from DB preferences");
+
         VoiceEngine {
-            capture: Mutex::new(capture),
+            audio_router: Mutex::new(router),
             transcriber: Mutex::new(transcriber),
-            tts: Mutex::new(TextToSpeech::new()),
+            tts: Mutex::new(tts),
             state: Mutex::new(VoiceState::Idle),
             muted: Mutex::new(false),
+            app_handle,
         }
     }
 
-    pub fn set_state(&self, state: VoiceState) { *self.state.lock().unwrap() = state; }
+    pub fn set_state_and_emit(&self, state: VoiceState) {
+        *self.state.lock().unwrap() = state.clone();
+        if let Some(app_handle) = &self.app_handle {
+            if let Err(e) = app_handle.emit("voice-state", state) {
+                log::warn!("Failed to emit voice-state event: {}", e);
+            }
+        }
+    }
+
     pub fn get_state(&self) -> VoiceState { self.state.lock().unwrap().clone() }
-    pub fn is_available(&self) -> bool { self.transcriber.lock().unwrap().is_some() }
+
+    pub fn is_available(&self) -> bool {
+        self.transcriber.lock().unwrap().is_some() || model_manager::is_downloaded()
+    }
+
+    pub async fn transcribe_command(&self, audio_data: &[f32]) -> Result<String, String> {
+        let cloud_transcriber = {
+            let guard = self.transcriber.lock().map_err(|e| e.to_string())?;
+            guard.clone()
+        };
+
+        if let Some(transcriber) = cloud_transcriber {
+            match transcriber.transcribe(audio_data).await {
+                Ok(text) if !text.is_empty() => return Ok(text),
+                Ok(_) => log::info!("Cloud transcription returned empty text, trying local fallback"),
+                Err(e) => log::warn!("Cloud transcription failed, trying local fallback: {}", e),
+            }
+        }
+
+        if model_manager::is_downloaded() {
+            let model_path = model_manager::model_path();
+            let samples = audio_data.to_vec();
+            let local_result = tauri::async_runtime::spawn_blocking(move || {
+                let transcriber = LocalTranscriber::new(&model_path)?;
+                transcriber.transcribe(&samples)
+            })
+            .await
+            .map_err(|e| format!("Local Whisper task failed: {}", e))?;
+
+            return local_result;
+        }
+
+        Err("Speech-to-text not available. Configure OPENAI_API_KEY or download the local Whisper model.".to_string())
+    }
 
     pub fn toggle_mute(&self) -> bool {
         let mut muted = self.muted.lock().unwrap();
         *muted = !*muted;
-        if *muted { self.set_state(VoiceState::Disabled); }
-        else { self.set_state(VoiceState::Idle); }
+        if *muted {
+            if let Ok(router) = self.audio_router.lock() {
+                router.deactivate();
+            }
+            self.set_state_and_emit(VoiceState::Disabled);
+        } else {
+            self.set_state_and_emit(VoiceState::Idle);
+        }
         *muted
     }
 }

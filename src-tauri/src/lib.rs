@@ -58,10 +58,21 @@ pub fn run() {
                 }
             });
 
-            let voice_engine = std::sync::Arc::new(voice::VoiceEngine::new());
+            let voice_engine = std::sync::Arc::new(voice::VoiceEngine::new(
+                &db_arc,
+                Some(app.handle().clone()),
+            ));
+            let wake_service = std::sync::Arc::new(voice::wake_word::WakeWordService::new(
+                std::sync::Arc::clone(&voice_engine),
+                std::sync::Arc::clone(&db_arc),
+                router.clone(),
+                std::sync::Arc::clone(&auth_arc),
+                app.handle().clone(),
+            ));
 
             // Auto-briefing on startup (only if enabled)
             let db_brief = std::sync::Arc::clone(&db_arc);
+            let auth_brief = std::sync::Arc::clone(&auth_arc);
             tauri::async_runtime::spawn(async move {
                 tokio::time::sleep(std::time::Duration::from_secs(3)).await;
                 // Check if auto-briefing is enabled
@@ -94,7 +105,7 @@ pub fn run() {
                     std::env::var("OPENAI_API_KEY").ok(),
                     "claude_primary",
                 );
-                match crate::assistant::briefing::generate_briefing(&db_brief, &router).await {
+                match crate::assistant::briefing::generate_briefing(&db_brief, &router, &auth_brief).await {
                     Ok(result) => {
                         log::info!("Morning briefing: {}", result.briefing);
                         // Mark as briefed today
@@ -113,7 +124,7 @@ pub fn run() {
                                 rusqlite::params![result.briefing],
                             );
                         }
-                        let tts = crate::voice::tts::TextToSpeech::new();
+                        let tts = crate::voice::tts::TextToSpeech::from_db(&db_brief);
                         let speech = format!("{}. {}", result.greeting, result.briefing);
                         if let Err(e) = tts.speak(&speech).await {
                             log::warn!("Briefing TTS failed: {}", e);
@@ -123,13 +134,40 @@ pub fn run() {
                 }
             });
 
-            app.manage(db_arc);
-            app.manage(auth_arc);
+            let wake_word_enabled = {
+                let conn = db_arc.conn.lock().unwrap();
+                conn.query_row(
+                    "SELECT value FROM user_preferences WHERE key = 'wake_word_enabled'",
+                    [],
+                    |row| row.get::<_, String>(0),
+                )
+                .unwrap_or_else(|_| "false".to_string())
+                    == "true"
+            };
+
+            app.manage(std::sync::Arc::clone(&db_arc));
+            app.manage(std::sync::Arc::clone(&auth_arc));
             app.manage(router);
             app.manage(voice_engine);
+            app.manage(std::sync::Arc::clone(&wake_service));
             tray::create_tray(app).expect("Failed to create system tray");
+
+            if wake_word_enabled {
+                tauri::async_runtime::spawn(async move {
+                    if let Err(e) = wake_service.enable().await {
+                        log::warn!("Wake-word startup enable failed: {}", e);
+                    }
+                });
+            }
+
             log::info!("JARVIS started successfully");
             Ok(())
+        })
+        .on_window_event(|window, event| {
+            if let tauri::WindowEvent::CloseRequested { api, .. } = event {
+                api.prevent_close();
+                let _ = window.hide();
+            }
         })
         .invoke_handler(tauri::generate_handler![
             commands::tasks::get_tasks,
@@ -175,6 +213,11 @@ pub fn run() {
             voice::commands::get_voice_settings,
             voice::commands::set_voice_setting,
             voice::commands::list_tts_voices,
+            voice::wake_commands::get_wake_word_status,
+            voice::wake_commands::enable_wake_word,
+            voice::wake_commands::disable_wake_word,
+            voice::wake_commands::is_model_downloaded,
+            voice::wake_commands::download_model,
             commands::assistant::get_briefing,
             commands::assistant::speak_briefing,
             commands::assistant::ask_jarvis,

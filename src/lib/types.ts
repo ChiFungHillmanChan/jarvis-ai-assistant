@@ -102,13 +102,31 @@ export interface GitHubStats {
   review_requested: number;
 }
 
-export type VoiceState = "Idle" | "Listening" | "Processing" | "Speaking" | "Disabled" | { Error: string };
+export type VoiceState =
+  | "Idle"
+  | "Listening"
+  | "Processing"
+  | "Speaking"
+  | "WakeWordListening"
+  | "WakeWordDetected"
+  | "WakeWordProcessing"
+  | "WakeWordSpeaking"
+  | "Disabled"
+  | { ModelDownloading: number }
+  | { Error: string };
 
 export interface VoiceSettings {
   enabled: boolean;
   tts_voice: string;
   tts_rate: number;
   tts_enabled: boolean;
+}
+
+export interface WakeWordStatus {
+  enabled: boolean;
+  running: boolean;
+  model_downloaded: boolean;
+  voice_state: VoiceState;
 }
 
 export interface EmailRule {

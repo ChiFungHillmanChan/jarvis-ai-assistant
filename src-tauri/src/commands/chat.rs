@@ -1,5 +1,6 @@
 use crate::ai::AiRouter;
 use crate::db::Database;
+use crate::voice::VoiceEngine;
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
 use tauri::State;
@@ -16,6 +17,8 @@ pub struct ChatMessage {
 pub async fn send_message(
     db: State<'_, Arc<Database>>,
     router: State<'_, AiRouter>,
+    google_auth: State<'_, Arc<crate::auth::google::GoogleAuth>>,
+    engine: State<'_, Arc<VoiceEngine>>,
     message: String,
 ) -> Result<ChatMessage, String> {
     {
@@ -68,12 +71,20 @@ pub async fn send_message(
                     search_context, message
                 );
                 let search_messages = vec![("user".to_string(), search_prompt)];
-                let search_response = router.send(search_messages).await?;
+                let search_response = router.send(search_messages, &db, &google_auth).await?;
 
                 {
                     let conn3 = db.conn.lock().map_err(|e| e.to_string())?;
                     conn3.execute("INSERT INTO conversations (role, content) VALUES ('assistant', ?1)", rusqlite::params![search_response])
                         .map_err(|e| e.to_string())?;
+                }
+
+                // Speak the search response via TTS
+                {
+                    let tts = engine.tts.lock().map_err(|e| e.to_string())?.clone();
+                    if let Err(e) = tts.speak(&search_response).await {
+                        log::warn!("Chat TTS failed: {}", e);
+                    }
                 }
 
                 return Ok(crate::commands::chat::ChatMessage {
@@ -189,7 +200,7 @@ pub async fn send_message(
     context_messages.extend(messages);
     let messages = context_messages;
 
-    let response_text = router.send(messages).await?;
+    let response_text = router.send(messages, &db, &google_auth).await?;
     // Both OpenAI and Claude now handle tool execution natively via function calling / tool use.
     let final_response = response_text;
     {
@@ -197,6 +208,15 @@ pub async fn send_message(
         conn.execute("INSERT INTO conversations (role, content) VALUES ('assistant', ?1)", rusqlite::params![final_response])
             .map_err(|e| e.to_string())?;
     }
+
+    // Speak the response via TTS
+    {
+        let tts = engine.tts.lock().map_err(|e| e.to_string())?.clone();
+        if let Err(e) = tts.speak(&final_response).await {
+            log::warn!("Chat TTS failed: {}", e);
+        }
+    }
+
     Ok(ChatMessage { id: None, role: "assistant".to_string(), content: final_response, created_at: None })
 }
 

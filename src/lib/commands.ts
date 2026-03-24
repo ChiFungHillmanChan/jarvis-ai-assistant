@@ -1,5 +1,5 @@
 import { invoke } from "@tauri-apps/api/core";
-import type { Task, ChatMessage, DashboardData, Settings, EmailSummary, EmailStats, CalendarEventView, CronJobView, CronRunView, NotionPageView, GitHubItemView, GitHubStats, VoiceState, VoiceSettings, EmailRule, BriefingResult } from "./types";
+import type { Task, ChatMessage, DashboardData, Settings, EmailSummary, EmailStats, CalendarEventView, CronJobView, CronRunView, NotionPageView, GitHubItemView, GitHubStats, VoiceState, VoiceSettings, WakeWordStatus, EmailRule, BriefingResult } from "./types";
 
 export async function getTasks(): Promise<Task[]> {
   return invoke("get_tasks");
@@ -66,6 +66,11 @@ export async function toggleMute(): Promise<boolean> { return invoke("toggle_mut
 export async function getVoiceSettings(): Promise<VoiceSettings> { return invoke("get_voice_settings"); }
 export async function setVoiceSetting(key: string, value: string): Promise<void> { return invoke("set_voice_setting", { key, value }); }
 export async function listTtsVoices(): Promise<string[]> { return invoke("list_tts_voices"); }
+export async function getWakeWordStatus(): Promise<WakeWordStatus> { return invoke("get_wake_word_status"); }
+export async function enableWakeWord(): Promise<void> { return invoke("enable_wake_word"); }
+export async function disableWakeWord(): Promise<void> { return invoke("disable_wake_word"); }
+export async function isModelDownloaded(): Promise<boolean> { return invoke("is_model_downloaded"); }
+export async function downloadModel(): Promise<boolean> { return invoke("download_model"); }
 
 // Email Rules
 export async function getSuggestedRules(): Promise<EmailRule[]> { return invoke("get_suggested_rules"); }

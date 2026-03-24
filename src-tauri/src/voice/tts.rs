@@ -16,6 +16,24 @@ impl TextToSpeech {
         }
     }
 
+    /// Create a TTS instance with settings loaded from user_preferences DB.
+    pub fn from_db(db: &crate::db::Database) -> Self {
+        let conn = db.conn.lock().unwrap();
+        let get = |key: &str, default: &str| -> String {
+            conn.query_row(
+                "SELECT value FROM user_preferences WHERE key = ?1",
+                rusqlite::params![key],
+                |row| row.get(0),
+            )
+            .unwrap_or_else(|_| default.to_string())
+        };
+        TextToSpeech {
+            voice: get("tts_voice", "Samantha"),
+            rate: get("tts_rate", "200").parse().unwrap_or(200),
+            enabled: get("tts_enabled", "true") == "true",
+        }
+    }
+
     pub fn set_voice(&mut self, voice: String) { self.voice = voice; }
     pub fn set_rate(&mut self, rate: u32) { self.rate = rate; }
     pub fn set_enabled(&mut self, enabled: bool) { self.enabled = enabled; }

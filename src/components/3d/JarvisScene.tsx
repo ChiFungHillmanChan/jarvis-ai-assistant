@@ -75,10 +75,15 @@ function easeInOut(t: number): number {
   return t < 0.5 ? 2 * t * t : 1 - Math.pow(-2 * t + 2, 2) / 2;
 }
 
-export default function JarvisScene() {
+interface JarvisSceneProps {
+  activityLevel?: "idle" | "listening" | "processing" | "active";
+}
+
+export default function JarvisScene({ activityLevel = "idle" }: JarvisSceneProps) {
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const animRef = useRef(0);
   const time = useRef(0);
+  const activityRef = useRef(0); // 0 = idle, 1 = max activity (smooth interpolation)
   const rotYRef = useRef(0);
   const rotXRef = useRef(0.25);
   const targetRY = useRef(0);
@@ -268,6 +273,13 @@ export default function JarvisScene() {
       const w = canvas.width, h = canvas.height;
       const cx = w / 2, cy = h / 2;
 
+      // Activity level interpolation (smooth lerp ~0.5s transition)
+      const targetAct = activityLevel === "active" ? 1.0
+        : activityLevel === "processing" ? 0.7
+        : activityLevel === "listening" ? 0.4 : 0.0;
+      activityRef.current += (targetAct - activityRef.current) * 0.03;
+      const act = activityRef.current;
+
       // Smooth zoom + rotation
       zoomRef.current += (targetZoom.current - zoomRef.current) * 0.08;
       const fov = zoomRef.current;
@@ -292,7 +304,7 @@ export default function JarvisScene() {
         }
       }
 
-      if (autoRot.current) targetRY.current += 0.002;
+      if (autoRot.current) targetRY.current += 0.002 + act * 0.004;
       rotYRef.current += (targetRY.current - rotYRef.current) * 0.06;
       rotXRef.current += (targetRX.current - rotXRef.current) * 0.06;
       const ry = rotYRef.current, rx = rotXRef.current;
@@ -362,8 +374,8 @@ export default function JarvisScene() {
         ctx.lineWidth = 0.8;
         ctx.stroke();
 
-        // Energy dot
-        const da = time.current * ring.spd;
+        // Energy dot (speed increases with activity)
+        const da = time.current * ring.spd * (1 + act * 2.0);
         let dp: Point3D = { x: Math.cos(da) * ring.r, y: Math.sin(da) * ring.r, z: 0 };
         dp = rotateX(dp, ring.tx); dp = rotateZ(dp, ring.tz); dp = transform(dp, ry, rx);
         const dpr = project(dp, cx, cy, fov);
@@ -376,12 +388,15 @@ export default function JarvisScene() {
         ctx.fillStyle = "rgba(180, 240, 255, 0.9)"; ctx.fill();
       }
 
-      // === CORE ===
-      const breath = 1 + Math.sin(time.current * 2.5) * 0.08;
+      // === CORE === (modulated by activity level)
+      const breathAmp = 0.08 + act * 0.17;
+      const breathSpd = 2.5 + act * 3.0;
+      const breath = 1 + Math.sin(time.current * breathSpd) * breathAmp;
       const cR = CORE_RADIUS * breath;
       for (let layer = 0; layer < 3; layer++) {
         const glowR = cR * (3 - layer);
-        const glowAlpha = [0.1, 0.05, 0.025][layer];
+        const glowBase = [0.1, 0.05, 0.025][layer];
+        const glowAlpha = glowBase * (1 + act * 2.5);
         const cg = ctx.createRadialGradient(cx, cy, 0, cx, cy, glowR);
         cg.addColorStop(0, `rgba(80, 200, 255, ${glowAlpha})`);
         cg.addColorStop(1, "rgba(0, 60, 120, 0)");
@@ -395,7 +410,7 @@ export default function JarvisScene() {
         {x:t2,y:0,z:-1},{x:t2,y:0,z:1},{x:-t2,y:0,z:-1},{x:-t2,y:0,z:1},
       ];
       const edges = [[0,1],[0,5],[0,7],[0,10],[0,11],[1,5],[1,7],[1,8],[1,9],[2,3],[2,4],[2,6],[2,10],[2,11],[3,4],[3,6],[3,8],[3,9],[4,5],[4,9],[4,11],[5,9],[5,11],[6,7],[6,8],[6,10],[7,8],[7,10],[8,9],[10,11]];
-      const coreRot = time.current * 0.3;
+      const coreRot = time.current * (0.3 + act * 0.9);
       ctx.strokeStyle = "rgba(100, 220, 255, 0.2)";
       ctx.lineWidth = 0.7;
       for (const [a, b] of edges) {
@@ -562,9 +577,11 @@ export default function JarvisScene() {
         }
       }
 
-      // === ENERGY PULSES ===
-      for (let i = 0; i < 2; i++) {
-        const phase = (time.current * 0.3 + i * 0.5) % 1;
+      // === ENERGY PULSES === (more + faster when active)
+      const pulseCount = 2 + Math.floor(act * 3);
+      const pulseSpeed = 0.3 + act * 0.4;
+      for (let i = 0; i < pulseCount; i++) {
+        const phase = (time.current * pulseSpeed + i * (1 / pulseCount)) % 1;
         const pr2 = CORE_RADIUS + phase * (SPHERE_RADIUS * 1.1 - CORE_RADIUS);
         const alpha = (1 - phase) * 0.06;
         if (alpha > 0.005) {

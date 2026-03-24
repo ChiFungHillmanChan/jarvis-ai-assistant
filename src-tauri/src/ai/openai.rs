@@ -7,7 +7,7 @@ struct OpenAIRequest {
     model: String,
     messages: Vec<OpenAIMessage>,
     tools: Vec<serde_json::Value>,
-    max_tokens: u32,
+    max_completion_tokens: u32,
 }
 
 #[derive(Serialize, Deserialize, Clone, Debug)]
@@ -50,6 +50,8 @@ struct OpenAIChoice {
 pub async fn send(
     api_key: &str,
     messages: Vec<(String, String)>,
+    db: &crate::db::Database,
+    google_auth: &std::sync::Arc<crate::auth::google::GoogleAuth>,
 ) -> Result<String, Box<dyn std::error::Error + Send + Sync>> {
     let client = Client::new();
     let tool_defs = tools::get_tool_definitions();
@@ -66,10 +68,10 @@ pub async fn send(
     let max_iterations = 5;
     for _ in 0..max_iterations {
         let request = OpenAIRequest {
-            model: "gpt-4o-mini".into(),
+            model: "gpt-5".into(),
             messages: openai_messages.clone(),
             tools: openai_tools.clone(),
-            max_tokens: 1024,
+            max_completion_tokens: 4096,
         };
 
         let response = client
@@ -94,7 +96,7 @@ pub async fn send(
                 openai_messages.push(choice.message.clone());
                 for tc in tool_calls {
                     log::info!("JARVIS tool call: {}({})", tc.function.name, tc.function.arguments);
-                    let result = tools::execute_tool(&tc.function.name, &tc.function.arguments).await;
+                    let result = tools::execute_tool(&tc.function.name, &tc.function.arguments, db, google_auth).await;
                     log::info!("JARVIS tool result: {}", &result[..result.len().min(200)]);
                     openai_messages.push(OpenAIMessage {
                         role: "tool".into(), content: Some(result),

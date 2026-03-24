@@ -53,6 +53,8 @@ enum ResponseBlock {
 pub async fn send(
     api_key: &str,
     messages: Vec<(String, String)>,
+    db: &crate::db::Database,
+    google_auth: &std::sync::Arc<crate::auth::google::GoogleAuth>,
 ) -> Result<String, Box<dyn std::error::Error + Send + Sync>> {
     let client = Client::new();
     let tool_defs = tools::get_tool_definitions();
@@ -65,8 +67,8 @@ pub async fn send(
     let max_iterations = 5;
     for _ in 0..max_iterations {
         let request = ClaudeRequest {
-            model: "claude-sonnet-4-20250514".into(),
-            max_tokens: 1024,
+            model: "claude-sonnet-4-6-20250610".into(),
+            max_tokens: 4096,
             system: tools::SYSTEM_PROMPT.into(),
             tools: claude_tools.clone(),
             messages: claude_messages.clone(),
@@ -121,7 +123,7 @@ pub async fn send(
             for (id, name, input) in &tool_uses {
                 let args_str = serde_json::to_string(input).unwrap_or_default();
                 log::info!("JARVIS tool call: {}({})", name, args_str);
-                let result = tools::execute_tool(name, &args_str).await;
+                let result = tools::execute_tool(name, &args_str, db, google_auth).await;
                 log::info!("JARVIS tool result: {}", &result[..result.len().min(200)]);
                 result_blocks.push(ContentBlock::ToolResult {
                     tool_use_id: id.clone(),

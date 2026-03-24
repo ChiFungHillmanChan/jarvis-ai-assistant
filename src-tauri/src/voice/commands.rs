@@ -7,13 +7,17 @@ use tauri::State;
 #[tauri::command]
 pub async fn start_listening(engine: State<'_, Arc<VoiceEngine>>) -> Result<String, String> {
     if !engine.is_available() {
-        return Err("Voice not available. Set OPENAI_API_KEY in .env for speech-to-text.".to_string());
+        let error = "Voice not available. Configure OPENAI_API_KEY or download the local Whisper model.".to_string();
+        engine.set_state_and_emit(VoiceState::Error(error.clone()));
+        return Err(error);
     }
     if *engine.muted.lock().unwrap() {
-        return Err("Voice is muted".to_string());
+        let error = "Voice is muted".to_string();
+        engine.set_state_and_emit(VoiceState::Error(error.clone()));
+        return Err(error);
     }
-    engine.set_state(VoiceState::Listening);
-    engine.capture.lock().map_err(|e| e.to_string())?.start_recording()?;
+    engine.set_state_and_emit(VoiceState::Listening);
+    engine.audio_router.lock().map_err(|e| e.to_string())?.start_ptt();
     Ok("Listening...".to_string())
 }
 
@@ -22,27 +26,26 @@ pub async fn stop_listening(
     engine: State<'_, Arc<VoiceEngine>>,
     router: State<'_, AiRouter>,
     db: State<'_, Arc<Database>>,
+    google_auth: State<'_, Arc<crate::auth::google::GoogleAuth>>,
 ) -> Result<String, String> {
-    let samples = engine.capture.lock().map_err(|e| e.to_string())?.stop_recording();
+    let samples = engine.audio_router.lock().map_err(|e| e.to_string())?.stop_ptt();
     if samples.is_empty() {
-        engine.set_state(VoiceState::Idle);
+        engine.set_state_and_emit(VoiceState::Idle);
         return Ok(String::new());
     }
 
-    engine.set_state(VoiceState::Processing);
+    engine.set_state_and_emit(VoiceState::Processing);
 
-    // Transcribe — clone the transcriber out of the mutex to avoid holding it across await
-    let transcriber_clone = {
-        let guard = engine.transcriber.lock().map_err(|e| e.to_string())?;
-        guard.clone()
-    };
-    let text = match transcriber_clone {
-        Some(t) => t.transcribe(&samples).await?,
-        None => return Err("STT not available".to_string()),
+    let text = match engine.transcribe_command(&samples).await {
+        Ok(text) => text,
+        Err(e) => {
+            engine.set_state_and_emit(VoiceState::Error(e.clone()));
+            return Err(e);
+        }
     };
 
     if text.is_empty() {
-        engine.set_state(VoiceState::Idle);
+        engine.set_state_and_emit(VoiceState::Idle);
         return Ok(String::new());
     }
 
@@ -67,7 +70,13 @@ pub async fn stop_listening(
         msgs
     };
 
-    let response = router.send(messages).await?;
+    let response = match router.send(messages, &db, &google_auth).await {
+        Ok(response) => response,
+        Err(e) => {
+            engine.set_state_and_emit(VoiceState::Error(e.clone()));
+            return Err(e);
+        }
+    };
 
     // Save assistant response
     {
@@ -76,16 +85,18 @@ pub async fn stop_listening(
             .map_err(|e| e.to_string())?;
     }
 
-    // Speak response — clone TTS to avoid holding mutex across await
-    engine.set_state(VoiceState::Speaking);
+    // Speak response — mute capture during TTS to prevent audio feedback
+    engine.set_state_and_emit(VoiceState::Speaking);
+    engine.audio_router.lock().map_err(|e| e.to_string())?.mute();
     {
         let tts = engine.tts.lock().map_err(|e| e.to_string())?.clone();
         if let Err(e) = tts.speak(&response).await {
             log::warn!("TTS failed: {}", e);
         }
     }
+    engine.audio_router.lock().map_err(|e| e.to_string())?.unmute();
 
-    engine.set_state(VoiceState::Idle);
+    engine.set_state_and_emit(VoiceState::Idle);
     Ok(response)
 }
 
@@ -115,13 +126,27 @@ pub fn get_voice_settings(db: State<Arc<Database>>) -> Result<VoiceSettings, Str
 }
 
 #[tauri::command]
-pub fn set_voice_setting(db: State<Arc<Database>>, key: String, value: String) -> Result<(), String> {
+pub fn set_voice_setting(
+    db: State<Arc<Database>>,
+    engine: State<Arc<VoiceEngine>>,
+    key: String,
+    value: String,
+) -> Result<(), String> {
     let conn = db.conn.lock().map_err(|e| e.to_string())?;
     conn.execute(
         "INSERT INTO user_preferences (key, value, updated_at) VALUES (?1, ?2, datetime('now'))
          ON CONFLICT(key) DO UPDATE SET value = ?2, updated_at = datetime('now')",
         rusqlite::params![key, value],
     ).map_err(|e| e.to_string())?;
+    drop(conn);
+
+    // Sync in-memory TTS with the new setting
+    match key.as_str() {
+        "tts_voice" => engine.tts.lock().map_err(|e| e.to_string())?.set_voice(value),
+        "tts_rate" => engine.tts.lock().map_err(|e| e.to_string())?.set_rate(value.parse().unwrap_or(200)),
+        "tts_enabled" => engine.tts.lock().map_err(|e| e.to_string())?.set_enabled(value == "true"),
+        _ => {}
+    }
     Ok(())
 }
 

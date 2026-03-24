@@ -14,12 +14,13 @@ pub struct BriefingResult {
 pub async fn generate_briefing(
     db: &Arc<Database>,
     router: &AiRouter,
+    google_auth: &Arc<crate::auth::google::GoogleAuth>,
 ) -> Result<BriefingResult, String> {
     let context = DayContext::gather(db)?;
     let prompt = context.to_prompt();
 
     let messages = vec![("user".to_string(), prompt)];
-    let briefing_text = router.send(messages).await?;
+    let briefing_text = router.send(messages, db, google_auth).await?;
 
     Ok(BriefingResult {
         greeting: context.greeting,

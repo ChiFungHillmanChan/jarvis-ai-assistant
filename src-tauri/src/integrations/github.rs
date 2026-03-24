@@ -36,6 +36,30 @@ struct User {
     login: String,
 }
 
+fn extract_owner_repo(repo_url: Option<&str>) -> String {
+    repo_url
+        .and_then(|u| {
+            let parts: Vec<&str> = u.rsplitn(3, '/').collect();
+            if parts.len() >= 2 { Some(format!("{}/{}", parts[1], parts[0])) } else { None }
+        })
+        .unwrap_or_else(|| "unknown".to_string())
+}
+
+fn issue_to_item(issue: IssueOrPR, item_type: &str, state_override: Option<&str>) -> GitHubItem {
+    GitHubItem {
+        github_id: issue.id,
+        item_type: item_type.to_string(),
+        title: issue.title,
+        repo: extract_owner_repo(issue.repository_url.as_deref()),
+        number: Some(issue.number),
+        state: state_override.map(String::from).unwrap_or(issue.state),
+        url: Some(issue.html_url),
+        author: issue.user.map(|u| u.login),
+        updated_at: issue.updated_at,
+        ci_status: None,
+    }
+}
+
 pub async fn fetch_assigned_items(token: &str) -> Result<Vec<GitHubItem>, String> {
     let client = Client::new();
     let mut items = Vec::new();
@@ -60,27 +84,8 @@ pub async fn fetch_assigned_items(token: &str) -> Result<Vec<GitHubItem>, String
     let issues: Vec<IssueOrPR> = resp.json().await.map_err(|e| e.to_string())?;
 
     for issue in issues {
-        let repo = issue.repository_url.as_deref()
-            .and_then(|u| {
-                let parts: Vec<&str> = u.rsplitn(3, '/').collect();
-                if parts.len() >= 2 { Some(format!("{}/{}", parts[1], parts[0])) } else { None }
-            })
-            .unwrap_or_else(|| "unknown".to_string());
-
         let item_type = if issue.pull_request.is_some() { "pr" } else { "issue" };
-
-        items.push(GitHubItem {
-            github_id: issue.id,
-            item_type: item_type.to_string(),
-            title: issue.title,
-            repo,
-            number: Some(issue.number),
-            state: issue.state,
-            url: Some(issue.html_url),
-            author: issue.user.map(|u| u.login),
-            updated_at: issue.updated_at,
-            ci_status: None,
-        });
+        items.push(issue_to_item(issue, item_type, None));
     }
 
     // Fetch PRs for review
@@ -96,28 +101,8 @@ pub async fn fetch_assigned_items(token: &str) -> Result<Vec<GitHubItem>, String
     if resp.status().is_success() {
         let search: SearchResponse = resp.json().await.map_err(|e| e.to_string())?;
         for pr in search.items {
-            let repo = pr.repository_url.as_deref()
-                .and_then(|u| {
-                    let parts: Vec<&str> = u.rsplitn(3, '/').collect();
-                    if parts.len() >= 2 { Some(format!("{}/{}", parts[1], parts[0])) } else { None }
-                })
-                .unwrap_or_else(|| "unknown".to_string());
-
-            // Skip if already in items
             if items.iter().any(|i| i.github_id == pr.id) { continue; }
-
-            items.push(GitHubItem {
-                github_id: pr.id,
-                item_type: "pr_review".to_string(),
-                title: pr.title,
-                repo,
-                number: Some(pr.number),
-                state: "review_requested".to_string(),
-                url: Some(pr.html_url),
-                author: pr.user.map(|u| u.login),
-                updated_at: pr.updated_at,
-                ci_status: None,
-            });
+            items.push(issue_to_item(pr, "pr_review", Some("review_requested")));
         }
     }
 
@@ -129,15 +114,46 @@ struct SearchResponse {
     items: Vec<IssueOrPR>,
 }
 
+pub async fn fetch_items_filtered(
+    token: &str,
+    item_type: &str,
+    repo: Option<&str>,
+) -> Result<Vec<GitHubItem>, String> {
+    let all_items = fetch_assigned_items(token).await?;
+
+    let filtered: Vec<GitHubItem> = all_items
+        .into_iter()
+        .filter(|item| {
+            let type_match = match item_type {
+                "prs" => item.item_type == "pr" || item.item_type == "pr_review",
+                "issues" => item.item_type == "issue",
+                _ => true,
+            };
+            let repo_match = match repo {
+                Some(r) => item.repo == r,
+                None => true,
+            };
+            type_match && repo_match
+        })
+        .collect();
+
+    Ok(filtered)
+}
+
 pub async fn create_issue(
     token: &str,
     owner: &str,
     repo: &str,
     title: &str,
     body: Option<&str>,
+    labels: Option<&str>,
 ) -> Result<String, String> {
     let client = Client::new();
-    let payload = serde_json::json!({ "title": title, "body": body });
+    let mut payload = serde_json::json!({ "title": title, "body": body });
+    if let Some(labels_str) = labels {
+        let label_vec: Vec<&str> = labels_str.split(',').map(|s| s.trim()).collect();
+        payload["labels"] = serde_json::json!(label_vec);
+    }
 
     let resp = client
         .post(&format!("{}/repos/{}/{}/issues", GITHUB_API, owner, repo))

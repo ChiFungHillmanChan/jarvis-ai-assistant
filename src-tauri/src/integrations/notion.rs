@@ -133,6 +133,95 @@ pub fn save_to_db(db: &crate::db::Database, pages: &[NotionPage]) -> Result<(), 
     Ok(())
 }
 
+pub async fn get_page_content(api_key: &str, page_id: &str) -> Result<String, String> {
+    let client = Client::new();
+
+    let resp = client
+        .get(&format!("{}/blocks/{}/children?page_size=100", NOTION_API, page_id))
+        .header("Authorization", format!("Bearer {}", api_key))
+        .header("Notion-Version", NOTION_VERSION)
+        .send()
+        .await
+        .map_err(|e| format!("Notion blocks error: {}", e))?;
+
+    if resp.status() == 401 {
+        return Err("UNAUTHORIZED: Invalid Notion API key".to_string());
+    }
+    if !resp.status().is_success() {
+        let s = resp.status();
+        let t = resp.text().await.unwrap_or_default();
+        return Err(format!("Notion API error {}: {}", s, t));
+    }
+
+    let body: serde_json::Value = resp.json().await.map_err(|e| e.to_string())?;
+    let results = body["results"].as_array().unwrap_or(&Vec::new()).clone();
+
+    let mut output = String::new();
+    for block in &results {
+        let block_type = block["type"].as_str().unwrap_or("");
+        match block_type {
+            "paragraph" => {
+                let text = extract_rich_text(&block["paragraph"]["rich_text"]);
+                output.push_str(&text);
+                output.push('\n');
+            }
+            "heading_1" => {
+                let text = extract_rich_text(&block["heading_1"]["rich_text"]);
+                output.push_str(&format!("# {}\n", text));
+            }
+            "heading_2" => {
+                let text = extract_rich_text(&block["heading_2"]["rich_text"]);
+                output.push_str(&format!("## {}\n", text));
+            }
+            "heading_3" => {
+                let text = extract_rich_text(&block["heading_3"]["rich_text"]);
+                output.push_str(&format!("### {}\n", text));
+            }
+            "bulleted_list_item" => {
+                let text = extract_rich_text(&block["bulleted_list_item"]["rich_text"]);
+                output.push_str(&format!("- {}\n", text));
+            }
+            "numbered_list_item" => {
+                let text = extract_rich_text(&block["numbered_list_item"]["rich_text"]);
+                output.push_str(&format!("1. {}\n", text));
+            }
+            "to_do" => {
+                let text = extract_rich_text(&block["to_do"]["rich_text"]);
+                let checked = block["to_do"]["checked"].as_bool().unwrap_or(false);
+                if checked {
+                    output.push_str(&format!("- [x] {}\n", text));
+                } else {
+                    output.push_str(&format!("- [ ] {}\n", text));
+                }
+            }
+            "code" => {
+                let text = extract_rich_text(&block["code"]["rich_text"]);
+                let lang = block["code"]["language"].as_str().unwrap_or("");
+                output.push_str(&format!("```{}\n{}\n```\n", lang, text));
+            }
+            "divider" => {
+                output.push_str("---\n");
+            }
+            _ => {
+                // Skip unknown block types
+            }
+        }
+    }
+
+    Ok(output)
+}
+
+fn extract_rich_text(rich_text: &serde_json::Value) -> String {
+    match rich_text.as_array() {
+        Some(arr) => arr
+            .iter()
+            .filter_map(|item| item["plain_text"].as_str())
+            .collect::<Vec<&str>>()
+            .join(""),
+        None => String::new(),
+    }
+}
+
 fn extract_title(properties: &Option<serde_json::Value>) -> Option<String> {
     let props = properties.as_ref()?;
     // Try "title" property first (standard for pages)

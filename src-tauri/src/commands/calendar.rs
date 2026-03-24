@@ -35,7 +35,7 @@ pub async fn sync_calendar(db: State<'_, Arc<Database>>, auth: State<'_, Arc<Goo
 #[tauri::command]
 pub async fn create_event(auth: State<'_, Arc<GoogleAuth>>, summary: String, start: String, end: String, description: Option<String>) -> Result<String, String> {
     let token = auth.get_access_token().ok_or("Not authenticated with Google")?;
-    cal::create_event(&token, &summary, &start, &end, description.as_deref()).await
+    cal::create_event(&token, &summary, &start, &end, description.as_deref(), None, None).await
 }
 
 #[tauri::command]

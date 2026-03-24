@@ -61,14 +61,92 @@ pub async fn fetch_events(access_token: &str, time_min: &str, time_max: &str) ->
     }).collect())
 }
 
-pub async fn create_event(access_token: &str, summary: &str, start: &str, end: &str, description: Option<&str>) -> Result<String, String> {
+pub async fn create_event(
+    access_token: &str,
+    summary: &str,
+    start: &str,
+    end: &str,
+    description: Option<&str>,
+    location: Option<&str>,
+    attendees: Option<&str>,
+) -> Result<String, String> {
     let client = Client::new();
     let url = format!("{}/calendars/primary/events", CALENDAR_API);
-    let body = serde_json::json!({ "summary": summary, "description": description, "start": { "dateTime": start }, "end": { "dateTime": end } });
+    let mut body = serde_json::json!({
+        "summary": summary,
+        "start": { "dateTime": start },
+        "end": { "dateTime": end },
+    });
+    if let Some(desc) = description {
+        body["description"] = serde_json::Value::String(desc.to_string());
+    }
+    if let Some(loc) = location {
+        body["location"] = serde_json::Value::String(loc.to_string());
+    }
+    if let Some(att) = attendees {
+        let emails: Vec<serde_json::Value> = att
+            .split(',')
+            .map(|e| serde_json::json!({ "email": e.trim() }))
+            .collect();
+        body["attendees"] = serde_json::Value::Array(emails);
+    }
     let resp = client.post(&url).bearer_auth(access_token).json(&body).send().await.map_err(|e| format!("Create event error: {}", e))?;
+    if resp.status() == 401 { return Err("UNAUTHORIZED".to_string()); }
     if !resp.status().is_success() { let s = resp.status(); let t = resp.text().await.unwrap_or_default(); return Err(format!("Create event failed {}: {}", s, t)); }
     let created: serde_json::Value = resp.json().await.map_err(|e| e.to_string())?;
-    Ok(created["id"].as_str().unwrap_or("").to_string())
+    let id = created["id"].as_str().unwrap_or("");
+    let link = created["htmlLink"].as_str().unwrap_or("");
+    Ok(format!("{} | {}", id, link))
+}
+
+pub async fn update_event(
+    access_token: &str,
+    event_id: &str,
+    title: Option<&str>,
+    start: Option<&str>,
+    end: Option<&str>,
+    location: Option<&str>,
+    description: Option<&str>,
+) -> Result<String, String> {
+    let client = Client::new();
+    let url = format!("{}/calendars/primary/events/{}", CALENDAR_API, event_id);
+    let mut body = serde_json::json!({});
+    if let Some(t) = title {
+        body["summary"] = serde_json::Value::String(t.to_string());
+    }
+    if let Some(s) = start {
+        body["start"] = serde_json::json!({ "dateTime": s });
+    }
+    if let Some(e) = end {
+        body["end"] = serde_json::json!({ "dateTime": e });
+    }
+    if let Some(loc) = location {
+        body["location"] = serde_json::Value::String(loc.to_string());
+    }
+    if let Some(desc) = description {
+        body["description"] = serde_json::Value::String(desc.to_string());
+    }
+    let resp = client.patch(&url).bearer_auth(access_token).json(&body).send().await.map_err(|e| format!("Update event error: {}", e))?;
+    if resp.status() == 401 { return Err("UNAUTHORIZED".to_string()); }
+    if !resp.status().is_success() { let s = resp.status(); let t = resp.text().await.unwrap_or_default(); return Err(format!("Update event failed {}: {}", s, t)); }
+    let updated: serde_json::Value = resp.json().await.map_err(|e| e.to_string())?;
+    let id = updated["id"].as_str().unwrap_or("");
+    let link = updated["htmlLink"].as_str().unwrap_or("");
+    Ok(format!("{} | {}", id, link))
+}
+
+pub async fn delete_event(access_token: &str, event_id: &str) -> Result<String, String> {
+    let client = Client::new();
+    let url = format!("{}/calendars/primary/events/{}", CALENDAR_API, event_id);
+    let resp = client.delete(&url).bearer_auth(access_token).send().await.map_err(|e| format!("Delete event error: {}", e))?;
+    if resp.status() == 401 { return Err("UNAUTHORIZED".to_string()); }
+    if resp.status() == 204 || resp.status().is_success() {
+        Ok(format!("Event {} deleted successfully.", event_id))
+    } else {
+        let s = resp.status();
+        let t = resp.text().await.unwrap_or_default();
+        Err(format!("Delete event failed {}: {}", s, t))
+    }
 }
 
 pub fn save_to_db(db: &crate::db::Database, events: &[CalendarEvent]) -> Result<(), String> {
