@@ -15,6 +15,7 @@ import VoiceIndicator from "./components/VoiceIndicator";
 import { useVoiceState } from "./hooks/useVoiceState";
 import ToastContainer from "./components/Toast";
 import WindowControls from "./components/WindowControls";
+import JarvisScene from "./components/3d/JarvisScene";
 
 export default function App() {
   const [activeView, setActiveView] = useState("home");
@@ -49,6 +50,9 @@ export default function App() {
 
   return (
     <div style={styles.root}>
+      {/* 3D atom field background */}
+      <JarvisScene />
+
       <div className="drag-region" style={styles.titleBar} onMouseDown={(e) => { if ((e.target as HTMLElement).closest('.no-drag')) return; getCurrentWindow().startDragging(); }}>
         <span style={styles.titleText}>JARVIS</span>
         <WindowControls />
@@ -68,9 +72,9 @@ export default function App() {
 }
 
 const styles: Record<string, React.CSSProperties> = {
-  root: { height: "100vh", display: "flex", flexDirection: "column", overflow: "hidden" },
-  titleBar: { height: 36, flexShrink: 0, display: "flex", justifyContent: "space-between", alignItems: "center", padding: "0 12px" },
-  titleText: { color: "rgba(0, 180, 255, 0.3)", fontFamily: "var(--font-mono)", fontSize: 10, letterSpacing: 2 },
+  root: { height: "100vh", display: "flex", flexDirection: "column", overflow: "hidden", position: "relative" as const, zIndex: 1 },
+  titleBar: { height: 36, flexShrink: 0, display: "flex", justifyContent: "space-between", alignItems: "center", padding: "0 12px", background: "rgba(10, 14, 26, 0.5)", backdropFilter: "blur(8px)", borderBottom: "1px solid rgba(0, 180, 255, 0.08)" },
+  titleText: { color: "rgba(0, 180, 255, 0.4)", fontFamily: "var(--font-mono)", fontSize: 10, letterSpacing: 3 },
   layout: { flex: 1, display: "flex", overflow: "hidden" },
   content: { flex: 1, display: "flex", flexDirection: "column", overflow: "hidden" },
   mainArea: { flex: 1, overflow: "hidden" },

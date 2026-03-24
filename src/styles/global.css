@@ -79,17 +79,7 @@ body {
    Subtle 24px cyan grid lines rendered via body::before
    ============================================================ */
 
-body::before {
-  content: '';
-  position: fixed;
-  inset: 0;
-  pointer-events: none;
-  z-index: 0;
-  background-image:
-    linear-gradient(rgba(0, 180, 255, 0.04) 1px, transparent 1px),
-    linear-gradient(90deg, rgba(0, 180, 255, 0.04) 1px, transparent 1px);
-  background-size: 24px 24px;
-}
+/* Grid overlay removed -- 3D particle field is the background now */
 
 /* Ensure app content sits above the grid overlay */
 #root {
@@ -128,18 +118,21 @@ body::before {
    Utility classes
    ============================================================ */
 
-/* Translucent panel with cyan border */
+/* Glassmorphism panel -- floats over 3D background */
 .panel {
-  background: var(--bg-panel);
+  background: rgba(10, 14, 26, 0.75);
+  backdrop-filter: blur(12px);
+  -webkit-backdrop-filter: blur(12px);
   border: 1px solid var(--border-primary);
   border-radius: var(--radius-md);
   padding: 16px;
-  transition: background 0.2s ease, border-color 0.2s ease;
+  transition: background 0.2s ease, border-color 0.2s ease, box-shadow 0.2s ease;
 }
 
 .panel:hover {
-  background: var(--bg-panel-hover);
+  background: rgba(10, 14, 26, 0.85);
   border-color: var(--border-glow);
+  box-shadow: 0 0 20px rgba(0, 180, 255, 0.05), inset 0 0 20px rgba(0, 180, 255, 0.02);
 }
 
 /* Small uppercase monospace label */

@@ -35,7 +35,7 @@ export default function Sidebar({ activeView, onNavigate, onChatToggle }: Sideba
 }
 
 const styles: Record<string, React.CSSProperties> = {
-  container: { width: 56, height: "100%", display: "flex", flexDirection: "column", alignItems: "center", padding: "12px 0", borderRight: "1px solid rgba(0, 180, 255, 0.12)", background: "rgba(0, 180, 255, 0.02)", gap: 4 },
+  container: { width: 56, height: "100%", display: "flex", flexDirection: "column", alignItems: "center", padding: "12px 0", borderRight: "1px solid rgba(0, 180, 255, 0.1)", background: "rgba(10, 14, 26, 0.6)", backdropFilter: "blur(12px)", gap: 4 },
   logo: { width: 32, height: 32, border: "1px solid rgba(0, 180, 255, 0.4)", borderRadius: 8, display: "flex", alignItems: "center", justifyContent: "center", marginBottom: 16 },
   logoText: { color: "rgba(0, 180, 255, 0.9)", fontFamily: "var(--font-mono)", fontSize: 14, fontWeight: 500 },
   nav: { display: "flex", flexDirection: "column", gap: 4, flex: 1 },
