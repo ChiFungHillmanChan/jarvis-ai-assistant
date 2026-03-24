@@ -117,3 +117,10 @@ export interface EmailRule {
   archive_count: number;
   rule_status: string;
 }
+
+export interface BriefingResult {
+  greeting: string;
+  briefing: string;
+  has_overdue: boolean;
+  task_count: number;
+}

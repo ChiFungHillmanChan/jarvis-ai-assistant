@@ -1,5 +1,5 @@
 import { invoke } from "@tauri-apps/api/core";
-import type { Task, ChatMessage, DashboardData, Settings, EmailSummary, EmailStats, CalendarEventView, CronJobView, CronRunView, NotionPageView, GitHubItemView, GitHubStats, VoiceState, VoiceSettings, EmailRule } from "./types";
+import type { Task, ChatMessage, DashboardData, Settings, EmailSummary, EmailStats, CalendarEventView, CronJobView, CronRunView, NotionPageView, GitHubItemView, GitHubStats, VoiceState, VoiceSettings, EmailRule, BriefingResult } from "./types";
 
 export async function getTasks(): Promise<Task[]> {
   return invoke("get_tasks");
@@ -77,3 +77,8 @@ export async function getActiveRules(): Promise<EmailRule[]> { return invoke("ge
 export async function createCustomCron(description: string): Promise<CronJobView> { return invoke("create_custom_cron", { description }); }
 export async function deleteCronJob(jobId: number): Promise<void> { return invoke("delete_cron_job", { job_id: jobId }); }
 export async function toggleCronJob(jobId: number): Promise<string> { return invoke("toggle_cron_job", { job_id: jobId }); }
+
+// Assistant
+export async function getBriefing(): Promise<BriefingResult> { return invoke("get_briefing"); }
+export async function speakBriefing(): Promise<BriefingResult> { return invoke("speak_briefing"); }
+export async function askJarvis(question: string): Promise<string> { return invoke("ask_jarvis", { question }); }

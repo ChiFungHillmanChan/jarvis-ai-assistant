@@ -2,6 +2,8 @@ import GreetingHeader from "../components/GreetingHeader";
 import Timeline from "../components/Timeline";
 import StatsPanel from "../components/StatsPanel";
 import EmailRuleSuggestion from "../components/EmailRuleSuggestion";
+import Briefing from "../components/Briefing";
+import NotificationBanner from "../components/NotificationBanner";
 import type { DashboardData } from "../lib/types";
 import { useTauriCommand } from "../hooks/useTauriCommand";
 
@@ -20,7 +22,9 @@ export default function Dashboard() {
   return (
     <div style={styles.container}>
       <div style={styles.main}>
+        <Briefing />
         <GreetingHeader greeting={data.greeting} taskCount={data.task_count} />
+        <NotificationBanner />
         <EmailRuleSuggestion />
         <Timeline tasks={data.pending_tasks} />
       </div>
