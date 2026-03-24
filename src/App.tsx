@@ -50,30 +50,34 @@ export default function App() {
 
   return (
     <div style={styles.root}>
-      {/* 3D atom field background */}
+      {/* 3D atom field background -- renders behind UI */}
       <JarvisScene />
 
-      <div className="drag-region" style={styles.titleBar} onMouseDown={(e) => { if ((e.target as HTMLElement).closest('.no-drag')) return; getCurrentWindow().startDragging(); }}>
-        <span style={styles.titleText}>JARVIS</span>
-        <WindowControls />
-      </div>
-      <div style={styles.layout}>
+      {/* UI layer -- floats above 3D */}
+      <div style={styles.uiLayer}>
+        <div className="drag-region" style={styles.titleBar} onMouseDown={(e) => { if ((e.target as HTMLElement).closest('.no-drag')) return; getCurrentWindow().startDragging(); }}>
+          <span style={styles.titleText}>JARVIS</span>
+          <WindowControls />
+        </div>
+        <div style={styles.layout}>
         <Sidebar activeView={activeView} onNavigate={setActiveView} onChatToggle={toggleChat} />
         <div style={styles.content}>
           <div style={styles.mainArea}>{renderView()}</div>
           <CommandBar onActivate={toggleChat} />
         </div>
       </div>
-      <ChatPanel isOpen={chatOpen} isFullScreen={chatFullScreen} onClose={closeChat} onToggleFullScreen={() => setChatFullScreen((prev) => !prev)} />
-      <VoiceIndicator state={voiceState} onStop={stopVoice} />
-      <ToastContainer />
+        <ChatPanel isOpen={chatOpen} isFullScreen={chatFullScreen} onClose={closeChat} onToggleFullScreen={() => setChatFullScreen((prev) => !prev)} />
+        <VoiceIndicator state={voiceState} onStop={stopVoice} />
+        <ToastContainer />
+      </div>
     </div>
   );
 }
 
 const styles: Record<string, React.CSSProperties> = {
-  root: { height: "100vh", display: "flex", flexDirection: "column", overflow: "hidden", position: "relative" as const, zIndex: 1 },
-  titleBar: { height: 36, flexShrink: 0, display: "flex", justifyContent: "space-between", alignItems: "center", padding: "0 12px", background: "rgba(10, 14, 26, 0.5)", backdropFilter: "blur(8px)", borderBottom: "1px solid rgba(0, 180, 255, 0.08)" },
+  root: { height: "100vh", overflow: "hidden", position: "relative" as const },
+  uiLayer: { position: "absolute" as const, top: 0, left: 0, right: 0, bottom: 0, zIndex: 2, display: "flex", flexDirection: "column" as const, overflow: "hidden" },
+  titleBar: { height: 36, flexShrink: 0, display: "flex", justifyContent: "space-between", alignItems: "center", padding: "0 12px", background: "rgba(10, 14, 26, 0.4)", backdropFilter: "blur(12px)", borderBottom: "1px solid rgba(0, 180, 255, 0.08)" },
   titleText: { color: "rgba(0, 180, 255, 0.4)", fontFamily: "var(--font-mono)", fontSize: 10, letterSpacing: 3 },
   layout: { flex: 1, display: "flex", overflow: "hidden" },
   content: { flex: 1, display: "flex", flexDirection: "column", overflow: "hidden" },
