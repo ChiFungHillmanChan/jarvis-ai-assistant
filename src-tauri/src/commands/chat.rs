@@ -200,6 +200,14 @@ pub async fn send_message(
 }
 
 #[tauri::command]
+pub fn clear_conversations(db: State<Arc<Database>>) -> Result<(), String> {
+    let conn = db.conn.lock().map_err(|e| e.to_string())?;
+    conn.execute("DELETE FROM conversations", []).map_err(|e| e.to_string())?;
+    log::info!("Conversations cleared");
+    Ok(())
+}
+
+#[tauri::command]
 pub fn get_conversations(db: State<Arc<Database>>) -> Result<Vec<ChatMessage>, String> {
     let conn = db.conn.lock().map_err(|e| e.to_string())?;
     let mut stmt = conn.prepare("SELECT id, role, content, created_at FROM conversations ORDER BY id ASC")

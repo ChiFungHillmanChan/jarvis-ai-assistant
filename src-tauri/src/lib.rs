@@ -139,6 +139,7 @@ pub fn run() {
             commands::settings::update_setting,
             commands::chat::send_message,
             commands::chat::get_conversations,
+            commands::chat::clear_conversations,
             commands::dashboard::get_dashboard_data,
             commands::email::get_emails,
             commands::email::sync_emails,

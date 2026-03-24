@@ -1,6 +1,7 @@
-import { useState, useEffect } from "react";
+import { useState, useEffect, useCallback } from "react";
 import type { ChatMessage } from "../lib/types";
 import { sendMessage, getConversations } from "../lib/commands";
+import { invoke } from "@tauri-apps/api/core";
 
 export function useChat() {
   const [messages, setMessages] = useState<ChatMessage[]>([]);
@@ -24,5 +25,16 @@ export function useChat() {
       setLoading(false);
     }
   }
-  return { messages, loading, error, send };
+
+  const clearChat = useCallback(async () => {
+    try {
+      await invoke("clear_conversations");
+      setMessages([]);
+      setError(null);
+    } catch (e) {
+      console.error("Failed to clear chat:", e);
+    }
+  }, []);
+
+  return { messages, loading, error, send, clearChat };
 }
