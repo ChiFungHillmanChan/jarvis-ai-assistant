@@ -358,9 +358,9 @@ export default memo(function JarvisScene({ activityLevel = "idle", ttsAmplitudeR
     window.addEventListener("wheel", onWheel, { passive: false });
     window.addEventListener("dblclick", onDblClick);
 
-    // Frame rate throttle: ~10fps when idle, 60fps when active/interacting
+    // Frame rate throttle: ~30fps when idle (smooth rotation), 60fps when active
     let lastFrameTime = 0;
-    const IDLE_FRAME_MS = 100;  // 10fps when idle
+    const IDLE_FRAME_MS = 33;   // 30fps when idle -- smooth enough for auto-rotation
     const ACTIVE_FRAME_MS = 16; // 60fps when active
 
     function animate(timestamp?: number) {
