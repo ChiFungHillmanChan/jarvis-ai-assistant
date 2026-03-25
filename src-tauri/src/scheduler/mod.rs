@@ -13,6 +13,15 @@ impl Scheduler {
     pub async fn new(db: Arc<Database>, google_auth: Arc<GoogleAuth>) -> Result<Self, String> {
         let scheduler = JobScheduler::new().await.map_err(|e| format!("Failed to create scheduler: {}", e))?;
 
+        // Reduce proactive check from every 1 min to every 5 min to lower DB contention
+        {
+            let conn = db.conn.lock().map_err(|e| e.to_string())?;
+            let _ = conn.execute(
+                "UPDATE cron_jobs SET schedule = '0 */5 * * * *' WHERE action_type = 'proactive_check' AND schedule = '0 */1 * * * *'",
+                [],
+            );
+        }
+
         let job_rows: Vec<(i64, String, String, String, Option<String>)> = {
             let conn = db.conn.lock().map_err(|e| e.to_string())?;
             let mut stmt = conn.prepare("SELECT id, name, schedule, action_type, parameters FROM cron_jobs WHERE status = 'active'").map_err(|e| e.to_string())?;

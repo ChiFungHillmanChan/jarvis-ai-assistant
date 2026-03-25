@@ -5,6 +5,7 @@ use serde_json::json;
 use std::collections::HashMap;
 use super::tools;
 use tauri::Emitter;
+use crate::voice::tts::TtsCommand;
 
 #[derive(Serialize)]
 struct OpenAIRequest {
@@ -78,6 +79,7 @@ pub async fn send(
     db: &crate::db::Database,
     google_auth: &std::sync::Arc<crate::auth::google::GoogleAuth>,
     app_handle: &tauri::AppHandle,
+    tts_tx: Option<tokio::sync::mpsc::Sender<TtsCommand>>,
 ) -> Result<String, Box<dyn std::error::Error + Send + Sync>> {
     let client = Client::builder()
         .read_timeout(std::time::Duration::from_secs(60))
@@ -160,6 +162,9 @@ pub async fn send(
                         if let Some(ref content) = delta.content {
                             text_parts.push(content.clone());
                             let _ = app_handle.emit("chat-token", json!({"token": content, "done": false}));
+                            if let Some(ref tx) = tts_tx {
+                                let _ = tx.try_send(TtsCommand::TextChunk(content.clone()));
+                            }
                         }
 
                         // Tool calls
@@ -216,12 +221,34 @@ pub async fn send(
                 tool_call_id: None,
             });
 
-            // Execute each tool and push results
+            // Execute each tool -- deduplicate same-name calls (e.g. 4x open_url → run only the first)
+            let mut executed_tools: std::collections::HashSet<String> = std::collections::HashSet::new();
+            let mut narrated = false;
             for tc in &tool_calls_vec {
+                let is_duplicate = executed_tools.contains(&tc.function.name);
+                if is_duplicate {
+                    log::info!("JARVIS skipping duplicate tool call: {}", tc.function.name);
+                    openai_messages.push(OpenAIMessage {
+                        role: "tool".into(),
+                        content: Some("Skipped: already executed this tool in this batch.".to_string()),
+                        tool_calls: None,
+                        tool_call_id: Some(tc.id.clone()),
+                    });
+                    continue;
+                }
+                executed_tools.insert(tc.function.name.clone());
                 log::info!("JARVIS tool call: {}({})", tc.function.name, tc.function.arguments);
                 let _ = app_handle.emit("chat-tool-call", json!({"tool_name": tc.function.name}));
                 let label = tools::tool_status_label(&tc.function.name);
                 let _ = app_handle.emit("chat-status", json!({"status": format!("Running: {}", label)}));
+                if !narrated {
+                    if let Some(ref tx) = tts_tx {
+                        // Always narrate -- this also flushes any buffered AI text
+                        let narration = tools::tool_voice_narration(&tc.function.name);
+                        let _ = tx.try_send(TtsCommand::Narrate(narration.to_string()));
+                        narrated = true;
+                    }
+                }
                 let result = tools::execute_tool(&tc.function.name, &tc.function.arguments, db, google_auth).await;
                 log::info!("JARVIS tool result: {}", &result[..result.len().min(200)]);
                 openai_messages.push(OpenAIMessage {

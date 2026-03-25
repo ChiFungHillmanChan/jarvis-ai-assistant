@@ -5,6 +5,7 @@ use serde_json::json;
 use std::collections::HashMap;
 use super::tools;
 use tauri::Emitter;
+use crate::voice::tts::TtsCommand;
 
 #[derive(Serialize)]
 struct ClaudeRequest {
@@ -74,6 +75,7 @@ pub async fn send(
     db: &crate::db::Database,
     google_auth: &std::sync::Arc<crate::auth::google::GoogleAuth>,
     app_handle: &tauri::AppHandle,
+    tts_tx: Option<tokio::sync::mpsc::Sender<TtsCommand>>,
 ) -> Result<String, Box<dyn std::error::Error + Send + Sync>> {
     let client = Client::builder()
         .read_timeout(std::time::Duration::from_secs(60))
@@ -184,6 +186,9 @@ pub async fn send(
                                     if let Some(ref text) = delta.text {
                                         text_parts.push(text.clone());
                                         let _ = app_handle.emit("chat-token", json!({"token": text, "done": false}));
+                                        if let Some(ref tx) = tts_tx {
+                                            let _ = tx.try_send(TtsCommand::TextChunk(text.clone()));
+                                        }
                                     }
                                 }
                                 Some("input_json_delta") => {
@@ -235,14 +240,34 @@ pub async fn send(
                 content: ClaudeContent::Blocks(assistant_blocks),
             });
 
-            // Execute tools and add results
+            // Execute tools -- deduplicate same-name calls (e.g. 4x open_url → run only the first)
             let mut result_blocks = Vec::new();
+            let mut executed_tools: std::collections::HashSet<String> = std::collections::HashSet::new();
+            let mut narrated = false;
             for (id, name, input) in &tool_uses {
+                let is_duplicate = executed_tools.contains(name.as_str());
+                if is_duplicate {
+                    log::info!("JARVIS skipping duplicate tool call: {}", name);
+                    result_blocks.push(ContentBlock::ToolResult {
+                        tool_use_id: id.clone(),
+                        content: "Skipped: already executed this tool in this batch.".to_string(),
+                    });
+                    continue;
+                }
+                executed_tools.insert(name.clone());
                 let args_str = serde_json::to_string(input).unwrap_or_default();
                 log::info!("JARVIS tool call: {}({})", name, args_str);
                 let _ = app_handle.emit("chat-tool-call", json!({"tool_name": name}));
                 let label = tools::tool_status_label(name);
                 let _ = app_handle.emit("chat-status", json!({"status": format!("Running: {}", label)}));
+                if !narrated {
+                    if let Some(ref tx) = tts_tx {
+                        // Always narrate -- this also flushes any buffered AI text
+                        let narration = tools::tool_voice_narration(name);
+                        let _ = tx.try_send(TtsCommand::Narrate(narration.to_string()));
+                        narrated = true;
+                    }
+                }
                 let result = tools::execute_tool(name, &args_str, db, google_auth).await;
                 log::info!("JARVIS tool result: {}", &result[..result.len().min(200)]);
                 result_blocks.push(ContentBlock::ToolResult {

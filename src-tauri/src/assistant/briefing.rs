@@ -21,7 +21,7 @@ pub async fn generate_briefing(
     let prompt = context.to_prompt();
 
     let messages = vec![("user".to_string(), prompt)];
-    let briefing_text = router.send(messages, db, google_auth, app_handle).await?;
+    let briefing_text = router.send(messages, db, google_auth, app_handle, None).await?;
 
     Ok(BriefingResult {
         greeting: context.greeting,

@@ -105,7 +105,7 @@ pub async fn ask_jarvis(
     );
 
     let messages = vec![("user".to_string(), prompt)];
-    router.send(messages, &db, &google_auth, &app_handle).await
+    router.send(messages, &db, &google_auth, &app_handle, None).await
 }
 
 #[tauri::command]
@@ -150,5 +150,5 @@ pub async fn search_conversations(
     );
 
     let messages = vec![("user".to_string(), prompt)];
-    router.send(messages, &db, &google_auth, &app_handle).await
+    router.send(messages, &db, &google_auth, &app_handle, None).await
 }

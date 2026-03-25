@@ -1,8 +1,169 @@
 use tokio::process::Command;
+use tokio::sync::mpsc;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use tauri::Emitter;
 use serde_json::json;
+
+// ---------------------------------------------------------------------------
+// Streaming TTS -- speaks sentences as AI tokens arrive
+// ---------------------------------------------------------------------------
+
+pub enum TtsCommand {
+    /// A text chunk from the AI streaming response -- accumulated into sentences
+    TextChunk(String),
+    /// A narration to speak immediately (e.g. tool status like "Checking calendar...")
+    Narrate(String),
+    /// AI finished -- speak remaining buffer, then stop
+    Done,
+}
+
+/// Streaming TTS consumer that speaks sentences in real-time as tokens arrive.
+pub struct StreamingTts {
+    tx: mpsc::Sender<TtsCommand>,
+    handle: tokio::task::JoinHandle<()>,
+}
+
+impl StreamingTts {
+    pub fn new(tts: TextToSpeech, app_handle: tauri::AppHandle) -> Self {
+        let (tx, rx) = mpsc::channel::<TtsCommand>(200);
+        let handle = tokio::spawn(streaming_tts_consumer(tts, app_handle, rx));
+        StreamingTts { tx, handle }
+    }
+
+    /// Get a clone of the sender for passing into AI providers.
+    pub fn sender(&self) -> mpsc::Sender<TtsCommand> {
+        self.tx.clone()
+    }
+
+    /// Drop the sender and wait for the consumer to finish speaking everything.
+    pub async fn finish(self) {
+        let _ = self.tx.send(TtsCommand::Done).await;
+        drop(self.tx);
+        let _ = self.handle.await;
+    }
+}
+
+async fn streaming_tts_consumer(
+    tts: TextToSpeech,
+    app_handle: tauri::AppHandle,
+    mut rx: mpsc::Receiver<TtsCommand>,
+) {
+    if !tts.enabled {
+        // Drain channel without speaking
+        while rx.recv().await.is_some() {}
+        return;
+    }
+
+    tts.cancel_flag.store(false, Ordering::SeqCst);
+
+    let mut buffer = String::new();
+    let mut sentence_count: usize = 0;
+    let mut prev_was_delimiter = false;
+
+    loop {
+        let cmd = match rx.recv().await {
+            Some(cmd) => cmd,
+            None => break, // channel closed
+        };
+
+        if tts.is_cancelled() {
+            let _ = app_handle.emit("chat-state", json!({"state": "idle"}));
+            // Drain remaining messages
+            while rx.recv().await.is_some() {}
+            return;
+        }
+
+        match cmd {
+            TtsCommand::TextChunk(text) => {
+                for ch in text.chars() {
+                    buffer.push(ch);
+
+                    // Sentence boundary: delimiter followed by space, buffer >= 10 chars
+                    if prev_was_delimiter && ch == ' ' && buffer.len() >= 10 {
+                        let sentence = buffer.trim().to_string();
+                        if !sentence.is_empty() {
+                            if sentence_count == 0 {
+                                let _ = app_handle.emit("chat-state", json!({"state": "speaking"}));
+                            }
+                            let _ = tts.speak_sentence(&sentence, 1, &app_handle).await;
+                            sentence_count += 1;
+                        }
+                        buffer.clear();
+                        prev_was_delimiter = false;
+                        continue;
+                    }
+
+                    prev_was_delimiter = matches!(ch, '.' | '!' | '?' | ':');
+
+                    // Force-split at 150 chars for faster delivery
+                    if buffer.len() >= 150 {
+                        let sentence = if let Some(last_space) = buffer.rfind(' ') {
+                            let (s, remainder) = buffer.split_at(last_space);
+                            let sentence = s.trim().to_string();
+                            buffer = remainder.trim().to_string();
+                            sentence
+                        } else {
+                            let sentence = buffer.trim().to_string();
+                            buffer.clear();
+                            sentence
+                        };
+                        if !sentence.is_empty() {
+                            if sentence_count == 0 {
+                                let _ = app_handle.emit("chat-state", json!({"state": "speaking"}));
+                            }
+                            let _ = tts.speak_sentence(&sentence, 1, &app_handle).await;
+                            sentence_count += 1;
+                        }
+                    }
+                }
+            }
+            TtsCommand::Narrate(text) => {
+                // Flush any buffered text FIRST so it's spoken before the narration
+                let pending = buffer.trim().to_string();
+                if !pending.is_empty() {
+                    if sentence_count == 0 {
+                        let _ = app_handle.emit("chat-state", json!({"state": "speaking"}));
+                    }
+                    let _ = tts.speak_sentence(&pending, 1, &app_handle).await;
+                    sentence_count += 1;
+                    buffer.clear();
+                    prev_was_delimiter = false;
+                }
+                // Then speak the narration (e.g. "Checking calendar...")
+                if !text.is_empty() {
+                    if sentence_count == 0 {
+                        let _ = app_handle.emit("chat-state", json!({"state": "speaking"}));
+                    }
+                    let _ = tts.speak_sentence(&text, 1, &app_handle).await;
+                    sentence_count += 1;
+                }
+            }
+            TtsCommand::Done => {
+                // Speak any remaining buffered text
+                let remaining = buffer.trim().to_string();
+                if !remaining.is_empty() {
+                    if sentence_count == 0 {
+                        let _ = app_handle.emit("chat-state", json!({"state": "speaking"}));
+                    }
+                    let _ = tts.speak_sentence(&remaining, 0, &app_handle).await;
+                }
+                let _ = app_handle.emit("chat-state", json!({"state": "idle"}));
+                return;
+            }
+        }
+    }
+
+    // Channel closed without Done -- speak remaining buffer and clean up
+    let remaining = buffer.trim().to_string();
+    if !remaining.is_empty() {
+        if sentence_count == 0 {
+            let _ = app_handle.emit("chat-state", json!({"state": "speaking"}));
+        }
+        let _ = tts.speak_sentence(&remaining, 0, &app_handle).await;
+    }
+    let _ = app_handle.emit("chat-state", json!({"state": "idle"}));
+}
 
 #[derive(Clone)]
 pub struct TextToSpeech {
@@ -90,13 +251,18 @@ impl TextToSpeech {
         if !self.enabled || sentence.is_empty() || self.cancel_flag.load(Ordering::SeqCst) {
             return Ok(());
         }
+        // Sanitize text for natural speech -- strip markdown and formatting
+        let clean = sanitize_for_speech(sentence);
+        if clean.is_empty() {
+            return Ok(());
+        }
         let _ = app_handle.emit("tts-speaking", json!({
-            "sentence": sentence, "remaining": remaining
+            "sentence": &clean, "remaining": remaining
         }));
         // Amplitude simulation in background
         let cancel = self.cancel_flag.clone();
         let ah = app_handle.clone();
-        let word_count = sentence.split_whitespace().count();
+        let word_count = clean.split_whitespace().count();
         let est_duration_ms = (word_count as u64) * 300;
         let amp_handle = tokio::spawn(async move {
             let start = std::time::Instant::now();
@@ -114,12 +280,12 @@ impl TextToSpeech {
         let status = Command::new("say")
             .arg("-v").arg(&self.voice)
             .arg("-r").arg(self.rate.to_string())
-            .arg(sentence)
+            .arg(&clean)
             .status().await.map_err(|e| format!("TTS error: {}", e))?;
         amp_handle.abort();
         let _ = app_handle.emit("tts-amplitude", json!({"amplitude": 0.0}));
         if !status.success() {
-            log::warn!("TTS sentence failed: {}", &sentence[..sentence.len().min(50)]);
+            log::warn!("TTS sentence failed: {}", &clean[..clean.len().min(50)]);
         }
         let _ = app_handle.emit("tts-sentence-done", json!({"remaining": remaining}));
         Ok(())
@@ -131,6 +297,74 @@ impl TextToSpeech {
         let text = String::from_utf8_lossy(&output.stdout);
         Ok(text.lines().filter_map(|line| line.split_whitespace().next().map(|s| s.to_string())).collect())
     }
+}
+
+/// Strip markdown, URLs, and formatting so macOS `say` reads clean natural speech.
+fn sanitize_for_speech(text: &str) -> String {
+    let mut out = String::with_capacity(text.len());
+    let mut chars = text.chars().peekable();
+
+    while let Some(ch) = chars.next() {
+        match ch {
+            // Strip markdown bold/italic markers: * and _
+            '*' | '_' => continue,
+            // Strip backticks (inline code)
+            '`' => continue,
+            // Strip hash headers: "## Title" → "Title"
+            '#' => {
+                while chars.peek() == Some(&'#') { chars.next(); }
+                if chars.peek() == Some(&' ') { chars.next(); }
+                continue;
+            }
+            // Convert markdown links [text](url) → "text"
+            '[' => {
+                let mut link_text = String::new();
+                for c in chars.by_ref() {
+                    if c == ']' { break; }
+                    link_text.push(c);
+                }
+                // Skip the (url) part if present
+                if chars.peek() == Some(&'(') {
+                    chars.next();
+                    let mut depth = 1;
+                    for c in chars.by_ref() {
+                        if c == '(' { depth += 1; }
+                        if c == ')' { depth -= 1; if depth == 0 { break; } }
+                    }
+                }
+                out.push_str(&link_text);
+                continue;
+            }
+            // Strip bullet-point dashes at start of line: "- item" → "item"
+            '-' if out.is_empty() || out.ends_with('\n') => {
+                if chars.peek() == Some(&' ') { chars.next(); }
+                continue;
+            }
+            // Collapse newlines into spaces
+            '\n' => {
+                if !out.ends_with(' ') && !out.is_empty() {
+                    out.push(' ');
+                }
+                continue;
+            }
+            _ => out.push(ch),
+        }
+    }
+
+    // Collapse multiple spaces
+    let mut result = String::with_capacity(out.len());
+    let mut prev_space = false;
+    for ch in out.chars() {
+        if ch == ' ' {
+            if !prev_space { result.push(' '); }
+            prev_space = true;
+        } else {
+            result.push(ch);
+            prev_space = false;
+        }
+    }
+
+    result.trim().to_string()
 }
 
 fn split_sentences(text: &str) -> Vec<String> {

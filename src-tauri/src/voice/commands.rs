@@ -1,6 +1,7 @@
 use crate::ai::AiRouter;
 use crate::db::Database;
 use crate::voice::{VoiceEngine, VoiceState};
+use crate::voice::tts::StreamingTts;
 use serde_json::json;
 use std::sync::Arc;
 use tauri::{Emitter, State};
@@ -104,9 +105,20 @@ pub async fn stop_listening(
         msgs
     };
 
-    let response = match router.send(messages, &db, &google_auth, &app_handle).await {
+    // Mute capture before AI call -- streaming TTS will speak during processing
+    engine.audio_router.lock().map_err(|e| e.to_string())?.mute();
+
+    // Create streaming TTS -- speaks sentences as AI tokens arrive
+    let streaming_tts = {
+        let tts = engine.tts.lock().map_err(|e| e.to_string())?.clone();
+        StreamingTts::new(tts, app_handle.clone())
+    };
+    let tts_tx = Some(streaming_tts.sender());
+
+    let response = match router.send(messages, &db, &google_auth, &app_handle, tts_tx).await {
         Ok(response) => response,
         Err(e) => {
+            engine.audio_router.lock().map_err(|e| e.to_string())?.unmute();
             engine.set_state_and_emit(VoiceState::Error(e.clone()));
             return Err(e);
         }
@@ -122,15 +134,9 @@ pub async fn stop_listening(
         "role": "assistant", "content": response
     }));
 
-    // Speak response via sentence-queued TTS -- mute capture during TTS to prevent audio feedback
-    engine.audio_router.lock().map_err(|e| e.to_string())?.mute();
-    {
-        let tts = engine.tts.lock().map_err(|e| e.to_string())?.clone();
-        if let Err(e) = tts.speak_queued(&response, &app_handle).await {
-            log::warn!("TTS failed: {}", e);
-            let _ = app_handle.emit("chat-state", json!({"state": "idle"}));
-        }
-    }
+    // Finish streaming TTS -- speaks any remaining buffered text
+    streaming_tts.finish().await;
+
     engine.audio_router.lock().map_err(|e| e.to_string())?.unmute();
     engine.set_state_and_emit(VoiceState::Idle);
     Ok(response)

@@ -100,12 +100,15 @@ async fn run_github_digest(db: &Arc<Database>) -> Result<String, String> {
 }
 
 async fn run_deadline_monitor(db: &Arc<Database>) -> Result<String, String> {
-    let conn = db.conn.lock().map_err(|e| e.to_string())?;
-    let mut stmt = conn.prepare(
-        "SELECT id, title, deadline FROM tasks WHERE status != 'completed' AND deadline IS NOT NULL AND deadline <= date('now', '+3 days') ORDER BY deadline ASC"
-    ).map_err(|e| e.to_string())?;
-    let warnings: Vec<(i64, String, String)> = stmt.query_map([], |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)))
-        .map_err(|e| e.to_string())?.collect::<Result<Vec<_>, _>>().map_err(|e| e.to_string())?;
+    let warnings: Vec<(i64, String, String)> = {
+        let conn = db.conn.lock().map_err(|e| e.to_string())?;
+        let mut stmt = conn.prepare(
+            "SELECT id, title, deadline FROM tasks WHERE status != 'completed' AND deadline IS NOT NULL AND deadline <= date('now', '+3 days') ORDER BY deadline ASC"
+        ).map_err(|e| e.to_string())?;
+        let rows = stmt.query_map([], |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)))
+            .map_err(|e| e.to_string())?;
+        rows.collect::<Result<Vec<_>, _>>().map_err(|e| e.to_string())?
+    };
     if warnings.is_empty() { return Ok("No upcoming deadlines".to_string()); }
     for (id, title, deadline) in &warnings {
         log::warn!("Deadline approaching: '{}' (id={}) due {}", title, id, deadline);
@@ -114,40 +117,49 @@ async fn run_deadline_monitor(db: &Arc<Database>) -> Result<String, String> {
 }
 
 async fn run_proactive_check(db: &Arc<Database>) -> Result<String, String> {
-    let conn = db.conn.lock().map_err(|e| e.to_string())?;
+    // Each query acquires and releases the lock independently to avoid blocking
+    // other jobs and UI commands during the check.
     let mut alerts = Vec::new();
 
-    let overdue: i64 = conn.query_row(
-        "SELECT COUNT(*) FROM tasks WHERE status != 'completed' AND deadline IS NOT NULL AND deadline < date('now')",
-        [], |r| r.get(0)
-    ).unwrap_or(0);
+    let overdue: i64 = {
+        let conn = db.conn.lock().map_err(|e| e.to_string())?;
+        conn.query_row(
+            "SELECT COUNT(*) FROM tasks WHERE status != 'completed' AND deadline IS NOT NULL AND deadline < date('now')",
+            [], |r| r.get(0)
+        ).unwrap_or(0)
+    };
     if overdue > 0 { alerts.push(format!("{} overdue task(s)", overdue)); }
 
-    let due_today: i64 = conn.query_row(
-        "SELECT COUNT(*) FROM tasks WHERE status != 'completed' AND deadline = date('now')",
-        [], |r| r.get(0)
-    ).unwrap_or(0);
+    let due_today: i64 = {
+        let conn = db.conn.lock().map_err(|e| e.to_string())?;
+        conn.query_row(
+            "SELECT COUNT(*) FROM tasks WHERE status != 'completed' AND deadline = date('now')",
+            [], |r| r.get(0)
+        ).unwrap_or(0)
+    };
     if due_today > 0 { alerts.push(format!("{} task(s) due today", due_today)); }
 
-    let upcoming_meeting: Option<(String, Option<String>, Option<String>)> = conn.query_row(
-        "SELECT summary, description, attendees FROM calendar_events WHERE start_time > datetime('now') AND start_time <= datetime('now', '+15 minutes') ORDER BY start_time ASC LIMIT 1",
-        [], |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?))
-    ).ok();
+    let upcoming_meeting: Option<(String, Option<String>, Option<String>)> = {
+        let conn = db.conn.lock().map_err(|e| e.to_string())?;
+        conn.query_row(
+            "SELECT summary, description, attendees FROM calendar_events WHERE start_time > datetime('now') AND start_time <= datetime('now', '+15 minutes') ORDER BY start_time ASC LIMIT 1",
+            [], |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?))
+        ).ok()
+    };
     if let Some((summary, description, attendees)) = upcoming_meeting {
         let mut prep = format!("Meeting in 15 min: {}", summary);
         if let Some(desc) = description { if !desc.is_empty() { prep.push_str(&format!(" -- {}", desc)); } }
         if let Some(att) = attendees { if !att.is_empty() { prep.push_str(&format!(" [with: {}]", att)); } }
-        // Check for related tasks
         let related_tasks: Vec<String> = {
+            let conn = db.conn.lock().map_err(|e| e.to_string())?;
             let mut stmt = conn.prepare(
                 "SELECT title FROM tasks WHERE status != 'completed' AND (title LIKE ?1 OR description LIKE ?1) LIMIT 3"
             ).map_err(|e| e.to_string())?;
             let pattern = format!("%{}%", summary.split_whitespace().next().unwrap_or(&summary));
-            let result = stmt.query_map(rusqlite::params![pattern], |row| row.get::<_, String>(0))
-                .map_err(|e| e.to_string())?
-                .collect::<Result<Vec<_>, _>>()
+            let rows = stmt.query_map(rusqlite::params![pattern], |row| row.get::<_, String>(0))
                 .map_err(|e| e.to_string())?;
-            result
+            rows.collect::<Result<Vec<_>, _>>()
+                .map_err(|e| e.to_string())?
         };
         if !related_tasks.is_empty() {
             prep.push_str(&format!(" | Related tasks: {}", related_tasks.join(", ")));
@@ -155,16 +167,20 @@ async fn run_proactive_check(db: &Arc<Database>) -> Result<String, String> {
         alerts.push(prep);
     }
 
-    let failed: i64 = conn.query_row(
-        "SELECT COUNT(*) FROM cron_runs WHERE status = 'failed' AND started_at > datetime('now', '-1 hour')",
-        [], |r| r.get(0)
-    ).unwrap_or(0);
+    let failed: i64 = {
+        let conn = db.conn.lock().map_err(|e| e.to_string())?;
+        conn.query_row(
+            "SELECT COUNT(*) FROM cron_runs WHERE status = 'failed' AND started_at > datetime('now', '-1 hour')",
+            [], |r| r.get(0)
+        ).unwrap_or(0)
+    };
     if failed > 0 { alerts.push(format!("{} cron job(s) failed in the last hour", failed)); }
 
     if alerts.is_empty() {
         Ok("No alerts".to_string())
     } else {
         let alert_text = alerts.join("; ");
+        let conn = db.conn.lock().map_err(|e| e.to_string())?;
         conn.execute(
             "INSERT INTO user_preferences (key, value, updated_at) VALUES ('last_alerts', ?1, datetime('now'))
              ON CONFLICT(key) DO UPDATE SET value = ?1, updated_at = datetime('now')",

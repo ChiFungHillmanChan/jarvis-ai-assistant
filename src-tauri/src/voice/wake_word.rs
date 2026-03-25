@@ -3,10 +3,12 @@ use crate::auth::google::GoogleAuth;
 use crate::db::Database;
 use crate::voice::model_manager;
 use crate::voice::transcribe::LocalTranscriber;
+use crate::voice::tts::StreamingTts;
 use crate::voice::{JarvisAppHandle, VoiceEngine, VoiceState};
+use serde_json::json;
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
-use tauri::Manager;
+use tauri::{Emitter, Manager};
 use tokio::sync::Mutex as AsyncMutex;
 use tauri::async_runtime::JoinHandle;
 use tokio_util::sync::CancellationToken;
@@ -320,16 +322,39 @@ async fn handle_wake_word_detection(
         return Ok(());
     }
 
+    // Show transcribed text in chat and signal AI is thinking
+    let _ = app_handle.emit("chat-new-message", json!({
+        "role": "user", "content": &user_text
+    }));
+    let _ = app_handle.emit("chat-state", json!({"state": "thinking"}));
+
     save_message(&db, "user", &user_text)?;
     let messages = load_recent_messages(&db)?;
-    let response = router.send(messages, &db, &auth, &app_handle).await?;
+
+    // Create streaming TTS -- speaks sentences as AI tokens arrive
+    voice_engine.set_state_and_emit(VoiceState::WakeWordSpeaking);
+    let streaming_tts = {
+        let tts = voice_engine.tts.lock().map_err(|e| e.to_string())?.clone();
+        StreamingTts::new(tts, app_handle.clone())
+    };
+    let tts_tx = Some(streaming_tts.sender());
+
+    let response = match router.send(messages, &db, &auth, &app_handle, tts_tx).await {
+        Ok(r) => r,
+        Err(e) => {
+            let _ = app_handle.emit("chat-state", json!({"state": "idle"}));
+            return Err(e);
+        }
+    };
     save_message(&db, "assistant", &response)?;
 
-    voice_engine.set_state_and_emit(VoiceState::WakeWordSpeaking);
-    let tts = voice_engine.tts.lock().map_err(|e| e.to_string())?.clone();
-    if let Err(e) = tts.speak(&response).await {
-        log::warn!("Wake-word response TTS failed: {}", e);
-    }
+    // Show assistant response in chat
+    let _ = app_handle.emit("chat-new-message", json!({
+        "role": "assistant", "content": &response
+    }));
+
+    // Finish streaming TTS -- speaks any remaining buffered text
+    streaming_tts.finish().await;
 
     voice_engine
         .audio_router

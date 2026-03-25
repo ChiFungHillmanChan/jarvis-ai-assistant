@@ -8,7 +8,7 @@ export default function ChatPanel({ isOpen, isFullScreen, onClose, onToggleFullS
   const { messages, loading, error, send, clearChat, currentStatus, streamingText } = useChat();
   const [input, setInput] = useState("");
   const messagesEndRef = useRef<HTMLDivElement>(null);
-  const inputRef = useRef<HTMLInputElement>(null);
+  const inputRef = useRef<HTMLTextAreaElement>(null);
 
   useEffect(() => { messagesEndRef.current?.scrollIntoView({ behavior: "smooth" }); }, [messages, streamingText]);
   useEffect(() => { if (isOpen) inputRef.current?.focus(); }, [isOpen]);
@@ -58,7 +58,27 @@ export default function ChatPanel({ isOpen, isFullScreen, onClose, onToggleFullS
         <div ref={messagesEndRef} />
       </div>
       <form onSubmit={handleSubmit} style={styles.inputForm}>
-        <input ref={inputRef} type="text" value={input} onChange={(e) => setInput(e.target.value)} placeholder="Talk to JARVIS..." style={styles.input} />
+        <textarea
+          ref={inputRef}
+          value={input}
+          onChange={(e) => {
+            setInput(e.target.value);
+            // Auto-grow: reset height then set to scrollHeight
+            e.target.style.height = "auto";
+            e.target.style.height = Math.min(e.target.scrollHeight, 150) + "px";
+          }}
+          onKeyDown={(e) => {
+            if (e.key === "Enter" && !e.shiftKey) {
+              e.preventDefault();
+              handleSubmit(e);
+              // Reset height after send
+              if (inputRef.current) inputRef.current.style.height = "auto";
+            }
+          }}
+          placeholder="Talk to JARVIS..."
+          style={styles.input}
+          rows={1}
+        />
       </form>
     </div>
   );
@@ -72,7 +92,7 @@ const styles: Record<string, React.CSSProperties> = {
   headerBtn: { background: "transparent", border: "none", color: "rgba(0, 180, 255, 0.5)", fontFamily: "var(--font-mono)", fontSize: 11, cursor: "pointer" },
   messages: { flex: 1, overflowY: "auto", padding: 16, userSelect: "text" as const, cursor: "text" },
   inputForm: { padding: 12, borderTop: "1px solid rgba(0, 180, 255, 0.1)" },
-  input: { width: "100%", background: "rgba(0, 180, 255, 0.03)", border: "1px solid rgba(0, 180, 255, 0.15)", borderRadius: 8, padding: "10px 14px", color: "rgba(0, 180, 255, 0.8)", fontSize: 13, fontFamily: "var(--font-sans)", outline: "none" },
+  input: { width: "100%", background: "rgba(0, 180, 255, 0.03)", border: "1px solid rgba(0, 180, 255, 0.15)", borderRadius: 8, padding: "10px 14px", color: "rgba(0, 180, 255, 0.8)", fontSize: 13, fontFamily: "var(--font-sans)", outline: "none", resize: "none" as const, overflow: "hidden", lineHeight: 1.5, boxSizing: "border-box" as const },
   empty: { color: "rgba(0, 180, 255, 0.2)", fontSize: 12, fontStyle: "italic", textAlign: "center" as const, padding: 40 },
   liveResponse: { margin: "8px 0", background: "rgba(0, 180, 255, 0.03)", border: "1px solid rgba(0, 180, 255, 0.1)", borderRadius: 8, overflow: "hidden" },
   statusBar: { display: "flex", alignItems: "center", gap: 8, padding: "8px 12px", borderBottom: "1px solid rgba(0, 180, 255, 0.06)", background: "rgba(0, 180, 255, 0.02)" },

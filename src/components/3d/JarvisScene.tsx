@@ -87,12 +87,12 @@ function easeInOut(t: number): number {
 
 interface JarvisSceneProps {
   activityLevel?: "idle" | "listening" | "processing" | "active";
-  ttsAmplitude?: number;
+  ttsAmplitudeRef?: React.RefObject<number>;
   pendingToolCall?: string | null;
   onToolCallConsumed?: () => void;
 }
 
-export default function JarvisScene({ activityLevel = "idle", ttsAmplitude = 0, pendingToolCall = null, onToolCallConsumed }: JarvisSceneProps) {
+export default function JarvisScene({ activityLevel = "idle", ttsAmplitudeRef, pendingToolCall = null, onToolCallConsumed }: JarvisSceneProps) {
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const animRef = useRef(0);
   const time = useRef(0);
@@ -108,7 +108,8 @@ export default function JarvisScene({ activityLevel = "idle", ttsAmplitude = 0, 
   const autoRot = useRef(true);
   const mousePos = useRef({ x: 0, y: 0 });
   const speakingAlpha = useRef(0);
-  const ttsAmpRef = useRef(0);
+  const ttsAmpFallback = useRef(0);
+  const ttsAmpRef = ttsAmplitudeRef || ttsAmpFallback;
   const arcsRef = useRef<EnergyArc[]>([]);
   const ringSpeedRef = useRef(1.0);
 
@@ -231,9 +232,8 @@ export default function JarvisScene({ activityLevel = "idle", ttsAmplitude = 0, 
     autoRot.current = false;
   }, []);
 
-  useEffect(() => {
-    ttsAmpRef.current = ttsAmplitude;
-  }, [ttsAmplitude]);
+  // ttsAmplitude is read directly from the ref passed by App.tsx (no re-render needed)
+  // The animation loop reads ttsAmplitudeRef.current each frame.
 
   useEffect(() => {
     if (pendingToolCall && nodes.current.length > 0) {
@@ -361,7 +361,7 @@ export default function JarvisScene({ activityLevel = "idle", ttsAmplitude = 0, 
       const act = activityRef.current;
 
       // Speaking crossfade
-      const isSpeaking = ttsAmpRef.current > 0.01;
+      const isSpeaking = (ttsAmpRef.current ?? 0) > 0.01;
       const speakTarget = isSpeaking ? 1 : 0;
       const speakSpeed = isSpeaking ? 0.06 : 0.035;
       speakingAlpha.current += (speakTarget - speakingAlpha.current) * speakSpeed;
@@ -533,7 +533,7 @@ export default function JarvisScene({ activityLevel = "idle", ttsAmplitude = 0, 
       // === RADIAL WAVEFORM (speaking state) ===
       if (spkAlpha > 0.01) {
         const waveAlpha = spkAlpha;
-        const amp = ttsAmpRef.current;
+        const amp = ttsAmpRef.current ?? 0;
         const barCount = 48;
         const innerR = 18;
         const maxOuterR = 55;

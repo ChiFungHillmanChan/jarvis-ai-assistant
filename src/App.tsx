@@ -27,7 +27,7 @@ export default function App() {
   const [wallpaperRaised, setWallpaperRaised] = useState(false);
   const [aiState, setAiState] = useState<"idle" | "thinking" | "speaking">("idle");
   const [pageTransition, setPageTransition] = useState(false);
-  const [ttsAmplitude, setTtsAmplitude] = useState(0);
+  const ttsAmplitudeRef = useRef(0);
   const [pendingToolCall, setPendingToolCall] = useState<string | null>(null);
   const prevView = useRef(activeView);
 
@@ -58,17 +58,18 @@ export default function App() {
     const unlistenAi = listen<{ state: "idle" | "thinking" | "speaking" }>("chat-state", (event) => {
       setAiState(event.payload.state);
       // Auto-open chat panel when AI starts thinking (e.g. from voice input)
-      if (event.payload.state === "thinking" && !chatOpen) {
+      if (event.payload.state === "thinking") {
         setChatOpen(true);
       }
     });
     return () => { unlistenAi.then((fn) => fn()); };
-  }, [chatOpen]);
+  }, []);
 
   // Listen for TTS amplitude and tool call events
   useEffect(() => {
     const unlistenAmp = listen<{ amplitude: number }>("tts-amplitude", (event) => {
-      setTtsAmplitude(event.payload.amplitude);
+      // Write to ref instead of state -- JarvisScene reads via ref, no re-render cascade
+      ttsAmplitudeRef.current = event.payload.amplitude;
     });
     const unlistenTool = listen<{ tool_name: string }>("chat-tool-call", (event) => {
       setPendingToolCall(event.payload.tool_name);
@@ -135,7 +136,7 @@ export default function App() {
 
   return (
     <div style={styles.root}>
-      <JarvisScene activityLevel={getActivityLevel()} ttsAmplitude={ttsAmplitude} pendingToolCall={pendingToolCall} onToolCallConsumed={() => setPendingToolCall(null)} />
+      <JarvisScene activityLevel={getActivityLevel()} ttsAmplitudeRef={ttsAmplitudeRef} pendingToolCall={pendingToolCall} onToolCallConsumed={() => setPendingToolCall(null)} />
 
       <div style={styles.uiLayer}>
         <div className="drag-region" style={styles.titleBar} onMouseDown={(e) => { if ((e.target as HTMLElement).closest('.no-drag')) return; getCurrentWindow().startDragging(); }}>

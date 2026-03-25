@@ -61,25 +61,39 @@ struct BodyData {
 struct Header { name: String, value: String }
 
 pub async fn fetch_inbox(access_token: &str, max_results: u32) -> Result<Vec<GmailMessage>, String> {
-    let client = Client::new();
+    let client = Client::builder()
+        .connect_timeout(std::time::Duration::from_secs(10))
+        .timeout(std::time::Duration::from_secs(15))
+        .build()
+        .map_err(|e| format!("HTTP client error: {}", e))?;
     let url = format!("{}/messages?maxResults={}&labelIds=INBOX", GMAIL_API, max_results);
     let resp = client.get(&url).bearer_auth(access_token).send().await.map_err(|e| format!("Gmail list error: {}", e))?;
     if resp.status() == 401 { return Err("UNAUTHORIZED".to_string()); }
     if !resp.status().is_success() { return Err(format!("Gmail API error: {}", resp.status())); }
     let list: ListResponse = resp.json().await.map_err(|e| e.to_string())?;
     let refs = list.messages.unwrap_or_default();
+
+    // Fetch message details in parallel (up to max_results concurrently)
+    let futures: Vec<_> = refs.iter().take(max_results as usize)
+        .map(|msg_ref| fetch_message_detail(access_token, &msg_ref.id))
+        .collect();
+    let results = futures_util::future::join_all(futures).await;
     let mut messages = Vec::new();
-    for msg_ref in refs.iter().take(max_results as usize) {
-        match fetch_message_detail(access_token, &msg_ref.id).await {
+    for (i, result) in results.into_iter().enumerate() {
+        match result {
             Ok(msg) => messages.push(msg),
-            Err(e) => log::warn!("Failed to fetch message {}: {}", msg_ref.id, e),
+            Err(e) => log::warn!("Failed to fetch message {}: {}", refs[i].id, e),
         }
     }
     Ok(messages)
 }
 
 pub async fn fetch_message_detail(access_token: &str, message_id: &str) -> Result<GmailMessage, String> {
-    let client = Client::new();
+    let client = Client::builder()
+        .connect_timeout(std::time::Duration::from_secs(10))
+        .timeout(std::time::Duration::from_secs(15))
+        .build()
+        .map_err(|e| format!("HTTP client error: {}", e))?;
     let url = format!("{}/messages/{}?format=metadata&metadataHeaders=Subject&metadataHeaders=From&metadataHeaders=Date", GMAIL_API, message_id);
     let resp = client.get(&url).bearer_auth(access_token).send().await.map_err(|e| e.to_string())?;
     let detail: MessageDetail = resp.json().await.map_err(|e| e.to_string())?;

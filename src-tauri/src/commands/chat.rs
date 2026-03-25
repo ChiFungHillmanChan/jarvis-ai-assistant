@@ -1,6 +1,7 @@
 use crate::ai::AiRouter;
 use crate::db::Database;
 use crate::voice::VoiceEngine;
+use crate::voice::tts::StreamingTts;
 use serde::{Deserialize, Serialize};
 use serde_json::json;
 use std::sync::Arc;
@@ -82,7 +83,7 @@ pub async fn send_message(
                 );
                 let search_messages = vec![("user".to_string(), search_prompt)];
                 let _ = app_handle.emit("chat-state", json!({"state": "thinking"}));
-                let search_response = match router.send(search_messages, &db, &google_auth, &app_handle).await {
+                let search_response = match router.send(search_messages, &db, &google_auth, &app_handle, None).await {
                     Ok(r) => r,
                     Err(e) => {
                         let _ = app_handle.emit("chat-state", json!({"state": "idle"}));
@@ -220,7 +221,15 @@ pub async fn send_message(
 
     log::info!("[STREAM-DEBUG] Emitting chat-state: thinking");
     let _ = app_handle.emit("chat-state", json!({"state": "thinking"}));
-    let response_text = match router.send(messages, &db, &google_auth, &app_handle).await {
+
+    // Create streaming TTS -- speaks sentences as AI tokens arrive
+    let streaming_tts = {
+        let tts = engine.tts.lock().map_err(|e| e.to_string())?.clone();
+        StreamingTts::new(tts, app_handle.clone())
+    };
+    let tts_tx = Some(streaming_tts.sender());
+
+    let response_text = match router.send(messages, &db, &google_auth, &app_handle, tts_tx).await {
         Ok(r) => r,
         Err(e) => {
             let _ = app_handle.emit("chat-state", json!({"state": "idle"}));
@@ -234,15 +243,9 @@ pub async fn send_message(
             .map_err(|e| e.to_string())?;
     }
 
-    // Speak the response via sentence-queued TTS (emits its own chat-state events)
-    log::info!("[STREAM-DEBUG] Starting sentence-queued TTS, response len={}", final_response.len());
-    {
-        let tts = engine.tts.lock().map_err(|e| e.to_string())?.clone();
-        if let Err(e) = tts.speak_queued(&final_response, &app_handle).await {
-            log::warn!("Chat TTS failed: {}", e);
-            let _ = app_handle.emit("chat-state", json!({"state": "idle"}));
-        }
-    }
+    // Finish streaming TTS -- speaks any remaining buffered text
+    log::info!("[STREAM-DEBUG] Finishing streaming TTS, response len={}", final_response.len());
+    streaming_tts.finish().await;
 
     Ok(ChatMessage { id: None, role: "assistant".to_string(), content: final_response, created_at: None })
 }

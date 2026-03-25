@@ -47,7 +47,7 @@ pub async fn create_custom_cron(
     );
 
     let messages = vec![("user".to_string(), prompt)];
-    let response = router.send(messages, &db, &google_auth, &app_handle).await?;
+    let response = router.send(messages, &db, &google_auth, &app_handle, None).await?;
 
     // Parse AI response as JSON
     let parsed: serde_json::Value = serde_json::from_str(response.trim().trim_start_matches("```json").trim_end_matches("```").trim())
