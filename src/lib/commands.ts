@@ -82,6 +82,7 @@ export async function getActiveRules(): Promise<EmailRule[]> { return invoke("ge
 export async function createCustomCron(description: string): Promise<CronJobView> { return invoke("create_custom_cron", { description }); }
 export async function deleteCronJob(jobId: number): Promise<void> { return invoke("delete_cron_job", { job_id: jobId }); }
 export async function toggleCronJob(jobId: number): Promise<string> { return invoke("toggle_cron_job", { job_id: jobId }); }
+export async function getUpcomingRuns(schedule: string, count?: number): Promise<string[]> { return invoke("get_upcoming_runs", { schedule, count }); }
 
 // Assistant
 export async function getBriefing(): Promise<BriefingResult> { return invoke("get_briefing"); }

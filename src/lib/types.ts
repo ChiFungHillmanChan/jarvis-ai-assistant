@@ -63,6 +63,7 @@ export interface CronJobView {
   status: string;
   last_run: string | null;
   next_run: string | null;
+  description: string | null;
 }
 
 export interface CronRunView {
