@@ -5,7 +5,7 @@ use std::sync::Arc;
 use tauri::State;
 
 #[derive(Serialize)]
-pub struct CronJobView { pub id: i64, pub name: String, pub schedule: String, pub action_type: String, pub status: String, pub last_run: Option<String>, pub next_run: Option<String> }
+pub struct CronJobView { pub id: i64, pub name: String, pub schedule: String, pub action_type: String, pub status: String, pub last_run: Option<String>, pub next_run: Option<String>, pub description: Option<String> }
 
 #[derive(Serialize)]
 pub struct CronRunView { pub id: i64, pub job_id: i64, pub started_at: String, pub finished_at: Option<String>, pub status: String, pub result: Option<String>, pub error: Option<String> }
@@ -13,8 +13,8 @@ pub struct CronRunView { pub id: i64, pub job_id: i64, pub started_at: String, p
 #[tauri::command]
 pub fn get_cron_jobs(db: State<Arc<Database>>) -> Result<Vec<CronJobView>, String> {
     let conn = db.conn.lock().map_err(|e| e.to_string())?;
-    let mut stmt = conn.prepare("SELECT id, name, schedule, action_type, status, last_run, next_run FROM cron_jobs ORDER BY id ASC").map_err(|e| e.to_string())?;
-    let jobs = stmt.query_map([], |row| Ok(CronJobView { id: row.get(0)?, name: row.get(1)?, schedule: row.get(2)?, action_type: row.get(3)?, status: row.get(4)?, last_run: row.get(5)?, next_run: row.get(6)? }))
+    let mut stmt = conn.prepare("SELECT id, name, schedule, action_type, status, last_run, next_run, description FROM cron_jobs ORDER BY id ASC").map_err(|e| e.to_string())?;
+    let jobs = stmt.query_map([], |row| Ok(CronJobView { id: row.get(0)?, name: row.get(1)?, schedule: row.get(2)?, action_type: row.get(3)?, status: row.get(4)?, last_run: row.get(5)?, next_run: row.get(6)?, description: row.get(7)? }))
         .map_err(|e| e.to_string())?.collect::<Result<Vec<_>, _>>().map_err(|e| e.to_string())?;
     Ok(jobs)
 }
@@ -42,7 +42,7 @@ pub async fn create_custom_cron(
         "Parse this scheduling request into a JSON object. Supported schedule patterns: daily, weekly, monthly, every N hours/days. \
          Supported action_types: email_sync, calendar_sync, deadline_monitor, notion_sync, github_digest, auto_archive_emails. \
          Return ONLY valid JSON with these fields: \
-         {{\"name\": \"short name\", \"schedule\": \"cron expression (6-field: sec min hour day month weekday)\", \"action_type\": \"one of the supported types\"}} \
+         {{\"name\": \"short name\", \"schedule\": \"cron expression (6-field: sec min hour day month weekday)\", \"action_type\": \"one of the supported types\", \"description\": \"human-readable schedule like 'Every Friday at midnight'\"}} \
          \nRequest: \"{}\"", description
     );
 
@@ -56,6 +56,7 @@ pub async fn create_custom_cron(
     let name = parsed["name"].as_str().ok_or("Missing 'name' in AI response")?.to_string();
     let schedule = parsed["schedule"].as_str().ok_or("Missing 'schedule' in AI response")?.to_string();
     let action_type = parsed["action_type"].as_str().ok_or("Missing 'action_type' in AI response")?.to_string();
+    let desc = parsed["description"].as_str().unwrap_or("").to_string();
 
     // Validate action_type
     let valid_actions = ["email_sync", "calendar_sync", "deadline_monitor", "notion_sync", "github_digest", "auto_archive_emails"];
@@ -67,8 +68,8 @@ pub async fn create_custom_cron(
     let job_id = {
         let conn = db.conn.lock().map_err(|e| e.to_string())?;
         conn.execute(
-            "INSERT INTO cron_jobs (name, schedule, action_type, status) VALUES (?1, ?2, ?3, 'active')",
-            rusqlite::params![name, schedule, action_type],
+            "INSERT INTO cron_jobs (name, schedule, action_type, status, description) VALUES (?1, ?2, ?3, 'active', ?4)",
+            rusqlite::params![name, schedule, action_type, desc],
         ).map_err(|e| e.to_string())?;
         conn.last_insert_rowid()
     };
@@ -83,6 +84,7 @@ pub async fn create_custom_cron(
         status: "active".to_string(),
         last_run: None,
         next_run: None,
+        description: Some(desc),
     })
 }
 
@@ -110,4 +112,26 @@ pub fn toggle_cron_job(db: State<Arc<Database>>, job_id: i64) -> Result<String, 
     ).map_err(|e| e.to_string())?;
 
     Ok(new_status.to_string())
+}
+
+#[tauri::command]
+pub fn get_upcoming_runs(schedule: String, count: Option<usize>) -> Result<Vec<String>, String> {
+    use cron::Schedule;
+    use std::str::FromStr;
+    use chrono::Local;
+
+    let n = count.unwrap_or(3);
+
+    // Try parsing as-is first (6-field), then try prepending seconds
+    let sched = Schedule::from_str(&schedule)
+        .or_else(|_| Schedule::from_str(&format!("0 {}", schedule)))
+        .map_err(|e| format!("Invalid cron expression: {}", e))?;
+
+    let runs: Vec<String> = sched
+        .upcoming(Local)
+        .take(n)
+        .map(|dt| dt.format("%Y-%m-%d %H:%M").to_string())
+        .collect();
+
+    Ok(runs)
 }

@@ -252,6 +252,7 @@ pub fn run() {
             commands::cron::create_custom_cron,
             commands::cron::delete_cron_job,
             commands::cron::toggle_cron_job,
+            commands::cron::get_upcoming_runs,
             commands::google_auth::google_connect,
             commands::google_auth::google_status,
             commands::notion::get_notion_pages,
