@@ -112,9 +112,10 @@ export default memo(function JarvisScene({ activityLevel = "idle", ttsAmplitudeR
   const ttsAmpFallback = useRef(0);
   const ttsAmpRef = ttsAmplitudeRef || ttsAmpFallback;
   const micAmpFallback = useRef(0);
-  // micAmpRef will be used by Task 9 for waveform visualization
-  const _micAmpRef = micAmplitudeRef || micAmpFallback;
-  void _micAmpRef;
+  const micAmpRef = micAmplitudeRef || micAmpFallback;
+  const stateColorRef = useRef({ r: 0, g: 180, b: 255 });
+  const targetColorRef = useRef({ r: 0, g: 180, b: 255 });
+  const listeningAlphaRef = useRef(0);
   const arcsRef = useRef<EnergyArc[]>([]);
   const ringSpeedRef = useRef(1.0);
 
@@ -394,6 +395,21 @@ export default memo(function JarvisScene({ activityLevel = "idle", ttsAmplitudeR
       ringSpeedRef.current += (ringTarget - ringSpeedRef.current) * ringLerp;
       const ringMult = ringSpeedRef.current;
 
+      // Voice state color targets
+      const colorTargets: Record<string, { r: number; g: number; b: number }> = {
+        idle: { r: 0, g: 180, b: 255 },
+        listening: { r: 0, g: 180, b: 255 },
+        processing: { r: 255, g: 180, b: 0 },
+        active: { r: 16, g: 185, b: 129 },
+      };
+      targetColorRef.current = colorTargets[activityLevel] || colorTargets.idle;
+      const sc = stateColorRef.current;
+      const tc = targetColorRef.current;
+      const lerpSpeed = 0.04;
+      sc.r += (tc.r - sc.r) * lerpSpeed;
+      sc.g += (tc.g - sc.g) * lerpSpeed;
+      sc.b += (tc.b - sc.b) * lerpSpeed;
+
       // Smooth zoom + rotation
       zoomRef.current += (targetZoom.current - zoomRef.current) * 0.08;
       const fov = zoomRef.current;
@@ -515,18 +531,25 @@ export default memo(function JarvisScene({ activityLevel = "idle", ttsAmplitudeR
         }
       }
 
-      // === CORE === (modulated by activity level)
+      // === CORE === (modulated by activity level + voice amplitude)
+      const micAmp = micAmpRef.current ?? 0;
+      const ttsAmp = ttsAmpRef.current ?? 0;
+      const voiceAmp = Math.max(micAmp, ttsAmp);
+      const coreScale = 1 + voiceAmp * 0.2;
       const breathAmp = 0.08 + act * 0.17;
       const breathSpd = 2.5 + act * 3.0;
       const breath = 1 + Math.sin(time.current * breathSpd) * breathAmp;
-      const cR = CORE_RADIUS * breath * (1 + spkAlpha * 0.15);
+      const cR = CORE_RADIUS * breath * (1 + spkAlpha * 0.15) * coreScale;
       for (let layer = 0; layer < 3; layer++) {
         const glowR = cR * (3 - layer);
         const glowBase = [0.1, 0.05, 0.025][layer];
         const glowAlpha = glowBase * (1 + act * 2.5);
+        const coreR = Math.round(80 + (sc.r - 0) * 0.3);
+        const coreG = Math.round(200 + (sc.g - 180) * 0.3);
+        const coreB = Math.round(255 + (sc.b - 255) * 0.3);
         const cg = ctx.createRadialGradient(cx, cy, 0, cx, cy, glowR);
-        cg.addColorStop(0, `rgba(80, 200, 255, ${glowAlpha})`);
-        cg.addColorStop(1, "rgba(0, 60, 120, 0)");
+        cg.addColorStop(0, `rgba(${coreR}, ${coreG}, ${coreB}, ${glowAlpha})`);
+        cg.addColorStop(1, `rgba(${Math.round(sc.r * 0.2)}, ${Math.round(sc.g * 0.33)}, ${Math.round(sc.b * 0.47)}, 0)`);
         ctx.beginPath(); ctx.arc(cx, cy, glowR, 0, Math.PI * 2); ctx.fillStyle = cg; ctx.fill();
       }
       // Wireframe core
@@ -551,24 +574,33 @@ export default memo(function JarvisScene({ activityLevel = "idle", ttsAmplitudeR
         ctx.beginPath(); ctx.moveTo(pra.x, pra.y); ctx.lineTo(prb.x, prb.y); ctx.stroke();
       }
 
-      // === RADIAL WAVEFORM (speaking state) ===
-      if (spkAlpha > 0.01) {
-        const waveAlpha = spkAlpha;
-        const amp = ttsAmpRef.current ?? 0;
+      // === RADIAL WAVEFORM (speaking + listening states) ===
+      // Listening alpha crossfade
+      const isListening = activityLevel === "listening";
+      listeningAlphaRef.current += (isListening ? 0.06 : -0.035);
+      listeningAlphaRef.current = Math.max(0, Math.min(1, listeningAlphaRef.current));
+
+      // Combined wave alpha: show waveform for either speaking OR listening
+      const waveAlpha = Math.max(spkAlpha, listeningAlphaRef.current);
+
+      // Choose amplitude source based on state
+      const waveAmplitude = isListening ? micAmp : ttsAmp;
+
+      if (waveAlpha > 0.01) {
         const barCount = 48;
         const innerR = 18;
         const maxOuterR = 55;
 
-        ctx.strokeStyle = `rgba(0, 180, 255, ${0.3 * waveAlpha})`;
+        ctx.strokeStyle = `rgba(${Math.round(sc.r)}, ${Math.round(sc.g)}, ${Math.round(sc.b)}, ${0.3 * waveAlpha})`;
         ctx.lineWidth = 1;
         ctx.beginPath(); ctx.arc(cx, cy, innerR, 0, Math.PI * 2); ctx.stroke();
 
-        ctx.fillStyle = `rgba(0, 180, 255, ${0.9 * waveAlpha})`;
+        ctx.fillStyle = `rgba(${Math.round(sc.r)}, ${Math.round(sc.g)}, ${Math.round(sc.b)}, ${0.9 * waveAlpha})`;
         ctx.beginPath(); ctx.arc(cx, cy, 3, 0, Math.PI * 2); ctx.fill();
 
         for (let bi = 0; bi < barCount; bi++) {
           const angle = (bi / barCount) * Math.PI * 2;
-          const barAmp = amp * (0.3 + 0.7 * (
+          const barAmp = waveAmplitude * (0.3 + 0.7 * (
             0.5 * Math.sin(time.current * 0.07 + bi * 0.5) +
             0.3 * Math.sin(time.current * 0.11 + bi * 0.8) +
             0.2 * Math.sin(time.current * 0.15 + bi * 1.3)
@@ -581,11 +613,12 @@ export default memo(function JarvisScene({ activityLevel = "idle", ttsAmplitudeR
           const x2 = cx + Math.cos(angle) * barLen;
           const y2 = cy + Math.sin(angle) * barLen;
 
-          ctx.strokeStyle = `rgba(0, 180, 255, ${(0.4 + norm * 0.5) * waveAlpha})`;
+          const barColor = `rgba(${Math.round(sc.r)}, ${Math.round(sc.g)}, ${Math.round(sc.b)}, ${(0.4 + norm * 0.5) * waveAlpha})`;
+          ctx.strokeStyle = barColor;
           ctx.lineWidth = 2.5;
           ctx.beginPath(); ctx.moveTo(x1, y1); ctx.lineTo(x2, y2); ctx.stroke();
 
-          ctx.fillStyle = `rgba(0, 180, 255, ${norm * 0.9 * waveAlpha})`;
+          ctx.fillStyle = `rgba(${Math.round(sc.r)}, ${Math.round(sc.g)}, ${Math.round(sc.b)}, ${norm * 0.9 * waveAlpha})`;
           ctx.beginPath(); ctx.arc(x2, y2, 2, 0, Math.PI * 2); ctx.fill();
         }
       }
@@ -598,6 +631,15 @@ export default memo(function JarvisScene({ activityLevel = "idle", ttsAmplitudeR
       const transformed = nodes.current.map(node => {
         node.theta += node.speed;
         const cart = sphereToCart(node.theta, node.phi, node.r);
+
+        // Particle attraction during listening: nudge toward center
+        if (isListening && micAmp > 0.01) {
+          const attractStrength = 0.3 * micAmp;
+          cart.x *= (1 - attractStrength);
+          cart.y *= (1 - attractStrength);
+          cart.z *= (1 - attractStrength);
+        }
+
         const tp = transform(cart, ry, rx);
         const pr = project(tp, cx, cy, fov);
         return { node, pr, tz: tp.z };
