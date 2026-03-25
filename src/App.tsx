@@ -18,11 +18,57 @@ import { useVoiceState } from "./hooks/useVoiceState";
 import ToastContainer from "./components/Toast";
 import WindowControls from "./components/WindowControls";
 import JarvisScene from "./components/3d/JarvisScene";
+import { useChat } from "./hooks/useChat";
+import ChatMessageComponent from "./components/ChatMessage";
+
+function ChatFullView() {
+  const { messages, loading, error, send, clearChat, streamingText } = useChat();
+  const [input, setInput] = useState("");
+  const messagesEndRef = useRef<HTMLDivElement>(null);
+  const inputRef = useRef<HTMLTextAreaElement>(null);
+
+  useEffect(() => { messagesEndRef.current?.scrollIntoView({ behavior: "smooth" }); }, [messages]);
+  useEffect(() => { inputRef.current?.focus(); }, []);
+
+  const handleSubmit = (e: React.FormEvent) => {
+    e.preventDefault();
+    if (input.trim()) { send(input); setInput(""); }
+  };
+
+  return (
+    <div style={{ display: "flex", flexDirection: "column", height: "100%", padding: 24 }}>
+      <div style={{ display: "flex", justifyContent: "space-between", marginBottom: 16 }}>
+        <span className="system-text">JARVIS CHAT</span>
+        <button onClick={clearChat} style={{ background: "transparent", border: "none", color: "rgba(0, 180, 255, 0.5)", fontFamily: "var(--font-mono)", fontSize: 11, cursor: "pointer" }}>NEW</button>
+      </div>
+      <div style={{ flex: 1, overflowY: "auto", maxWidth: 700 }}>
+        {messages.map((msg, i) => <ChatMessageComponent key={msg.id ?? i} message={msg} />)}
+        {loading && streamingText && (
+          <div style={{ padding: "12px 14px", color: "rgba(0, 180, 255, 0.85)", fontSize: 13, lineHeight: 1.6, whiteSpace: "pre-wrap" as const }}>
+            {streamingText}<span style={{ color: "rgba(0, 180, 255, 0.5)", animation: "blink 1s step-end infinite" }}>|</span>
+          </div>
+        )}
+        {error && <div style={{ color: "var(--accent-urgent)", fontSize: 12, padding: 8 }}>{error}</div>}
+        <div ref={messagesEndRef} />
+      </div>
+      <form onSubmit={handleSubmit} style={{ maxWidth: 700, paddingTop: 12, borderTop: "1px solid rgba(0, 180, 255, 0.08)" }}>
+        <div style={{ display: "flex", alignItems: "flex-end", gap: 8 }}>
+          <textarea ref={inputRef} value={input} onChange={(e) => setInput(e.target.value)}
+            onKeyDown={(e) => { if (e.key === "Enter" && !e.shiftKey) { e.preventDefault(); handleSubmit(e); } }}
+            placeholder="Talk to JARVIS..." rows={1}
+            style={{ flex: 1, background: "rgba(0, 180, 255, 0.04)", border: "1px solid rgba(0, 180, 255, 0.18)", borderRadius: 12, padding: "10px 14px", color: "rgba(0, 180, 255, 0.8)", fontSize: 13, fontFamily: "var(--font-sans)", outline: "none", resize: "none" as const, overflow: "hidden", lineHeight: 1.5, boxSizing: "border-box" as const }} />
+          <button type="submit" style={{ width: 34, height: 34, borderRadius: "50%", background: "rgba(0, 180, 255, 0.12)", border: "1px solid rgba(0, 180, 255, 0.25)", display: "flex", alignItems: "center", justifyContent: "center", cursor: "pointer", flexShrink: 0 }}>
+            <svg width="14" height="14" viewBox="0 0 14 14"><path d="M3 7h8M8 4l3 3-3 3" fill="none" stroke="rgba(0, 180, 255, 0.7)" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round" /></svg>
+          </button>
+        </div>
+      </form>
+    </div>
+  );
+}
 
 export default function App() {
   const [activeView, setActiveView] = useState("home");
   const [chatOpen, setChatOpen] = useState(false);
-  const [chatFullScreen, setChatFullScreen] = useState(false);
   const [wallpaperActive, setWallpaperActive] = useState(false);
   const [wallpaperRaised, setWallpaperRaised] = useState(false);
   const [aiState, setAiState] = useState<"idle" | "thinking" | "speaking">("idle");
@@ -31,10 +77,9 @@ export default function App() {
   const [pendingToolCall, setPendingToolCall] = useState<string | null>(null);
   const prevView = useRef(activeView);
 
-  const toggleChat = useCallback(() => { setChatOpen((prev) => !prev); setChatFullScreen(false); }, []);
-  const closeChat = useCallback(() => { setChatOpen(false); setChatFullScreen(false); }, []);
+  const toggleChat = useCallback(() => { setChatOpen((prev) => !prev); }, []);
+  const closeChat = useCallback(() => { setChatOpen(false); }, []);
   const handleToolCallConsumed = useCallback(() => setPendingToolCall(null), []);
-  const toggleFullScreen = useCallback(() => setChatFullScreen((prev) => !prev), []);
 
   const { state: voiceState, startVoice, stopVoice } = useVoiceState();
 
@@ -59,10 +104,6 @@ export default function App() {
   useEffect(() => {
     const unlistenAi = listen<{ state: "idle" | "thinking" | "speaking" }>("chat-state", (event) => {
       setAiState(event.payload.state);
-      // Auto-open chat panel when AI starts thinking (e.g. from voice input)
-      if (event.payload.state === "thinking") {
-        setChatOpen(true);
-      }
     });
     return () => { unlistenAi.then((fn) => fn()); };
   }, []);
@@ -128,6 +169,7 @@ export default function App() {
 
   function renderView() {
     switch (activeView) {
+      case "chat": return <ChatFullView />;
       case "email": return <EmailPage />;
       case "calendar": return <CalendarPage />;
       case "github": return <GitHubPage />;
@@ -165,7 +207,9 @@ export default function App() {
             <CommandBar onActivate={toggleChat} />
           </div>
         </div>
-        <ChatPanel isOpen={chatOpen} isFullScreen={chatFullScreen} onClose={closeChat} onToggleFullScreen={toggleFullScreen} />
+        {activeView !== "chat" && (
+          <ChatPanel isOpen={chatOpen} onClose={closeChat} onNavigateToChat={() => { setChatOpen(false); setActiveView("chat"); }} />
+        )}
         <VoiceIndicator state={voiceState} onStop={stopVoice} />
         <ToastContainer />
       </div>

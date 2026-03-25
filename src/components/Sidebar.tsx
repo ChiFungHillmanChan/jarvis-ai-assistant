@@ -7,6 +7,7 @@ interface SidebarProps {
 
 const navItems = [
   { id: "home", label: "HOME", icon: "H" },
+  { id: "chat", label: "CHAT", icon: ">" },
   { id: "email", label: "MAIL", icon: "M" },
   { id: "calendar", label: "CAL", icon: "C" },
   { id: "github", label: "GIT", icon: "G" },
