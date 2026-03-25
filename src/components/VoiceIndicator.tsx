@@ -1,45 +1,31 @@
 import { memo } from "react";
 import type { VoiceState } from "../lib/types";
 
-interface VoiceIndicatorProps { state: VoiceState; onStop: () => void; }
+interface Props { state: VoiceState; onStop: () => void; }
 
-export default memo(function VoiceIndicator({ state, onStop }: VoiceIndicatorProps) {
-  if (state === "Idle" || state === "Disabled") return null;
+function getStateInfo(state: VoiceState): { label: string; color: string } | null {
+  if (state === "Listening" || state === "WakeWordListening") return { label: "LISTENING", color: "rgba(0, 180, 255, 0.9)" };
+  if (state === "Processing" || state === "WakeWordDetected" || state === "WakeWordProcessing") return { label: "PROCESSING", color: "rgba(255, 180, 0, 0.85)" };
+  if (state === "Speaking" || state === "WakeWordSpeaking") return { label: "SPEAKING", color: "rgba(16, 185, 129, 0.85)" };
+  if (typeof state === "object" && "ModelDownloading" in state) return { label: "DOWNLOADING", color: "rgba(96, 165, 250, 0.85)" };
+  if (typeof state === "object" && "Error" in state) return { label: "ERROR", color: "rgba(255, 100, 100, 0.8)" };
+  return null;
+}
 
-  const isManualListening = state === "Listening";
-  const label = state === "Listening" ? "LISTENING..."
-    : state === "Processing" ? "PROCESSING..."
-    : state === "Speaking" ? "SPEAKING..."
-    : state === "WakeWordListening" ? "WAKE WORD ACTIVE"
-    : state === "WakeWordDetected" ? "WAKE WORD DETECTED"
-    : state === "WakeWordProcessing" ? "PROCESSING WAKE REQUEST..."
-    : state === "WakeWordSpeaking" ? "JARVIS RESPONDING..."
-    : typeof state === "object" && "ModelDownloading" in state ? `DOWNLOADING MODEL... ${state.ModelDownloading}%`
-    : typeof state === "object" && "Error" in state ? `ERROR: ${state.Error}`
-    : "";
-
-  const color = state === "Listening" || state === "WakeWordListening" ? "rgba(0, 180, 255, 0.9)"
-    : state === "Processing" || state === "WakeWordDetected" || state === "WakeWordProcessing" ? "rgba(255, 180, 0, 0.85)"
-    : state === "Speaking" || state === "WakeWordSpeaking" ? "rgba(16, 185, 129, 0.85)"
-    : typeof state === "object" && "ModelDownloading" in state ? "rgba(96, 165, 250, 0.85)"
-    : "rgba(255, 100, 100, 0.8)";
+export default memo(function VoiceIndicator({ state, onStop }: Props) {
+  const info = getStateInfo(state);
+  if (!info) return null;
 
   return (
-    <div style={{ ...styles.overlay, cursor: isManualListening ? "pointer" : "default" }} onClick={isManualListening ? onStop : undefined}>
-      <div style={{ ...styles.indicator, borderColor: color }}>
-        <div style={{ ...styles.dot, background: color }} className="animate-glow" />
-        <span style={{ ...styles.label, color }}>{label}</span>
-        {isManualListening && <span style={styles.hint}>Click or press Cmd+Shift+J to stop</span>}
-      </div>
+    <div onClick={onStop} style={styles.container} title="Cmd+Shift+J">
+      <div style={{ ...styles.dot, background: info.color, boxShadow: `0 0 8px ${info.color.replace(/[\d.]+\)$/, "0.5)")}` }} className="animate-glow" />
+      <span style={{ ...styles.label, color: info.color.replace(/[\d.]+\)$/, "0.6)") }}>{info.label}</span>
     </div>
   );
 });
 
 const styles: Record<string, React.CSSProperties> = {
-  overlay: { position: "fixed", bottom: 24, left: "50%", transform: "translateX(-50%)", zIndex: 200 },
-  indicator: { display: "flex", alignItems: "center", gap: 10, padding: "10px 20px", borderRadius: 24, border: "1px solid", background: "rgba(10, 14, 26, 0.95)" },
-  dot: { width: 10, height: 10, borderRadius: "50%" },
-  label: { fontFamily: "var(--font-mono)", fontSize: 11, letterSpacing: 1.5 },
-  hint: { color: "rgba(0, 180, 255, 0.3)", fontSize: 9, fontFamily: "var(--font-mono)" },
+  container: { position: "fixed", bottom: 16, left: "50%", transform: "translateX(-50%)", display: "flex", alignItems: "center", gap: 6, padding: "5px 12px", background: "rgba(10, 14, 26, 0.8)", borderRadius: 12, border: "1px solid rgba(0, 180, 255, 0.1)", cursor: "pointer", zIndex: 50 },
+  dot: { width: 6, height: 6, borderRadius: "50%", flexShrink: 0 },
+  label: { fontFamily: "var(--font-mono)", fontSize: 9, letterSpacing: 1 },
 };
-
