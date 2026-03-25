@@ -9,7 +9,8 @@ pub mod wake_word;
 use audio_router::AudioRouter;
 use transcribe::{LocalTranscriber, Transcriber};
 use tts::TextToSpeech;
-use std::sync::Mutex;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, Mutex};
 use tauri::Emitter;
 
 #[derive(Clone, serde::Serialize, Debug, PartialEq)]
@@ -36,6 +37,7 @@ pub struct VoiceEngine {
     pub state: Mutex<VoiceState>,
     pub muted: Mutex<bool>,
     pub app_handle: Option<JarvisAppHandle>,
+    mic_emitter_active: Arc<AtomicBool>,
 }
 
 impl VoiceEngine {
@@ -65,6 +67,7 @@ impl VoiceEngine {
             state: Mutex::new(VoiceState::Idle),
             muted: Mutex::new(false),
             app_handle,
+            mic_emitter_active: Arc::new(AtomicBool::new(false)),
         }
     }
 
@@ -125,5 +128,30 @@ impl VoiceEngine {
             self.set_state_and_emit(VoiceState::Idle);
         }
         *muted
+    }
+
+    /// Start emitting mic-amplitude events at ~20 Hz for frontend visualization.
+    pub fn start_mic_emitter(&self) {
+        if self.mic_emitter_active.swap(true, Ordering::Relaxed) {
+            return; // already running
+        }
+        let active = self.mic_emitter_active.clone();
+        let mic_amp = self.audio_router.lock().unwrap().mic_amplitude.clone();
+        let app_handle = self.app_handle.clone();
+
+        tokio::spawn(async move {
+            while active.load(Ordering::Relaxed) {
+                tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+                let amp = f32::from_bits(mic_amp.load(Ordering::Relaxed));
+                if let Some(ref h) = app_handle {
+                    let _ = h.emit("mic-amplitude", serde_json::json!({ "amplitude": amp }));
+                }
+            }
+        });
+    }
+
+    /// Stop emitting mic-amplitude events.
+    pub fn stop_mic_emitter(&self) {
+        self.mic_emitter_active.store(false, Ordering::Relaxed);
     }
 }

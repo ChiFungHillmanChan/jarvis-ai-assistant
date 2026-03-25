@@ -1,5 +1,5 @@
 use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
-use std::sync::atomic::{AtomicU8, AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicU8, AtomicU32, AtomicUsize, Ordering};
 use std::sync::Arc;
 
 // Audio routing modes (lock-free via atomic)
@@ -92,6 +92,8 @@ pub struct AudioRouter {
     ptt_buf: Arc<SpscRingBuffer>,
     /// Actual device sample rate (may differ from 16kHz)
     sample_rate: u32,
+    /// RMS mic amplitude for visualization (stored as f32 bits)
+    pub mic_amplitude: Arc<AtomicU32>,
 }
 
 impl AudioRouter {
@@ -108,6 +110,7 @@ impl AudioRouter {
             ring,
             ptt_buf,
             sample_rate: 16000, // will be updated on start()
+            mic_amplitude: Arc::new(AtomicU32::new(0)),
         }
     }
 
@@ -143,6 +146,7 @@ impl AudioRouter {
         let mode = Arc::clone(&self.mode);
         let ring = Arc::clone(&self.ring);
         let ptt_buf = Arc::clone(&self.ptt_buf);
+        let mic_amplitude = Arc::clone(&self.mic_amplitude);
 
         let stream = device
             .build_input_stream(
@@ -154,6 +158,12 @@ impl AudioRouter {
                         MODE_WAKEWORD => ring.write(data),
                         MODE_PTT => ptt_buf.write(data),
                         _ => {} // MODE_INACTIVE: discard
+                    }
+                    // Compute RMS amplitude for visualization
+                    if m != MODE_INACTIVE {
+                        let sum: f64 = data.iter().map(|s| (*s as f64).powi(2)).sum();
+                        let rms = (sum / data.len().max(1) as f64).sqrt() as f32;
+                        mic_amplitude.store(rms.to_bits(), Ordering::Relaxed);
                     }
                 },
                 |err| log::error!("AudioRouter stream error: {}", err),
@@ -233,6 +243,11 @@ impl AudioRouter {
     /// Get the actual device sample rate.
     pub fn sample_rate(&self) -> u32 {
         self.sample_rate
+    }
+
+    /// Get the current RMS mic amplitude (for visualization).
+    pub fn mic_amplitude(&self) -> f32 {
+        f32::from_bits(self.mic_amplitude.load(Ordering::Relaxed))
     }
 
     /// Resample from device rate to 16kHz (what Whisper expects).

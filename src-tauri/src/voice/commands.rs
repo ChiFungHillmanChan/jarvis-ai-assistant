@@ -34,6 +34,7 @@ pub async fn start_listening(engine: State<'_, Arc<VoiceEngine>>) -> Result<Stri
 
     engine.set_state_and_emit(VoiceState::Listening);
     engine.audio_router.lock().map_err(|e| e.to_string())?.start_ptt();
+    engine.start_mic_emitter();
     Ok("Listening...".to_string())
 }
 
@@ -55,6 +56,7 @@ pub async fn stop_listening(
     }
     // Immediately transition to Processing so duplicate calls are rejected
     engine.set_state_and_emit(VoiceState::Processing);
+    engine.stop_mic_emitter();
 
     let samples = engine.audio_router.lock().map_err(|e| e.to_string())?.stop_ptt();
 
