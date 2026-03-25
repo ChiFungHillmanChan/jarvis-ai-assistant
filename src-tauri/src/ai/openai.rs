@@ -1,11 +1,11 @@
+use super::tools;
+use crate::voice::tts::TtsCommand;
 use futures_util::StreamExt;
 use reqwest::Client;
 use serde::{Deserialize, Serialize};
 use serde_json::json;
-use std::collections::HashMap;
-use super::tools;
+use std::collections::{HashMap, HashSet};
 use tauri::Emitter;
-use crate::voice::tts::TtsCommand;
 
 #[derive(Serialize)]
 struct OpenAIRequest {
@@ -88,11 +88,16 @@ pub async fn send(
     let openai_tools = tools::to_openai_format(&tool_defs);
 
     let mut openai_messages: Vec<OpenAIMessage> = vec![OpenAIMessage {
-        role: "system".into(), content: Some(tools::SYSTEM_PROMPT.into()),
-        tool_calls: None, tool_call_id: None,
+        role: "system".into(),
+        content: Some(tools::SYSTEM_PROMPT.into()),
+        tool_calls: None,
+        tool_call_id: None,
     }];
     openai_messages.extend(messages.into_iter().map(|(role, content)| OpenAIMessage {
-        role, content: Some(content), tool_calls: None, tool_call_id: None,
+        role,
+        content: Some(content),
+        tool_calls: None,
+        tool_call_id: None,
     }));
 
     let max_iterations = 5;
@@ -110,7 +115,8 @@ pub async fn send(
             .header("Authorization", format!("Bearer {}", api_key))
             .header("Content-Type", "application/json")
             .json(&request)
-            .send().await?;
+            .send()
+            .await?;
 
         if !response.status().is_success() {
             let status = response.status();
@@ -122,7 +128,9 @@ pub async fn send(
         let mut buffer = String::new();
         let mut text_parts: Vec<String> = Vec::new();
         let mut tool_map: HashMap<usize, (String, String, String)> = HashMap::new(); // index -> (call_id, fn_name, arguments)
+        let mut announced_tools: HashSet<usize> = HashSet::new();
         let mut finish_reason: Option<String> = None;
+        let mut response_started = false;
 
         while let Some(chunk_result) = stream.next().await {
             let chunk = match chunk_result {
@@ -142,14 +150,20 @@ pub async fn send(
 
                 let mut data_str = String::new();
                 for line in event_block.lines() {
-                    if line.starts_with(':') { continue; }
+                    if line.starts_with(':') {
+                        continue;
+                    }
                     if let Some(rest) = line.strip_prefix("data: ") {
                         data_str = rest.to_string();
                     }
                 }
 
-                if data_str.is_empty() { continue; }
-                if data_str == "[DONE]" { continue; }
+                if data_str.is_empty() {
+                    continue;
+                }
+                if data_str == "[DONE]" {
+                    continue;
+                }
 
                 let chunk: SseChunk = match serde_json::from_str(&data_str) {
                     Ok(c) => c,
@@ -160,8 +174,19 @@ pub async fn send(
                     if let Some(ref delta) = choice.delta {
                         // Text content
                         if let Some(ref content) = delta.content {
+                            if !response_started {
+                                response_started = true;
+                                let _ = app_handle.emit(
+                                    "chat-status",
+                                    json!({
+                                        "status": "Composing response...",
+                                        "phase": "responding"
+                                    }),
+                                );
+                            }
                             text_parts.push(content.clone());
-                            let _ = app_handle.emit("chat-token", json!({"token": content, "done": false}));
+                            let _ = app_handle
+                                .emit("chat-token", json!({"token": content, "done": false}));
                             if let Some(ref tx) = tts_tx {
                                 let _ = tx.try_send(TtsCommand::TextChunk(content.clone()));
                             }
@@ -170,7 +195,9 @@ pub async fn send(
                         // Tool calls
                         if let Some(ref tool_calls) = delta.tool_calls {
                             for tc in tool_calls {
-                                let entry = tool_map.entry(tc.index).or_insert_with(|| (String::new(), String::new(), String::new()));
+                                let entry = tool_map.entry(tc.index).or_insert_with(|| {
+                                    (String::new(), String::new(), String::new())
+                                });
                                 if let Some(ref id) = tc.id {
                                     entry.0 = id.clone();
                                 }
@@ -178,7 +205,17 @@ pub async fn send(
                                     if let Some(ref name) = func.name {
                                         entry.1 = name.clone();
                                         let label = tools::tool_status_label(name);
-                                        let _ = app_handle.emit("chat-status", json!({"status": label}));
+                                        let _ = app_handle.emit(
+                                            "chat-status",
+                                            json!({
+                                                "status": format!("Planning: {}", label),
+                                                "phase": "planning"
+                                            }),
+                                        );
+                                        if announced_tools.insert(tc.index) {
+                                            let _ = app_handle
+                                                .emit("chat-tool-call", json!({"tool_name": name}));
+                                        }
                                     }
                                     if let Some(ref args) = func.arguments {
                                         entry.2.push_str(args);
@@ -216,13 +253,18 @@ pub async fn send(
             // Push assistant message with tool calls
             openai_messages.push(OpenAIMessage {
                 role: "assistant".into(),
-                content: if text_content.is_empty() { None } else { Some(text_content) },
+                content: if text_content.is_empty() {
+                    None
+                } else {
+                    Some(text_content)
+                },
                 tool_calls: Some(tool_calls_vec.clone()),
                 tool_call_id: None,
             });
 
             // Execute each tool -- deduplicate same-name calls (e.g. 4x open_url → run only the first)
-            let mut executed_tools: std::collections::HashSet<String> = std::collections::HashSet::new();
+            let mut executed_tools: std::collections::HashSet<String> =
+                std::collections::HashSet::new();
             let mut narrated = false;
             for tc in &tool_calls_vec {
                 let is_duplicate = executed_tools.contains(&tc.function.name);
@@ -230,17 +272,28 @@ pub async fn send(
                     log::info!("JARVIS skipping duplicate tool call: {}", tc.function.name);
                     openai_messages.push(OpenAIMessage {
                         role: "tool".into(),
-                        content: Some("Skipped: already executed this tool in this batch.".to_string()),
+                        content: Some(
+                            "Skipped: already executed this tool in this batch.".to_string(),
+                        ),
                         tool_calls: None,
                         tool_call_id: Some(tc.id.clone()),
                     });
                     continue;
                 }
                 executed_tools.insert(tc.function.name.clone());
-                log::info!("JARVIS tool call: {}({})", tc.function.name, tc.function.arguments);
-                let _ = app_handle.emit("chat-tool-call", json!({"tool_name": tc.function.name}));
+                log::info!(
+                    "JARVIS tool call: {}({})",
+                    tc.function.name,
+                    tc.function.arguments
+                );
                 let label = tools::tool_status_label(&tc.function.name);
-                let _ = app_handle.emit("chat-status", json!({"status": format!("Running: {}", label)}));
+                let _ = app_handle.emit(
+                    "chat-status",
+                    json!({
+                        "status": format!("Running: {}", label),
+                        "phase": "acting"
+                    }),
+                );
                 if !narrated {
                     if let Some(ref tx) = tts_tx {
                         // Always narrate -- this also flushes any buffered AI text
@@ -249,7 +302,9 @@ pub async fn send(
                         narrated = true;
                     }
                 }
-                let result = tools::execute_tool(&tc.function.name, &tc.function.arguments, db, google_auth).await;
+                let result =
+                    tools::execute_tool(&tc.function.name, &tc.function.arguments, db, google_auth)
+                        .await;
                 log::info!("JARVIS tool result: {}", &result[..result.len().min(200)]);
                 openai_messages.push(OpenAIMessage {
                     role: "tool".into(),
@@ -258,7 +313,13 @@ pub async fn send(
                     tool_call_id: Some(tc.id.clone()),
                 });
             }
-            let _ = app_handle.emit("chat-status", json!({"status": "Composing response..."}));
+            let _ = app_handle.emit(
+                "chat-status",
+                json!({
+                    "status": "Reviewing tool results...",
+                    "phase": "thinking"
+                }),
+            );
             continue;
         }
 

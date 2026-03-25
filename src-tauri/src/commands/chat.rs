@@ -1,7 +1,7 @@
 use crate::ai::AiRouter;
 use crate::db::Database;
-use crate::voice::VoiceEngine;
 use crate::voice::tts::StreamingTts;
+use crate::voice::VoiceEngine;
 use serde::{Deserialize, Serialize};
 use serde_json::json;
 use std::sync::Arc;
@@ -31,7 +31,13 @@ pub async fn send_message(
         let _ = app_handle.emit("tts-amplitude", json!({"amplitude": 0.0}));
     }
     let _ = app_handle.emit("chat-state", json!({"state": "thinking"}));
-    let _ = app_handle.emit("chat-status", json!({"status": "Processing..."}));
+    let _ = app_handle.emit(
+        "chat-status",
+        json!({
+            "status": "Understanding your request...",
+            "phase": "thinking"
+        }),
+    );
 
     // Run DB insert + conversation fetch + context gathering on a blocking thread
     // to avoid starving tokio's async worker pool when the mutex is contended.
@@ -39,64 +45,98 @@ pub async fn send_message(
     let msg_clone = message.clone();
     let msg_lower = message.to_lowercase();
 
-    let (history, context_messages) = tokio::task::spawn_blocking(move || -> Result<(Vec<(String, String)>, Vec<(String, String)>), String> {
-        // Insert user message
-        {
-            let conn = db_arc.conn.lock().map_err(|e| e.to_string())?;
-            conn.execute("INSERT INTO conversations (role, content) VALUES ('user', ?1)", rusqlite::params![msg_clone])
+    let (history, context_messages) = tokio::task::spawn_blocking(
+        move || -> Result<(Vec<(String, String)>, Vec<(String, String)>), String> {
+            // Insert user message
+            {
+                let conn = db_arc.conn.lock().map_err(|e| e.to_string())?;
+                conn.execute(
+                    "INSERT INTO conversations (role, content) VALUES ('user', ?1)",
+                    rusqlite::params![msg_clone],
+                )
                 .map_err(|e| e.to_string())?;
-        }
-
-        // Fetch conversation history
-        let history = {
-            let conn = db_arc.conn.lock().map_err(|e| e.to_string())?;
-            let mut stmt = conn.prepare("SELECT role, content FROM conversations ORDER BY id DESC LIMIT 20")
-                .map_err(|e| e.to_string())?;
-            let mut msgs: Vec<(String, String)> = stmt
-                .query_map([], |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?)))
-                .map_err(|e| e.to_string())?
-                .collect::<Result<Vec<_>, _>>()
-                .map_err(|e| e.to_string())?;
-            msgs.reverse();
-            msgs
-        };
-
-        // Only add context for questions about personal data (saves tokens)
-        let needs_context = {
-            msg_lower.contains("task") || msg_lower.contains("meeting") || msg_lower.contains("email")
-            || msg_lower.contains("deadline") || msg_lower.contains("schedule") || msg_lower.contains("today")
-            || msg_lower.contains("calendar") || msg_lower.contains("work on") || msg_lower.contains("priority")
-            || msg_lower.contains("github") || msg_lower.contains("pr") || msg_lower.contains("issue")
-            || msg_lower.contains("notion") || msg_lower.contains("what should") || msg_lower.contains("remind")
-            || msg_lower.contains("status") || msg_lower.contains("busy") || msg_lower.contains("free")
-            || msg_lower.contains("obsidian") || msg_lower.contains("notes") || msg_lower.contains("vault")
-            || msg_lower.contains("job") || msg_lower.contains("resume") || msg_lower.contains("interview")
-            || msg_lower.contains("application")
-        };
-
-        let mut ctx_msgs = Vec::new();
-        if needs_context {
-            if let Ok(ctx) = crate::assistant::context::DayContext::gather(&db_arc) {
-                let context_prompt = format!(
-                    "[CONTEXT] TASKS: {} | CALENDAR: {} | EMAIL: {} | GITHUB: {}",
-                    ctx.tasks_summary.lines().next().unwrap_or(""),
-                    ctx.calendar_summary.lines().next().unwrap_or(""),
-                    ctx.email_summary.lines().next().unwrap_or(""),
-                    ctx.github_summary,
-                );
-                ctx_msgs.push(("user".to_string(), context_prompt));
-                ctx_msgs.push(("assistant".to_string(), "Understood.".to_string()));
             }
-        }
 
-        Ok((history, ctx_msgs))
-    }).await.map_err(|e| e.to_string())??;
+            // Fetch conversation history
+            let history = {
+                let conn = db_arc.conn.lock().map_err(|e| e.to_string())?;
+                let mut stmt = conn
+                    .prepare("SELECT role, content FROM conversations ORDER BY id DESC LIMIT 20")
+                    .map_err(|e| e.to_string())?;
+                let mut msgs: Vec<(String, String)> = stmt
+                    .query_map([], |row| {
+                        Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+                    })
+                    .map_err(|e| e.to_string())?
+                    .collect::<Result<Vec<_>, _>>()
+                    .map_err(|e| e.to_string())?;
+                msgs.reverse();
+                msgs
+            };
+
+            // Only add context for questions about personal data (saves tokens)
+            let needs_context = {
+                msg_lower.contains("task")
+                    || msg_lower.contains("meeting")
+                    || msg_lower.contains("email")
+                    || msg_lower.contains("deadline")
+                    || msg_lower.contains("schedule")
+                    || msg_lower.contains("today")
+                    || msg_lower.contains("calendar")
+                    || msg_lower.contains("work on")
+                    || msg_lower.contains("priority")
+                    || msg_lower.contains("github")
+                    || msg_lower.contains("pr")
+                    || msg_lower.contains("issue")
+                    || msg_lower.contains("notion")
+                    || msg_lower.contains("what should")
+                    || msg_lower.contains("remind")
+                    || msg_lower.contains("status")
+                    || msg_lower.contains("busy")
+                    || msg_lower.contains("free")
+                    || msg_lower.contains("obsidian")
+                    || msg_lower.contains("notes")
+                    || msg_lower.contains("vault")
+                    || msg_lower.contains("job")
+                    || msg_lower.contains("resume")
+                    || msg_lower.contains("interview")
+                    || msg_lower.contains("application")
+            };
+
+            let mut ctx_msgs = Vec::new();
+            if needs_context {
+                if let Ok(ctx) = crate::assistant::context::DayContext::gather(&db_arc) {
+                    let context_prompt = format!(
+                        "[CONTEXT] TASKS: {} | CALENDAR: {} | EMAIL: {} | GITHUB: {}",
+                        ctx.tasks_summary.lines().next().unwrap_or(""),
+                        ctx.calendar_summary.lines().next().unwrap_or(""),
+                        ctx.email_summary.lines().next().unwrap_or(""),
+                        ctx.github_summary,
+                    );
+                    ctx_msgs.push(("user".to_string(), context_prompt));
+                    ctx_msgs.push(("assistant".to_string(), "Understood.".to_string()));
+                }
+            }
+
+            Ok((history, ctx_msgs))
+        },
+    )
+    .await
+    .map_err(|e| e.to_string())??;
 
     // Check if user is searching conversation history
-    let search_keywords = ["what did i tell you", "what did i say", "remember when", "search for", "find our conversation about", "what did we discuss"];
+    let search_keywords = [
+        "what did i tell you",
+        "what did i say",
+        "remember when",
+        "search for",
+        "find our conversation about",
+        "what did we discuss",
+    ];
     let msg_lower = message.to_lowercase();
     if search_keywords.iter().any(|kw| msg_lower.contains(kw)) {
-        let topic = search_keywords.iter()
+        let topic = search_keywords
+            .iter()
             .filter_map(|kw| msg_lower.find(kw).map(|pos| &message[pos + kw.len()..]))
             .next()
             .unwrap_or(&message)
@@ -132,7 +172,17 @@ pub async fn send_message(
                     search_context, message
                 );
                 let search_messages = vec![("user".to_string(), search_prompt)];
-                let search_response = match router.send(search_messages, &db, &google_auth, &app_handle, None).await {
+                let _ = app_handle.emit(
+                    "chat-status",
+                    json!({
+                        "status": "Reviewing earlier conversations...",
+                        "phase": "thinking"
+                    }),
+                );
+                let search_response = match router
+                    .send(search_messages, &db, &google_auth, &app_handle, None)
+                    .await
+                {
                     Ok(r) => r,
                     Err(e) => {
                         let _ = app_handle.emit("chat-state", json!({"state": "idle"}));
@@ -142,7 +192,11 @@ pub async fn send_message(
 
                 {
                     let conn3 = db.conn.lock().map_err(|e| e.to_string())?;
-                    conn3.execute("INSERT INTO conversations (role, content) VALUES ('assistant', ?1)", rusqlite::params![search_response])
+                    conn3
+                        .execute(
+                            "INSERT INTO conversations (role, content) VALUES ('assistant', ?1)",
+                            rusqlite::params![search_response],
+                        )
                         .map_err(|e| e.to_string())?;
                 }
 
@@ -155,7 +209,10 @@ pub async fn send_message(
                 }
 
                 return Ok(crate::commands::chat::ChatMessage {
-                    id: None, role: "assistant".to_string(), content: search_response, created_at: None,
+                    id: None,
+                    role: "assistant".to_string(),
+                    content: search_response,
+                    created_at: None,
                 });
             }
         }
@@ -165,8 +222,15 @@ pub async fn send_message(
 
     // Search Obsidian for relevant notes (with 3s timeout to avoid blocking)
     let obsidian_keywords = [
-        "obsidian", "notes", "vault", "job", "resume", "interview",
-        "application", "career", "cover letter",
+        "obsidian",
+        "notes",
+        "vault",
+        "job",
+        "resume",
+        "interview",
+        "application",
+        "career",
+        "cover letter",
     ];
     if obsidian_keywords.iter().any(|kw| msg_lower.contains(kw)) {
         let obs_key = {
@@ -189,7 +253,9 @@ pub async fn send_message(
             if let Ok(Ok(notes)) = tokio::time::timeout(
                 std::time::Duration::from_secs(3),
                 crate::integrations::obsidian::search_vault(&key, &search_term),
-            ).await {
+            )
+            .await
+            {
                 let note_context: String = notes
                     .iter()
                     .take(3)
@@ -211,11 +277,17 @@ pub async fn send_message(
                     let len = all_messages.len();
                     all_messages.insert(
                         if len > 0 { len - 1 } else { 0 },
-                        ("user".to_string(), format!("[OBSIDIAN NOTES]\n{}", note_context)),
+                        (
+                            "user".to_string(),
+                            format!("[OBSIDIAN NOTES]\n{}", note_context),
+                        ),
                     );
                     all_messages.insert(
                         if len > 0 { len } else { 1 },
-                        ("assistant".to_string(), "I see the relevant notes from your Obsidian vault.".to_string()),
+                        (
+                            "assistant".to_string(),
+                            "I see the relevant notes from your Obsidian vault.".to_string(),
+                        ),
                     );
                 }
             }
@@ -232,7 +304,10 @@ pub async fn send_message(
     };
     let tts_tx = Some(streaming_tts.sender());
 
-    let response_text = match router.send(messages, &db, &google_auth, &app_handle, tts_tx).await {
+    let response_text = match router
+        .send(messages, &db, &google_auth, &app_handle, tts_tx)
+        .await
+    {
         Ok(r) => r,
         Err(e) => {
             let _ = app_handle.emit("chat-state", json!({"state": "idle"}));
@@ -242,21 +317,30 @@ pub async fn send_message(
     let final_response = response_text;
     {
         let conn = db.conn.lock().map_err(|e| e.to_string())?;
-        conn.execute("INSERT INTO conversations (role, content) VALUES ('assistant', ?1)", rusqlite::params![final_response])
-            .map_err(|e| e.to_string())?;
+        conn.execute(
+            "INSERT INTO conversations (role, content) VALUES ('assistant', ?1)",
+            rusqlite::params![final_response],
+        )
+        .map_err(|e| e.to_string())?;
     }
 
     // Finish streaming TTS -- speaks any remaining buffered text
     log::debug!("[chat] TTS finish, len={}", final_response.len());
     streaming_tts.finish().await;
 
-    Ok(ChatMessage { id: None, role: "assistant".to_string(), content: final_response, created_at: None })
+    Ok(ChatMessage {
+        id: None,
+        role: "assistant".to_string(),
+        content: final_response,
+        created_at: None,
+    })
 }
 
 #[tauri::command]
 pub fn clear_conversations(db: State<Arc<Database>>) -> Result<(), String> {
     let conn = db.conn.lock().map_err(|e| e.to_string())?;
-    conn.execute("DELETE FROM conversations", []).map_err(|e| e.to_string())?;
+    conn.execute("DELETE FROM conversations", [])
+        .map_err(|e| e.to_string())?;
     log::info!("Conversations cleared");
     Ok(())
 }
@@ -264,11 +348,17 @@ pub fn clear_conversations(db: State<Arc<Database>>) -> Result<(), String> {
 #[tauri::command]
 pub fn get_conversations(db: State<Arc<Database>>) -> Result<Vec<ChatMessage>, String> {
     let conn = db.conn.lock().map_err(|e| e.to_string())?;
-    let mut stmt = conn.prepare("SELECT id, role, content, created_at FROM conversations ORDER BY id ASC")
+    let mut stmt = conn
+        .prepare("SELECT id, role, content, created_at FROM conversations ORDER BY id ASC")
         .map_err(|e| e.to_string())?;
     let messages = stmt
         .query_map([], |row| {
-            Ok(ChatMessage { id: row.get(0)?, role: row.get(1)?, content: row.get(2)?, created_at: row.get(3)? })
+            Ok(ChatMessage {
+                id: row.get(0)?,
+                role: row.get(1)?,
+                content: row.get(2)?,
+                created_at: row.get(3)?,
+            })
         })
         .map_err(|e| e.to_string())?
         .collect::<Result<Vec<_>, _>>()

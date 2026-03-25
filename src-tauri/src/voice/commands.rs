@@ -1,7 +1,7 @@
 use crate::ai::AiRouter;
 use crate::db::Database;
-use crate::voice::{VoiceEngine, VoiceState};
 use crate::voice::tts::StreamingTts;
+use crate::voice::{VoiceEngine, VoiceState};
 use serde_json::json;
 use std::sync::Arc;
 use tauri::{Emitter, State};
@@ -9,7 +9,9 @@ use tauri::{Emitter, State};
 #[tauri::command]
 pub async fn start_listening(engine: State<'_, Arc<VoiceEngine>>) -> Result<String, String> {
     if !engine.is_available() {
-        let error = "Voice not available. Configure OPENAI_API_KEY or download the local Whisper model.".to_string();
+        let error =
+            "Voice not available. Configure OPENAI_API_KEY or download the local Whisper model."
+                .to_string();
         engine.set_state_and_emit(VoiceState::Error(error.clone()));
         return Err(error);
     }
@@ -33,7 +35,11 @@ pub async fn start_listening(engine: State<'_, Arc<VoiceEngine>>) -> Result<Stri
     }
 
     engine.set_state_and_emit(VoiceState::Listening);
-    engine.audio_router.lock().map_err(|e| e.to_string())?.start_ptt();
+    engine
+        .audio_router
+        .lock()
+        .map_err(|e| e.to_string())?
+        .start_ptt();
     engine.start_mic_emitter();
     Ok("Listening...".to_string())
 }
@@ -50,22 +56,43 @@ pub async fn stop_listening(
     {
         let current = engine.state.lock().map_err(|e| e.to_string())?;
         if *current != VoiceState::Listening {
-            log::warn!("stop_listening called but state is {:?}, ignoring", *current);
+            log::warn!(
+                "stop_listening called but state is {:?}, ignoring",
+                *current
+            );
             return Ok(String::new());
         }
     }
     // Immediately transition to Processing so duplicate calls are rejected
     engine.set_state_and_emit(VoiceState::Processing);
     engine.stop_mic_emitter();
+    let _ = app_handle.emit(
+        "chat-status",
+        json!({
+            "status": "Transcribing your request...",
+            "phase": "transcribing"
+        }),
+    );
 
-    let samples = engine.audio_router.lock().map_err(|e| e.to_string())?.stop_ptt();
+    let samples = engine
+        .audio_router
+        .lock()
+        .map_err(|e| e.to_string())?
+        .stop_ptt();
 
     let duration_secs = samples.len() as f32 / 16000.0;
-    let rms = if samples.is_empty() { 0.0 } else {
+    let rms = if samples.is_empty() {
+        0.0
+    } else {
         (samples.iter().map(|s| s * s).sum::<f32>() / samples.len() as f32).sqrt()
     };
 
-    log::info!("PTT captured: {:.2}s, {} samples, RMS {:.6}", duration_secs, samples.len(), rms);
+    log::info!(
+        "PTT captured: {:.2}s, {} samples, RMS {:.6}",
+        duration_secs,
+        samples.len(),
+        rms
+    );
 
     if samples.is_empty() {
         log::warn!("PTT returned empty buffer -- audio stream may have died");
@@ -74,7 +101,10 @@ pub async fn stop_listening(
     }
 
     if samples.len() < 8000 {
-        log::warn!("Audio too short ({:.2}s), skipping transcription", duration_secs);
+        log::warn!(
+            "Audio too short ({:.2}s), skipping transcription",
+            duration_secs
+        );
         engine.set_state_and_emit(VoiceState::Idle);
         return Ok(String::new());
     }
@@ -112,21 +142,37 @@ pub async fn stop_listening(
     // Save user message and notify chat panel
     {
         let conn = db.conn.lock().map_err(|e| e.to_string())?;
-        conn.execute("INSERT INTO conversations (role, content) VALUES ('user', ?1)", rusqlite::params![text])
-            .map_err(|e| e.to_string())?;
+        conn.execute(
+            "INSERT INTO conversations (role, content) VALUES ('user', ?1)",
+            rusqlite::params![text],
+        )
+        .map_err(|e| e.to_string())?;
     }
-    let _ = app_handle.emit("chat-new-message", json!({
-        "role": "user", "content": text
-    }));
+    let _ = app_handle.emit(
+        "chat-new-message",
+        json!({
+            "role": "user", "content": text
+        }),
+    );
     let _ = app_handle.emit("chat-state", json!({"state": "thinking"}));
+    let _ = app_handle.emit(
+        "chat-status",
+        json!({
+            "status": "Understanding your request...",
+            "phase": "thinking"
+        }),
+    );
 
     // Get AI response
     let messages = {
         let conn = db.conn.lock().map_err(|e| e.to_string())?;
-        let mut stmt = conn.prepare("SELECT role, content FROM conversations ORDER BY id DESC LIMIT 20")
+        let mut stmt = conn
+            .prepare("SELECT role, content FROM conversations ORDER BY id DESC LIMIT 20")
             .map_err(|e| e.to_string())?;
         let mut msgs: Vec<(String, String)> = stmt
-            .query_map([], |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?)))
+            .query_map([], |row| {
+                Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+            })
             .map_err(|e| e.to_string())?
             .collect::<Result<Vec<_>, _>>()
             .map_err(|e| e.to_string())?;
@@ -135,7 +181,11 @@ pub async fn stop_listening(
     };
 
     // Mute capture before AI call -- streaming TTS will speak during processing
-    engine.audio_router.lock().map_err(|e| e.to_string())?.mute();
+    engine
+        .audio_router
+        .lock()
+        .map_err(|e| e.to_string())?
+        .mute();
     engine.set_state_and_emit(VoiceState::Speaking);
 
     // Create streaming TTS -- speaks sentences as AI tokens arrive
@@ -145,7 +195,10 @@ pub async fn stop_listening(
     };
     let tts_tx = Some(streaming_tts.sender());
 
-    let response = match router.send(messages, &db, &google_auth, &app_handle, tts_tx).await {
+    let response = match router
+        .send(messages, &db, &google_auth, &app_handle, tts_tx)
+        .await
+    {
         Ok(response) => response,
         Err(e) => {
             // Always clean up on error -- unmute, reset state, signal frontend
@@ -160,12 +213,18 @@ pub async fn stop_listening(
     // Save assistant response and notify chat panel
     {
         let conn = db.conn.lock().map_err(|e| e.to_string())?;
-        conn.execute("INSERT INTO conversations (role, content) VALUES ('assistant', ?1)", rusqlite::params![response])
-            .map_err(|e| e.to_string())?;
+        conn.execute(
+            "INSERT INTO conversations (role, content) VALUES ('assistant', ?1)",
+            rusqlite::params![response],
+        )
+        .map_err(|e| e.to_string())?;
     }
-    let _ = app_handle.emit("chat-new-message", json!({
-        "role": "assistant", "content": response
-    }));
+    let _ = app_handle.emit(
+        "chat-new-message",
+        json!({
+            "role": "assistant", "content": response
+        }),
+    );
 
     // Finish streaming TTS -- speaks any remaining buffered text
     streaming_tts.finish().await;
@@ -192,8 +251,12 @@ pub fn toggle_mute(engine: State<Arc<VoiceEngine>>) -> bool {
 pub fn get_voice_settings(db: State<Arc<Database>>) -> Result<VoiceSettings, String> {
     let conn = db.conn.lock().map_err(|e| e.to_string())?;
     let get = |key: &str, default: &str| -> String {
-        conn.query_row("SELECT value FROM user_preferences WHERE key = ?1", rusqlite::params![key], |row| row.get(0))
-            .unwrap_or_else(|_| default.to_string())
+        conn.query_row(
+            "SELECT value FROM user_preferences WHERE key = ?1",
+            rusqlite::params![key],
+            |row| row.get(0),
+        )
+        .unwrap_or_else(|_| default.to_string())
     };
     Ok(VoiceSettings {
         enabled: get("voice_enabled", "true") == "true",
@@ -215,14 +278,27 @@ pub fn set_voice_setting(
         "INSERT INTO user_preferences (key, value, updated_at) VALUES (?1, ?2, datetime('now'))
          ON CONFLICT(key) DO UPDATE SET value = ?2, updated_at = datetime('now')",
         rusqlite::params![key, value],
-    ).map_err(|e| e.to_string())?;
+    )
+    .map_err(|e| e.to_string())?;
     drop(conn);
 
     // Sync in-memory TTS with the new setting
     match key.as_str() {
-        "tts_voice" => engine.tts.lock().map_err(|e| e.to_string())?.set_voice(value),
-        "tts_rate" => engine.tts.lock().map_err(|e| e.to_string())?.set_rate(value.parse().unwrap_or(200)),
-        "tts_enabled" => engine.tts.lock().map_err(|e| e.to_string())?.set_enabled(value == "true"),
+        "tts_voice" => engine
+            .tts
+            .lock()
+            .map_err(|e| e.to_string())?
+            .set_voice(value),
+        "tts_rate" => engine
+            .tts
+            .lock()
+            .map_err(|e| e.to_string())?
+            .set_rate(value.parse().unwrap_or(200)),
+        "tts_enabled" => engine
+            .tts
+            .lock()
+            .map_err(|e| e.to_string())?
+            .set_enabled(value == "true"),
         _ => {}
     }
     Ok(())

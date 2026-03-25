@@ -8,9 +8,9 @@ use crate::voice::{JarvisAppHandle, VoiceEngine, VoiceState};
 use serde_json::json;
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
+use tauri::async_runtime::JoinHandle;
 use tauri::{Emitter, Manager};
 use tokio::sync::Mutex as AsyncMutex;
-use tauri::async_runtime::JoinHandle;
 use tokio_util::sync::CancellationToken;
 
 pub struct WakeWordService {
@@ -76,10 +76,7 @@ impl WakeWordService {
         }
 
         let token = {
-            let mut guard = self
-                .cancellation_token
-                .lock()
-                .map_err(|e| e.to_string())?;
+            let mut guard = self.cancellation_token.lock().map_err(|e| e.to_string())?;
             *guard = CancellationToken::new();
             guard.clone()
         };
@@ -190,10 +187,7 @@ async fn supervisor_loop(
                 match voice_engine.audio_router.lock() {
                     Ok(mut audio_router) => {
                         if let Err(reconnect_err) = audio_router.reconnect() {
-                            log::error!(
-                                "Wake-word audio reconnect failed: {}",
-                                reconnect_err
-                            );
+                            log::error!("Wake-word audio reconnect failed: {}", reconnect_err);
                             continue;
                         }
                         audio_router.unmute();
@@ -320,10 +314,20 @@ async fn handle_wake_word_detection(
         .lock()
         .map_err(|e| e.to_string())?
         .mute();
+    let _ = app_handle.emit("chat-voice-active", json!({"active": true}));
+    let _ = app_handle.emit(
+        "chat-status",
+        json!({
+            "status": "Transcribing your request...",
+            "phase": "transcribing"
+        }),
+    );
 
     let user_text =
-        transcribe_with_fallback(Arc::clone(&voice_engine), local_transcriber, &command_audio).await?;
+        transcribe_with_fallback(Arc::clone(&voice_engine), local_transcriber, &command_audio)
+            .await?;
     if user_text.trim().is_empty() {
+        let _ = app_handle.emit("chat-voice-active", json!({"active": false}));
         voice_engine
             .audio_router
             .lock()
@@ -333,10 +337,20 @@ async fn handle_wake_word_detection(
     }
 
     // Show transcribed text in chat and signal AI is thinking
-    let _ = app_handle.emit("chat-new-message", json!({
-        "role": "user", "content": &user_text
-    }));
+    let _ = app_handle.emit(
+        "chat-new-message",
+        json!({
+            "role": "user", "content": &user_text
+        }),
+    );
     let _ = app_handle.emit("chat-state", json!({"state": "thinking"}));
+    let _ = app_handle.emit(
+        "chat-status",
+        json!({
+            "status": "Understanding your request...",
+            "phase": "thinking"
+        }),
+    );
 
     save_message(&db, "user", &user_text)?;
     let messages = load_recent_messages(&db)?;
@@ -352,6 +366,7 @@ async fn handle_wake_word_detection(
     let response = match router.send(messages, &db, &auth, &app_handle, tts_tx).await {
         Ok(r) => r,
         Err(e) => {
+            let _ = app_handle.emit("chat-voice-active", json!({"active": false}));
             let _ = app_handle.emit("chat-state", json!({"state": "idle"}));
             return Err(e);
         }
@@ -359,9 +374,12 @@ async fn handle_wake_word_detection(
     save_message(&db, "assistant", &response)?;
 
     // Show assistant response in chat
-    let _ = app_handle.emit("chat-new-message", json!({
-        "role": "assistant", "content": &response
-    }));
+    let _ = app_handle.emit(
+        "chat-new-message",
+        json!({
+            "role": "assistant", "content": &response
+        }),
+    );
 
     // Finish streaming TTS -- speaks any remaining buffered text
     streaming_tts.finish().await;
@@ -371,6 +389,7 @@ async fn handle_wake_word_detection(
         .lock()
         .map_err(|e| e.to_string())?
         .unmute();
+    let _ = app_handle.emit("chat-voice-active", json!({"active": false}));
 
     Ok(())
 }
@@ -488,7 +507,9 @@ fn load_recent_messages(db: &Database) -> Result<Vec<(String, String)>, String> 
         .prepare("SELECT role, content FROM conversations ORDER BY id DESC LIMIT 20")
         .map_err(|e| e.to_string())?;
     let mut messages = stmt
-        .query_map([], |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?)))
+        .query_map([], |row| {
+            Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+        })
         .map_err(|e| e.to_string())?
         .collect::<Result<Vec<_>, _>>()
         .map_err(|e| e.to_string())?;
@@ -511,11 +532,7 @@ fn rms(samples: &[f32]) -> f32 {
         return 0.0;
     }
 
-    let energy = samples
-        .iter()
-        .map(|sample| sample * sample)
-        .sum::<f32>()
-        / samples.len() as f32;
+    let energy = samples.iter().map(|sample| sample * sample).sum::<f32>() / samples.len() as f32;
     energy.sqrt()
 }
 
@@ -523,7 +540,13 @@ fn is_wake_phrase(transcript: &str) -> bool {
     let normalized = transcript
         .to_lowercase()
         .chars()
-        .map(|c| if c.is_ascii_alphabetic() || c.is_ascii_whitespace() { c } else { ' ' })
+        .map(|c| {
+            if c.is_ascii_alphabetic() || c.is_ascii_whitespace() {
+                c
+            } else {
+                ' '
+            }
+        })
         .collect::<String>();
     let compact = normalized.split_whitespace().collect::<Vec<_>>().join(" ");
     if compact.contains("hey jarvis") || compact.contains("hi jarvis") {
@@ -531,7 +554,9 @@ fn is_wake_phrase(transcript: &str) -> bool {
     }
 
     let tokens: Vec<&str> = compact.split_whitespace().collect();
-    let has_greeting = tokens.iter().any(|token| matches!(*token, "hey" | "hi" | "hay"));
+    let has_greeting = tokens
+        .iter()
+        .any(|token| matches!(*token, "hey" | "hi" | "hay"));
     let has_name = tokens
         .iter()
         .any(|token| levenshtein(token, "jarvis") <= 1 || token.contains("jarvis"));

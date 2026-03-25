@@ -18,8 +18,10 @@ import { useVoiceState } from "./hooks/useVoiceState";
 import ToastContainer from "./components/Toast";
 import WindowControls from "./components/WindowControls";
 import JarvisScene from "./components/3d/JarvisScene";
+import AssistantHud from "./components/AssistantHud";
 import { useChat } from "./hooks/useChat";
 import ChatMessageComponent from "./components/ChatMessage";
+import type { AssistantPhase, ChatStatusPayload, ChatThinkingPayload, ChatTokenPayload, ChatStatePayload } from "./lib/types";
 
 function ChatFullView() {
   const { messages, loading, error, send, clearChat, streamingText } = useChat();
@@ -73,16 +75,39 @@ export default function App() {
   const [wallpaperRaised, setWallpaperRaised] = useState(false);
   const [aiState, setAiState] = useState<"idle" | "thinking" | "speaking">("idle");
   const [pageTransition, setPageTransition] = useState(false);
+  const [assistantPhase, setAssistantPhase] = useState<AssistantPhase>("idle");
+  const [assistantStatus, setAssistantStatus] = useState<string | null>(null);
+  const [assistantThinking, setAssistantThinking] = useState("");
+  const [assistantResponsePreview, setAssistantResponsePreview] = useState("");
+  const [voiceRequestActive, setVoiceRequestActive] = useState(false);
   const ttsAmplitudeRef = useRef(0);
   const micAmplitudeRef = useRef(0);
   const [pendingToolCall, setPendingToolCall] = useState<string | null>(null);
   const prevView = useRef(activeView);
+  const hudResetTimer = useRef<number | null>(null);
+  const aiStateRef = useRef(aiState);
+  const assistantThinkingRef = useRef(assistantThinking);
 
   const toggleChat = useCallback(() => { setChatOpen((prev) => !prev); }, []);
   const closeChat = useCallback(() => { setChatOpen(false); }, []);
   const handleToolCallConsumed = useCallback(() => setPendingToolCall(null), []);
 
   const { state: voiceState, startVoice, stopVoice } = useVoiceState();
+
+  useEffect(() => {
+    aiStateRef.current = aiState;
+  }, [aiState]);
+
+  useEffect(() => {
+    assistantThinkingRef.current = assistantThinking;
+  }, [assistantThinking]);
+
+  useEffect(() => {
+    if (voiceState === "Listening" || voiceState === "WakeWordListening") {
+      setAssistantPhase("listening");
+      setAssistantStatus("Listening...");
+    }
+  }, [voiceState]);
 
   useEffect(() => {
     invoke<boolean>("get_wallpaper_status").then(setWallpaperActive).catch(() => {});
@@ -103,14 +128,43 @@ export default function App() {
 
   // Listen for AI chat state changes
   useEffect(() => {
-    const unlistenAi = listen<{ state: "idle" | "thinking" | "speaking" }>("chat-state", (event) => {
+    const unlistenAi = listen<ChatStatePayload>("chat-state", (event) => {
+      if (hudResetTimer.current) {
+        window.clearTimeout(hudResetTimer.current);
+        hudResetTimer.current = null;
+      }
       setAiState(event.payload.state);
+      if (event.payload.state === "speaking") {
+        setAssistantPhase("speaking");
+        setAssistantStatus((prev) => prev || "Speaking...");
+      } else if (event.payload.state === "thinking") {
+        setAssistantThinking("");
+        setAssistantResponsePreview("");
+        setAssistantPhase((prev) => (prev === "idle" ? "thinking" : prev));
+      } else {
+        hudResetTimer.current = window.setTimeout(() => {
+          setAssistantPhase("idle");
+          setAssistantStatus(null);
+          setAssistantThinking("");
+          setAssistantResponsePreview("");
+        }, 900);
+      }
     });
-    return () => { unlistenAi.then((fn) => fn()); };
+    return () => {
+      if (hudResetTimer.current) {
+        window.clearTimeout(hudResetTimer.current);
+      }
+      unlistenAi.then((fn) => fn());
+    };
   }, []);
 
   // Listen for TTS amplitude, mic amplitude, and tool call events
   useEffect(() => {
+    const appendTail = (prev: string, next: string, max: number) => {
+      const merged = `${prev}${next}`;
+      return merged.length <= max ? merged : merged.slice(-max);
+    };
+
     const unlistenAmp = listen<{ amplitude: number }>("tts-amplitude", (event) => {
       // Write to ref instead of state -- JarvisScene reads via ref, no re-render cascade
       ttsAmplitudeRef.current = event.payload.amplitude;
@@ -121,10 +175,44 @@ export default function App() {
     const unlistenTool = listen<{ tool_name: string }>("chat-tool-call", (event) => {
       setPendingToolCall(event.payload.tool_name);
     });
+    const unlistenStatus = listen<ChatStatusPayload>("chat-status", (event) => {
+      setAssistantStatus(event.payload.status);
+      if (event.payload.phase) {
+        setAssistantPhase(event.payload.phase);
+      }
+      if (event.payload.phase === "responding" && assistantThinkingRef.current) {
+        setAssistantThinking("");
+      }
+    });
+    const unlistenToken = listen<ChatTokenPayload>("chat-token", (event) => {
+      if (event.payload.done) {
+        return;
+      }
+      setAssistantResponsePreview((prev) => appendTail(prev, event.payload.token, 260));
+    });
+    const unlistenThinking = listen<ChatThinkingPayload>("chat-thinking", (event) => {
+      if (event.payload.done) {
+        return;
+      }
+      setAssistantThinking((prev) => appendTail(prev, event.payload.text, 220));
+    });
+    const unlistenVoiceRequest = listen<{ active: boolean }>("chat-voice-active", (event) => {
+      setVoiceRequestActive(event.payload.active);
+      if (!event.payload.active && aiStateRef.current === "idle") {
+        setAssistantPhase("idle");
+      } else if (event.payload.active) {
+        setAssistantThinking("");
+        setAssistantResponsePreview("");
+      }
+    });
     return () => {
       unlistenAmp.then((fn) => fn());
       unlistenMic.then((fn) => fn());
       unlistenTool.then((fn) => fn());
+      unlistenStatus.then((fn) => fn());
+      unlistenToken.then((fn) => fn());
+      unlistenThinking.then((fn) => fn());
+      unlistenVoiceRequest.then((fn) => fn());
     };
   }, []);
 
@@ -215,6 +303,13 @@ export default function App() {
         {activeView !== "chat" && (
           <ChatPanel isOpen={chatOpen} onClose={closeChat} onNavigateToChat={() => { setChatOpen(false); setActiveView("chat"); }} />
         )}
+        <AssistantHud
+          visible={voiceRequestActive || aiState !== "idle" || assistantPhase !== "idle" || Boolean(assistantStatus) || Boolean(assistantThinking) || Boolean(assistantResponsePreview)}
+          phase={assistantPhase}
+          status={assistantStatus}
+          thinking={assistantThinking}
+          responsePreview={assistantResponsePreview}
+        />
         <VoiceIndicator state={voiceState} onStop={stopVoice} />
         <ToastContainer />
       </div>

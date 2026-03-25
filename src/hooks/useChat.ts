@@ -87,7 +87,11 @@ export function useChat() {
     });
 
     const unlistenState = listen<ChatStatePayload>("chat-state", (event) => {
-      if (mounted) setAiState(event.payload.state);
+      if (!mounted) return;
+      setAiState(event.payload.state);
+      if (event.payload.state === "idle") {
+        setCurrentStatus(null);
+      }
     });
 
     // Listen for new messages from voice or other non-chat paths

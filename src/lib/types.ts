@@ -118,6 +118,16 @@ export type VoiceState =
 
 export type AiState = "idle" | "thinking" | "speaking";
 
+export type AssistantPhase =
+  | "idle"
+  | "listening"
+  | "transcribing"
+  | "thinking"
+  | "planning"
+  | "acting"
+  | "responding"
+  | "speaking";
+
 export interface ChatTokenPayload {
   token: string;
   done: boolean;
@@ -125,10 +135,17 @@ export interface ChatTokenPayload {
 
 export interface ChatStatusPayload {
   status: string;
+  phase?: AssistantPhase;
+  detail?: string;
 }
 
 export interface ChatStatePayload {
   state: AiState;
+}
+
+export interface ChatThinkingPayload {
+  text: string;
+  done?: boolean;
 }
 
 export interface TtsAmplitudePayload {
