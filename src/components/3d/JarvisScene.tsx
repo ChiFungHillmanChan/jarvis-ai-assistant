@@ -118,10 +118,16 @@ export default memo(function JarvisScene({ activityLevel = "idle", ttsAmplitudeR
   const listeningAlphaRef = useRef(0);
   const arcsRef = useRef<EnergyArc[]>([]);
   const ringSpeedRef = useRef(1.0);
+  const gridOpacityRef = useRef(1);
 
   // Data nodes
   const nodes = useRef<DataNode[]>([]);
   const dataLoaded = useRef(false);
+
+  // Z-sort cache (avoid sorting every frame)
+  const sortedNodesRef = useRef<{ node: DataNode; pr: { x: number; y: number; scale: number }; tz: number }[]>([]);
+  const lastSortRotXRef = useRef(0);
+  const lastSortRotYRef = useRef(0);
 
   // Focus animation state
   const focusTarget = useRef<DataNode | null>(null);
@@ -219,7 +225,7 @@ export default memo(function JarvisScene({ activityLevel = "idle", ttsAmplitudeR
       addNode(item.type, item.label, item.sublabel, item.urgent);
     }
 
-    const targetTotal = 120;
+    const targetTotal = 60;
     while (idx < targetTotal) {
       addNode("particle", "", undefined);
     }
@@ -352,9 +358,9 @@ export default memo(function JarvisScene({ activityLevel = "idle", ttsAmplitudeR
     window.addEventListener("wheel", onWheel, { passive: false });
     window.addEventListener("dblclick", onDblClick);
 
-    // Frame rate throttle: ~20fps when idle, 60fps when active/interacting
+    // Frame rate throttle: ~10fps when idle, 60fps when active/interacting
     let lastFrameTime = 0;
-    const IDLE_FRAME_MS = 50;   // 20fps when idle
+    const IDLE_FRAME_MS = 100;  // 10fps when idle
     const ACTIVE_FRAME_MS = 16; // 60fps when active
 
     function animate(timestamp?: number) {
@@ -370,7 +376,7 @@ export default memo(function JarvisScene({ activityLevel = "idle", ttsAmplitudeR
       }
       lastFrameTime = now;
 
-      try {
+      try { // --- begin frame ---
       time.current += 0.006;
       const w = canvas.width, h = canvas.height;
       const cx = w / 2, cy = h / 2;
@@ -450,37 +456,64 @@ export default memo(function JarvisScene({ activityLevel = "idle", ttsAmplitudeR
       ctx.fillStyle = ambGlow;
       ctx.fillRect(0, 0, w, h);
 
-      // === GRID LINES (reduced segments for performance) ===
-      // Latitude
-      for (let i = 1; i < LAT_LINES; i++) {
-        const phi = (i / LAT_LINES) * Math.PI;
-        const ringR = SPHERE_RADIUS * Math.sin(phi);
-        const ringY = SPHERE_RADIUS * Math.cos(phi);
-        ctx.beginPath();
-        for (let s = 0; s <= 32; s++) {
-          const theta = (s / 32) * Math.PI * 2;
-          const p = transform({ x: ringR * Math.cos(theta), y: ringY, z: ringR * Math.sin(theta) }, ry, rx);
-          const pr = project(p, cx, cy, fov);
-          if (s === 0) ctx.moveTo(pr.x, pr.y); else ctx.lineTo(pr.x, pr.y);
-        }
-        ctx.strokeStyle = `rgba(0, 160, 255, ${0.04 + (i === LAT_LINES / 2 ? 0.04 : 0)})`;
+      // === GRID LINES (batched paths, skipped when idle) ===
+      const targetGridOpacity = (activityLevel !== "idle" || dragging.current) ? 1 : 0;
+      gridOpacityRef.current += (targetGridOpacity - gridOpacityRef.current) * 0.05;
+
+      if (gridOpacityRef.current > 0.01) {
+        ctx.globalAlpha = gridOpacityRef.current;
+
+        // Latitude -- batch all lines except equator into one path
         ctx.lineWidth = 0.5;
-        ctx.stroke();
-      }
-      // Longitude
-      for (let i = 0; i < LON_LINES; i++) {
-        const theta = (i / LON_LINES) * Math.PI * 2;
         ctx.beginPath();
-        for (let s = 0; s <= 24; s++) {
-          const phi = (s / 24) * Math.PI;
-          let p = sphereToCart(theta, phi, SPHERE_RADIUS);
-          p = transform(p, ry, rx);
-          const pr = project(p, cx, cy, fov);
-          if (s === 0) ctx.moveTo(pr.x, pr.y); else ctx.lineTo(pr.x, pr.y);
+        for (let i = 1; i < LAT_LINES; i++) {
+          if (i === LAT_LINES / 2) continue; // equator drawn separately (brighter)
+          const phi = (i / LAT_LINES) * Math.PI;
+          const ringR = SPHERE_RADIUS * Math.sin(phi);
+          const ringY = SPHERE_RADIUS * Math.cos(phi);
+          for (let s = 0; s <= 32; s++) {
+            const theta = (s / 32) * Math.PI * 2;
+            const p = transform({ x: ringR * Math.cos(theta), y: ringY, z: ringR * Math.sin(theta) }, ry, rx);
+            const pr = project(p, cx, cy, fov);
+            if (s === 0) ctx.moveTo(pr.x, pr.y); else ctx.lineTo(pr.x, pr.y);
+          }
+        }
+        ctx.strokeStyle = "rgba(0, 160, 255, 0.04)";
+        ctx.stroke();
+
+        // Equator (brighter)
+        {
+          const eqPhi = (LAT_LINES / 2 / LAT_LINES) * Math.PI;
+          const eqR = SPHERE_RADIUS * Math.sin(eqPhi);
+          const eqY = SPHERE_RADIUS * Math.cos(eqPhi);
+          ctx.beginPath();
+          for (let s = 0; s <= 32; s++) {
+            const theta = (s / 32) * Math.PI * 2;
+            const p = transform({ x: eqR * Math.cos(theta), y: eqY, z: eqR * Math.sin(theta) }, ry, rx);
+            const pr = project(p, cx, cy, fov);
+            if (s === 0) ctx.moveTo(pr.x, pr.y); else ctx.lineTo(pr.x, pr.y);
+          }
+          ctx.strokeStyle = "rgba(0, 160, 255, 0.08)";
+          ctx.stroke();
+        }
+
+        // Longitude -- batch all into one path
+        ctx.beginPath();
+        for (let i = 0; i < LON_LINES; i++) {
+          const theta = (i / LON_LINES) * Math.PI * 2;
+          for (let s = 0; s <= 24; s++) {
+            const phi = (s / 24) * Math.PI;
+            let p = sphereToCart(theta, phi, SPHERE_RADIUS);
+            p = transform(p, ry, rx);
+            const pr = project(p, cx, cy, fov);
+            if (s === 0) ctx.moveTo(pr.x, pr.y); else ctx.lineTo(pr.x, pr.y);
+          }
         }
         ctx.strokeStyle = "rgba(0, 160, 255, 0.03)";
         ctx.lineWidth = 0.4;
         ctx.stroke();
+
+        ctx.globalAlpha = 1;
       }
 
       // === ORBITAL RINGS ===
@@ -627,7 +660,7 @@ export default memo(function JarvisScene({ activityLevel = "idle", ttsAmplitudeR
       hoveredNode.current = null;
       const mx = mousePos.current.x, my = mousePos.current.y;
 
-      // Transform + sort back to front
+      // Transform + sort back to front (sort cached when rotation unchanged)
       const transformed = nodes.current.map(node => {
         node.theta += node.speed;
         const cart = sphereToCart(node.theta, node.phi, node.r);
@@ -644,23 +677,51 @@ export default memo(function JarvisScene({ activityLevel = "idle", ttsAmplitudeR
         const pr = project(tp, cx, cy, fov);
         return { node, pr, tz: tp.z };
       });
-      transformed.sort((a, b) => b.tz - a.tz);
 
-      // Draw connections between nearby non-particle nodes (batch into single path)
+      const rotChanged = Math.abs(ry - lastSortRotYRef.current) > 0.001 ||
+                          Math.abs(rx - lastSortRotXRef.current) > 0.001;
+      if (rotChanged || sortedNodesRef.current.length !== transformed.length) {
+        transformed.sort((a, b) => b.tz - a.tz);
+        sortedNodesRef.current = transformed;
+        lastSortRotYRef.current = ry;
+        lastSortRotXRef.current = rx;
+      }
+      const sorted = sortedNodesRef.current.length === transformed.length ? sortedNodesRef.current : transformed;
+
+      // Draw connections between nearby non-particle nodes (spatial grid lookup)
       if (act > 0.05 || isInteracting) {
         const dataNodes = transformed.filter(t => t.node.type !== "particle");
+        const CELL_SIZE = 80;
+        const grid: Map<string, typeof dataNodes> = new Map();
+        for (const dn of dataNodes) {
+          const cellX = Math.floor(dn.pr.x / CELL_SIZE);
+          const cellY = Math.floor(dn.pr.y / CELL_SIZE);
+          const key = `${cellX},${cellY}`;
+          if (!grid.has(key)) grid.set(key, []);
+          grid.get(key)!.push(dn);
+        }
+
         ctx.lineWidth = 0.3;
         ctx.beginPath();
         let hasLines = false;
-        for (let i = 0; i < dataNodes.length; i++) {
-          for (let j = i + 1; j < dataNodes.length; j++) {
-            const dx = dataNodes[i].pr.x - dataNodes[j].pr.x;
-            const dy = dataNodes[i].pr.y - dataNodes[j].pr.y;
-            const distSq = dx*dx + dy*dy;
-            if (distSq < 6400) { // 80*80, avoid sqrt
-              ctx.moveTo(dataNodes[i].pr.x, dataNodes[i].pr.y);
-              ctx.lineTo(dataNodes[j].pr.x, dataNodes[j].pr.y);
-              hasLines = true;
+        for (const dn of dataNodes) {
+          const cellX = Math.floor(dn.pr.x / CELL_SIZE);
+          const cellY = Math.floor(dn.pr.y / CELL_SIZE);
+          for (let ddx = -1; ddx <= 1; ddx++) {
+            for (let ddy = -1; ddy <= 1; ddy++) {
+              const neighbors = grid.get(`${cellX + ddx},${cellY + ddy}`);
+              if (!neighbors) continue;
+              for (const other of neighbors) {
+                if (other.node.id <= dn.node.id) continue; // avoid duplicates
+                const dx = dn.pr.x - other.pr.x;
+                const dy = dn.pr.y - other.pr.y;
+                const distSq = dx * dx + dy * dy;
+                if (distSq < 6400) { // 80*80
+                  ctx.moveTo(dn.pr.x, dn.pr.y);
+                  ctx.lineTo(other.pr.x, other.pr.y);
+                  hasLines = true;
+                }
+              }
             }
           }
         }
@@ -670,8 +731,8 @@ export default memo(function JarvisScene({ activityLevel = "idle", ttsAmplitudeR
         }
       }
 
-      // Draw nodes
-      for (const { node, pr } of transformed) {
+      // Draw nodes (back-to-front using cached sort order)
+      for (const { node, pr } of sorted) {
         const col = TYPE_COLORS[node.type] || TYPE_COLORS.particle;
         const sz = node.size * pr.scale * 1.5;
         if (sz < 0.2 || pr.scale <= 0) continue;
