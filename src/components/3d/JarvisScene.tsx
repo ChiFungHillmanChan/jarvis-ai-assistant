@@ -88,11 +88,12 @@ function easeInOut(t: number): number {
 interface JarvisSceneProps {
   activityLevel?: "idle" | "listening" | "processing" | "active";
   ttsAmplitudeRef?: React.RefObject<number>;
+  micAmplitudeRef?: React.RefObject<number>;
   pendingToolCall?: string | null;
   onToolCallConsumed?: () => void;
 }
 
-export default memo(function JarvisScene({ activityLevel = "idle", ttsAmplitudeRef, pendingToolCall = null, onToolCallConsumed }: JarvisSceneProps) {
+export default memo(function JarvisScene({ activityLevel = "idle", ttsAmplitudeRef, micAmplitudeRef, pendingToolCall = null, onToolCallConsumed }: JarvisSceneProps) {
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const animRef = useRef(0);
   const time = useRef(0);
@@ -110,6 +111,10 @@ export default memo(function JarvisScene({ activityLevel = "idle", ttsAmplitudeR
   const speakingAlpha = useRef(0);
   const ttsAmpFallback = useRef(0);
   const ttsAmpRef = ttsAmplitudeRef || ttsAmpFallback;
+  const micAmpFallback = useRef(0);
+  // micAmpRef will be used by Task 9 for waveform visualization
+  const _micAmpRef = micAmplitudeRef || micAmpFallback;
+  void _micAmpRef;
   const arcsRef = useRef<EnergyArc[]>([]);
   const ringSpeedRef = useRef(1.0);
 

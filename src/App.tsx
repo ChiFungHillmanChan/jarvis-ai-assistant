@@ -74,6 +74,7 @@ export default function App() {
   const [aiState, setAiState] = useState<"idle" | "thinking" | "speaking">("idle");
   const [pageTransition, setPageTransition] = useState(false);
   const ttsAmplitudeRef = useRef(0);
+  const micAmplitudeRef = useRef(0);
   const [pendingToolCall, setPendingToolCall] = useState<string | null>(null);
   const prevView = useRef(activeView);
 
@@ -108,17 +109,21 @@ export default function App() {
     return () => { unlistenAi.then((fn) => fn()); };
   }, []);
 
-  // Listen for TTS amplitude and tool call events
+  // Listen for TTS amplitude, mic amplitude, and tool call events
   useEffect(() => {
     const unlistenAmp = listen<{ amplitude: number }>("tts-amplitude", (event) => {
       // Write to ref instead of state -- JarvisScene reads via ref, no re-render cascade
       ttsAmplitudeRef.current = event.payload.amplitude;
+    });
+    const unlistenMic = listen<{ amplitude: number }>("mic-amplitude", (event) => {
+      micAmplitudeRef.current = event.payload.amplitude;
     });
     const unlistenTool = listen<{ tool_name: string }>("chat-tool-call", (event) => {
       setPendingToolCall(event.payload.tool_name);
     });
     return () => {
       unlistenAmp.then((fn) => fn());
+      unlistenMic.then((fn) => fn());
       unlistenTool.then((fn) => fn());
     };
   }, []);
@@ -182,7 +187,7 @@ export default function App() {
 
   return (
     <div style={styles.root}>
-      <JarvisScene activityLevel={activityLevel} ttsAmplitudeRef={ttsAmplitudeRef} pendingToolCall={pendingToolCall} onToolCallConsumed={handleToolCallConsumed} />
+      <JarvisScene activityLevel={activityLevel} ttsAmplitudeRef={ttsAmplitudeRef} micAmplitudeRef={micAmplitudeRef} pendingToolCall={pendingToolCall} onToolCallConsumed={handleToolCallConsumed} />
 
       <div style={styles.uiLayer}>
         <div className="drag-region" style={styles.titleBar} onMouseDown={(e) => { if ((e.target as HTMLElement).closest('.no-drag')) return; getCurrentWindow().startDragging(); }}>
