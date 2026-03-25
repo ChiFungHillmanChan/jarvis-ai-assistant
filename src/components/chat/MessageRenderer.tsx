@@ -1,5 +1,6 @@
 import { memo } from "react";
 import InlineChart from "./InlineChart";
+import StatusCard from "./StatusCard";
 
 // ---------------------------------------------------------------------------
 // Types
@@ -238,11 +239,13 @@ function MessageRendererInner({ content }: MessageRendererProps) {
           );
         }
 
-        if (block.type === "status") {
+        if (block.type === "status" && block.data) {
           return (
-            <div key={i} style={placeholderStyle}>
-              [Status: {block.content}]
-            </div>
+            <StatusCard
+              key={i}
+              statusType={block.content}
+              data={block.data as Record<string, unknown>}
+            />
           );
         }
 
@@ -266,17 +269,6 @@ const containerStyle: React.CSSProperties = {
   fontSize: 13,
   fontFamily: "var(--font-sans)",
   color: "rgba(0, 180, 255, 0.8)",
-};
-
-const placeholderStyle: React.CSSProperties = {
-  padding: "8px 12px",
-  marginTop: 6,
-  background: "rgba(0, 180, 255, 0.04)",
-  border: "1px solid rgba(0, 180, 255, 0.1)",
-  borderRadius: 6,
-  fontFamily: "var(--font-mono)",
-  fontSize: 11,
-  color: "rgba(0, 180, 255, 0.5)",
 };
 
 const inlineStyles: Record<string, React.CSSProperties> = {
