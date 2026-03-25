@@ -364,6 +364,44 @@ pub fn get_tool_definitions() -> Vec<Tool> {
                 "required": ["path"]
             }),
         },
+        Tool {
+            name: "render_chart".into(),
+            description: "Render a data chart inline in the chat. Use when presenting numerical data, trends, or comparisons.".into(),
+            parameters: json!({
+                "type": "object",
+                "properties": {
+                    "chart_type": {
+                        "type": "string",
+                        "enum": ["line", "pie", "bar"],
+                        "description": "Type of chart to render"
+                    },
+                    "data": {
+                        "type": "object",
+                        "description": "Chart data. For line/bar: {labels: string[], series: [{name: string, data: number[]}]}. For pie: {segments: [{label: string, value: number}]}"
+                    }
+                },
+                "required": ["chart_type", "data"]
+            }),
+        },
+        Tool {
+            name: "render_status".into(),
+            description: "Show a status card for a completed action. Use after creating tasks, syncing data, or completing any action.".into(),
+            parameters: json!({
+                "type": "object",
+                "properties": {
+                    "status_type": {
+                        "type": "string",
+                        "enum": ["task_created", "task_completed", "email_synced", "calendar_synced", "cron_created", "action_completed"],
+                        "description": "Type of status to display"
+                    },
+                    "data": {
+                        "type": "object",
+                        "description": "Status data. Fields vary by type: task_created needs name/priority/due, email_synced needs count/folder, etc."
+                    }
+                },
+                "required": ["status_type", "data"]
+            }),
+        },
     ]
 }
 
@@ -429,6 +467,8 @@ pub fn tool_status_label(name: &str) -> &'static str {
         "list_processes" => "Listing processes...",
         "kill_process" => "Stopping process...",
         "read_file" => "Reading file...",
+        "render_chart" => "Rendering chart...",
+        "render_status" => "Showing result...",
         _ => "Processing...",
     }
 }
@@ -468,6 +508,8 @@ pub fn tool_voice_narration(name: &str) -> &'static str {
         "list_processes" => "Checking running processes.",
         "kill_process" => "Stopping that process.",
         "read_file" => "Reading that file.",
+        "render_chart" => "Putting together a chart for you.",
+        "render_status" => "Here are the results.",
         _ => "Working on it.",
     }
 }
@@ -885,6 +927,16 @@ pub async fn execute_tool(
                     .unwrap_or_else(|e| format!("Obsidian error: {}", e)),
                 None => "Obsidian API key not configured. Please add your Obsidian REST API key in Settings.".to_string(),
             }
+        }
+        "render_chart" => {
+            let chart_type = args["chart_type"].as_str().unwrap_or("line");
+            let data = &args["data"];
+            format!("[CHART:{}|{}]", chart_type, serde_json::to_string(data).unwrap_or_default())
+        }
+        "render_status" => {
+            let status_type = args["status_type"].as_str().unwrap_or("action_completed");
+            let data = &args["data"];
+            format!("[STATUS:{}|{}]", status_type, serde_json::to_string(data).unwrap_or_default())
         }
         _ => format!("Unknown tool: {}", name),
     };
