@@ -1,4 +1,5 @@
 import { memo } from "react";
+import InlineChart from "./InlineChart";
 
 // ---------------------------------------------------------------------------
 // Types
@@ -227,11 +228,13 @@ function MessageRendererInner({ content }: MessageRendererProps) {
   return (
     <div style={containerStyle}>
       {blocks.map((block, i) => {
-        if (block.type === "chart") {
+        if (block.type === "chart" && block.data) {
           return (
-            <div key={i} style={placeholderStyle}>
-              [Chart: {block.content}]
-            </div>
+            <InlineChart
+              key={i}
+              chartType={block.content}
+              data={block.data as Record<string, unknown>}
+            />
           );
         }
 
