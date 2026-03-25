@@ -1,4 +1,4 @@
-import { useState, useCallback, useEffect, useRef } from "react";
+import { useState, useCallback, useEffect, useRef, useMemo } from "react";
 import { getCurrentWindow } from "@tauri-apps/api/window";
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
@@ -33,6 +33,8 @@ export default function App() {
 
   const toggleChat = useCallback(() => { setChatOpen((prev) => !prev); setChatFullScreen(false); }, []);
   const closeChat = useCallback(() => { setChatOpen(false); setChatFullScreen(false); }, []);
+  const handleToolCallConsumed = useCallback(() => setPendingToolCall(null), []);
+  const toggleFullScreen = useCallback(() => setChatFullScreen((prev) => !prev), []);
 
   const { state: voiceState, startVoice, stopVoice } = useVoiceState();
 
@@ -90,17 +92,15 @@ export default function App() {
     }
   }, [activeView]);
 
-  function getActivityLevel(): "idle" | "listening" | "processing" | "active" {
-    // Page transition pulse
+  const activityLevel = useMemo((): "idle" | "listening" | "processing" | "active" => {
     if (pageTransition) return "processing";
-    // AI states take priority
     if (aiState === "speaking") return "active";
     if (aiState === "thinking") return "processing";
     if (voiceState === "Speaking" || voiceState === "WakeWordSpeaking") return "active";
     if (voiceState === "Processing" || voiceState === "WakeWordDetected" || voiceState === "WakeWordProcessing" || (typeof voiceState === "object" && "ModelDownloading" in voiceState)) return "processing";
     if (voiceState === "Listening" || voiceState === "WakeWordListening") return "listening";
     return "idle";
-  }
+  }, [pageTransition, aiState, voiceState]);
 
   async function handleLowerToBackground() {
     await invoke("lower_wallpaper");
@@ -118,7 +118,11 @@ export default function App() {
     },
     "cmd+shift+j": () => {
       if (voiceState === "Listening") { stopVoice(); }
-      else if (voiceState === "Idle" || voiceState === "WakeWordListening") { startVoice(); }
+      else if (
+        voiceState === "Idle" ||
+        voiceState === "WakeWordListening" ||
+        (typeof voiceState === "object" && "Error" in voiceState)
+      ) { startVoice(); }
     },
   });
 
@@ -136,7 +140,7 @@ export default function App() {
 
   return (
     <div style={styles.root}>
-      <JarvisScene activityLevel={getActivityLevel()} ttsAmplitudeRef={ttsAmplitudeRef} pendingToolCall={pendingToolCall} onToolCallConsumed={() => setPendingToolCall(null)} />
+      <JarvisScene activityLevel={activityLevel} ttsAmplitudeRef={ttsAmplitudeRef} pendingToolCall={pendingToolCall} onToolCallConsumed={handleToolCallConsumed} />
 
       <div style={styles.uiLayer}>
         <div className="drag-region" style={styles.titleBar} onMouseDown={(e) => { if ((e.target as HTMLElement).closest('.no-drag')) return; getCurrentWindow().startDragging(); }}>
@@ -161,7 +165,7 @@ export default function App() {
             <CommandBar onActivate={toggleChat} />
           </div>
         </div>
-        <ChatPanel isOpen={chatOpen} isFullScreen={chatFullScreen} onClose={closeChat} onToggleFullScreen={() => setChatFullScreen((prev) => !prev)} />
+        <ChatPanel isOpen={chatOpen} isFullScreen={chatFullScreen} onClose={closeChat} onToggleFullScreen={toggleFullScreen} />
         <VoiceIndicator state={voiceState} onStop={stopVoice} />
         <ToastContainer />
       </div>

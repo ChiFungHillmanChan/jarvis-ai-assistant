@@ -1,24 +1,37 @@
-import { useState, useRef, useEffect } from "react";
+import { useState, useRef, useEffect, useCallback, memo } from "react";
 import ChatMessageComponent from "./ChatMessage";
 import { useChat } from "../hooks/useChat";
 
 interface ChatPanelProps { isOpen: boolean; isFullScreen: boolean; onClose: () => void; onToggleFullScreen: () => void; }
 
-export default function ChatPanel({ isOpen, isFullScreen, onClose, onToggleFullScreen }: ChatPanelProps) {
+export default memo(function ChatPanel({ isOpen, isFullScreen, onClose, onToggleFullScreen }: ChatPanelProps) {
   const { messages, loading, error, send, clearChat, currentStatus, streamingText } = useChat();
   const [input, setInput] = useState("");
   const messagesEndRef = useRef<HTMLDivElement>(null);
   const inputRef = useRef<HTMLTextAreaElement>(null);
+  const scrollRafRef = useRef<number | null>(null);
 
-  useEffect(() => { messagesEndRef.current?.scrollIntoView({ behavior: "smooth" }); }, [messages, streamingText]);
+  // Scroll on new messages only (not every streaming token)
+  useEffect(() => { messagesEndRef.current?.scrollIntoView({ behavior: "smooth" }); }, [messages]);
+
+  // Throttled scroll during streaming — at most once per animation frame
+  useEffect(() => {
+    if (!streamingText) return;
+    if (scrollRafRef.current) return;
+    scrollRafRef.current = requestAnimationFrame(() => {
+      messagesEndRef.current?.scrollIntoView({ behavior: "auto" });
+      scrollRafRef.current = null;
+    });
+    return () => { if (scrollRafRef.current) { cancelAnimationFrame(scrollRafRef.current); scrollRafRef.current = null; } };
+  }, [streamingText]);
   useEffect(() => { if (isOpen) inputRef.current?.focus(); }, [isOpen]);
 
-  if (!isOpen) return null;
-
-  function handleSubmit(e: React.FormEvent) {
+  const handleSubmit = useCallback((e: React.FormEvent) => {
     e.preventDefault();
     if (input.trim()) { send(input); setInput(""); }
-  }
+  }, [input, send]);
+
+  if (!isOpen) return null;
 
   const panelStyle: React.CSSProperties = isFullScreen ? styles.fullScreen : styles.overlay;
   return (
@@ -82,7 +95,7 @@ export default function ChatPanel({ isOpen, isFullScreen, onClose, onToggleFullS
       </form>
     </div>
   );
-}
+});
 
 const styles: Record<string, React.CSSProperties> = {
   overlay: { position: "fixed", top: 0, right: 0, width: 380, height: "100%", borderLeft: "1px solid rgba(0, 180, 255, 0.15)", background: "rgba(10, 14, 26, 0.97)", display: "flex", flexDirection: "column", zIndex: 100, userSelect: "text" as const },

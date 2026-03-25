@@ -239,12 +239,22 @@ async fn detection_loop(
                     .map_err(|e| e.to_string())?
                     .read_ring(2.0);
 
-                if !has_speech(&audio_window, 0.015) {
+                if audio_window.is_empty() {
+                    log::debug!("Wake word: empty audio window -- stream may not be active");
                     continue;
                 }
 
+                if !has_speech(&audio_window, 0.008) {
+                    continue;
+                }
+
+                let window_rms = rms(&audio_window);
                 let transcript = transcribe_local_window(local_transcriber.clone(), audio_window).await?;
-                if transcript.is_empty() || !is_wake_phrase(&transcript) {
+                if transcript.is_empty() {
+                    continue;
+                }
+                log::debug!("Wake word heard (RMS {:.4}): \"{}\"", window_rms, transcript);
+                if !is_wake_phrase(&transcript) {
                     continue;
                 }
 

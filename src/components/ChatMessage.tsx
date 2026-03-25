@@ -1,6 +1,7 @@
+import { memo } from "react";
 import type { ChatMessage as ChatMessageType } from "../lib/types";
 interface ChatMessageProps { message: ChatMessageType; }
-export default function ChatMessage({ message }: ChatMessageProps) {
+export default memo(function ChatMessage({ message }: ChatMessageProps) {
   const isUser = message.role === "user";
   return (
     <div style={{ ...styles.container, alignItems: isUser ? "flex-end" : "flex-start" }}>
@@ -10,7 +11,7 @@ export default function ChatMessage({ message }: ChatMessageProps) {
       </div>
     </div>
   );
-}
+})
 const styles: Record<string, React.CSSProperties> = {
   container: { display: "flex", flexDirection: "column", marginBottom: 14, maxWidth: "85%" },
   label: { color: "rgba(0, 180, 255, 0.4)", fontSize: 9, fontFamily: "var(--font-mono)", letterSpacing: 1.5, marginBottom: 4 },

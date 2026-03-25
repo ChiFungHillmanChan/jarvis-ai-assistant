@@ -1,3 +1,4 @@
+import { memo } from "react";
 interface SidebarProps {
   activeView: string;
   onNavigate: (view: string) => void;
@@ -14,7 +15,7 @@ const navItems = [
   { id: "settings", label: "SET", icon: "S" },
 ];
 
-export default function Sidebar({ activeView, onNavigate, onChatToggle }: SidebarProps) {
+export default memo(function Sidebar({ activeView, onNavigate, onChatToggle }: SidebarProps) {
   return (
     <div style={styles.container}>
       <div style={styles.logo}><span style={styles.logoText}>J</span></div>
@@ -32,7 +33,7 @@ export default function Sidebar({ activeView, onNavigate, onChatToggle }: Sideba
       </button>
     </div>
   );
-}
+});
 
 const styles: Record<string, React.CSSProperties> = {
   container: { width: 56, height: "100%", display: "flex", flexDirection: "column", alignItems: "center", padding: "12px 0", borderRight: "1px solid rgba(0, 180, 255, 0.1)", background: "rgba(10, 14, 26, 0.6)", backdropFilter: "blur(12px)", gap: 4 },

@@ -16,6 +16,10 @@ export function useChat() {
   const tokenBuffer = useRef("");
   const rafId = useRef<number | null>(null);
   const streamingTextRef = useRef("");
+  // Track whether voice initiated the current AI request -- skip streaming tokens if so
+  const voiceActiveRef = useRef(false);
+  // Track whether chat (useChat.send) initiated the current request
+  const chatInitiatedRef = useRef(false);
 
   useEffect(() => { getConversations().then(setMessages).catch((e) => setError(String(e))); }, []);
 
@@ -37,11 +41,25 @@ export function useChat() {
       rafId.current = null;
     };
 
+    // Track voice-initiated requests to skip token processing
+    const unlistenVoice = listen<{ active: boolean }>("chat-voice-active", (event) => {
+      voiceActiveRef.current = event.payload.active;
+      // When voice finishes, clear any leftover streaming state
+      if (!event.payload.active) {
+        tokenBuffer.current = "";
+        if (rafId.current) {
+          cancelAnimationFrame(rafId.current);
+          rafId.current = null;
+        }
+      }
+    });
+
     const unlistenToken = listen<ChatTokenPayload>("chat-token", (event) => {
       if (!mounted) return;
-      console.log("[STREAM-DEBUG] chat-token:", event.payload.done ? "DONE" : event.payload.token.substring(0, 30));
+      // Skip token processing if voice initiated this request (not our concern)
+      if (voiceActiveRef.current && !chatInitiatedRef.current) return;
+
       if (event.payload.done) {
-        // Flush any remaining buffer
         if (tokenBuffer.current) {
           const remaining = tokenBuffer.current;
           tokenBuffer.current = "";
@@ -64,19 +82,17 @@ export function useChat() {
     });
 
     const unlistenStatus = listen<ChatStatusPayload>("chat-status", (event) => {
-      console.log("[STREAM-DEBUG] chat-status:", event.payload.status);
-      if (mounted) setCurrentStatus(event.payload.status);
+      // Only update status for chat-initiated requests
+      if (mounted && !voiceActiveRef.current) setCurrentStatus(event.payload.status);
     });
 
     const unlistenState = listen<ChatStatePayload>("chat-state", (event) => {
-      console.log("[STREAM-DEBUG] chat-state:", event.payload.state);
       if (mounted) setAiState(event.payload.state);
     });
 
     // Listen for new messages from voice or other non-chat paths
     const unlistenNewMsg = listen<{ role: string; content: string }>("chat-new-message", (event) => {
       if (!mounted) return;
-      console.log("[STREAM-DEBUG] chat-new-message:", event.payload.role);
       const msg: ChatMessage = {
         id: null,
         role: event.payload.role as "user" | "assistant",
@@ -93,6 +109,7 @@ export function useChat() {
       unlistenStatus.then((fn) => fn());
       unlistenState.then((fn) => fn());
       unlistenNewMsg.then((fn) => fn());
+      unlistenVoice.then((fn) => fn());
     };
   }, []);
 
@@ -106,10 +123,10 @@ export function useChat() {
     setCurrentStatus(null);
     tokenBuffer.current = "";
     streamingTextRef.current = "";
+    chatInitiatedRef.current = true;
 
     try {
       const response = await sendMessage(text);
-      // Use streamed text if available, fall back to response content
       const finalContent = streamingTextRef.current || response.content;
       setMessages((prev) => [...prev, { ...response, content: finalContent }]);
       setStreamingText("");
@@ -121,6 +138,7 @@ export function useChat() {
       }
     } finally {
       setLoading(false);
+      chatInitiatedRef.current = false;
     }
   }
 

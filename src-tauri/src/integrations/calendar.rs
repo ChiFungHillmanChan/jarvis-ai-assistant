@@ -43,8 +43,17 @@ impl EventTime {
 
 pub async fn fetch_events(access_token: &str, time_min: &str, time_max: &str) -> Result<Vec<CalendarEvent>, String> {
     let client = Client::new();
-    let url = format!("{}/calendars/primary/events?timeMin={}&timeMax={}&singleEvents=true&orderBy=startTime&maxResults=50", CALENDAR_API, time_min, time_max);
-    let resp = client.get(&url).bearer_auth(access_token).send().await.map_err(|e| format!("Calendar API error: {}", e))?;
+    let url = format!("{}/calendars/primary/events", CALENDAR_API);
+    let resp = client.get(&url)
+        .bearer_auth(access_token)
+        .query(&[
+            ("timeMin", time_min),
+            ("timeMax", time_max),
+            ("singleEvents", "true"),
+            ("orderBy", "startTime"),
+            ("maxResults", "50"),
+        ])
+        .send().await.map_err(|e| format!("Calendar API error: {}", e))?;
     if resp.status() == 401 { return Err("UNAUTHORIZED".to_string()); }
     if !resp.status().is_success() { return Err(format!("Calendar API error: {}", resp.status())); }
     let body: EventsResponse = resp.json().await.map_err(|e| e.to_string())?;

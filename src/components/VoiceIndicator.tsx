@@ -1,8 +1,9 @@
+import { memo } from "react";
 import type { VoiceState } from "../lib/types";
 
 interface VoiceIndicatorProps { state: VoiceState; onStop: () => void; }
 
-export default function VoiceIndicator({ state, onStop }: VoiceIndicatorProps) {
+export default memo(function VoiceIndicator({ state, onStop }: VoiceIndicatorProps) {
   if (state === "Idle" || state === "Disabled") return null;
 
   const isManualListening = state === "Listening";
@@ -32,7 +33,7 @@ export default function VoiceIndicator({ state, onStop }: VoiceIndicatorProps) {
       </div>
     </div>
   );
-}
+});
 
 const styles: Record<string, React.CSSProperties> = {
   overlay: { position: "fixed", bottom: 24, left: "50%", transform: "translateX(-50%)", zIndex: 200 },
@@ -41,3 +42,4 @@ const styles: Record<string, React.CSSProperties> = {
   label: { fontFamily: "var(--font-mono)", fontSize: 11, letterSpacing: 1.5 },
   hint: { color: "rgba(0, 180, 255, 0.3)", fontSize: 9, fontFamily: "var(--font-mono)" },
 };
+

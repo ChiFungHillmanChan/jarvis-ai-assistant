@@ -18,6 +18,20 @@ pub async fn start_listening(engine: State<'_, Arc<VoiceEngine>>) -> Result<Stri
         engine.set_state_and_emit(VoiceState::Error(error.clone()));
         return Err(error);
     }
+
+    // Ensure audio stream is alive -- reconnect if it died or failed at startup
+    {
+        let mut router = engine.audio_router.lock().map_err(|e| e.to_string())?;
+        if !router.is_alive() {
+            log::warn!("AudioRouter stream not alive, reconnecting...");
+            router.reconnect().map_err(|e| {
+                let error = format!("Microphone unavailable: {}", e);
+                engine.set_state_and_emit(VoiceState::Error(error.clone()));
+                error
+            })?;
+        }
+    }
+
     engine.set_state_and_emit(VoiceState::Listening);
     engine.audio_router.lock().map_err(|e| e.to_string())?.start_ptt();
     Ok("Listening...".to_string())
@@ -31,6 +45,17 @@ pub async fn stop_listening(
     db: State<'_, Arc<Database>>,
     google_auth: State<'_, Arc<crate::auth::google::GoogleAuth>>,
 ) -> Result<String, String> {
+    // Guard: only proceed if currently Listening (prevents concurrent calls)
+    {
+        let current = engine.state.lock().map_err(|e| e.to_string())?;
+        if *current != VoiceState::Listening {
+            log::warn!("stop_listening called but state is {:?}, ignoring", *current);
+            return Ok(String::new());
+        }
+    }
+    // Immediately transition to Processing so duplicate calls are rejected
+    engine.set_state_and_emit(VoiceState::Processing);
+
     let samples = engine.audio_router.lock().map_err(|e| e.to_string())?.stop_ptt();
 
     let duration_secs = samples.len() as f32 / 16000.0;
@@ -38,23 +63,22 @@ pub async fn stop_listening(
         (samples.iter().map(|s| s * s).sum::<f32>() / samples.len() as f32).sqrt()
     };
 
+    log::info!("PTT captured: {:.2}s, {} samples, RMS {:.6}", duration_secs, samples.len(), rms);
+
     if samples.is_empty() {
+        log::warn!("PTT returned empty buffer -- audio stream may have died");
         engine.set_state_and_emit(VoiceState::Idle);
         return Ok(String::new());
     }
 
-    // Require at least 0.5 seconds of audio to avoid Whisper hallucination
     if samples.len() < 8000 {
         log::warn!("Audio too short ({:.2}s), skipping transcription", duration_secs);
         engine.set_state_and_emit(VoiceState::Idle);
         return Ok(String::new());
     }
 
-    // Check if audio is essentially silence (RMS < threshold)
-    // MacBook Pro built-in mic produces low RMS (~0.003 for quiet speech)
     if rms < 0.001 {
-        log::warn!("Audio is silence (RMS {:.4}), skipping transcription", rms);
-        // RMS exactly 0.0 with substantial samples = macOS blocking mic (all-zero buffer)
+        log::warn!("Audio is silence (RMS {:.6}), skipping transcription", rms);
         if rms == 0.0 && samples.len() > 16000 {
             let error = "Microphone permission denied. Grant access in System Settings > Privacy & Security > Microphone.".to_string();
             engine.set_state_and_emit(VoiceState::Error(error.clone()));
@@ -65,17 +89,20 @@ pub async fn stop_listening(
         return Ok(String::new());
     }
 
-    engine.set_state_and_emit(VoiceState::Processing);
+    // Signal that voice initiated this AI request (frontend uses this to skip token events)
+    let _ = app_handle.emit("chat-voice-active", json!({"active": true}));
 
     let text = match engine.transcribe_command(&samples).await {
         Ok(text) => text,
         Err(e) => {
-            engine.set_state_and_emit(VoiceState::Error(e.clone()));
+            let _ = app_handle.emit("chat-voice-active", json!({"active": false}));
+            engine.set_state_and_emit(VoiceState::Idle);
             return Err(e);
         }
     };
 
     if text.is_empty() {
+        let _ = app_handle.emit("chat-voice-active", json!({"active": false}));
         engine.set_state_and_emit(VoiceState::Idle);
         return Ok(String::new());
     }
@@ -107,6 +134,7 @@ pub async fn stop_listening(
 
     // Mute capture before AI call -- streaming TTS will speak during processing
     engine.audio_router.lock().map_err(|e| e.to_string())?.mute();
+    engine.set_state_and_emit(VoiceState::Speaking);
 
     // Create streaming TTS -- speaks sentences as AI tokens arrive
     let streaming_tts = {
@@ -118,8 +146,11 @@ pub async fn stop_listening(
     let response = match router.send(messages, &db, &google_auth, &app_handle, tts_tx).await {
         Ok(response) => response,
         Err(e) => {
-            engine.audio_router.lock().map_err(|e| e.to_string())?.unmute();
-            engine.set_state_and_emit(VoiceState::Error(e.clone()));
+            // Always clean up on error -- unmute, reset state, signal frontend
+            let _ = engine.audio_router.lock().map(|r| r.unmute());
+            let _ = app_handle.emit("chat-voice-active", json!({"active": false}));
+            let _ = app_handle.emit("chat-state", json!({"state": "idle"}));
+            engine.set_state_and_emit(VoiceState::Idle);
             return Err(e);
         }
     };
@@ -137,7 +168,10 @@ pub async fn stop_listening(
     // Finish streaming TTS -- speaks any remaining buffered text
     streaming_tts.finish().await;
 
-    engine.audio_router.lock().map_err(|e| e.to_string())?.unmute();
+    // Clean up -- always restore audio and state
+    let _ = engine.audio_router.lock().map(|r| r.unmute());
+    let _ = app_handle.emit("chat-voice-active", json!({"active": false}));
+    let _ = app_handle.emit("chat-state", json!({"state": "idle"}));
     engine.set_state_and_emit(VoiceState::Idle);
     Ok(response)
 }

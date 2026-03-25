@@ -24,25 +24,78 @@ pub async fn send_message(
     engine: State<'_, Arc<VoiceEngine>>,
     message: String,
 ) -> Result<ChatMessage, String> {
-    {
-        let conn = db.conn.lock().map_err(|e| e.to_string())?;
-        conn.execute("INSERT INTO conversations (role, content) VALUES ('user', ?1)", rusqlite::params![message])
-            .map_err(|e| e.to_string())?;
-    }
-
-    // Cancel any in-progress TTS from previous response
+    // Cancel any in-progress TTS and emit thinking state FIRST for immediate UI feedback
     {
         let tts = engine.tts.lock().map_err(|e| e.to_string())?.clone();
         tts.cancel();
-        let _ = app_handle.emit("chat-state", json!({"state": "idle"}));
         let _ = app_handle.emit("tts-amplitude", json!({"amplitude": 0.0}));
     }
+    let _ = app_handle.emit("chat-state", json!({"state": "thinking"}));
+    let _ = app_handle.emit("chat-status", json!({"status": "Processing..."}));
+
+    // Run DB insert + conversation fetch + context gathering on a blocking thread
+    // to avoid starving tokio's async worker pool when the mutex is contended.
+    let db_arc = db.inner().clone();
+    let msg_clone = message.clone();
+    let msg_lower = message.to_lowercase();
+
+    let (history, context_messages) = tokio::task::spawn_blocking(move || -> Result<(Vec<(String, String)>, Vec<(String, String)>), String> {
+        // Insert user message
+        {
+            let conn = db_arc.conn.lock().map_err(|e| e.to_string())?;
+            conn.execute("INSERT INTO conversations (role, content) VALUES ('user', ?1)", rusqlite::params![msg_clone])
+                .map_err(|e| e.to_string())?;
+        }
+
+        // Fetch conversation history
+        let history = {
+            let conn = db_arc.conn.lock().map_err(|e| e.to_string())?;
+            let mut stmt = conn.prepare("SELECT role, content FROM conversations ORDER BY id DESC LIMIT 20")
+                .map_err(|e| e.to_string())?;
+            let mut msgs: Vec<(String, String)> = stmt
+                .query_map([], |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?)))
+                .map_err(|e| e.to_string())?
+                .collect::<Result<Vec<_>, _>>()
+                .map_err(|e| e.to_string())?;
+            msgs.reverse();
+            msgs
+        };
+
+        // Only add context for questions about personal data (saves tokens)
+        let needs_context = {
+            msg_lower.contains("task") || msg_lower.contains("meeting") || msg_lower.contains("email")
+            || msg_lower.contains("deadline") || msg_lower.contains("schedule") || msg_lower.contains("today")
+            || msg_lower.contains("calendar") || msg_lower.contains("work on") || msg_lower.contains("priority")
+            || msg_lower.contains("github") || msg_lower.contains("pr") || msg_lower.contains("issue")
+            || msg_lower.contains("notion") || msg_lower.contains("what should") || msg_lower.contains("remind")
+            || msg_lower.contains("status") || msg_lower.contains("busy") || msg_lower.contains("free")
+            || msg_lower.contains("obsidian") || msg_lower.contains("notes") || msg_lower.contains("vault")
+            || msg_lower.contains("job") || msg_lower.contains("resume") || msg_lower.contains("interview")
+            || msg_lower.contains("application")
+        };
+
+        let mut ctx_msgs = Vec::new();
+        if needs_context {
+            if let Ok(ctx) = crate::assistant::context::DayContext::gather(&db_arc) {
+                let context_prompt = format!(
+                    "[CONTEXT] TASKS: {} | CALENDAR: {} | EMAIL: {} | GITHUB: {}",
+                    ctx.tasks_summary.lines().next().unwrap_or(""),
+                    ctx.calendar_summary.lines().next().unwrap_or(""),
+                    ctx.email_summary.lines().next().unwrap_or(""),
+                    ctx.github_summary,
+                );
+                ctx_msgs.push(("user".to_string(), context_prompt));
+                ctx_msgs.push(("assistant".to_string(), "Understood.".to_string()));
+            }
+        }
+
+        Ok((history, ctx_msgs))
+    }).await.map_err(|e| e.to_string())??;
 
     // Check if user is searching conversation history
     let search_keywords = ["what did i tell you", "what did i say", "remember when", "search for", "find our conversation about", "what did we discuss"];
     let msg_lower = message.to_lowercase();
     if search_keywords.iter().any(|kw| msg_lower.contains(kw)) {
-        // Extract the search topic (rough: everything after the keyword)
         let topic = search_keywords.iter()
             .filter_map(|kw| msg_lower.find(kw).map(|pos| &message[pos + kw.len()..]))
             .next()
@@ -52,16 +105,13 @@ pub async fn send_message(
             .to_string();
 
         if !topic.is_empty() {
-            // Search conversations — keep all DB work in a scoped block so
-            // MutexGuard and Statement are dropped before the async `await`.
-            let results: Vec<String> = {
-                let conn2 = db.conn.lock().map_err(|e| e.to_string())?;
-                let mut stmt = conn2.prepare(
+            let db_arc2 = db.inner().clone();
+            let results: Vec<String> = tokio::task::spawn_blocking(move || -> Result<Vec<String>, String> {
+                let conn = db_arc2.conn.lock().map_err(|e| e.to_string())?;
+                let mut stmt = conn.prepare(
                     "SELECT role, content, created_at FROM conversations WHERE content LIKE ?1 ORDER BY created_at DESC LIMIT 10"
                 ).map_err(|e| e.to_string())?;
                 let pattern = format!("%{}%", topic);
-                // Bind to `collected` so MappedRows is fully consumed (and
-                // dropped) before `stmt` / `conn2` leave scope.
                 let collected = stmt
                     .query_map(rusqlite::params![pattern], |row| {
                         let role: String = row.get(0)?;
@@ -72,8 +122,8 @@ pub async fn send_message(
                     .map_err(|e| e.to_string())?
                     .collect::<Result<Vec<_>, _>>()
                     .map_err(|e| e.to_string())?;
-                collected
-            };
+                Ok(collected)
+            }).await.map_err(|e| e.to_string())??;
 
             if !results.is_empty() {
                 let search_context = results.join("\n");
@@ -82,7 +132,6 @@ pub async fn send_message(
                     search_context, message
                 );
                 let search_messages = vec![("user".to_string(), search_prompt)];
-                let _ = app_handle.emit("chat-state", json!({"state": "thinking"}));
                 let search_response = match router.send(search_messages, &db, &google_auth, &app_handle, None).await {
                     Ok(r) => r,
                     Err(e) => {
@@ -97,7 +146,6 @@ pub async fn send_message(
                         .map_err(|e| e.to_string())?;
                 }
 
-                // Speak the search response via sentence-queued TTS
                 {
                     let tts = engine.tts.lock().map_err(|e| e.to_string())?.clone();
                     if let Err(e) = tts.speak_queued(&search_response, &app_handle).await {
@@ -113,47 +161,9 @@ pub async fn send_message(
         }
     }
 
-    let messages = {
-        let conn = db.conn.lock().map_err(|e| e.to_string())?;
-        let mut stmt = conn.prepare("SELECT role, content FROM conversations ORDER BY id DESC LIMIT 20")
-            .map_err(|e| e.to_string())?;
-        let mut msgs: Vec<(String, String)> = stmt
-            .query_map([], |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?)))
-            .map_err(|e| e.to_string())?
-            .collect::<Result<Vec<_>, _>>()
-            .map_err(|e| e.to_string())?;
-        msgs.reverse();
-        msgs
-    };
-    // Only add context for questions about personal data (saves tokens)
-    let msg_lower = message.to_lowercase();
-    let needs_context = {
-        msg_lower.contains("task") || msg_lower.contains("meeting") || msg_lower.contains("email")
-        || msg_lower.contains("deadline") || msg_lower.contains("schedule") || msg_lower.contains("today")
-        || msg_lower.contains("calendar") || msg_lower.contains("work on") || msg_lower.contains("priority")
-        || msg_lower.contains("github") || msg_lower.contains("pr") || msg_lower.contains("issue")
-        || msg_lower.contains("notion") || msg_lower.contains("what should") || msg_lower.contains("remind")
-        || msg_lower.contains("status") || msg_lower.contains("busy") || msg_lower.contains("free")
-        || msg_lower.contains("obsidian") || msg_lower.contains("notes") || msg_lower.contains("vault")
-        || msg_lower.contains("job") || msg_lower.contains("resume") || msg_lower.contains("interview")
-        || msg_lower.contains("application")
-    };
+    let mut all_messages = context_messages;
 
-    let mut context_messages = Vec::new();
-    if needs_context {
-        if let Ok(ctx) = crate::assistant::context::DayContext::gather(&db) {
-            let context_prompt = format!(
-                "[CONTEXT] TASKS: {} | CALENDAR: {} | EMAIL: {} | GITHUB: {}",
-                ctx.tasks_summary.lines().next().unwrap_or(""),
-                ctx.calendar_summary.lines().next().unwrap_or(""),
-                ctx.email_summary.lines().next().unwrap_or(""),
-                ctx.github_summary,
-            );
-            context_messages.push(("user".to_string(), context_prompt));
-            context_messages.push(("assistant".to_string(), "Understood.".to_string()));
-        }
-    }
-    // Search Obsidian for relevant notes if message mentions notes/jobs/personal topics
+    // Search Obsidian for relevant notes (with 3s timeout to avoid blocking)
     let obsidian_keywords = [
         "obsidian", "notes", "vault", "job", "resume", "interview",
         "application", "career", "cover letter",
@@ -175,9 +185,11 @@ pub async fn send_message(
                 .take(3)
                 .collect::<Vec<_>>()
                 .join(" ");
-            if let Ok(notes) =
-                crate::integrations::obsidian::search_vault(&key, &search_term).await
-            {
+            // 3-second timeout so Obsidian search doesn't block the response
+            if let Ok(Ok(notes)) = tokio::time::timeout(
+                std::time::Duration::from_secs(3),
+                crate::integrations::obsidian::search_vault(&key, &search_term),
+            ).await {
                 let note_context: String = notes
                     .iter()
                     .take(3)
@@ -196,31 +208,22 @@ pub async fn send_message(
                     .collect::<Vec<_>>()
                     .join("\n");
                 if !note_context.is_empty() {
-                    let len = context_messages.len();
-                    context_messages.insert(
+                    let len = all_messages.len();
+                    all_messages.insert(
                         if len > 0 { len - 1 } else { 0 },
-                        (
-                            "user".to_string(),
-                            format!("[OBSIDIAN NOTES]\n{}", note_context),
-                        ),
+                        ("user".to_string(), format!("[OBSIDIAN NOTES]\n{}", note_context)),
                     );
-                    context_messages.insert(
+                    all_messages.insert(
                         if len > 0 { len } else { 1 },
-                        (
-                            "assistant".to_string(),
-                            "I see the relevant notes from your Obsidian vault.".to_string(),
-                        ),
+                        ("assistant".to_string(), "I see the relevant notes from your Obsidian vault.".to_string()),
                     );
                 }
             }
         }
     }
 
-    context_messages.extend(messages);
-    let messages = context_messages;
-
-    log::info!("[STREAM-DEBUG] Emitting chat-state: thinking");
-    let _ = app_handle.emit("chat-state", json!({"state": "thinking"}));
+    all_messages.extend(history);
+    let messages = all_messages;
 
     // Create streaming TTS -- speaks sentences as AI tokens arrive
     let streaming_tts = {
@@ -244,7 +247,7 @@ pub async fn send_message(
     }
 
     // Finish streaming TTS -- speaks any remaining buffered text
-    log::info!("[STREAM-DEBUG] Finishing streaming TTS, response len={}", final_response.len());
+    log::debug!("[chat] TTS finish, len={}", final_response.len());
     streaming_tts.finish().await;
 
     Ok(ChatMessage { id: None, role: "assistant".to_string(), content: final_response, created_at: None })

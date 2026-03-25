@@ -82,6 +82,9 @@ pub async fn send(
         .build()?;
     let tool_defs = tools::get_tool_definitions();
     let claude_tools = tools::to_claude_format(&tool_defs);
+    // Pre-compute static fields once to avoid re-allocating each iteration
+    let model: String = "claude-sonnet-4-6-20250610".into();
+    let system: String = tools::SYSTEM_PROMPT.into();
 
     let mut claude_messages: Vec<ClaudeMessage> = messages.into_iter().map(|(role, content)| {
         ClaudeMessage { role, content: ClaudeContent::Text(content) }
@@ -90,9 +93,9 @@ pub async fn send(
     let max_iterations = 5;
     for _ in 0..max_iterations {
         let request = ClaudeRequest {
-            model: "claude-sonnet-4-6-20250610".into(),
+            model: model.clone(),
             max_tokens: 4096,
-            system: tools::SYSTEM_PROMPT.into(),
+            system: system.clone(),
             tools: claude_tools.clone(),
             messages: claude_messages.clone(),
             stream: true,
@@ -166,7 +169,7 @@ pub async fn send(
                     }
                 };
 
-                log::info!("[STREAM-DEBUG] SSE event: {}", sse.event_type);
+                log::debug!("[claude] SSE: {}", sse.event_type);
                 match sse.event_type.as_str() {
                     "content_block_start" => {
                         if let Some(ref cb) = sse.content_block {

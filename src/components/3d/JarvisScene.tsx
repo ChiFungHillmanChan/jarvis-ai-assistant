@@ -1,4 +1,4 @@
-import { useEffect, useRef, useCallback } from "react";
+import { useEffect, useRef, useCallback, memo } from "react";
 import { invoke } from "@tauri-apps/api/core";
 
 /**
@@ -92,7 +92,7 @@ interface JarvisSceneProps {
   onToolCallConsumed?: () => void;
 }
 
-export default function JarvisScene({ activityLevel = "idle", ttsAmplitudeRef, pendingToolCall = null, onToolCallConsumed }: JarvisSceneProps) {
+export default memo(function JarvisScene({ activityLevel = "idle", ttsAmplitudeRef, pendingToolCall = null, onToolCallConsumed }: JarvisSceneProps) {
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const animRef = useRef(0);
   const time = useRef(0);
@@ -213,7 +213,7 @@ export default function JarvisScene({ activityLevel = "idle", ttsAmplitudeRef, p
       addNode(item.type, item.label, item.sublabel, item.urgent);
     }
 
-    const targetTotal = 200;
+    const targetTotal = 120;
     while (idx < targetTotal) {
       addNode("particle", "", undefined);
     }
@@ -278,10 +278,10 @@ export default function JarvisScene({ activityLevel = "idle", ttsAmplitudeRef, p
     resize();
     window.addEventListener("resize", resize);
 
-    // Load data after a short delay
-    setTimeout(() => loadData(), 1000);
-    // Refresh data every 30 seconds
-    const dataInterval = setInterval(() => loadData(), 30000);
+    // Load data after dashboard has had time to initialize
+    setTimeout(() => loadData(), 3000);
+    // Refresh data every 60 seconds (reduced from 30s to lower DB contention)
+    const dataInterval = setInterval(() => loadData(), 60000);
 
     // Mouse controls
     function onDown(e: MouseEvent) {
@@ -346,8 +346,24 @@ export default function JarvisScene({ activityLevel = "idle", ttsAmplitudeRef, p
     window.addEventListener("wheel", onWheel, { passive: false });
     window.addEventListener("dblclick", onDblClick);
 
-    function animate() {
+    // Frame rate throttle: ~20fps when idle, 60fps when active/interacting
+    let lastFrameTime = 0;
+    const IDLE_FRAME_MS = 50;   // 20fps when idle
+    const ACTIVE_FRAME_MS = 16; // 60fps when active
+
+    function animate(timestamp?: number) {
       if (!canvas || !ctx) return;
+
+      // Throttle frame rate based on activity
+      const now = timestamp || performance.now();
+      const isInteracting = dragging.current || focusTarget.current !== null || arcsRef.current.length > 0;
+      const frameInterval = (activityLevel !== "idle" || isInteracting) ? ACTIVE_FRAME_MS : IDLE_FRAME_MS;
+      if (now - lastFrameTime < frameInterval) {
+        animRef.current = requestAnimationFrame(animate);
+        return;
+      }
+      lastFrameTime = now;
+
       try {
       time.current += 0.006;
       const w = canvas.width, h = canvas.height;
@@ -413,15 +429,15 @@ export default function JarvisScene({ activityLevel = "idle", ttsAmplitudeRef, p
       ctx.fillStyle = ambGlow;
       ctx.fillRect(0, 0, w, h);
 
-      // === GRID LINES ===
+      // === GRID LINES (reduced segments for performance) ===
       // Latitude
       for (let i = 1; i < LAT_LINES; i++) {
         const phi = (i / LAT_LINES) * Math.PI;
         const ringR = SPHERE_RADIUS * Math.sin(phi);
         const ringY = SPHERE_RADIUS * Math.cos(phi);
         ctx.beginPath();
-        for (let s = 0; s <= 60; s++) {
-          const theta = (s / 60) * Math.PI * 2;
+        for (let s = 0; s <= 32; s++) {
+          const theta = (s / 32) * Math.PI * 2;
           const p = transform({ x: ringR * Math.cos(theta), y: ringY, z: ringR * Math.sin(theta) }, ry, rx);
           const pr = project(p, cx, cy, fov);
           if (s === 0) ctx.moveTo(pr.x, pr.y); else ctx.lineTo(pr.x, pr.y);
@@ -434,8 +450,8 @@ export default function JarvisScene({ activityLevel = "idle", ttsAmplitudeRef, p
       for (let i = 0; i < LON_LINES; i++) {
         const theta = (i / LON_LINES) * Math.PI * 2;
         ctx.beginPath();
-        for (let s = 0; s <= 40; s++) {
-          const phi = (s / 40) * Math.PI;
+        for (let s = 0; s <= 24; s++) {
+          const phi = (s / 24) * Math.PI;
           let p = sphereToCart(theta, phi, SPHERE_RADIUS);
           p = transform(p, ry, rx);
           const pr = project(p, cx, cy, fov);
@@ -456,8 +472,8 @@ export default function JarvisScene({ activityLevel = "idle", ttsAmplitudeRef, p
       ];
       for (const ring of ringDefs) {
         ctx.beginPath();
-        for (let s = 0; s <= 80; s++) {
-          const a = (s / 80) * Math.PI * 2;
+        for (let s = 0; s <= 48; s++) {
+          const a = (s / 48) * Math.PI * 2;
           let p: Point3D = { x: Math.cos(a) * ring.r, y: Math.sin(a) * ring.r, z: 0 };
           p = rotateX(p, ring.tx); p = rotateZ(p, ring.tz); p = transform(p, ry, rx);
           const pr = project(p, cx, cy, fov);
@@ -583,23 +599,27 @@ export default function JarvisScene({ activityLevel = "idle", ttsAmplitudeRef, p
       });
       transformed.sort((a, b) => b.tz - a.tz);
 
-      // Draw connections between nearby non-particle nodes
-      ctx.lineWidth = 0.3;
-      for (let i = 0; i < transformed.length; i++) {
-        if (transformed[i].node.type === "particle") continue;
-        for (let j = i + 1; j < transformed.length; j++) {
-          if (transformed[j].node.type === "particle") continue;
-          const dx = transformed[i].pr.x - transformed[j].pr.x;
-          const dy = transformed[i].pr.y - transformed[j].pr.y;
-          const dist = Math.sqrt(dx*dx + dy*dy);
-          if (dist < 80) {
-            const alpha = (1 - dist / 80) * 0.08;
-            ctx.beginPath();
-            ctx.moveTo(transformed[i].pr.x, transformed[i].pr.y);
-            ctx.lineTo(transformed[j].pr.x, transformed[j].pr.y);
-            ctx.strokeStyle = `rgba(0, 180, 255, ${alpha})`;
-            ctx.stroke();
+      // Draw connections between nearby non-particle nodes (batch into single path)
+      if (act > 0.05 || isInteracting) {
+        const dataNodes = transformed.filter(t => t.node.type !== "particle");
+        ctx.lineWidth = 0.3;
+        ctx.beginPath();
+        let hasLines = false;
+        for (let i = 0; i < dataNodes.length; i++) {
+          for (let j = i + 1; j < dataNodes.length; j++) {
+            const dx = dataNodes[i].pr.x - dataNodes[j].pr.x;
+            const dy = dataNodes[i].pr.y - dataNodes[j].pr.y;
+            const distSq = dx*dx + dy*dy;
+            if (distSq < 6400) { // 80*80, avoid sqrt
+              ctx.moveTo(dataNodes[i].pr.x, dataNodes[i].pr.y);
+              ctx.lineTo(dataNodes[j].pr.x, dataNodes[j].pr.y);
+              hasLines = true;
+            }
           }
+        }
+        if (hasLines) {
+          ctx.strokeStyle = "rgba(0, 180, 255, 0.06)";
+          ctx.stroke();
         }
       }
 
@@ -626,14 +646,21 @@ export default function JarvisScene({ activityLevel = "idle", ttsAmplitudeRef, p
 
         if (isHovered) hoveredNode.current = node;
 
-        // Glow for data nodes
+        // Glow for data nodes (only use gradient for hovered/focused, simple fill otherwise)
         if (node.type !== "particle") {
-          const glowSize = finalSz * (isHovered ? 6 : isFocused ? 8 : 4);
-          const glowAlpha = (isHovered ? 0.15 : isFocused ? 0.2 : 0.06) * pr.scale;
-          const ng = ctx.createRadialGradient(pr.x, pr.y, 0, pr.x, pr.y, glowSize);
-          ng.addColorStop(0, `rgba(${col.r}, ${col.g}, ${col.b}, ${glowAlpha})`);
-          ng.addColorStop(1, `rgba(${col.r}, ${col.g}, ${col.b}, 0)`);
-          ctx.beginPath(); ctx.arc(pr.x, pr.y, glowSize, 0, Math.PI * 2); ctx.fillStyle = ng; ctx.fill();
+          if (isHovered || isFocused) {
+            const glowSize = finalSz * (isHovered ? 6 : 8);
+            const glowAlpha = (isHovered ? 0.15 : 0.2) * pr.scale;
+            const ng = ctx.createRadialGradient(pr.x, pr.y, 0, pr.x, pr.y, glowSize);
+            ng.addColorStop(0, `rgba(${col.r}, ${col.g}, ${col.b}, ${glowAlpha})`);
+            ng.addColorStop(1, `rgba(${col.r}, ${col.g}, ${col.b}, 0)`);
+            ctx.beginPath(); ctx.arc(pr.x, pr.y, glowSize, 0, Math.PI * 2); ctx.fillStyle = ng; ctx.fill();
+          } else if (pr.scale > 0.4) {
+            const glowSize = finalSz * 4;
+            ctx.beginPath(); ctx.arc(pr.x, pr.y, glowSize, 0, Math.PI * 2);
+            ctx.fillStyle = `rgba(${col.r}, ${col.g}, ${col.b}, ${0.03 * pr.scale})`;
+            ctx.fill();
+          }
         }
 
         // Urgent ring
@@ -858,4 +885,4 @@ export default function JarvisScene({ activityLevel = "idle", ttsAmplitudeRef, p
       position: "fixed", top: 0, left: 0, width: "100%", height: "100%", zIndex: 1,
     }} />
   );
-}
+})
