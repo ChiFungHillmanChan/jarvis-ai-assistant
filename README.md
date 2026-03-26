@@ -418,6 +418,14 @@ Key tools and resources:
 
 ---
 
+## Planned Improvements
+
+- **API cost tracking** -- monitor token usage and estimated spend per provider, with per-conversation breakdowns and daily/monthly summaries
+- **Local model support** -- run local LLMs (e.g., Ollama, llama.cpp) as an alternative to cloud APIs for fully offline AI chat
+- **More syncing integrations** -- expand beyond Gmail, Calendar, Notion, and GitHub to support additional services (Slack, Linear, Jira, Google Drive, etc.)
+
+---
+
 ## License
 
 MIT
