@@ -276,6 +276,7 @@ Migrations run automatically on startup via refinery.
 ### Prerequisites
 
 - **macOS** (uses native APIs: `say`, `mdfind`, `open`, accessibility)
+- Xcode Command Line Tools -- `xcode-select --install`
 - [Rust](https://rustup.rs/) 1.70+
 - [Node.js](https://nodejs.org/) 18+
 - [cmake](https://cmake.org/) -- `brew install cmake` (required for whisper-rs)
@@ -303,6 +304,8 @@ GOOGLE_CLIENT_ID=...             # Gmail + Calendar OAuth (optional)
 GOOGLE_CLIENT_SECRET=...         # Gmail + Calendar OAuth (optional)
 ```
 
+**Minimum requirement:** You need at least one of `ANTHROPIC_API_KEY` or `OPENAI_API_KEY` to use the AI chat. If you provide both, Claude is used as the primary model with OpenAI as an automatic fallback. Voice input (speech-to-text) requires `OPENAI_API_KEY` for the Whisper API. Google and all other integrations are optional -- the app runs fine without them.
+
 Notion, GitHub, and Obsidian tokens are configured in the app's Settings page and stored in the local database.
 
 ### Google OAuth Setup (for Gmail + Calendar)
@@ -320,7 +323,7 @@ Notion, GitHub, and Obsidian tokens are configured in the app's Settings page an
 npm run tauri dev
 ```
 
-First build compiles ~530 Rust crates. Subsequent builds are incremental and fast.
+The first build compiles ~530 Rust crates and may take several minutes. You'll see Cargo output in the terminal -- once it finishes, the app window opens automatically. Subsequent builds are incremental and fast.
 
 ---
 
