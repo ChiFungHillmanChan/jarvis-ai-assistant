@@ -4,6 +4,12 @@ A macOS desktop AI assistant inspired by Iron Man's JARVIS. Holographic dark UI,
 
 Built with **Tauri v2** (Rust) + **React** + **TypeScript**. No Electron. No web server. Just Rust and a webview.
 
+[Features](#features) | [Tech Stack](#tech-stack) | [Getting Started](#getting-started) | [Architecture](#architecture) | [How It Was Built](#how-it-was-built)
+
+---
+
+> **This project is under active development.** Found a bug or have a suggestion? [Open an issue](https://github.com/ChiFungHillmanChan/jarvis-ai-assistant/issues) -- all feedback is welcome.
+
 ---
 
 ## What It Does
