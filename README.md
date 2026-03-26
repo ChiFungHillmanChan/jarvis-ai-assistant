@@ -178,76 +178,76 @@ The AI can execute these directly on your Mac:
 ### Project Structure
 
 ```
-src/                          # React frontend
-  components/
-    3d/                       # Canvas2D holographic sphere (JarvisScene.tsx)
-    chat/                     # Message renderer, inline charts, status cards
-    cron/                     # Cron job cards, timeline, creation flow
-    ChatPanel.tsx             # Cmd+K floating chat
-    Sidebar.tsx               # Navigation
-    VoiceIndicator.tsx        # Voice state overlay
-    ...                       # Dashboard cards, stats, timeline
-  hooks/
-    useChat.ts                # Chat state, message history, streaming
-    useVoiceState.ts          # Voice engine state machine
-    useKeyboard.ts            # Global keyboard shortcuts
-    useTauriCommand.ts        # Generic Tauri invoke wrapper
-    ChatContext.tsx            # Shared chat context provider
-  lib/
-    types.ts                  # Shared TypeScript interfaces
-    commands.ts               # Typed Tauri invoke wrappers (40+)
-  pages/                      # Dashboard, Email, Calendar, GitHub, Notion, Cron, Settings
-  styles/
-    global.css                # Holographic theme (CSS variables, glassmorphism)
-    animations.css            # Keyframe animations
+src/                              # React frontend
+├── components/
+│   ├── 3d/                       # Canvas2D holographic sphere (JarvisScene.tsx)
+│   ├── chat/                     # Message renderer, inline charts, status cards
+│   ├── cron/                     # Cron job cards, timeline, creation flow
+│   ├── ChatPanel.tsx             # Cmd+K floating chat
+│   ├── Sidebar.tsx               # Navigation
+│   ├── VoiceIndicator.tsx        # Voice state overlay
+│   └── ...                       # Dashboard cards, stats, timeline
+├── hooks/
+│   ├── useChat.ts                # Chat state, message history, streaming
+│   ├── useVoiceState.ts          # Voice engine state machine
+│   ├── useKeyboard.ts            # Global keyboard shortcuts
+│   ├── useTauriCommand.ts        # Generic Tauri invoke wrapper
+│   └── ChatContext.tsx           # Shared chat context provider
+├── lib/
+│   ├── types.ts                  # Shared TypeScript interfaces
+│   └── commands.ts               # Typed Tauri invoke wrappers (40+)
+├── pages/                        # Dashboard, Email, Calendar, GitHub, Notion, Cron, Settings
+└── styles/
+    ├── global.css                # Holographic theme (CSS variables, glassmorphism)
+    └── animations.css            # Keyframe animations
 
-src-tauri/                    # Rust backend
-  src/
-    ai/
-      claude.rs               # Claude API client (streaming, tool calling)
-      openai.rs               # OpenAI API client (streaming, function calling)
-      tools.rs                # 18 shared tool definitions
-    assistant/
-      context.rs              # DayContext: aggregates tasks, events, emails, PRs
-      briefing.rs             # AI-generated morning briefing
-      actions.rs              # Action tag parser for Claude responses
-    auth/
-      google.rs               # OAuth2 PKCE flow with auto-refresh
-    commands/                  # 40+ Tauri IPC command handlers
-      chat.rs                 # AI chat with streaming + tool execution
-      assistant.rs            # Briefing, context, proactive checks
-      email.rs                # Gmail operations
-      calendar.rs             # Calendar operations
-      github.rs               # GitHub operations
-      notion.rs               # Notion operations
-      obsidian.rs             # Obsidian vault operations
-      cron.rs                 # Cron job management
-      system.rs               # System control commands
-      tasks.rs                # Task CRUD
-      settings.rs             # User preferences
-      dashboard.rs            # Dashboard data aggregation
-      google_auth.rs          # OAuth flow commands
-    integrations/
-      gmail.rs                # Gmail API client
-      calendar.rs             # Google Calendar API client
-      notion.rs               # Notion API client
-      github.rs               # GitHub API client
-      obsidian.rs             # Obsidian Local REST API client
-    scheduler/
-      mod.rs                  # tokio-cron-scheduler setup
-      jobs.rs                 # 7 job type implementations
-    system/
-      control.rs              # macOS system control (apps, files, windows, volume, etc.)
-    voice/
-      audio_router.rs         # Audio device management
-      transcribe.rs           # Whisper STT (cloud + local)
-      tts.rs                  # macOS say TTS
-      wake_word.rs            # Wake word detection
-      model_manager.rs        # Whisper model downloads
-    db.rs                     # SQLite init + refinery migrations
-    tray.rs                   # System tray menu
-    lib.rs                    # App initialization, state management, command registration
-  migrations/                 # V1-V6 SQL schema files
+src-tauri/                        # Rust backend
+├── src/
+│   ├── ai/
+│   │   ├── claude.rs             # Claude API client (streaming, tool calling)
+│   │   ├── openai.rs             # OpenAI API client (streaming, function calling)
+│   │   └── tools.rs              # 18 shared tool definitions
+│   ├── assistant/
+│   │   ├── context.rs            # DayContext: aggregates tasks, events, emails, PRs
+│   │   ├── briefing.rs           # AI-generated morning briefing
+│   │   └── actions.rs            # Action tag parser for Claude responses
+│   ├── auth/
+│   │   └── google.rs             # OAuth2 PKCE flow with auto-refresh
+│   ├── commands/                 # 40+ Tauri IPC command handlers
+│   │   ├── chat.rs               # AI chat with streaming + tool execution
+│   │   ├── assistant.rs          # Briefing, context, proactive checks
+│   │   ├── email.rs              # Gmail operations
+│   │   ├── calendar.rs           # Calendar operations
+│   │   ├── github.rs             # GitHub operations
+│   │   ├── notion.rs             # Notion operations
+│   │   ├── obsidian.rs           # Obsidian vault operations
+│   │   ├── cron.rs               # Cron job management
+│   │   ├── system.rs             # System control commands
+│   │   ├── tasks.rs              # Task CRUD
+│   │   ├── settings.rs           # User preferences
+│   │   ├── dashboard.rs          # Dashboard data aggregation
+│   │   └── google_auth.rs        # OAuth flow commands
+│   ├── integrations/
+│   │   ├── gmail.rs              # Gmail API client
+│   │   ├── calendar.rs           # Google Calendar API client
+│   │   ├── notion.rs             # Notion API client
+│   │   ├── github.rs             # GitHub API client
+│   │   └── obsidian.rs           # Obsidian Local REST API client
+│   ├── scheduler/
+│   │   ├── mod.rs                # tokio-cron-scheduler setup
+│   │   └── jobs.rs               # 7 job type implementations
+│   ├── system/
+│   │   └── control.rs            # macOS system control (apps, files, windows, volume, etc.)
+│   ├── voice/
+│   │   ├── audio_router.rs       # Audio device management
+│   │   ├── transcribe.rs         # Whisper STT (cloud + local)
+│   │   ├── tts.rs                # macOS say TTS
+│   │   ├── wake_word.rs          # Wake word detection
+│   │   └── model_manager.rs      # Whisper model downloads
+│   ├── db.rs                     # SQLite init + refinery migrations
+│   ├── tray.rs                   # System tray menu
+│   └── lib.rs                    # App initialization, state management, command registration
+└── migrations/                   # V1-V6 SQL schema files
 ```
 
 ### Database Schema
