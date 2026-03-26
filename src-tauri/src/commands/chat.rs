@@ -4,7 +4,7 @@ use crate::voice::tts::StreamingTts;
 use crate::voice::VoiceEngine;
 use serde::{Deserialize, Serialize};
 use serde_json::json;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 use tauri::{Emitter, State};
 
 #[derive(Serialize, Deserialize, Clone)]
@@ -19,7 +19,7 @@ pub struct ChatMessage {
 pub async fn send_message(
     app_handle: tauri::AppHandle,
     db: State<'_, Arc<Database>>,
-    router: State<'_, AiRouter>,
+    router: State<'_, Mutex<AiRouter>>,
     google_auth: State<'_, Arc<crate::auth::google::GoogleAuth>>,
     engine: State<'_, Arc<VoiceEngine>>,
     message: String,
@@ -123,6 +123,9 @@ pub async fn send_message(
     )
     .await
     .map_err(|e| e.to_string())??;
+
+    // Clone router for async operations (Mutex can't be held across await)
+    let router = router.lock().map_err(|e| e.to_string())?.clone();
 
     // Check if user is searching conversation history
     let search_keywords = [

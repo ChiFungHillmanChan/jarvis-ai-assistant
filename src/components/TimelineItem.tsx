@@ -1,8 +1,15 @@
+import { memo } from "react";
 import type { Task } from "../lib/types";
 interface TimelineItemProps { task: Task; }
-export default function TimelineItem({ task }: TimelineItemProps) {
-  const isOverdue = task.deadline && new Date(task.deadline) <= new Date();
-  const isDueToday = task.deadline && new Date(task.deadline).toDateString() === new Date().toDateString();
+export default memo(function TimelineItem({ task }: TimelineItemProps) {
+  let isOverdue = false;
+  let isDueToday = false;
+  if (task.deadline) {
+    const dl = new Date(task.deadline);
+    const now = new Date();
+    isOverdue = dl <= now;
+    isDueToday = dl.toDateString() === now.toDateString();
+  }
   const dotColor = isOverdue ? "rgba(255, 100, 100, 0.6)" : isDueToday ? "rgba(255, 180, 0, 0.5)" : "rgba(0, 180, 255, 0.4)";
   const textColor = isOverdue ? "rgba(255, 100, 100, 0.8)" : "rgba(0, 180, 255, 0.8)";
   return (
@@ -17,7 +24,7 @@ export default function TimelineItem({ task }: TimelineItemProps) {
       </div>
     </div>
   );
-}
+});
 const styles: Record<string, React.CSSProperties> = {
   item: { display: "flex", gap: 12, paddingLeft: 4, marginBottom: 14, position: "relative" },
   dot: { width: 8, height: 8, borderRadius: "50%", marginTop: 4, flexShrink: 0 },

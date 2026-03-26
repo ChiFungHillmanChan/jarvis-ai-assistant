@@ -1,3 +1,4 @@
+import { memo } from "react";
 import StatCard from "./StatCard";
 import CalendarCard from "./CalendarCard";
 import CronCard from "./CronCard";
@@ -8,7 +9,7 @@ import type { EmailStats } from "../lib/types";
 
 interface StatsPanelProps { taskCount: number; }
 
-export default function StatsPanel({ taskCount }: StatsPanelProps) {
+export default memo(function StatsPanel({ taskCount }: StatsPanelProps) {
   const { data: emailStats } = useTauriCommand<EmailStats>("get_email_stats");
   return (
     <div style={styles.container}>
@@ -20,7 +21,7 @@ export default function StatsPanel({ taskCount }: StatsPanelProps) {
       <CronCard />
     </div>
   );
-}
+})
 const styles: Record<string, React.CSSProperties> = {
   container: { width: 160, display: "flex", flexDirection: "column", gap: 10, overflowY: "auto" },
 };

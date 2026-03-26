@@ -1,7 +1,7 @@
 use crate::ai::AiRouter;
 use crate::db::Database;
 use serde::Serialize;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 use tauri::State;
 
 #[derive(Serialize)]
@@ -33,7 +33,7 @@ pub fn get_cron_runs(db: State<Arc<Database>>, job_id: i64, limit: Option<u32>) 
 pub async fn create_custom_cron(
     app_handle: tauri::AppHandle,
     db: State<'_, Arc<Database>>,
-    router: State<'_, AiRouter>,
+    router: State<'_, Mutex<AiRouter>>,
     google_auth: State<'_, Arc<crate::auth::google::GoogleAuth>>,
     description: String,
 ) -> Result<CronJobView, String> {
@@ -47,6 +47,7 @@ pub async fn create_custom_cron(
     );
 
     let messages = vec![("user".to_string(), prompt)];
+    let router = router.lock().map_err(|e| e.to_string())?.clone();
     let response = router.send(messages, &db, &google_auth, &app_handle, None).await?;
 
     // Parse AI response as JSON

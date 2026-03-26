@@ -3,7 +3,7 @@ use crate::db::Database;
 use crate::voice::tts::StreamingTts;
 use crate::voice::{VoiceEngine, VoiceState};
 use serde_json::json;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 use tauri::{Emitter, State};
 
 #[tauri::command]
@@ -48,7 +48,7 @@ pub async fn start_listening(engine: State<'_, Arc<VoiceEngine>>) -> Result<Stri
 pub async fn stop_listening(
     app_handle: tauri::AppHandle,
     engine: State<'_, Arc<VoiceEngine>>,
-    router: State<'_, AiRouter>,
+    router: State<'_, Mutex<AiRouter>>,
     db: State<'_, Arc<Database>>,
     google_auth: State<'_, Arc<crate::auth::google::GoogleAuth>>,
 ) -> Result<String, String> {
@@ -195,6 +195,7 @@ pub async fn stop_listening(
     };
     let tts_tx = Some(streaming_tts.sender());
 
+    let router = router.lock().map_err(|e| e.to_string())?.clone();
     let response = match router
         .send(messages, &db, &google_auth, &app_handle, tts_tx)
         .await

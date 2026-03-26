@@ -298,7 +298,7 @@ export default function App() {
   return (
     <ChatProvider>
     <div style={styles.root}>
-      <JarvisScene activityLevel={activityLevel} ttsAmplitudeRef={ttsAmplitudeRef} micAmplitudeRef={micAmplitudeRef} pendingToolCall={pendingToolCall} onToolCallConsumed={handleToolCallConsumed} />
+      <JarvisScene activityLevel={activityLevel} assistantPhase={assistantPhase} ttsAmplitudeRef={ttsAmplitudeRef} micAmplitudeRef={micAmplitudeRef} pendingToolCall={pendingToolCall} onToolCallConsumed={handleToolCallConsumed} />
 
       <div style={styles.uiLayer}>
         <div className="drag-region" style={styles.titleBar} onMouseDown={(e) => { if ((e.target as HTMLElement).closest('.no-drag')) return; getCurrentWindow().startDragging(); }}>
@@ -350,8 +350,8 @@ const styles: Record<string, React.CSSProperties> = {
   uiLayer: { position: "absolute" as const, top: 0, left: 0, right: 0, bottom: 0, zIndex: 2, display: "flex", flexDirection: "column" as const, overflow: "hidden" },
   titleBar: { height: 36, flexShrink: 0, display: "flex", justifyContent: "space-between", alignItems: "center", padding: "0 12px", background: "rgba(10, 14, 26, 0.4)", backdropFilter: "blur(12px)", borderBottom: "1px solid rgba(0, 180, 255, 0.08)" },
   titleText: { color: "rgba(0, 180, 255, 0.4)", fontFamily: "var(--font-mono)", fontSize: 10, letterSpacing: 3 },
-  layout: { flex: 1, display: "flex", overflow: "hidden" },
-  content: { flex: 1, display: "flex", flexDirection: "column", overflow: "hidden" },
-  mainArea: { flex: 1, overflow: "auto" },
+  layout: { flex: 1, display: "flex", overflow: "hidden", minHeight: 0 },
+  content: { flex: 1, display: "flex", flexDirection: "column", overflow: "hidden", minHeight: 0 },
+  mainArea: { flex: 1, overflow: "auto", minHeight: 0 },
   lowerBtn: { background: "rgba(0, 180, 255, 0.1)", border: "1px solid rgba(0, 180, 255, 0.3)", borderRadius: 4, padding: "2px 8px", color: "rgba(0, 180, 255, 0.7)", cursor: "pointer", fontFamily: "var(--font-mono)", fontSize: 9, letterSpacing: 1 },
 };

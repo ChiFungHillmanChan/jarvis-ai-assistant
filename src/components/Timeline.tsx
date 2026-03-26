@@ -1,7 +1,8 @@
+import { memo } from "react";
 import type { Task } from "../lib/types";
 import TimelineItem from "./TimelineItem";
 interface TimelineProps { tasks: Task[]; }
-export default function Timeline({ tasks }: TimelineProps) {
+export default memo(function Timeline({ tasks }: TimelineProps) {
   return (
     <div style={styles.container}>
       <div className="label" style={{ marginBottom: 12 }}>TIMELINE</div>
@@ -12,7 +13,7 @@ export default function Timeline({ tasks }: TimelineProps) {
       </div>
     </div>
   );
-}
+})
 const styles: Record<string, React.CSSProperties> = {
   container: { flex: 1, overflowY: "auto", paddingRight: 8 },
   line: { borderLeft: "1px solid rgba(0, 180, 255, 0.15)", paddingLeft: 16, marginLeft: 4 },

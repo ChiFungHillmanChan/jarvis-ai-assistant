@@ -6,6 +6,7 @@ pub mod dashboard;
 pub mod email;
 pub mod github;
 pub mod google_auth;
+pub mod local_llm;
 pub mod notion;
 pub mod obsidian;
 pub mod settings;

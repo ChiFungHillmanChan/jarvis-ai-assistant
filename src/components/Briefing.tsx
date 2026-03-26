@@ -1,4 +1,4 @@
-import { useState, useEffect, useRef } from "react";
+import { useState, useEffect, useRef, memo } from "react";
 import type { BriefingResult } from "../lib/types";
 import { getBriefing, speakBriefing } from "../lib/commands";
 
@@ -7,7 +7,7 @@ let cachedBriefing: BriefingResult | null = null;
 let briefingLoaded = false;
 let briefingLoading = false;
 
-export default function Briefing() {
+export default memo(function Briefing() {
   const [briefing, setBriefing] = useState<BriefingResult | null>(cachedBriefing);
   const [loading, setLoading] = useState(!briefingLoaded);
   const [dismissed, setDismissed] = useState(false);
@@ -86,10 +86,10 @@ export default function Briefing() {
       )}
     </div>
   );
-}
+})
 
 const styles: Record<string, React.CSSProperties> = {
-  container: { border: "1px solid rgba(0, 180, 255, 0.2)", borderRadius: 8, background: "rgba(10, 14, 26, 0.75)", backdropFilter: "blur(12px)", marginBottom: 16, overflow: "hidden" },
+  container: { border: "1px solid rgba(0, 180, 255, 0.2)", borderRadius: 8, background: "rgba(10, 14, 26, 0.92)", marginBottom: 16, overflow: "hidden" },
   header: { display: "flex", justifyContent: "space-between", alignItems: "center", padding: "8px 12px", borderBottom: "1px solid rgba(0, 180, 255, 0.1)" },
   actions: { display: "flex", gap: 6 },
   speakBtn: { background: "rgba(0, 180, 255, 0.08)", border: "1px solid rgba(0, 180, 255, 0.3)", borderRadius: 4, padding: "3px 8px", color: "rgba(0, 180, 255, 0.8)", fontSize: 9, fontFamily: "var(--font-mono)", cursor: "pointer" },

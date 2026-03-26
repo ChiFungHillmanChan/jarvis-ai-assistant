@@ -1,5 +1,5 @@
 import { invoke } from "@tauri-apps/api/core";
-import type { Task, ChatMessage, DashboardData, Settings, EmailSummary, EmailStats, CalendarEventView, CronJobView, CronRunView, NotionPageView, GitHubItemView, GitHubStats, VoiceState, VoiceSettings, WakeWordStatus, EmailRule, BriefingResult } from "./types";
+import type { Task, ChatMessage, DashboardData, Settings, EmailSummary, EmailStats, CalendarEventView, CronJobView, CronRunView, NotionPageView, GitHubItemView, GitHubStats, VoiceState, VoiceSettings, WakeWordStatus, EmailRule, BriefingResult, LocalEndpoint, LocalModel, ProviderChainEntry, EndpointHealth } from "./types";
 
 export async function getTasks(): Promise<Task[]> {
   return invoke("get_tasks");
@@ -114,3 +114,20 @@ export async function getWallpaperStatus(): Promise<boolean> { return invoke("ge
 export async function raiseWallpaper(): Promise<void> { return invoke("raise_wallpaper"); }
 export async function lowerWallpaper(): Promise<void> { return invoke("lower_wallpaper"); }
 export async function isWallpaperRaised(): Promise<boolean> { return invoke("is_wallpaper_raised"); }
+
+// Local LLM
+export async function listLocalEndpoints(): Promise<LocalEndpoint[]> { return invoke("list_local_endpoints"); }
+export async function addLocalEndpoint(name: string, url: string, backendType?: string, apiKey?: string): Promise<LocalEndpoint> {
+  return invoke("add_local_endpoint", { name, url, backend_type: backendType, api_key: apiKey });
+}
+export async function updateLocalEndpoint(id: string, updates: { name?: string; url?: string; api_key?: string; connection_timeout_ms?: number; keep_alive_minutes?: number; is_active?: boolean }): Promise<void> {
+  return invoke("update_local_endpoint", { id, ...updates });
+}
+export async function removeLocalEndpoint(id: string): Promise<void> { return invoke("remove_local_endpoint", { id }); }
+export async function testEndpointConnection(endpointId: string): Promise<EndpointHealth> { return invoke("test_endpoint_connection", { endpoint_id: endpointId }); }
+export async function listEndpointModels(endpointId: string): Promise<LocalModel[]> { return invoke("list_endpoint_models", { endpoint_id: endpointId }); }
+export async function getProviderChain(): Promise<ProviderChainEntry[]> { return invoke("get_provider_chain"); }
+export async function updateProviderChain(chain: ProviderChainEntry[]): Promise<void> { return invoke("update_provider_chain", { chain }); }
+export async function updateModelOverride(endpointId: string, modelId: string, overrides: { context_length?: number; tool_capability?: string; system_prompt_suffix?: string }): Promise<void> {
+  return invoke("update_model_override", { endpoint_id: endpointId, model_id: modelId, ...overrides });
+}

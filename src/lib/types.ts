@@ -183,3 +183,44 @@ export interface BriefingResult {
   has_overdue: boolean;
   task_count: number;
 }
+
+// Local LLM types
+export interface LocalEndpoint {
+  id: string;
+  name: string;
+  url: string;
+  backend_type: "ollama" | "vllm" | "generic";
+  api_key?: string;
+  use_tls: boolean;
+  connection_timeout_ms: number;
+  keep_alive_minutes: number;
+  is_active: boolean;
+  last_health_check?: string;
+  last_health_status?: boolean;
+}
+
+export interface LocalModel {
+  id: string;
+  endpoint_id: string;
+  context_length: number;
+  supports_tools: "native" | "prompt_injected" | "chat_only";
+}
+
+export interface ProviderChainEntry {
+  position: number;
+  provider_type: "claude" | "openai" | "local";
+  endpoint_id?: string;
+  model_id?: string;
+  enabled: boolean;
+}
+
+export interface EndpointHealth {
+  reachable: boolean;
+  model_count: number;
+  latency_ms: number;
+}
+
+export interface ChatProviderPayload {
+  provider: string;
+  status: "trying" | "failed" | "active";
+}

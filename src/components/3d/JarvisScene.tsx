@@ -87,13 +87,14 @@ function easeInOut(t: number): number {
 
 interface JarvisSceneProps {
   activityLevel?: "idle" | "listening" | "processing" | "active";
+  assistantPhase?: string;
   ttsAmplitudeRef?: React.RefObject<number>;
   micAmplitudeRef?: React.RefObject<number>;
   pendingToolCall?: string | null;
   onToolCallConsumed?: () => void;
 }
 
-export default memo(function JarvisScene({ activityLevel = "idle", ttsAmplitudeRef, micAmplitudeRef, pendingToolCall = null, onToolCallConsumed }: JarvisSceneProps) {
+export default memo(function JarvisScene({ activityLevel = "idle", assistantPhase = "idle", ttsAmplitudeRef, micAmplitudeRef, pendingToolCall = null, onToolCallConsumed }: JarvisSceneProps) {
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const animRef = useRef(0);
   const time = useRef(0);
@@ -121,9 +122,25 @@ export default memo(function JarvisScene({ activityLevel = "idle", ttsAmplitudeR
   const gridOpacityRef = useRef(1);
   const activityLevelRef = useRef(activityLevel);
 
+  // Phase-driven animation refs
+  const phaseRef = useRef("idle");
+  const lastPhaseRef = useRef("idle");
+  const seekActive = useRef(false);
+  const seekProgress = useRef(0);
+  const seekStartRY = useRef(0);
+  const seekStartRX = useRef(0);
+  const seekTargetRY = useRef(0);
+  const seekTargetRX = useRef(0);
+  const highlightTypeRef = useRef<string | null>(null);
+  const highlightAlphaRef = useRef(0);
+
   useEffect(() => {
     activityLevelRef.current = activityLevel;
   }, [activityLevel]);
+
+  useEffect(() => {
+    phaseRef.current = assistantPhase;
+  }, [assistantPhase]);
 
   // Data nodes
   const nodes = useRef<DataNode[]>([]);
@@ -280,12 +297,30 @@ export default memo(function JarvisScene({ activityLevel = "idle", ttsAmplitudeR
       const targetIdx = nodes.current.indexOf(target);
       const color = TYPE_COLORS[target.type] || TYPE_COLORS.task;
 
+      // Seek: rotate sphere to face the target node
+      if (autoRot.current || phaseRef.current === "planning" || phaseRef.current === "acting" || phaseRef.current === "thinking") {
+        seekStartRY.current = rotYRef.current;
+        seekStartRX.current = rotXRef.current;
+        seekTargetRY.current = -target.theta + Math.PI / 2;
+        seekTargetRX.current = -(target.phi - Math.PI / 2);
+        seekProgress.current = 0;
+        seekActive.current = true;
+        autoRot.current = false;
+      }
+
+      // Slower arc speed when seeking so it arrives as sphere faces target
+      const arcSpeed = seekActive.current ? (0.016 + Math.random() * 0.008) : (0.025 + Math.random() * 0.015);
       arcsRef.current.push({
         targetIdx, progress: 0,
-        speed: 0.025 + Math.random() * 0.015,
+        speed: arcSpeed,
         trail: [], color, active: true,
         side: arcsRef.current.length % 2 === 0 ? 1 : -1,
       });
+
+      // Highlight all nodes of this type
+      highlightTypeRef.current = target.type;
+      highlightAlphaRef.current = 1.0;
+
       onToolCallConsumed?.();
     }
   }, [pendingToolCall, onToolCallConsumed]);
@@ -326,6 +361,7 @@ export default memo(function JarvisScene({ activityLevel = "idle", ttsAmplitudeR
       dragging.current = true;
       lastM.current = { x: e.clientX, y: e.clientY };
       autoRot.current = false;
+      seekActive.current = false;
       document.body.style.cursor = "grabbing";
     }
     function onMove(e: MouseEvent) {
@@ -372,10 +408,25 @@ export default memo(function JarvisScene({ activityLevel = "idle", ttsAmplitudeR
     window.addEventListener("wheel", onWheel, { passive: false });
     window.addEventListener("dblclick", onDblClick);
 
-    // Frame rate throttle: ~30fps when idle (smooth rotation), 60fps when active
+    // Cached gradients -- rebuilt only on resize
+    let cachedW = 0, cachedH = 0;
+    let ambientGlow: CanvasGradient | null = null;
+
+    function rebuildGradientCache(w: number, h: number) {
+      const cx = w / 2, cy = h / 2;
+      ambientGlow = ctx!.createRadialGradient(cx, cy, 0, cx, cy, SPHERE_RADIUS * 1.8);
+      ambientGlow.addColorStop(0, "rgba(0, 60, 120, 0.15)");
+      ambientGlow.addColorStop(0.3, "rgba(0, 30, 60, 0.08)");
+      ambientGlow.addColorStop(1, "rgba(0, 0, 0, 0)");
+      cachedW = w;
+      cachedH = h;
+    }
+
+    // Frame rate throttle: 3 tiers to balance smoothness vs CPU
     let lastFrameTime = 0;
-    const IDLE_FRAME_MS = 33;   // 30fps when idle -- smooth enough for auto-rotation
-    const ACTIVE_FRAME_MS = 16; // 60fps when active
+    const IDLE_FRAME_MS = 33;      // ~30fps idle
+    const LISTENING_FRAME_MS = 22; // ~45fps listening/low activity
+    const ACTIVE_FRAME_MS = 16;    // ~60fps active/interacting
 
     function animate(timestamp?: number) {
       if (!canvas || !ctx) return;
@@ -383,7 +434,11 @@ export default memo(function JarvisScene({ activityLevel = "idle", ttsAmplitudeR
       // Throttle frame rate based on activity
       const now = timestamp || performance.now();
       const isInteracting = dragging.current || focusTarget.current !== null || arcsRef.current.length > 0;
-      const frameInterval = (activityLevelRef.current !== "idle" || isInteracting) ? ACTIVE_FRAME_MS : IDLE_FRAME_MS;
+      const al = activityLevelRef.current;
+      const frameInterval = isInteracting || al === "active" || al === "processing"
+        ? ACTIVE_FRAME_MS
+        : al === "listening" ? LISTENING_FRAME_MS
+        : IDLE_FRAME_MS;
       if (now - lastFrameTime < frameInterval) {
         animRef.current = requestAnimationFrame(animate);
         return;
@@ -455,7 +510,54 @@ export default memo(function JarvisScene({ activityLevel = "idle", ttsAmplitudeR
         }
       }
 
-      if (autoRot.current) targetRY.current += 0.002 + act * 0.004;
+      // === PHASE-DRIVEN ANIMATION ===
+      const phase = phaseRef.current;
+
+      // Phase transition: re-enable auto-rotation when AI moves past tool execution
+      if (phase !== lastPhaseRef.current) {
+        if ((lastPhaseRef.current === "acting" || lastPhaseRef.current === "planning") &&
+            (phase === "thinking" || phase === "responding" || phase === "idle")) {
+          if (!dragging.current && !focusTarget.current) {
+            autoRot.current = true;
+            seekActive.current = false;
+          }
+        }
+        lastPhaseRef.current = phase;
+      }
+
+      // Seek animation: smoothly rotate sphere to face tool target node
+      if (seekActive.current && seekProgress.current < 1) {
+        seekProgress.current = Math.min(1, seekProgress.current + 0.012);
+        const st = easeInOut(seekProgress.current);
+        targetRY.current = seekStartRY.current + (seekTargetRY.current - seekStartRY.current) * st;
+        targetRX.current = seekStartRX.current + (seekTargetRX.current - seekStartRX.current) * st;
+        if (seekProgress.current >= 1) {
+          seekActive.current = false;
+        }
+      }
+
+      // Highlight type fade-out
+      if (highlightAlphaRef.current > 0) {
+        highlightAlphaRef.current = Math.max(0, highlightAlphaRef.current - 0.006);
+      }
+
+      // Phase-driven auto-rotation speed
+      if (autoRot.current && !seekActive.current) {
+        let spinSpeed;
+        switch (phase) {
+          case "thinking": spinSpeed = 0.012; break;   // 6x normal -- visibly fast spin
+          case "planning": spinSpeed = 0.005; break;    // decelerating
+          case "acting":   spinSpeed = 0.001; break;    // nearly stopped, locked on target
+          case "responding": spinSpeed = 0.003; break;  // gentle
+          default: spinSpeed = 0.002 + act * 0.004;     // idle baseline
+        }
+        targetRY.current += spinSpeed;
+        // Subtle wobble during thinking -- "scanning" feel
+        if (phase === "thinking") {
+          targetRX.current += Math.cos(time.current * 2.0) * 0.001;
+        }
+      }
+
       rotYRef.current += (targetRY.current - rotYRef.current) * 0.06;
       rotXRef.current += (targetRX.current - rotXRef.current) * 0.06;
       const ry = rotYRef.current, rx = rotXRef.current;
@@ -464,11 +566,9 @@ export default memo(function JarvisScene({ activityLevel = "idle", ttsAmplitudeR
       ctx.fillStyle = "#060a14";
       ctx.fillRect(0, 0, w, h);
 
-      const ambGlow = ctx.createRadialGradient(cx, cy, 0, cx, cy, SPHERE_RADIUS * 1.8);
-      ambGlow.addColorStop(0, "rgba(0, 60, 120, 0.15)");
-      ambGlow.addColorStop(0.3, "rgba(0, 30, 60, 0.08)");
-      ambGlow.addColorStop(1, "rgba(0, 0, 0, 0)");
-      ctx.fillStyle = ambGlow;
+      // Rebuild gradient cache on resize
+      if (w !== cachedW || h !== cachedH) rebuildGradientCache(w, h);
+      ctx.fillStyle = ambientGlow!;
       ctx.fillRect(0, 0, w, h);
 
       // === GRID LINES (batched paths, skipped when idle) ===
@@ -786,6 +886,22 @@ export default memo(function JarvisScene({ activityLevel = "idle", ttsAmplitudeR
           }
         }
 
+        // Tool target highlight: pulsing glow on nodes of the active tool type
+        if (node.type !== "particle" && node.type === highlightTypeRef.current && highlightAlphaRef.current > 0.01) {
+          const hlAlpha = highlightAlphaRef.current;
+          const hlPulse = 1 + Math.sin(time.current * 4) * 0.3;
+          const hlSize = finalSz * 5 * hlPulse;
+          const hlGrad = ctx.createRadialGradient(pr.x, pr.y, 0, pr.x, pr.y, hlSize);
+          hlGrad.addColorStop(0, `rgba(${col.r}, ${col.g}, ${col.b}, ${0.3 * hlAlpha * pr.scale})`);
+          hlGrad.addColorStop(0.5, `rgba(${col.r}, ${col.g}, ${col.b}, ${0.1 * hlAlpha * pr.scale})`);
+          hlGrad.addColorStop(1, `rgba(${col.r}, ${col.g}, ${col.b}, 0)`);
+          ctx.beginPath(); ctx.arc(pr.x, pr.y, hlSize, 0, Math.PI * 2); ctx.fillStyle = hlGrad; ctx.fill();
+          ctx.beginPath(); ctx.arc(pr.x, pr.y, finalSz * 2.5, 0, Math.PI * 2);
+          ctx.strokeStyle = `rgba(${col.r}, ${col.g}, ${col.b}, ${0.5 * hlAlpha})`;
+          ctx.lineWidth = 1.2;
+          ctx.stroke();
+        }
+
         // Urgent ring
         if (node.urgent) {
           ctx.beginPath();
@@ -969,13 +1085,29 @@ export default memo(function JarvisScene({ activityLevel = "idle", ttsAmplitudeR
       }
 
       // Scan line
+      // Scan line -- simple fill avoids per-frame gradient allocation
       const scanY = ((time.current * 60) % h);
-      const scanGrad = ctx.createLinearGradient(0, scanY - 15, 0, scanY + 15);
-      scanGrad.addColorStop(0, "rgba(0, 180, 255, 0)");
-      scanGrad.addColorStop(0.5, "rgba(0, 180, 255, 0.015)");
-      scanGrad.addColorStop(1, "rgba(0, 180, 255, 0)");
-      ctx.fillStyle = scanGrad;
-      ctx.fillRect(0, scanY - 15, w, 30);
+      ctx.fillStyle = "rgba(0, 180, 255, 0.012)";
+      ctx.fillRect(0, scanY - 10, w, 20);
+
+      // Phase label near core
+      if (phase !== "idle") {
+        const phaseLabels: Record<string, string> = {
+          thinking: "ANALYZING",
+          planning: "PLANNING",
+          acting: "EXECUTING",
+          responding: "COMPOSING",
+          listening: "LISTENING",
+          speaking: "SPEAKING",
+          transcribing: "TRANSCRIBING",
+        };
+        const phaseLabel = phaseLabels[phase] || phase.toUpperCase();
+        const labelAlpha = phase === "thinking" ? 0.3 + Math.sin(time.current * 3) * 0.1 : 0.35;
+        ctx.font = "10px 'JetBrains Mono', monospace";
+        ctx.textAlign = "center";
+        ctx.fillStyle = `rgba(${Math.round(sc.r)}, ${Math.round(sc.g)}, ${Math.round(sc.b)}, ${labelAlpha})`;
+        ctx.fillText(phaseLabel, cx, cy + cR + 20);
+      }
 
       // Cursor hint
       if (hoveredNode.current && hoveredNode.current.type !== "particle") {

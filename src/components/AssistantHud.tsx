@@ -103,11 +103,10 @@ const styles: Record<string, React.CSSProperties> = {
     zIndex: 55,
   },
   panel: {
-    background: "rgba(6, 10, 20, 0.78)",
+    background: "rgba(6, 10, 20, 0.92)",
     border: "1px solid rgba(0, 180, 255, 0.16)",
     borderRadius: 16,
     padding: "12px 16px",
-    backdropFilter: "blur(14px)",
     boxShadow: "0 0 24px rgba(0, 180, 255, 0.08)",
   },
   header: {

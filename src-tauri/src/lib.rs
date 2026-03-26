@@ -35,7 +35,10 @@ pub fn run() {
                     .unwrap_or_else(|_| "claude_primary".to_string())
             };
             log::info!("AI provider: {}", ai_provider);
-            let router = AiRouter::new(claude_key, openai_key, &ai_provider);
+            let mut router = AiRouter::new(claude_key, openai_key, &ai_provider);
+            router.load_from_db(&db);
+            log::info!("Provider chain: {} entries, {} local endpoints",
+                router.provider_chain().len(), router.local_endpoints().len());
 
             let google_auth = auth::google::GoogleAuth::new()
                 .unwrap_or_else(|| {
@@ -150,7 +153,7 @@ pub fn run() {
 
             app.manage(std::sync::Arc::clone(&db_arc));
             app.manage(std::sync::Arc::clone(&auth_arc));
-            app.manage(router);
+            app.manage(std::sync::Mutex::new(router));
             app.manage(voice_engine);
             app.manage(std::sync::Arc::clone(&wake_service));
             tray::create_tray(app).expect("Failed to create system tray");
@@ -284,6 +287,15 @@ pub fn run() {
             commands::obsidian::save_obsidian_note,
             commands::obsidian::list_obsidian_files,
             commands::obsidian::save_obsidian_key,
+            commands::local_llm::list_local_endpoints,
+            commands::local_llm::add_local_endpoint,
+            commands::local_llm::update_local_endpoint,
+            commands::local_llm::remove_local_endpoint,
+            commands::local_llm::test_endpoint_connection,
+            commands::local_llm::list_endpoint_models,
+            commands::local_llm::get_provider_chain,
+            commands::local_llm::update_provider_chain,
+            commands::local_llm::update_model_override,
             commands::system::open_application,
             commands::system::open_url,
             commands::system::run_shell_command,

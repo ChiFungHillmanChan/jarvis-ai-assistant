@@ -3,14 +3,14 @@ use crate::assistant::{briefing, context::DayContext};
 use crate::auth::google::GoogleAuth;
 use crate::db::Database;
 use crate::voice::tts::TextToSpeech;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 use tauri::State;
 
 #[tauri::command]
 pub async fn get_briefing(
     app_handle: tauri::AppHandle,
     db: State<'_, Arc<Database>>,
-    router: State<'_, AiRouter>,
+    router: State<'_, Mutex<AiRouter>>,
     google_auth: State<'_, Arc<GoogleAuth>>,
 ) -> Result<briefing::BriefingResult, String> {
     let today = chrono::Local::now().format("%Y-%m-%d").to_string();
@@ -42,6 +42,7 @@ pub async fn get_briefing(
         });
     }
 
+    let router = router.lock().map_err(|e| e.to_string())?.clone();
     let result = briefing::generate_briefing(&db, &router, &google_auth, &app_handle).await?;
 
     {
@@ -65,9 +66,10 @@ pub async fn get_briefing(
 pub async fn speak_briefing(
     app_handle: tauri::AppHandle,
     db: State<'_, Arc<Database>>,
-    router: State<'_, AiRouter>,
+    router: State<'_, Mutex<AiRouter>>,
     google_auth: State<'_, Arc<GoogleAuth>>,
 ) -> Result<briefing::BriefingResult, String> {
+    let router = router.lock().map_err(|e| e.to_string())?.clone();
     let result = briefing::generate_briefing(&db, &router, &google_auth, &app_handle).await?;
 
     // Speak the briefing
@@ -84,7 +86,7 @@ pub async fn speak_briefing(
 pub async fn ask_jarvis(
     app_handle: tauri::AppHandle,
     db: State<'_, Arc<Database>>,
-    router: State<'_, AiRouter>,
+    router: State<'_, Mutex<AiRouter>>,
     google_auth: State<'_, Arc<GoogleAuth>>,
     question: String,
 ) -> Result<String, String> {
@@ -105,6 +107,7 @@ pub async fn ask_jarvis(
     );
 
     let messages = vec![("user".to_string(), prompt)];
+    let router = router.lock().map_err(|e| e.to_string())?.clone();
     router.send(messages, &db, &google_auth, &app_handle, None).await
 }
 
@@ -112,7 +115,7 @@ pub async fn ask_jarvis(
 pub async fn search_conversations(
     app_handle: tauri::AppHandle,
     db: State<'_, Arc<Database>>,
-    router: State<'_, AiRouter>,
+    router: State<'_, Mutex<AiRouter>>,
     google_auth: State<'_, Arc<GoogleAuth>>,
     query: String,
 ) -> Result<String, String> {
@@ -150,5 +153,6 @@ pub async fn search_conversations(
     );
 
     let messages = vec![("user".to_string(), prompt)];
+    let router = router.lock().map_err(|e| e.to_string())?.clone();
     router.send(messages, &db, &google_auth, &app_handle, None).await
 }

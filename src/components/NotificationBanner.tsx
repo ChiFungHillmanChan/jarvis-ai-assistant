@@ -1,8 +1,8 @@
-import { useState } from "react";
+import { useState, memo } from "react";
 import { useTauriCommand } from "../hooks/useTauriCommand";
 import type { Settings } from "../lib/types";
 
-export default function NotificationBanner() {
+export default memo(function NotificationBanner() {
   const { data: settings } = useTauriCommand<Settings>("get_settings");
   const [dismissed, setDismissed] = useState(false);
   const alerts = settings?.values["last_alerts"];
@@ -16,7 +16,7 @@ export default function NotificationBanner() {
       <button onClick={() => setDismissed(true)} style={styles.closeBtn}>x</button>
     </div>
   );
-}
+})
 
 const styles: Record<string, React.CSSProperties> = {
   banner: {

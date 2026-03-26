@@ -18,9 +18,16 @@ import {
   getWallpaperStatus,
   enableWallpaper,
   disableWallpaper,
+  listLocalEndpoints,
+  addLocalEndpoint,
+  removeLocalEndpoint,
+  testEndpointConnection,
+  listEndpointModels,
+  getProviderChain,
+  updateProviderChain,
 } from "../lib/commands";
 import { listen } from "@tauri-apps/api/event";
-import type { VoiceSettings, WakeWordStatus, VoiceState } from "../lib/types";
+import type { VoiceSettings, WakeWordStatus, VoiceState, LocalEndpoint, LocalModel, ProviderChainEntry, EndpointHealth } from "../lib/types";
 import { useVoiceState } from "../hooks/useVoiceState";
 
 export default function Settings() {
@@ -44,6 +51,16 @@ export default function Settings() {
   const [wallpaperActive, setWallpaperActive] = useState(false);
   const [wallpaperBusy, setWallpaperBusy] = useState(false);
 
+  // Local LLM state
+  const [endpoints, setEndpoints] = useState<LocalEndpoint[]>([]);
+  const [chain, setChain] = useState<ProviderChainEntry[]>([]);
+  const [newEndpointUrl, setNewEndpointUrl] = useState("");
+  const [newEndpointName, setNewEndpointName] = useState("");
+  const [endpointBusy, setEndpointBusy] = useState(false);
+  const [endpointModels, setEndpointModels] = useState<Record<string, LocalModel[]>>({});
+  const [endpointHealth, setEndpointHealth] = useState<Record<string, EndpointHealth>>({});
+  const [llmError, setLlmError] = useState<string | null>(null);
+
   useEffect(() => {
     getSettings().then((s) => {
       setAiProvider(s.values["ai_provider"] || "claude_primary");
@@ -59,6 +76,11 @@ export default function Settings() {
     getVoiceSettings().then(setVoiceSettingsState);
     listTtsVoices().then(setTtsVoices);
     void refreshWakeStatus();
+  }, []);
+
+  useEffect(() => {
+    listLocalEndpoints().then(setEndpoints).catch(() => {});
+    getProviderChain().then(setChain).catch(() => {});
   }, []);
 
   useEffect(() => {
@@ -78,6 +100,105 @@ export default function Settings() {
       setWakeStatus({ ...status, model_downloaded: downloaded });
     } catch (e) {
       setWakeError(String(e));
+    }
+  }
+
+  async function handleAddEndpoint() {
+    if (!newEndpointUrl.trim()) return;
+    setEndpointBusy(true);
+    setLlmError(null);
+    try {
+      const ep = await addLocalEndpoint(
+        newEndpointName.trim() || newEndpointUrl.trim(),
+        newEndpointUrl.trim()
+      );
+      setEndpoints((prev) => [...prev, ep]);
+      setNewEndpointUrl("");
+      setNewEndpointName("");
+      // Fetch models for new endpoint
+      const models = await listEndpointModels(ep.id);
+      setEndpointModels((prev) => ({ ...prev, [ep.id]: models }));
+    } catch (e) {
+      setLlmError(String(e));
+    } finally {
+      setEndpointBusy(false);
+    }
+  }
+
+  async function handleRemoveEndpoint(id: string) {
+    try {
+      await removeLocalEndpoint(id);
+      setEndpoints((prev) => prev.filter((e) => e.id !== id));
+      // Remove from chain too
+      const newChain = chain.filter((c) => c.endpoint_id !== id);
+      setChain(newChain);
+      await updateProviderChain(newChain);
+    } catch (e) {
+      setLlmError(String(e));
+    }
+  }
+
+  async function handleTestEndpoint(id: string) {
+    setLlmError(null);
+    try {
+      const health = await testEndpointConnection(id);
+      setEndpointHealth((prev) => ({ ...prev, [id]: health }));
+      // Refresh models
+      const models = await listEndpointModels(id);
+      setEndpointModels((prev) => ({ ...prev, [id]: models }));
+    } catch (e) {
+      setLlmError(String(e));
+    }
+  }
+
+  async function handleAddToChain(providerType: string, endpointId?: string, modelId?: string) {
+    const newEntry: ProviderChainEntry = {
+      position: chain.length,
+      provider_type: providerType as "claude" | "openai" | "local",
+      endpoint_id: endpointId,
+      model_id: modelId,
+      enabled: true,
+    };
+    const updated = [...chain, newEntry];
+    setChain(updated);
+    try {
+      await updateProviderChain(updated);
+    } catch (e) {
+      setLlmError(String(e));
+    }
+  }
+
+  async function handleRemoveFromChain(index: number) {
+    const updated = chain.filter((_, i) => i !== index).map((c, i) => ({ ...c, position: i }));
+    setChain(updated);
+    try {
+      await updateProviderChain(updated);
+    } catch (e) {
+      setLlmError(String(e));
+    }
+  }
+
+  async function handleMoveChainEntry(index: number, direction: "up" | "down") {
+    const swapIdx = direction === "up" ? index - 1 : index + 1;
+    if (swapIdx < 0 || swapIdx >= chain.length) return;
+    const updated = [...chain];
+    [updated[index], updated[swapIdx]] = [updated[swapIdx], updated[index]];
+    const reindexed = updated.map((c, i) => ({ ...c, position: i }));
+    setChain(reindexed);
+    try {
+      await updateProviderChain(reindexed);
+    } catch (e) {
+      setLlmError(String(e));
+    }
+  }
+
+  async function handleToggleChainEntry(index: number) {
+    const updated = chain.map((c, i) => i === index ? { ...c, enabled: !c.enabled } : c);
+    setChain(updated);
+    try {
+      await updateProviderChain(updated);
+    } catch (e) {
+      setLlmError(String(e));
     }
   }
 
@@ -210,7 +331,92 @@ export default function Settings() {
         {/* Left column */}
         <div style={styles.column}>
           <div className="panel" style={styles.panel}>
-            <div className="label" style={styles.sectionTitle}>AI PROVIDER</div>
+            <div className="label" style={styles.sectionTitle}>LOCAL LLM ENDPOINTS</div>
+            <div style={styles.hint}>Connect to Ollama, vLLM, or any OpenAI-compatible server</div>
+
+            {endpoints.map((ep) => (
+              <div key={ep.id} style={{ background: "rgba(0, 180, 255, 0.03)", border: "1px solid rgba(0, 180, 255, 0.1)", borderRadius: 6, padding: 10, marginBottom: 8 }}>
+                <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center" }}>
+                  <div>
+                    <span style={{ color: "rgba(0, 180, 255, 0.8)", fontSize: 12, fontWeight: 600 }}>{ep.name}</span>
+                    <span style={{ color: "rgba(0, 180, 255, 0.4)", fontSize: 10, marginLeft: 8 }}>{ep.backend_type.toUpperCase()}</span>
+                  </div>
+                  <div style={{ display: "flex", gap: 4, alignItems: "center" }}>
+                    <span style={{ width: 8, height: 8, borderRadius: "50%", background: ep.last_health_status ? "rgba(16, 185, 129, 0.7)" : "rgba(255, 100, 100, 0.7)" }} />
+                  </div>
+                </div>
+                <div style={{ color: "rgba(0, 180, 255, 0.4)", fontSize: 10, fontFamily: "var(--font-mono)", marginTop: 4 }}>{ep.url}</div>
+                {endpointHealth[ep.id] && (
+                  <div style={{ color: "rgba(0, 180, 255, 0.5)", fontSize: 10, marginTop: 4 }}>
+                    {endpointHealth[ep.id].reachable ? `${endpointHealth[ep.id].model_count} models, ${endpointHealth[ep.id].latency_ms}ms` : "Unreachable"}
+                  </div>
+                )}
+                {endpointModels[ep.id] && endpointModels[ep.id].length > 0 && (
+                  <div style={{ marginTop: 6 }}>
+                    <div style={{ color: "rgba(0, 180, 255, 0.4)", fontSize: 9 }}>MODELS:</div>
+                    {endpointModels[ep.id].map((m) => (
+                      <div key={m.id} style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginTop: 2 }}>
+                        <span style={{ color: "rgba(0, 180, 255, 0.6)", fontSize: 10, fontFamily: "var(--font-mono)" }}>{m.id}</span>
+                        <div style={{ display: "flex", gap: 4, alignItems: "center" }}>
+                          <span style={{ color: "rgba(0, 180, 255, 0.3)", fontSize: 9 }}>{m.supports_tools === "native" ? "tools" : m.supports_tools === "prompt_injected" ? "prompt-tools" : "chat"}</span>
+                          <button onClick={() => handleAddToChain("local", ep.id, m.id)} style={{ ...styles.saveBtn, fontSize: 9, padding: "2px 6px" }}>+ CHAIN</button>
+                        </div>
+                      </div>
+                    ))}
+                  </div>
+                )}
+                <div style={{ display: "flex", gap: 6, marginTop: 8 }}>
+                  <button onClick={() => handleTestEndpoint(ep.id)} style={{ ...styles.saveBtn, fontSize: 9 }}>TEST</button>
+                  <button onClick={() => handleRemoveEndpoint(ep.id)} style={{ ...styles.saveBtn, fontSize: 9, borderColor: "rgba(255, 100, 100, 0.3)", color: "rgba(255, 100, 100, 0.7)" }}>REMOVE</button>
+                </div>
+              </div>
+            ))}
+
+            <div style={{ display: "flex", gap: 6, marginTop: 8, flexDirection: "column" as const }}>
+              <input value={newEndpointName} onChange={(e) => setNewEndpointName(e.target.value)} placeholder="Name (optional)" style={styles.tokenInput} />
+              <div style={{ display: "flex", gap: 6 }}>
+                <input value={newEndpointUrl} onChange={(e) => setNewEndpointUrl(e.target.value)} placeholder="http://localhost:11434" style={{ ...styles.tokenInput, flex: 1 }} />
+                <button onClick={handleAddEndpoint} disabled={endpointBusy} style={styles.saveBtn}>{endpointBusy ? "..." : "ADD"}</button>
+              </div>
+            </div>
+            {llmError && <div style={styles.errorText}>{llmError}</div>}
+          </div>
+
+          <div className="panel" style={styles.panel}>
+            <div className="label" style={styles.sectionTitle}>PROVIDER CHAIN</div>
+            <div style={styles.hint}>Priority order for AI providers (drag or use arrows to reorder)</div>
+
+            {chain.map((entry, i) => {
+              const label = entry.provider_type === "local"
+                ? `${entry.model_id || "unknown"} (local)`
+                : entry.provider_type.charAt(0).toUpperCase() + entry.provider_type.slice(1);
+              return (
+                <div key={i} style={{ display: "flex", alignItems: "center", gap: 6, marginBottom: 6, opacity: entry.enabled ? 1 : 0.4 }}>
+                  <span style={{ color: "rgba(0, 180, 255, 0.4)", fontSize: 10, fontFamily: "var(--font-mono)", width: 16 }}>{i + 1}.</span>
+                  <span style={{ color: "rgba(0, 180, 255, 0.8)", fontSize: 11, flex: 1, fontFamily: "var(--font-mono)" }}>{label}</span>
+                  <button onClick={() => handleMoveChainEntry(i, "up")} disabled={i === 0} style={{ ...styles.saveBtn, fontSize: 9, padding: "1px 5px" }}>^</button>
+                  <button onClick={() => handleMoveChainEntry(i, "down")} disabled={i === chain.length - 1} style={{ ...styles.saveBtn, fontSize: 9, padding: "1px 5px" }}>v</button>
+                  <label style={{ cursor: "pointer" }}>
+                    <input type="checkbox" checked={entry.enabled} onChange={() => handleToggleChainEntry(i)} style={styles.radio} />
+                  </label>
+                  <button onClick={() => handleRemoveFromChain(i)} style={{ ...styles.saveBtn, fontSize: 9, padding: "1px 5px", borderColor: "rgba(255, 100, 100, 0.3)", color: "rgba(255, 100, 100, 0.7)" }}>x</button>
+                </div>
+              );
+            })}
+
+            {chain.length === 0 && (
+              <div style={{ color: "rgba(0, 180, 255, 0.3)", fontSize: 11, marginBottom: 8 }}>No providers configured. Add cloud or local providers below.</div>
+            )}
+
+            <div style={{ display: "flex", gap: 6, marginTop: 8 }}>
+              <button onClick={() => handleAddToChain("claude")} style={styles.saveBtn}>+ Claude</button>
+              <button onClick={() => handleAddToChain("openai")} style={styles.saveBtn}>+ OpenAI</button>
+            </div>
+          </div>
+
+          <div className="panel" style={styles.panel}>
+            <div className="label" style={styles.sectionTitle}>AI PROVIDER (LEGACY)</div>
+            <div style={styles.hint}>Used when no provider chain is configured</div>
             {options.map((opt) => (
               <label key={opt.value} style={styles.option}>
                 <input type="radio" name="ai_provider" value={opt.value} checked={aiProvider === opt.value} onChange={() => handleProviderChange(opt.value)} style={styles.radio} />

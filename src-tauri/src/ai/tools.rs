@@ -405,6 +405,7 @@ pub fn get_tool_definitions() -> Vec<Tool> {
     ]
 }
 
+#[derive(Clone)]
 pub struct Tool {
     pub name: String,
     pub description: String,
