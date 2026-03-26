@@ -156,6 +156,7 @@ pub fn run() {
             app.manage(std::sync::Mutex::new(router));
             app.manage(voice_engine);
             app.manage(std::sync::Arc::clone(&wake_service));
+            app.manage(commands::model_pull::ModelPullState::new());
             tray::create_tray(app).expect("Failed to create system tray");
 
             if wake_word_enabled {
@@ -313,6 +314,8 @@ pub fn run() {
             commands::system_check::check_system_compatibility,
             commands::system_check::check_backend_prerequisites,
             commands::system_check::get_recommended_models,
+            commands::model_pull::pull_model,
+            commands::model_pull::cancel_model_pull,
         ])
         .run(tauri::generate_context!())
         .expect("error while running JARVIS");
