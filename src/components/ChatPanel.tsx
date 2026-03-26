@@ -1,6 +1,6 @@
 import { useState, useRef, useEffect, useCallback, memo } from "react";
 import ChatMessageComponent from "./ChatMessage";
-import { useChat } from "../hooks/useChat";
+import { useChatContext } from "../hooks/ChatContext";
 
 interface ChatPanelProps {
   isOpen: boolean;
@@ -9,7 +9,7 @@ interface ChatPanelProps {
 }
 
 export default memo(function ChatPanel({ isOpen, onClose, onNavigateToChat }: ChatPanelProps) {
-  const { messages, loading, error, send, clearChat, currentStatus, streamingText } = useChat();
+  const { messages, loading, error, send, clearChat, currentStatus, streamingText } = useChatContext();
   const [input, setInput] = useState("");
   const messagesEndRef = useRef<HTMLDivElement>(null);
   const inputRef = useRef<HTMLTextAreaElement>(null);

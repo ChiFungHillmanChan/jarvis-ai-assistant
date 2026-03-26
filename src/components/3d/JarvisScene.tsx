@@ -119,6 +119,11 @@ export default memo(function JarvisScene({ activityLevel = "idle", ttsAmplitudeR
   const arcsRef = useRef<EnergyArc[]>([]);
   const ringSpeedRef = useRef(1.0);
   const gridOpacityRef = useRef(1);
+  const activityLevelRef = useRef(activityLevel);
+
+  useEffect(() => {
+    activityLevelRef.current = activityLevel;
+  }, [activityLevel]);
 
   // Data nodes
   const nodes = useRef<DataNode[]>([]);
@@ -146,29 +151,38 @@ export default memo(function JarvisScene({ activityLevel = "idle", ttsAmplitudeR
     const freshItems: FreshItem[] = [];
 
     try {
-      const tasks: { id: number; title: string; deadline: string | null; status: string; priority: number }[] = await invoke("get_tasks");
-      for (const t of tasks.slice(0, 15)) {
-        freshItems.push({ type: "task", label: t.title, sublabel: t.deadline ? `Due: ${t.deadline}` : undefined, urgent: t.priority >= 2 });
-      }
+      const [tasksRes, emailsRes, eventsRes, ghRes, cronsRes] = await Promise.allSettled([
+        invoke<{ id: number; title: string; deadline: string | null; status: string; priority: number }[]>("get_tasks"),
+        invoke<{ id: number; subject: string | null; sender: string }[]>("get_emails", { limit: 10 }),
+        invoke<{ id: number; summary: string; start_time: string }[]>("get_todays_events"),
+        invoke<{ id: number; title: string; repo: string; item_type: string }[]>("get_github_items", { item_type: null }),
+        invoke<{ id: number; name: string; status: string; last_run: string | null }[]>("get_cron_jobs"),
+      ]);
 
-      const emails: { id: number; subject: string | null; sender: string }[] = await invoke("get_emails", { limit: 10 });
-      for (const e of emails.slice(0, 10)) {
-        freshItems.push({ type: "email", label: e.subject || "(No subject)", sublabel: e.sender });
+      if (tasksRes.status === "fulfilled") {
+        for (const t of tasksRes.value.slice(0, 15)) {
+          freshItems.push({ type: "task", label: t.title, sublabel: t.deadline ? `Due: ${t.deadline}` : undefined, urgent: t.priority >= 2 });
+        }
       }
-
-      const events: { id: number; summary: string; start_time: string }[] = await invoke("get_todays_events");
-      for (const ev of events.slice(0, 8)) {
-        freshItems.push({ type: "meeting", label: ev.summary, sublabel: new Date(ev.start_time).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" }) });
+      if (emailsRes.status === "fulfilled") {
+        for (const e of emailsRes.value.slice(0, 10)) {
+          freshItems.push({ type: "email", label: e.subject || "(No subject)", sublabel: e.sender });
+        }
       }
-
-      const ghItems: { id: number; title: string; repo: string; item_type: string }[] = await invoke("get_github_items", { item_type: null });
-      for (const g of ghItems.slice(0, 8)) {
-        freshItems.push({ type: "github", label: g.title, sublabel: `${g.repo} [${g.item_type}]` });
+      if (eventsRes.status === "fulfilled") {
+        for (const ev of eventsRes.value.slice(0, 8)) {
+          freshItems.push({ type: "meeting", label: ev.summary, sublabel: new Date(ev.start_time).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" }) });
+        }
       }
-
-      const crons: { id: number; name: string; status: string; last_run: string | null }[] = await invoke("get_cron_jobs");
-      for (const c of crons) {
-        freshItems.push({ type: "cron", label: c.name, sublabel: c.status });
+      if (ghRes.status === "fulfilled") {
+        for (const g of ghRes.value.slice(0, 8)) {
+          freshItems.push({ type: "github", label: g.title, sublabel: `${g.repo} [${g.item_type}]` });
+        }
+      }
+      if (cronsRes.status === "fulfilled") {
+        for (const c of cronsRes.value) {
+          freshItems.push({ type: "cron", label: c.name, sublabel: c.status });
+        }
       }
     } catch {
       // Backend may not be ready yet -- particles only on initial load
@@ -369,7 +383,7 @@ export default memo(function JarvisScene({ activityLevel = "idle", ttsAmplitudeR
       // Throttle frame rate based on activity
       const now = timestamp || performance.now();
       const isInteracting = dragging.current || focusTarget.current !== null || arcsRef.current.length > 0;
-      const frameInterval = (activityLevel !== "idle" || isInteracting) ? ACTIVE_FRAME_MS : IDLE_FRAME_MS;
+      const frameInterval = (activityLevelRef.current !== "idle" || isInteracting) ? ACTIVE_FRAME_MS : IDLE_FRAME_MS;
       if (now - lastFrameTime < frameInterval) {
         animRef.current = requestAnimationFrame(animate);
         return;
@@ -377,14 +391,15 @@ export default memo(function JarvisScene({ activityLevel = "idle", ttsAmplitudeR
       lastFrameTime = now;
 
       try { // --- begin frame ---
+      const activity = activityLevelRef.current;
       time.current += 0.006;
       const w = canvas.width, h = canvas.height;
       const cx = w / 2, cy = h / 2;
 
       // Activity level interpolation (smooth lerp ~0.5s transition)
-      const targetAct = activityLevel === "active" ? 1.0
-        : activityLevel === "processing" ? 0.7
-        : activityLevel === "listening" ? 0.4 : 0.0;
+      const targetAct = activity === "active" ? 1.0
+        : activity === "processing" ? 0.7
+        : activity === "listening" ? 0.4 : 0.0;
       activityRef.current += (targetAct - activityRef.current) * 0.03;
       const act = activityRef.current;
 
@@ -396,7 +411,7 @@ export default memo(function JarvisScene({ activityLevel = "idle", ttsAmplitudeR
       const spkAlpha = speakingAlpha.current;
 
       // Ring speed multiplier
-      const ringTarget = activityLevel === "processing" ? 3.0 : activityLevel === "listening" ? 1.2 : 1.0;
+      const ringTarget = activity === "processing" ? 3.0 : activity === "listening" ? 1.2 : 1.0;
       const ringLerp = ringTarget > ringSpeedRef.current ? 0.05 : 0.03;
       ringSpeedRef.current += (ringTarget - ringSpeedRef.current) * ringLerp;
       const ringMult = ringSpeedRef.current;
@@ -408,7 +423,7 @@ export default memo(function JarvisScene({ activityLevel = "idle", ttsAmplitudeR
         processing: { r: 255, g: 180, b: 0 },
         active: { r: 16, g: 185, b: 129 },
       };
-      targetColorRef.current = colorTargets[activityLevel] || colorTargets.idle;
+      targetColorRef.current = colorTargets[activity] || colorTargets.idle;
       const sc = stateColorRef.current;
       const tc = targetColorRef.current;
       const lerpSpeed = 0.04;
@@ -457,7 +472,7 @@ export default memo(function JarvisScene({ activityLevel = "idle", ttsAmplitudeR
       ctx.fillRect(0, 0, w, h);
 
       // === GRID LINES (batched paths, skipped when idle) ===
-      const targetGridOpacity = (activityLevel !== "idle" || dragging.current) ? 1 : 0;
+      const targetGridOpacity = (activity !== "idle" || dragging.current) ? 1 : 0;
       gridOpacityRef.current += (targetGridOpacity - gridOpacityRef.current) * 0.05;
 
       if (gridOpacityRef.current > 0.01) {
@@ -609,7 +624,7 @@ export default memo(function JarvisScene({ activityLevel = "idle", ttsAmplitudeR
 
       // === RADIAL WAVEFORM (speaking + listening states) ===
       // Listening alpha crossfade
-      const isListening = activityLevel === "listening";
+      const isListening = activity === "listening";
       listeningAlphaRef.current += (isListening ? 0.06 : -0.035);
       listeningAlphaRef.current = Math.max(0, Math.min(1, listeningAlphaRef.current));
 

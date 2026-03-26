@@ -1,4 +1,4 @@
-import { useState, useCallback, useEffect, useRef, useMemo } from "react";
+import { useState, useCallback, useEffect, useRef, useMemo, lazy, Suspense } from "react";
 import { getCurrentWindow } from "@tauri-apps/api/window";
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
@@ -6,12 +6,12 @@ import Sidebar from "./components/Sidebar";
 import ChatPanel from "./components/ChatPanel";
 import CommandBar from "./components/CommandBar";
 import Dashboard from "./pages/Dashboard";
-import Settings from "./pages/Settings";
-import CronDashboard from "./pages/CronDashboard";
-import EmailPage from "./pages/EmailPage";
-import CalendarPage from "./pages/CalendarPage";
-import GitHubPage from "./pages/GitHubPage";
-import NotionPage from "./pages/NotionPage";
+const Settings = lazy(() => import("./pages/Settings"));
+const CronDashboard = lazy(() => import("./pages/CronDashboard"));
+const EmailPage = lazy(() => import("./pages/EmailPage"));
+const CalendarPage = lazy(() => import("./pages/CalendarPage"));
+const GitHubPage = lazy(() => import("./pages/GitHubPage"));
+const NotionPage = lazy(() => import("./pages/NotionPage"));
 import { useKeyboard } from "./hooks/useKeyboard";
 import VoiceIndicator from "./components/VoiceIndicator";
 import { useVoiceState } from "./hooks/useVoiceState";
@@ -19,12 +19,12 @@ import ToastContainer from "./components/Toast";
 import WindowControls from "./components/WindowControls";
 import JarvisScene from "./components/3d/JarvisScene";
 import AssistantHud from "./components/AssistantHud";
-import { useChat } from "./hooks/useChat";
+import { ChatProvider, useChatContext } from "./hooks/ChatContext";
 import ChatMessageComponent from "./components/ChatMessage";
 import type { AssistantPhase, ChatStatusPayload, ChatThinkingPayload, ChatTokenPayload, ChatStatePayload } from "./lib/types";
 
 function ChatFullView() {
-  const { messages, loading, error, send, clearChat, streamingText } = useChat();
+  const { messages, loading, error, send, clearChat, streamingText } = useChatContext();
   const [input, setInput] = useState("");
   const messagesEndRef = useRef<HTMLDivElement>(null);
   const inputRef = useRef<HTMLTextAreaElement>(null);
@@ -87,6 +87,9 @@ export default function App() {
   const hudResetTimer = useRef<number | null>(null);
   const aiStateRef = useRef(aiState);
   const assistantThinkingRef = useRef(assistantThinking);
+  const hudTokenBuffer = useRef("");
+  const hudThinkingBuffer = useRef("");
+  const hudRafId = useRef<number | null>(null);
 
   const toggleChat = useCallback(() => { setChatOpen((prev) => !prev); }, []);
   const closeChat = useCallback(() => { setChatOpen(false); }, []);
@@ -184,17 +187,33 @@ export default function App() {
         setAssistantThinking("");
       }
     });
-    const unlistenToken = listen<ChatTokenPayload>("chat-token", (event) => {
-      if (event.payload.done) {
-        return;
+    const flushHudBuffers = () => {
+      if (hudTokenBuffer.current) {
+        const tokens = hudTokenBuffer.current;
+        hudTokenBuffer.current = "";
+        setAssistantResponsePreview((prev) => appendTail(prev, tokens, 260));
       }
-      setAssistantResponsePreview((prev) => appendTail(prev, event.payload.token, 260));
+      if (hudThinkingBuffer.current) {
+        const text = hudThinkingBuffer.current;
+        hudThinkingBuffer.current = "";
+        setAssistantThinking((prev) => appendTail(prev, text, 220));
+      }
+      hudRafId.current = null;
+    };
+    const scheduleHudFlush = () => {
+      if (!hudRafId.current) {
+        hudRafId.current = requestAnimationFrame(flushHudBuffers);
+      }
+    };
+    const unlistenToken = listen<ChatTokenPayload>("chat-token", (event) => {
+      if (event.payload.done) return;
+      hudTokenBuffer.current += event.payload.token;
+      scheduleHudFlush();
     });
     const unlistenThinking = listen<ChatThinkingPayload>("chat-thinking", (event) => {
-      if (event.payload.done) {
-        return;
-      }
-      setAssistantThinking((prev) => appendTail(prev, event.payload.text, 220));
+      if (event.payload.done) return;
+      hudThinkingBuffer.current += event.payload.text;
+      scheduleHudFlush();
     });
     const unlistenVoiceRequest = listen<{ active: boolean }>("chat-voice-active", (event) => {
       setVoiceRequestActive(event.payload.active);
@@ -206,6 +225,7 @@ export default function App() {
       }
     });
     return () => {
+      if (hudRafId.current) cancelAnimationFrame(hudRafId.current);
       unlistenAmp.then((fn) => fn());
       unlistenMic.then((fn) => fn());
       unlistenTool.then((fn) => fn());
@@ -236,12 +256,12 @@ export default function App() {
     return "idle";
   }, [pageTransition, aiState, voiceState]);
 
-  async function handleLowerToBackground() {
+  const handleLowerToBackground = useCallback(async () => {
     await invoke("lower_wallpaper");
     setWallpaperRaised(false);
-  }
+  }, []);
 
-  useKeyboard({
+  const shortcuts = useMemo(() => ({
     "cmd+k": toggleChat,
     escape: () => {
       if (wallpaperActive && wallpaperRaised) {
@@ -258,7 +278,9 @@ export default function App() {
         (typeof voiceState === "object" && "Error" in voiceState)
       ) { startVoice(); }
     },
-  });
+  }), [toggleChat, closeChat, wallpaperActive, wallpaperRaised, handleLowerToBackground, voiceState, startVoice, stopVoice]);
+
+  useKeyboard(shortcuts);
 
   function renderView() {
     switch (activeView) {
@@ -274,6 +296,7 @@ export default function App() {
   }
 
   return (
+    <ChatProvider>
     <div style={styles.root}>
       <JarvisScene activityLevel={activityLevel} ttsAmplitudeRef={ttsAmplitudeRef} micAmplitudeRef={micAmplitudeRef} pendingToolCall={pendingToolCall} onToolCallConsumed={handleToolCallConsumed} />
 
@@ -296,7 +319,11 @@ export default function App() {
         <div style={styles.layout}>
           <Sidebar activeView={activeView} onNavigate={setActiveView} onChatToggle={toggleChat} />
           <div style={styles.content}>
-            <div style={styles.mainArea}>{renderView()}</div>
+            <div style={styles.mainArea}>
+              <Suspense fallback={<div style={{ display: "flex", alignItems: "center", justifyContent: "center", height: "100%" }}><span className="system-text animate-glow">LOADING...</span></div>}>
+                {renderView()}
+              </Suspense>
+            </div>
             <CommandBar onActivate={toggleChat} />
           </div>
         </div>
@@ -314,6 +341,7 @@ export default function App() {
         <ToastContainer />
       </div>
     </div>
+    </ChatProvider>
   );
 }
 
