@@ -21,7 +21,8 @@ import JarvisScene from "./components/3d/JarvisScene";
 import AssistantHud from "./components/AssistantHud";
 import { ChatProvider, useChatContext } from "./hooks/ChatContext";
 import ChatMessageComponent from "./components/ChatMessage";
-import type { AssistantPhase, ChatStatusPayload, ChatThinkingPayload, ChatTokenPayload, ChatStatePayload } from "./lib/types";
+import ModelPullToast from "./components/ModelPullToast";
+import type { AssistantPhase, ChatStatusPayload, ChatThinkingPayload, ChatTokenPayload, ChatStatePayload, ModelPullProgress } from "./lib/types";
 
 function ChatFullView() {
   const { messages, loading, error, send, clearChat, streamingText } = useChatContext();
@@ -83,6 +84,7 @@ export default function App() {
   const ttsAmplitudeRef = useRef(0);
   const micAmplitudeRef = useRef(0);
   const [pendingToolCall, setPendingToolCall] = useState<string | null>(null);
+  const [modelPullProgress, setModelPullProgress] = useState<ModelPullProgress | null>(null);
   const prevView = useRef(activeView);
   const hudResetTimer = useRef<number | null>(null);
   const aiStateRef = useRef(aiState);
@@ -236,6 +238,20 @@ export default function App() {
     };
   }, []);
 
+  // Listen for model pull progress (for background toast)
+  useEffect(() => {
+    const unlisten = listen<ModelPullProgress>("model-pull-progress", (event) => {
+      const p = event.payload;
+      if (p.status === "complete" || p.status === "error") {
+        setModelPullProgress(p);
+        setTimeout(() => setModelPullProgress(null), 3000);
+      } else {
+        setModelPullProgress(p);
+      }
+    });
+    return () => { unlisten.then((fn) => fn()); };
+  }, []);
+
   // Page transition pulse
   useEffect(() => {
     if (prevView.current !== activeView) {
@@ -339,6 +355,7 @@ export default function App() {
         />
         <VoiceIndicator state={voiceState} onStop={stopVoice} />
         <ToastContainer />
+        <ModelPullToast progress={modelPullProgress} visible={activeView !== "settings" && modelPullProgress !== null} />
       </div>
     </div>
     </ChatProvider>
