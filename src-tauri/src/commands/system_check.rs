@@ -1,4 +1,9 @@
+use crate::ai::local::{self, backend::BackendType};
+use crate::db::Database;
 use serde::Serialize;
+use std::process::Command;
+use std::sync::Arc;
+use tauri::State;
 
 #[derive(Debug, Clone, Serialize)]
 pub struct GpuInfo {
@@ -107,6 +112,295 @@ pub fn get_curated_models(total_ram_gb: f64, pulled_ids: &[String]) -> Vec<Recom
         .collect()
 }
 
+/// Check if a binary is on PATH.
+fn binary_exists(name: &str) -> bool {
+    Command::new("which")
+        .arg(name)
+        .output()
+        .map(|o| o.status.success())
+        .unwrap_or(false)
+}
+
+/// Run a command and capture stdout, trimmed. Returns None on failure.
+fn run_command(cmd: &str, args: &[&str]) -> Option<String> {
+    Command::new(cmd)
+        .args(args)
+        .output()
+        .ok()
+        .filter(|o| o.status.success())
+        .and_then(|o| String::from_utf8(o.stdout).ok())
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty())
+}
+
+/// Detect GPU capabilities.
+fn detect_gpu() -> GpuInfo {
+    let has_metal = std::env::consts::OS == "macos" && std::env::consts::ARCH == "aarch64";
+
+    let mut has_cuda = false;
+    let mut cuda_version: Option<String> = None;
+    let mut vram_gb: Option<f64> = None;
+
+    if let Some(output) = run_command("nvidia-smi", &["--query-gpu=driver_version", "--format=csv,noheader,nounits"]) {
+        has_cuda = true;
+        cuda_version = Some(output);
+    }
+    if has_cuda {
+        if let Some(vram_str) = run_command("nvidia-smi", &["--query-gpu=memory.total", "--format=csv,noheader,nounits"]) {
+            vram_gb = vram_str.trim().parse::<f64>().ok().map(|mb| mb / 1024.0);
+        }
+    }
+
+    GpuInfo { has_metal, has_cuda, cuda_version, vram_gb }
+}
+
+/// Detect Ollama installation and running status.
+async fn detect_ollama() -> OllamaStatus {
+    let installed = binary_exists("ollama");
+    let version = run_command("ollama", &["--version"]);
+
+    let running = if installed {
+        let client = reqwest::Client::builder()
+            .timeout(std::time::Duration::from_secs(3))
+            .build()
+            .unwrap_or_default();
+        client.get("http://localhost:11434/")
+            .send().await
+            .map(|r| r.status().is_success())
+            .unwrap_or(false)
+    } else {
+        false
+    };
+
+    OllamaStatus { installed, running, version }
+}
+
+/// Detect vLLM / Python availability.
+fn detect_vllm() -> VllmStatus {
+    let python_available = binary_exists("python3");
+    let installed = python_available
+        && run_command("python3", &["-c", "import vllm; print(vllm.__version__)"]).is_some();
+
+    VllmStatus { installed, python_available }
+}
+
+/// Detect system RAM using sysinfo.
+fn detect_ram() -> (f64, f64) {
+    use sysinfo::System;
+    let mut sys = System::new_all();
+    sys.refresh_memory();
+    let total = sys.total_memory() as f64 / (1024.0 * 1024.0 * 1024.0);
+    let available = sys.available_memory() as f64 / (1024.0 * 1024.0 * 1024.0);
+    (total, available)
+}
+
+#[tauri::command]
+pub async fn check_system_compatibility() -> Result<SystemCompatibility, String> {
+    let (total_ram_gb, available_ram_gb) = detect_ram();
+    let gpu = detect_gpu();
+    let ollama = detect_ollama().await;
+    let vllm = detect_vllm();
+    let recommended_max_params = ram_to_recommendation(total_ram_gb).to_string();
+
+    Ok(SystemCompatibility {
+        os: std::env::consts::OS.to_string(),
+        arch: std::env::consts::ARCH.to_string(),
+        total_ram_gb,
+        available_ram_gb,
+        gpu,
+        ollama,
+        vllm,
+        recommended_max_params,
+    })
+}
+
+#[tauri::command]
+pub async fn check_backend_prerequisites(
+    backend_type: String,
+    url: Option<String>,
+) -> Result<Vec<PrerequisiteCheck>, String> {
+    let os = std::env::consts::OS;
+    let mut checks = Vec::new();
+
+    match backend_type.as_str() {
+        "ollama" => {
+            let installed = binary_exists("ollama");
+            let install_cmd = if os == "macos" {
+                "brew install ollama"
+            } else {
+                "curl -fsSL https://ollama.com/install.sh | sh"
+            };
+            checks.push(PrerequisiteCheck {
+                name: "Ollama installed".to_string(),
+                description: "Ollama binary available on PATH".to_string(),
+                passed: installed,
+                required: true,
+                fix_command: Some(install_cmd.to_string()),
+                fix_label: Some("Install Ollama".to_string()),
+            });
+
+            let running = if installed {
+                let client = reqwest::Client::builder()
+                    .timeout(std::time::Duration::from_secs(3))
+                    .build().unwrap_or_default();
+                client.get("http://localhost:11434/").send().await
+                    .map(|r| r.status().is_success()).unwrap_or(false)
+            } else {
+                false
+            };
+            checks.push(PrerequisiteCheck {
+                name: "Ollama running".to_string(),
+                description: "Ollama server responding on localhost:11434".to_string(),
+                passed: running,
+                required: true,
+                fix_command: Some("ollama serve".to_string()),
+                fix_label: Some("Start Ollama".to_string()),
+            });
+
+            let has_models = if running {
+                let backend = local::get_backend(&BackendType::Ollama);
+                backend.list_models("http://localhost:11434", None).await
+                    .map(|m| !m.is_empty()).unwrap_or(false)
+            } else {
+                false
+            };
+            checks.push(PrerequisiteCheck {
+                name: "Models available".to_string(),
+                description: "At least one model pulled and ready".to_string(),
+                passed: has_models,
+                required: true,
+                fix_command: None,
+                fix_label: Some("Pull a model below".to_string()),
+            });
+        }
+        "vllm" => {
+            let python = binary_exists("python3");
+            let python_cmd = if os == "macos" { "brew install python" } else { "apt install python3" };
+            checks.push(PrerequisiteCheck {
+                name: "Python 3 available".to_string(),
+                description: "python3 binary on PATH".to_string(),
+                passed: python,
+                required: true,
+                fix_command: Some(python_cmd.to_string()),
+                fix_label: Some("Install Python".to_string()),
+            });
+
+            let gpu = detect_gpu();
+            checks.push(PrerequisiteCheck {
+                name: "NVIDIA GPU + CUDA".to_string(),
+                description: if gpu.has_cuda {
+                    format!("CUDA detected (driver {})", gpu.cuda_version.as_deref().unwrap_or("unknown"))
+                } else if gpu.has_metal {
+                    "Apple Silicon detected (Metal). vLLM has experimental macOS support.".to_string()
+                } else {
+                    "No GPU acceleration detected".to_string()
+                },
+                passed: gpu.has_cuda || gpu.has_metal,
+                required: true,
+                fix_command: None,
+                fix_label: Some("vLLM requires a supported GPU".to_string()),
+            });
+
+            let vllm_installed = python
+                && run_command("python3", &["-c", "import vllm; print(vllm.__version__)"]).is_some();
+            checks.push(PrerequisiteCheck {
+                name: "vLLM installed".to_string(),
+                description: "vLLM Python package available".to_string(),
+                passed: vllm_installed,
+                required: true,
+                fix_command: Some("pip install vllm".to_string()),
+                fix_label: Some("Install vLLM".to_string()),
+            });
+
+            if let Some(ref endpoint_url) = url {
+                let client = reqwest::Client::builder()
+                    .timeout(std::time::Duration::from_secs(5))
+                    .build().unwrap_or_default();
+                let reachable = client.get(format!("{}/health", endpoint_url.trim_end_matches('/')))
+                    .send().await.map(|r| r.status().is_success()).unwrap_or(false);
+                checks.push(PrerequisiteCheck {
+                    name: "Server running".to_string(),
+                    description: format!("vLLM server at {}", endpoint_url),
+                    passed: reachable,
+                    required: true,
+                    fix_command: Some("vllm serve <model> --host 0.0.0.0 --port 8000".to_string()),
+                    fix_label: Some("Start vLLM server".to_string()),
+                });
+            }
+        }
+        "generic" => {
+            if let Some(ref endpoint_url) = url {
+                let client = reqwest::Client::builder()
+                    .timeout(std::time::Duration::from_secs(5))
+                    .build().unwrap_or_default();
+                let reachable = client.get(format!("{}/v1/models", endpoint_url.trim_end_matches('/')))
+                    .send().await.map(|r| r.status().is_success()).unwrap_or(false);
+                checks.push(PrerequisiteCheck {
+                    name: "Server reachable".to_string(),
+                    description: format!("OpenAI-compatible server at {}", endpoint_url),
+                    passed: reachable,
+                    required: true,
+                    fix_command: None,
+                    fix_label: Some("Ensure your server is running".to_string()),
+                });
+
+                if reachable {
+                    let backend = local::get_backend(&BackendType::Generic);
+                    let has_models = backend.list_models(endpoint_url, None).await
+                        .map(|m| !m.is_empty()).unwrap_or(false);
+                    checks.push(PrerequisiteCheck {
+                        name: "Models available".to_string(),
+                        description: "At least one model served by endpoint".to_string(),
+                        passed: has_models,
+                        required: true,
+                        fix_command: None,
+                        fix_label: Some("Check your server configuration".to_string()),
+                    });
+                }
+            } else {
+                checks.push(PrerequisiteCheck {
+                    name: "Endpoint URL required".to_string(),
+                    description: "Enter your server URL to check connectivity".to_string(),
+                    passed: false,
+                    required: true,
+                    fix_command: None,
+                    fix_label: None,
+                });
+            }
+        }
+        _ => return Err(format!("Unknown backend type: {}", backend_type)),
+    }
+
+    Ok(checks)
+}
+
+#[tauri::command]
+pub async fn get_recommended_models(
+    db: State<'_, Arc<Database>>,
+    endpoint_id: Option<String>,
+) -> Result<Vec<RecommendedModel>, String> {
+    let (total_ram_gb, _) = detect_ram();
+
+    let mut pulled_ids: Vec<String> = Vec::new();
+    if let Some(ref eid) = endpoint_id {
+        let (url, backend_type_str, api_key) = {
+            let conn = db.conn.lock().map_err(|e| e.to_string())?;
+            conn.query_row(
+                "SELECT url, backend_type, api_key FROM local_endpoints WHERE id = ?1",
+                rusqlite::params![eid],
+                |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?, row.get::<_, Option<String>>(2)?)),
+            ).map_err(|e| format!("Endpoint not found: {}", e))?
+        };
+        let backend_type = BackendType::from_str(&backend_type_str);
+        let backend = local::get_backend(&backend_type);
+        if let Ok(models) = backend.list_models(&url, api_key.as_deref()).await {
+            pulled_ids = models.into_iter().map(|m| m.id).collect();
+        }
+    }
+
+    Ok(get_curated_models(total_ram_gb, &pulled_ids))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -164,5 +458,31 @@ mod tests {
     fn test_curated_models_4gb_only_small() {
         let models = get_curated_models(4.0, &[]);
         assert_eq!(models.len(), 0);
+    }
+
+    #[test]
+    fn test_binary_exists_known() {
+        assert!(binary_exists("which"));
+    }
+
+    #[test]
+    fn test_binary_exists_unknown() {
+        assert!(!binary_exists("nonexistent_binary_xyz_999"));
+    }
+
+    #[test]
+    fn test_detect_ram_returns_positive() {
+        let (total, available) = detect_ram();
+        assert!(total > 0.0, "total RAM should be positive, got {}", total);
+        assert!(available >= 0.0, "available RAM should be non-negative, got {}", available);
+        assert!(total >= available, "total should >= available");
+    }
+
+    #[test]
+    fn test_detect_gpu_no_crash() {
+        let gpu = detect_gpu();
+        if std::env::consts::OS == "macos" && std::env::consts::ARCH == "aarch64" {
+            assert!(gpu.has_metal);
+        }
     }
 }

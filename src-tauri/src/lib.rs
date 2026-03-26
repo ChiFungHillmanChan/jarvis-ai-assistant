@@ -310,6 +310,9 @@ pub fn run() {
             wallpaper::raise_wallpaper,
             wallpaper::lower_wallpaper,
             wallpaper::is_wallpaper_raised,
+            commands::system_check::check_system_compatibility,
+            commands::system_check::check_backend_prerequisites,
+            commands::system_check::get_recommended_models,
         ])
         .run(tauri::generate_context!())
         .expect("error while running JARVIS");
