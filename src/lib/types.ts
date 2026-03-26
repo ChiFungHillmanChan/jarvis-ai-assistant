@@ -224,3 +224,63 @@ export interface ChatProviderPayload {
   provider: string;
   status: "trying" | "failed" | "active";
 }
+
+// System compatibility types
+export interface GpuInfo {
+  has_metal: boolean;
+  has_cuda: boolean;
+  cuda_version?: string;
+  vram_gb?: number;
+}
+
+export interface OllamaStatus {
+  installed: boolean;
+  running: boolean;
+  version?: string;
+}
+
+export interface VllmStatus {
+  installed: boolean;
+  python_available: boolean;
+}
+
+export interface SystemCompatibility {
+  os: string;
+  arch: string;
+  total_ram_gb: number;
+  available_ram_gb: number;
+  gpu: GpuInfo;
+  ollama: OllamaStatus;
+  vllm: VllmStatus;
+  recommended_max_params: string;
+}
+
+export interface PrerequisiteCheck {
+  name: string;
+  description: string;
+  passed: boolean;
+  required: boolean;
+  fix_command?: string;
+  fix_label?: string;
+}
+
+export interface RecommendedModel {
+  id: string;
+  name: string;
+  param_size: string;
+  download_size_gb: number;
+  min_ram_gb: number;
+  tool_capable: boolean;
+  description: string;
+  already_pulled: boolean;
+}
+
+export interface ModelPullProgress {
+  endpoint_id: string;
+  model: string;
+  status: "downloading" | "verifying" | "complete" | "error";
+  percent: number;
+  completed_bytes: number;
+  total_bytes: number;
+  error?: string;
+}

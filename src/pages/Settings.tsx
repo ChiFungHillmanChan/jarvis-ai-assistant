@@ -29,6 +29,7 @@ import {
 import { listen } from "@tauri-apps/api/event";
 import type { VoiceSettings, WakeWordStatus, VoiceState, LocalEndpoint, LocalModel, ProviderChainEntry, EndpointHealth } from "../lib/types";
 import { useVoiceState } from "../hooks/useVoiceState";
+import LocalAiSetup from "../components/LocalAiSetup";
 
 export default function Settings() {
   const [aiProvider, setAiProvider] = useState("claude_primary");
@@ -330,6 +331,12 @@ export default function Settings() {
       <div style={styles.grid}>
         {/* Left column */}
         <div style={styles.column}>
+          <LocalAiSetup
+            endpoints={endpoints}
+            onEndpointAdded={(ep) => setEndpoints((prev) => [...prev, ep])}
+            onModelsLoaded={(eid, models) => setEndpointModels((prev) => ({ ...prev, [eid]: models }))}
+            onAddToChain={handleAddToChain}
+          />
           <div className="panel" style={styles.panel}>
             <div className="label" style={styles.sectionTitle}>LOCAL LLM ENDPOINTS</div>
             <div style={styles.hint}>Connect to Ollama, vLLM, or any OpenAI-compatible server</div>

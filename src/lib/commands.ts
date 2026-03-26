@@ -1,5 +1,5 @@
 import { invoke } from "@tauri-apps/api/core";
-import type { Task, ChatMessage, DashboardData, Settings, EmailSummary, EmailStats, CalendarEventView, CronJobView, CronRunView, NotionPageView, GitHubItemView, GitHubStats, VoiceState, VoiceSettings, WakeWordStatus, EmailRule, BriefingResult, LocalEndpoint, LocalModel, ProviderChainEntry, EndpointHealth } from "./types";
+import type { Task, ChatMessage, DashboardData, Settings, EmailSummary, EmailStats, CalendarEventView, CronJobView, CronRunView, NotionPageView, GitHubItemView, GitHubStats, VoiceState, VoiceSettings, WakeWordStatus, EmailRule, BriefingResult, LocalEndpoint, LocalModel, ProviderChainEntry, EndpointHealth, SystemCompatibility, PrerequisiteCheck, RecommendedModel } from "./types";
 
 export async function getTasks(): Promise<Task[]> {
   return invoke("get_tasks");
@@ -131,3 +131,12 @@ export async function updateProviderChain(chain: ProviderChainEntry[]): Promise<
 export async function updateModelOverride(endpointId: string, modelId: string, overrides: { context_length?: number; tool_capability?: string; system_prompt_suffix?: string }): Promise<void> {
   return invoke("update_model_override", { endpoint_id: endpointId, model_id: modelId, ...overrides });
 }
+
+// System Check
+export async function checkSystemCompatibility(): Promise<SystemCompatibility> { return invoke("check_system_compatibility"); }
+export async function checkBackendPrerequisites(backendType: string, url?: string): Promise<PrerequisiteCheck[]> { return invoke("check_backend_prerequisites", { backend_type: backendType, url }); }
+export async function getRecommendedModels(endpointId?: string): Promise<RecommendedModel[]> { return invoke("get_recommended_models", { endpoint_id: endpointId }); }
+
+// Model Pull
+export async function pullModel(endpointId: string, modelName: string): Promise<void> { return invoke("pull_model", { endpoint_id: endpointId, model_name: modelName }); }
+export async function cancelModelPull(): Promise<void> { return invoke("cancel_model_pull"); }
