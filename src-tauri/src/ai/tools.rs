@@ -1,6 +1,6 @@
 use serde_json::json;
 
-/// Shared tool definitions used by both OpenAI and Claude APIs
+/// Shared tool definitions used by Gemini, OpenAI-compatible local, and legacy APIs
 pub fn get_tool_definitions() -> Vec<Tool> {
     vec![
         Tool {
@@ -433,6 +433,21 @@ pub fn to_claude_format(tools: &[Tool]) -> Vec<serde_json::Value> {
     })).collect()
 }
 
+/// Format tools for Gemini API format (functionDeclarations)
+pub fn to_gemini_format(tools: &[Tool]) -> Vec<serde_json::Value> {
+    let declarations: Vec<serde_json::Value> = tools
+        .iter()
+        .map(|t| {
+            json!({
+                "name": t.name,
+                "description": t.description,
+                "parameters": t.parameters,
+            })
+        })
+        .collect();
+    vec![json!({ "functionDeclarations": declarations })]
+}
+
 /// Map tool names to user-friendly status labels for streaming UI.
 pub fn tool_status_label(name: &str) -> &'static str {
     match name {
@@ -751,12 +766,12 @@ async fn execute_notion_tool(
     }
 }
 
-fn google_token_or_err(
+async fn google_token_or_err(
     google_auth: &std::sync::Arc<crate::auth::google::GoogleAuth>,
     service: &str,
 ) -> Result<String, String> {
-    google_auth.get_access_token()
-        .ok_or_else(|| format!("Google account not connected. Please connect in Settings to use {} tools.", service))
+    google_auth.ensure_access_token().await
+        .map_err(|_| format!("Google account not connected. Please connect in Settings to use {} tools.", service))
 }
 
 async fn refresh_google_token(
@@ -881,7 +896,7 @@ pub async fn execute_tool(
             crate::system::control::read_file(path, max_lines).await.unwrap_or_else(|e| format!("Error: {}", e))
         }
         "search_emails" | "read_email" | "send_email" | "archive_email" => {
-            let token = match google_token_or_err(google_auth, "Gmail") {
+            let token = match google_token_or_err(google_auth, "Gmail").await {
                 Ok(t) => t,
                 Err(msg) => return msg,
             };
@@ -895,7 +910,7 @@ pub async fn execute_tool(
             }
         }
         "list_events" | "create_event" | "update_event" | "delete_event" => {
-            let token = match google_token_or_err(google_auth, "Calendar") {
+            let token = match google_token_or_err(google_auth, "Calendar").await {
                 Ok(t) => t,
                 Err(msg) => return msg,
             };

@@ -26,16 +26,14 @@ pub fn run() {
         .plugin(tauri_plugin_global_shortcut::Builder::new().build())
         .setup(|app| {
             let db = Database::new().expect("Failed to initialize database");
-            let claude_key = std::env::var("ANTHROPIC_API_KEY").ok();
-            let openai_key = std::env::var("OPENAI_API_KEY").ok();
-            // Read AI provider preference from DB, default to claude_primary
+            let gemini_key = std::env::var("GEMINI_API_KEY").ok();
             let ai_provider = {
                 let conn = db.conn.lock().unwrap();
                 conn.query_row("SELECT value FROM user_preferences WHERE key = 'ai_provider'", [], |row| row.get::<_, String>(0))
-                    .unwrap_or_else(|_| "claude_primary".to_string())
+                    .unwrap_or_else(|_| "gemini_primary".to_string())
             };
             log::info!("AI provider: {}", ai_provider);
-            let mut router = AiRouter::new(claude_key, openai_key, &ai_provider);
+            let mut router = AiRouter::new(gemini_key, &ai_provider);
             router.load_from_db(&db);
             log::info!("Provider chain: {} entries, {} local endpoints",
                 router.provider_chain().len(), router.local_endpoints().len());
@@ -49,6 +47,18 @@ pub fn run() {
 
             let db_arc = std::sync::Arc::new(db);
             let auth_arc = std::sync::Arc::new(google_auth);
+
+            // Warm the Google access token from the persisted refresh token so
+            // background jobs and UI status work immediately after restart.
+            if auth_arc.has_refresh_token() {
+                let auth_warm = std::sync::Arc::clone(&auth_arc);
+                tauri::async_runtime::spawn(async move {
+                    match auth_warm.refresh_access_token().await {
+                        Ok(()) => log::info!("Google access token warmed on startup"),
+                        Err(e) => log::warn!("Google token warm-up failed: {}", e),
+                    }
+                });
+            }
 
             let db_for_scheduler = std::sync::Arc::clone(&db_arc);
             let auth_for_scheduler = std::sync::Arc::clone(&auth_arc);
@@ -107,9 +117,8 @@ pub fn run() {
                 }
 
                 let router = crate::ai::AiRouter::new(
-                    std::env::var("ANTHROPIC_API_KEY").ok(),
-                    std::env::var("OPENAI_API_KEY").ok(),
-                    "claude_primary",
+                    std::env::var("GEMINI_API_KEY").ok(),
+                    "gemini_primary",
                 );
                 match crate::assistant::briefing::generate_briefing(&db_brief, &router, &auth_brief, &app_handle_brief).await {
                     Ok(result) => {

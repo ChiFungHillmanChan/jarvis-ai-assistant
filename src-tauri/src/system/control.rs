@@ -164,8 +164,30 @@ pub async fn clipboard_write(content: &str) -> Result<String, String> {
     }
 }
 
+/// Remove jarvis screenshot temp files older than 1 hour.
+fn cleanup_stale_screenshots() {
+    let Ok(entries) = std::fs::read_dir("/tmp") else { return };
+    let cutoff = std::time::SystemTime::now() - std::time::Duration::from_secs(3600);
+    for entry in entries.flatten() {
+        let name = entry.file_name();
+        let Some(name_str) = name.to_str() else { continue };
+        if !name_str.starts_with("jarvis_screenshot_") || !name_str.ends_with(".png") {
+            continue;
+        }
+        if let Ok(meta) = entry.metadata() {
+            if let Ok(modified) = meta.modified() {
+                if modified < cutoff {
+                    let _ = std::fs::remove_file(entry.path());
+                }
+            }
+        }
+    }
+}
+
 /// Take a screenshot using screencapture
 pub async fn screenshot(region: &str) -> Result<String, String> {
+    cleanup_stale_screenshots();
+
     let timestamp = chrono::Local::now().format("%Y%m%d_%H%M%S");
     let path = format!("/tmp/jarvis_screenshot_{}.png", timestamp);
 

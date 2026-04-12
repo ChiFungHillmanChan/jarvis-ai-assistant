@@ -37,7 +37,10 @@ pub async fn run_job(db: &Arc<Database>, auth: &Arc<GoogleAuth>, action_type: &s
 }
 
 async fn run_email_sync(db: &Arc<Database>, auth: &Arc<GoogleAuth>) -> Result<String, String> {
-    let token = match auth.get_access_token() { Some(t) => t, None => return Ok("Skipped: not authenticated".to_string()) };
+    let token = match auth.ensure_access_token().await {
+        Ok(t) => t,
+        Err(_) => return Ok("Skipped: not authenticated".to_string()),
+    };
     match gmail::fetch_inbox(&token, 20).await {
         Ok(msgs) => { let c = msgs.len(); gmail::save_to_db(db, &msgs)?; Ok(format!("Synced {} emails", c)) }
         Err(ref e) if e == "UNAUTHORIZED" => {
@@ -52,7 +55,10 @@ async fn run_email_sync(db: &Arc<Database>, auth: &Arc<GoogleAuth>) -> Result<St
 }
 
 async fn run_calendar_sync(db: &Arc<Database>, auth: &Arc<GoogleAuth>) -> Result<String, String> {
-    let token = match auth.get_access_token() { Some(t) => t, None => return Ok("Skipped: not authenticated".to_string()) };
+    let token = match auth.ensure_access_token().await {
+        Ok(t) => t,
+        Err(_) => return Ok("Skipped: not authenticated".to_string()),
+    };
     let now = chrono::Utc::now();
     let time_min = now.to_rfc3339();
     let time_max = (now + chrono::TimeDelta::days(7)).to_rfc3339();
@@ -191,9 +197,9 @@ async fn run_proactive_check(db: &Arc<Database>) -> Result<String, String> {
 }
 
 async fn run_auto_archive(db: &Arc<Database>, auth: &Arc<GoogleAuth>) -> Result<String, String> {
-    let token = match auth.get_access_token() {
-        Some(t) => t,
-        None => return Ok("Skipped: not authenticated".to_string()),
+    let token = match auth.ensure_access_token().await {
+        Ok(t) => t,
+        Err(_) => return Ok("Skipped: not authenticated".to_string()),
     };
 
     // Get active rules (senders to auto-archive)

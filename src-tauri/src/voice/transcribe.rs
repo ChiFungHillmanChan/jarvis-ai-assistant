@@ -1,9 +1,11 @@
+use base64::Engine;
 use hound::{WavSpec, WavWriter};
-use reqwest::multipart;
 use std::io::Cursor;
 use std::path::Path;
 use std::sync::Arc;
 use whisper_rs::{FullParams, SamplingStrategy, WhisperContext, WhisperContextParameters};
+
+use crate::ai::gemini;
 
 #[derive(Clone)]
 pub struct Transcriber {
@@ -13,7 +15,7 @@ pub struct Transcriber {
 impl Transcriber {
     pub fn new(api_key: String) -> Result<Self, String> {
         if api_key.is_empty() {
-            return Err("OpenAI API key required for speech-to-text".to_string());
+            return Err("Gemini API key required for speech-to-text".to_string());
         }
         Ok(Transcriber { api_key })
     }
@@ -23,37 +25,62 @@ impl Transcriber {
             return Ok(String::new());
         }
 
-        // Convert f32 PCM to WAV bytes
         let wav_bytes = self.to_wav(audio_data)?;
+        let base64_audio =
+            base64::engine::general_purpose::STANDARD.encode(&wav_bytes);
 
-        // Send to OpenAI Whisper API
+        let request_body = serde_json::json!({
+            "contents": [{
+                "parts": [
+                    {
+                        "inline_data": {
+                            "mime_type": "audio/wav",
+                            "data": base64_audio
+                        }
+                    },
+                    {
+                        "text": "Transcribe this audio to text. Return ONLY the transcription, nothing else. If the audio is silent or unintelligible, return an empty string."
+                    }
+                ]
+            }],
+            "generationConfig": {
+                "maxOutputTokens": 512
+            }
+        });
+
+        let url = format!(
+            "{}/models/{}:generateContent",
+            gemini::API_BASE,
+            gemini::MODEL_FLASH
+        );
+
         let client = reqwest::Client::new();
-        let file_part = multipart::Part::bytes(wav_bytes)
-            .file_name("audio.wav")
-            .mime_str("audio/wav")
-            .map_err(|e| e.to_string())?;
-
-        let form = multipart::Form::new()
-            .text("model", "whisper-1")
-            .text("language", "en")
-            .part("file", file_part);
-
         let resp = client
-            .post("https://api.openai.com/v1/audio/transcriptions")
-            .header("Authorization", format!("Bearer {}", self.api_key))
-            .multipart(form)
+            .post(&url)
+            .header("x-goog-api-key", &self.api_key)
+            .header("Content-Type", "application/json")
+            .json(&request_body)
             .send()
             .await
-            .map_err(|e| format!("Whisper API error: {}", e))?;
+            .map_err(|e| format!("Gemini STT error: {}", e))?;
 
         if !resp.status().is_success() {
             let status = resp.status();
             let body = resp.text().await.unwrap_or_default();
-            return Err(format!("Whisper API error {}: {}", status, body));
+            return Err(format!("Gemini STT error {}: {}", status, body));
         }
 
         let result: serde_json::Value = resp.json().await.map_err(|e| e.to_string())?;
-        let text = result["text"].as_str().unwrap_or("").trim().to_string();
+
+        let text = result["candidates"]
+            .as_array()
+            .and_then(|c| c.first())
+            .and_then(|c| c["content"]["parts"].as_array())
+            .and_then(|p| p.first())
+            .and_then(|p| p["text"].as_str())
+            .unwrap_or("")
+            .trim()
+            .to_string();
 
         log::info!("Transcribed: \"{}\"", text);
         Ok(text)
@@ -74,9 +101,13 @@ impl Transcriber {
 
             for &sample in audio_data {
                 let s16 = (sample * 32767.0).clamp(-32768.0, 32767.0) as i16;
-                writer.write_sample(s16).map_err(|e| format!("WAV write error: {}", e))?;
+                writer
+                    .write_sample(s16)
+                    .map_err(|e| format!("WAV write error: {}", e))?;
             }
-            writer.finalize().map_err(|e| format!("WAV finalize error: {}", e))?;
+            writer
+                .finalize()
+                .map_err(|e| format!("WAV finalize error: {}", e))?;
         }
 
         Ok(cursor.into_inner())

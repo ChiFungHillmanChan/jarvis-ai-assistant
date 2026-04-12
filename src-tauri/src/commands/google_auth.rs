@@ -5,6 +5,12 @@ use tauri::State;
 
 #[tauri::command]
 pub async fn google_connect(auth: State<'_, Arc<GoogleAuth>>, db: State<'_, Arc<Database>>) -> Result<String, String> {
+    if auth.is_linked() {
+        if let Ok(_token) = auth.ensure_access_token().await {
+            return Ok("Already connected to Google".to_string());
+        }
+    }
+
     let scopes = vec![
         "https://www.googleapis.com/auth/gmail.readonly".to_string(),
         "https://www.googleapis.com/auth/gmail.modify".to_string(),
@@ -16,6 +22,18 @@ pub async fn google_connect(auth: State<'_, Arc<GoogleAuth>>, db: State<'_, Arc<
 }
 
 #[tauri::command]
-pub fn google_status(auth: State<Arc<GoogleAuth>>) -> bool {
-    auth.is_authenticated()
+pub async fn google_status(auth: State<'_, Arc<GoogleAuth>>) -> Result<bool, String> {
+    if auth.is_authenticated() {
+        return Ok(true);
+    }
+    if auth.has_refresh_token() {
+        match auth.refresh_access_token().await {
+            Ok(()) => return Ok(true),
+            Err(e) => {
+                log::warn!("Google token refresh failed during status check: {}", e);
+                return Ok(false);
+            }
+        }
+    }
+    Ok(false)
 }

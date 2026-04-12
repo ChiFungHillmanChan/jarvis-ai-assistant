@@ -10,7 +10,7 @@ use tauri::{Emitter, State};
 pub async fn start_listening(engine: State<'_, Arc<VoiceEngine>>) -> Result<String, String> {
     if !engine.is_available() {
         let error =
-            "Voice not available. Configure OPENAI_API_KEY or download the local Whisper model."
+            "Voice not available. Configure GEMINI_API_KEY or download the local Whisper model."
                 .to_string();
         engine.set_state_and_emit(VoiceState::Error(error.clone()));
         return Err(error);

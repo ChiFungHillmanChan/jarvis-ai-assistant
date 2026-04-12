@@ -357,22 +357,22 @@ pub async fn get_provider_chain(db: State<'_, Arc<Database>>) -> Result<Vec<Prov
                 [],
                 |row| row.get::<_, String>(0),
             )
-            .unwrap_or_else(|_| "claude_primary".to_string());
+            .unwrap_or_else(|_| "gemini_primary".to_string());
 
         let defaults = match ai_provider.as_str() {
-            "openai_primary" => vec![
-                ProviderChainEntry { position: 0, provider_type: "openai".into(), endpoint_id: None, model_id: None, enabled: true },
-                ProviderChainEntry { position: 1, provider_type: "claude".into(), endpoint_id: None, model_id: None, enabled: true },
+            "gemini_flash" => vec![
+                ProviderChainEntry { position: 0, provider_type: "gemini".into(), endpoint_id: None, model_id: Some(crate::ai::gemini::MODEL_FLASH.into()), enabled: true },
+                ProviderChainEntry { position: 1, provider_type: "gemini".into(), endpoint_id: None, model_id: Some(crate::ai::gemini::MODEL_PRO.into()), enabled: true },
             ],
-            "claude_only" => vec![
-                ProviderChainEntry { position: 0, provider_type: "claude".into(), endpoint_id: None, model_id: None, enabled: true },
+            "gemini_pro_only" => vec![
+                ProviderChainEntry { position: 0, provider_type: "gemini".into(), endpoint_id: None, model_id: Some(crate::ai::gemini::MODEL_PRO.into()), enabled: true },
             ],
-            "openai_only" => vec![
-                ProviderChainEntry { position: 0, provider_type: "openai".into(), endpoint_id: None, model_id: None, enabled: true },
+            "gemini_flash_only" => vec![
+                ProviderChainEntry { position: 0, provider_type: "gemini".into(), endpoint_id: None, model_id: Some(crate::ai::gemini::MODEL_FLASH.into()), enabled: true },
             ],
             _ => vec![
-                ProviderChainEntry { position: 0, provider_type: "claude".into(), endpoint_id: None, model_id: None, enabled: true },
-                ProviderChainEntry { position: 1, provider_type: "openai".into(), endpoint_id: None, model_id: None, enabled: true },
+                ProviderChainEntry { position: 0, provider_type: "gemini".into(), endpoint_id: None, model_id: Some(crate::ai::gemini::MODEL_PRO.into()), enabled: true },
+                ProviderChainEntry { position: 1, provider_type: "gemini".into(), endpoint_id: None, model_id: Some(crate::ai::gemini::MODEL_FLASH.into()), enabled: true },
             ],
         };
         return Ok(defaults);

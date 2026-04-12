@@ -32,7 +32,7 @@ pub fn get_emails(db: State<Arc<Database>>, limit: Option<u32>) -> Result<Vec<Em
 
 #[tauri::command]
 pub async fn sync_emails(db: State<'_, Arc<Database>>, auth: State<'_, Arc<GoogleAuth>>) -> Result<String, String> {
-    let token = auth.get_access_token().ok_or("Not authenticated with Google")?;
+    let token = auth.ensure_access_token().await?;
     let messages = gmail::fetch_inbox(&token, 20).await?;
     let count = messages.len();
     gmail::save_to_db(&db, &messages)?;
@@ -70,7 +70,7 @@ pub async fn archive_email(
     db: State<'_, Arc<Database>>,
     gmail_id: String,
 ) -> Result<(), String> {
-    let token = auth.get_access_token().ok_or("Not authenticated with Google")?;
+    let token = auth.ensure_access_token().await?;
     gmail::archive_message(&token, &gmail_id).await?;
 
     // Track sender for rule learning

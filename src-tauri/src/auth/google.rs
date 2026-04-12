@@ -138,8 +138,31 @@ impl GoogleAuth {
         self.access_token.lock().unwrap().clone()
     }
 
+    pub fn has_refresh_token(&self) -> bool {
+        self.refresh_token.lock().unwrap().is_some()
+    }
+
     pub fn is_authenticated(&self) -> bool {
         self.access_token.lock().unwrap().is_some()
+    }
+
+    /// Returns true if we have either a live access token or a stored refresh token.
+    pub fn is_linked(&self) -> bool {
+        self.is_authenticated() || self.has_refresh_token()
+    }
+
+    /// Ensures an access token is available, refreshing from the stored refresh
+    /// token if needed. Returns the access token or an error.
+    pub async fn ensure_access_token(&self) -> Result<String, String> {
+        if let Some(token) = self.get_access_token() {
+            return Ok(token);
+        }
+        if !self.has_refresh_token() {
+            return Err("Not authenticated with Google".to_string());
+        }
+        self.refresh_access_token().await?;
+        self.get_access_token()
+            .ok_or_else(|| "Token refresh succeeded but no token available".to_string())
     }
 
     pub fn load_from_db(&self, db: &crate::db::Database) {

@@ -1,4 +1,5 @@
 pub mod claude;
+pub mod gemini;
 pub mod local;
 pub mod openai;
 pub mod tools;
@@ -12,7 +13,7 @@ use tauri::Emitter;
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ProviderChainEntry {
     pub position: i32,
-    pub provider_type: String, // "claude", "openai", "local"
+    pub provider_type: String, // "gemini", "claude", "openai", "local"
     pub endpoint_id: Option<String>,
     pub model_id: Option<String>,
     pub enabled: bool,
@@ -20,6 +21,7 @@ pub struct ProviderChainEntry {
 
 #[derive(Clone)]
 pub struct AiRouter {
+    gemini_key: Option<String>,
     claude_key: Option<String>,
     openai_key: Option<String>,
     provider_chain: Vec<ProviderChainEntry>,
@@ -27,63 +29,61 @@ pub struct AiRouter {
 }
 
 impl AiRouter {
-    pub fn new(
-        claude_key: Option<String>,
-        openai_key: Option<String>,
-        provider_setting: &str,
-    ) -> Self {
-        // Build default chain from legacy setting for backward compatibility
+    pub fn new(gemini_key: Option<String>, provider_setting: &str) -> Self {
+        let claude_key = std::env::var("ANTHROPIC_API_KEY").ok();
+        let openai_key = std::env::var("OPENAI_API_KEY").ok();
         let chain = match provider_setting {
-            "openai_primary" => vec![
+            "gemini_flash" => vec![
                 ProviderChainEntry {
                     position: 0,
-                    provider_type: "openai".into(),
+                    provider_type: "gemini".into(),
                     endpoint_id: None,
-                    model_id: None,
+                    model_id: Some(gemini::MODEL_FLASH.into()),
                     enabled: true,
                 },
                 ProviderChainEntry {
                     position: 1,
-                    provider_type: "claude".into(),
+                    provider_type: "gemini".into(),
                     endpoint_id: None,
-                    model_id: None,
+                    model_id: Some(gemini::MODEL_PRO.into()),
                     enabled: true,
                 },
             ],
-            "claude_only" => vec![ProviderChainEntry {
+            "gemini_pro_only" => vec![ProviderChainEntry {
                 position: 0,
-                provider_type: "claude".into(),
+                provider_type: "gemini".into(),
                 endpoint_id: None,
-                model_id: None,
+                model_id: Some(gemini::MODEL_PRO.into()),
                 enabled: true,
             }],
-            "openai_only" => vec![ProviderChainEntry {
+            "gemini_flash_only" => vec![ProviderChainEntry {
                 position: 0,
-                provider_type: "openai".into(),
+                provider_type: "gemini".into(),
                 endpoint_id: None,
-                model_id: None,
+                model_id: Some(gemini::MODEL_FLASH.into()),
                 enabled: true,
             }],
             _ => vec![
-                // claude_primary (default)
+                // gemini_primary (default): pro first, flash fallback
                 ProviderChainEntry {
                     position: 0,
-                    provider_type: "claude".into(),
+                    provider_type: "gemini".into(),
                     endpoint_id: None,
-                    model_id: None,
+                    model_id: Some(gemini::MODEL_PRO.into()),
                     enabled: true,
                 },
                 ProviderChainEntry {
                     position: 1,
-                    provider_type: "openai".into(),
+                    provider_type: "gemini".into(),
                     endpoint_id: None,
-                    model_id: None,
+                    model_id: Some(gemini::MODEL_FLASH.into()),
                     enabled: true,
                 },
             ],
         };
 
         AiRouter {
+            gemini_key,
             claude_key,
             openai_key,
             provider_chain: chain,
@@ -93,7 +93,6 @@ impl AiRouter {
 
     /// Load provider chain from database (call after construction)
     pub fn load_from_db(&mut self, db: &crate::db::Database) {
-        // Load local endpoints
         if let Ok(conn) = db.conn.lock() {
             let mut stmt = conn
                 .prepare(
@@ -131,7 +130,6 @@ impl AiRouter {
                 self.local_endpoints = endpoints;
             }
 
-            // Load provider chain
             let mut chain_stmt = conn
                 .prepare(
                     "SELECT position, provider_type, endpoint_id, model_id, enabled \
@@ -197,6 +195,10 @@ impl AiRouter {
             }
 
             let provider_name = match entry.provider_type.as_str() {
+                "gemini" => {
+                    let model = entry.model_id.as_deref().unwrap_or(gemini::MODEL_PRO);
+                    format!("gemini ({})", model)
+                }
                 "local" => {
                     let model = entry.model_id.as_deref().unwrap_or("unknown");
                     format!("{} (local)", model)
@@ -213,6 +215,24 @@ impl AiRouter {
             );
 
             let result = match entry.provider_type.as_str() {
+                "gemini" => {
+                    if let Some(ref key) = self.gemini_key {
+                        let model = entry.model_id.as_deref().unwrap_or(gemini::MODEL_PRO);
+                        gemini::send(
+                            key,
+                            model,
+                            messages.clone(),
+                            db,
+                            google_auth,
+                            app_handle,
+                            tts_tx.clone(),
+                        )
+                        .await
+                        .map_err(|e| e.to_string())
+                    } else {
+                        Err("No Gemini API key configured".to_string())
+                    }
+                }
                 "claude" => {
                     if let Some(ref key) = self.claude_key {
                         claude::send(
@@ -271,7 +291,6 @@ impl AiRouter {
                         }
                     };
 
-                    // Get model overrides from DB
                     let (context_length, tool_override) = {
                         let conn = db.conn.lock().map_err(|e| e.to_string())?;
                         let ctx_len: u32 = conn
@@ -291,7 +310,6 @@ impl AiRouter {
                         (ctx_len, tool_ov)
                     };
 
-                    // Detect tool capability
                     let backend = local::get_backend(&endpoint.backend_type);
                     let detected_cap = backend
                         .detect_tool_capability(&endpoint.url, model_id)

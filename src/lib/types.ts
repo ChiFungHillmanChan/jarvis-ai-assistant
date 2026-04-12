@@ -208,7 +208,7 @@ export interface LocalModel {
 
 export interface ProviderChainEntry {
   position: number;
-  provider_type: "claude" | "openai" | "local";
+  provider_type: "gemini" | "claude" | "openai" | "local";
   endpoint_id?: string;
   model_id?: string;
   enabled: boolean;

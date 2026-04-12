@@ -22,7 +22,7 @@ pub fn get_events(db: State<Arc<Database>>, days: Option<i32>) -> Result<Vec<Cal
 
 #[tauri::command]
 pub async fn sync_calendar(db: State<'_, Arc<Database>>, auth: State<'_, Arc<GoogleAuth>>) -> Result<String, String> {
-    let token = auth.get_access_token().ok_or("Not authenticated with Google")?;
+    let token = auth.ensure_access_token().await?;
     let now = chrono::Utc::now();
     let time_min = now.to_rfc3339();
     let time_max = (now + chrono::TimeDelta::days(7)).to_rfc3339();
@@ -34,7 +34,7 @@ pub async fn sync_calendar(db: State<'_, Arc<Database>>, auth: State<'_, Arc<Goo
 
 #[tauri::command]
 pub async fn create_event(auth: State<'_, Arc<GoogleAuth>>, summary: String, start: String, end: String, description: Option<String>) -> Result<String, String> {
-    let token = auth.get_access_token().ok_or("Not authenticated with Google")?;
+    let token = auth.ensure_access_token().await?;
     cal::create_event(&token, &summary, &start, &end, description.as_deref(), None, None).await
 }
 

@@ -47,14 +47,14 @@ impl VoiceEngine {
             log::warn!("AudioRouter start failed (will retry on first use): {}", e);
         }
 
-        let transcriber = match std::env::var("OPENAI_API_KEY") {
+        let transcriber = match std::env::var("GEMINI_API_KEY") {
             Ok(key) if !key.is_empty() => {
                 match Transcriber::new(key) {
-                    Ok(t) => { log::info!("Voice STT ready (OpenAI Whisper API)"); Some(t) }
+                    Ok(t) => { log::info!("Voice STT ready (Gemini API)"); Some(t) }
                     Err(e) => { log::warn!("STT init failed: {}", e); None }
                 }
             }
-            _ => { log::info!("No OPENAI_API_KEY set. Voice STT disabled."); None }
+            _ => { log::info!("No GEMINI_API_KEY set. Voice STT disabled."); None }
         };
 
         let tts = TextToSpeech::from_db(db);
@@ -113,7 +113,7 @@ impl VoiceEngine {
             return local_result;
         }
 
-        Err("Speech-to-text not available. Configure OPENAI_API_KEY or download the local Whisper model.".to_string())
+        Err("Speech-to-text not available. Configure GEMINI_API_KEY or download the local Whisper model.".to_string())
     }
 
     pub fn toggle_mute(&self) -> bool {

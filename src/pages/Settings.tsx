@@ -32,7 +32,7 @@ import { useVoiceState } from "../hooks/useVoiceState";
 import LocalAiSetup from "../components/LocalAiSetup";
 
 export default function Settings() {
-  const [aiProvider, setAiProvider] = useState("claude_primary");
+  const [aiProvider, setAiProvider] = useState("gemini_primary");
   const [loaded, setLoaded] = useState(false);
   const [googleConnected, setGoogleConnected] = useState(false);
   const [connecting, setConnecting] = useState(false);
@@ -64,7 +64,7 @@ export default function Settings() {
 
   useEffect(() => {
     getSettings().then((s) => {
-      setAiProvider(s.values["ai_provider"] || "claude_primary");
+      setAiProvider(s.values["ai_provider"] || "gemini_primary");
       setLoaded(true);
     });
   }, []);
@@ -155,7 +155,7 @@ export default function Settings() {
   async function handleAddToChain(providerType: string, endpointId?: string, modelId?: string) {
     const newEntry: ProviderChainEntry = {
       position: chain.length,
-      provider_type: providerType as "claude" | "openai" | "local",
+      provider_type: providerType as "gemini" | "local",
       endpoint_id: endpointId,
       model_id: modelId,
       enabled: true,
@@ -310,10 +310,10 @@ export default function Settings() {
   }
 
   const options = [
-    { value: "claude_primary", label: "Claude (primary) + OpenAI (fallback)" },
-    { value: "openai_primary", label: "OpenAI (primary) + Claude (fallback)" },
-    { value: "claude_only", label: "Claude only" },
-    { value: "openai_only", label: "OpenAI only" },
+    { value: "gemini_primary", label: "Gemini Pro (primary) + Flash (fallback)" },
+    { value: "gemini_flash", label: "Gemini Flash (primary) + Pro (fallback)" },
+    { value: "gemini_pro_only", label: "Gemini Pro only" },
+    { value: "gemini_flash_only", label: "Gemini Flash only" },
   ];
 
   const modelDownloading =
@@ -339,7 +339,7 @@ export default function Settings() {
           />
           <div className="panel" style={styles.panel}>
             <div className="label" style={styles.sectionTitle}>LOCAL LLM ENDPOINTS</div>
-            <div style={styles.hint}>Connect to Ollama, vLLM, or any OpenAI-compatible server</div>
+            <div style={styles.hint}>Connect to Ollama, vLLM, or any compatible server</div>
 
             {endpoints.map((ep) => (
               <div key={ep.id} style={{ background: "rgba(0, 180, 255, 0.03)", border: "1px solid rgba(0, 180, 255, 0.1)", borderRadius: 6, padding: 10, marginBottom: 8 }}>
@@ -396,7 +396,13 @@ export default function Settings() {
             {chain.map((entry, i) => {
               const label = entry.provider_type === "local"
                 ? `${entry.model_id || "unknown"} (local)`
-                : entry.provider_type.charAt(0).toUpperCase() + entry.provider_type.slice(1);
+                : entry.provider_type === "gemini"
+                ? `Gemini (${entry.model_id || "default"})`
+                : entry.provider_type === "claude"
+                ? `Claude (${entry.model_id || "default"})`
+                : entry.provider_type === "openai"
+                ? `OpenAI (${entry.model_id || "default"})`
+                : entry.provider_type;
               return (
                 <div key={i} style={{ display: "flex", alignItems: "center", gap: 6, marginBottom: 6, opacity: entry.enabled ? 1 : 0.4 }}>
                   <span style={{ color: "rgba(0, 180, 255, 0.4)", fontSize: 10, fontFamily: "var(--font-mono)", width: 16 }}>{i + 1}.</span>
@@ -416,8 +422,8 @@ export default function Settings() {
             )}
 
             <div style={{ display: "flex", gap: 6, marginTop: 8 }}>
-              <button onClick={() => handleAddToChain("claude")} style={styles.saveBtn}>+ Claude</button>
-              <button onClick={() => handleAddToChain("openai")} style={styles.saveBtn}>+ OpenAI</button>
+              <button onClick={() => handleAddToChain("gemini", undefined, "gemini-3-pro-preview")} style={styles.saveBtn}>+ Gemini Pro</button>
+              <button onClick={() => handleAddToChain("gemini", undefined, "gemini-3-flash")} style={styles.saveBtn}>+ Gemini Flash</button>
             </div>
           </div>
 
@@ -435,8 +441,7 @@ export default function Settings() {
           <div className="panel" style={styles.panel}>
             <div className="label" style={styles.sectionTitle}>API KEYS</div>
             <div style={styles.hint}>Set in .env file at project root:</div>
-            <code style={styles.code}>ANTHROPIC_API_KEY</code>
-            <code style={styles.code}>OPENAI_API_KEY</code>
+            <code style={styles.code}>GEMINI_API_KEY</code>
           </div>
 
           <div className="panel" style={styles.panel}>
@@ -521,7 +526,7 @@ export default function Settings() {
               </div>
             )}
             <div style={styles.privacyText}>
-              Wake-word audio is processed locally for detection. After activation, full commands use cloud speech-to-text first when OPENAI_API_KEY is configured, then fall back to local Whisper.
+              Wake-word audio is processed locally for detection. After activation, full commands use cloud speech-to-text first when GEMINI_API_KEY is configured, then fall back to local Whisper.
             </div>
             {wakeError && <div style={styles.errorText}>{wakeError}</div>}
           </div>
