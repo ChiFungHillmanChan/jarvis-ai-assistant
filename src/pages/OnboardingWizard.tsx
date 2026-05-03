@@ -1,7 +1,6 @@
 import { useState } from "react";
 import LocalAiSetup from "../components/LocalAiSetup";
-import { googleConnect, markOnboardingComplete } from "../lib/commands";
-import { invoke } from "@tauri-apps/api/core";
+import { googleConnect, markOnboardingComplete, updateSetting } from "../lib/commands";
 
 type Step = 1 | 2 | 3 | 4;
 
@@ -18,13 +17,13 @@ export default function OnboardingWizard({ onComplete }: Props) {
 
   async function saveByokKeys() {
     if (openaiKey.trim()) {
-      await invoke("update_setting", { key: "openai_api_key", value: openaiKey.trim() });
+      await updateSetting("openai_api_key", openaiKey.trim());
     }
     if (claudeKey.trim()) {
-      await invoke("update_setting", { key: "claude_api_key", value: claudeKey.trim() });
+      await updateSetting("claude_api_key", claudeKey.trim());
     }
     if (geminiKey.trim()) {
-      await invoke("update_setting", { key: "gemini_api_key", value: geminiKey.trim() });
+      await updateSetting("gemini_api_key", geminiKey.trim());
     }
   }
 
@@ -70,9 +69,9 @@ export default function OnboardingWizard({ onComplete }: Props) {
             Optional: paste any cloud provider keys you already have. All optional --
             you can skip and add them later in Settings.
           </p>
-          <input style={styles.input} placeholder="OpenAI API key" value={openaiKey} onChange={(e) => setOpenaiKey(e.target.value)} />
-          <input style={styles.input} placeholder="Claude API key" value={claudeKey} onChange={(e) => setClaudeKey(e.target.value)} />
-          <input style={styles.input} placeholder="Gemini API key" value={geminiKey} onChange={(e) => setGeminiKey(e.target.value)} />
+          <input type="password" style={styles.input} placeholder="OpenAI API key" value={openaiKey} onChange={(e) => setOpenaiKey(e.target.value)} />
+          <input type="password" style={styles.input} placeholder="Claude API key" value={claudeKey} onChange={(e) => setClaudeKey(e.target.value)} />
+          <input type="password" style={styles.input} placeholder="Gemini API key" value={geminiKey} onChange={(e) => setGeminiKey(e.target.value)} />
           <div style={styles.row}>
             <button style={styles.skip} onClick={() => setStep(3)}>Skip</button>
             <button style={styles.next} onClick={() => setStep(3)}>Next</button>
@@ -87,6 +86,7 @@ export default function OnboardingWizard({ onComplete }: Props) {
             follow-ups. You can skip and connect later in Settings.
           </p>
           <button style={styles.next} onClick={async () => {
+            setError(null);
             try {
               await googleConnect();
               setStep(4);
@@ -94,7 +94,10 @@ export default function OnboardingWizard({ onComplete }: Props) {
               setError(String(e));
             }
           }}>Connect Google</button>
-          <button style={styles.skip} onClick={() => setStep(4)}>Skip</button>
+          <button style={styles.skip} onClick={() => {
+            setError(null);
+            setStep(4);
+          }}>Skip</button>
         </div>
       )}
 
