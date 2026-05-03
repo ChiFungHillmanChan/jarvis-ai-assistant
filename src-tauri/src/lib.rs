@@ -306,6 +306,8 @@ pub fn run() {
             commands::obsidian::save_obsidian_note,
             commands::obsidian::list_obsidian_files,
             commands::obsidian::save_obsidian_key,
+            commands::onboarding::check_onboarding_status,
+            commands::onboarding::mark_onboarding_complete,
             commands::local_llm::list_local_endpoints,
             commands::local_llm::add_local_endpoint,
             commands::local_llm::update_local_endpoint,

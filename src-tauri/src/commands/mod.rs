@@ -11,6 +11,7 @@ pub mod local_llm;
 pub mod model_pull;
 pub mod notion;
 pub mod obsidian;
+pub mod onboarding;
 pub mod settings;
 pub mod system;
 pub mod system_check;
