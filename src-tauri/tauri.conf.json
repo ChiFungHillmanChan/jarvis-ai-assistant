@@ -31,6 +31,7 @@
   "bundle": {
     "active": true,
     "targets": "all",
+    "createUpdaterArtifacts": true,
     "icon": [
       "icons/32x32.png",
       "icons/128x128.png",
@@ -40,7 +41,18 @@
     ],
     "macOS": {
       "infoPlist": "Info.plist",
-      "minimumSystemVersion": "11.0"
+      "minimumSystemVersion": "11.0",
+      "signingIdentity": "Developer ID Application: Hillman Chan (22K6G3HH9G)"
+    }
+  },
+  "plugins": {
+    "updater": {
+      "active": true,
+      "endpoints": [
+        "https://jarvis-releases.s3.ap-east-1.amazonaws.com/latest.json"
+      ],
+      "dialog": false,
+      "pubkey": "dW50cnVzdGVkIGNvbW1lbnQ6IG1pbmlzaWduIHB1YmxpYyBrZXk6IEJENDc1MEE2RkFERjE0MTMKUldRVEZOLzZwbEJIdmJObzFNTnlxVlNxT2xGWU5ieUt0L2YrQURRN2VRaitsTS9ZUzJ3b0FpSWMK"
     }
   }
 }
