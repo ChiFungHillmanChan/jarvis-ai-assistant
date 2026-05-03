@@ -13,6 +13,7 @@ const navItems = [
   { id: "github", label: "GIT", icon: "G" },
   { id: "notion", label: "NOT", icon: "N" },
   { id: "cron", label: "CRON", icon: "T" },
+  { id: "launch", label: "BETA", icon: "B" },
   { id: "settings", label: "SET", icon: "S" },
 ];
 

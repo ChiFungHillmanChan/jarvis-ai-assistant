@@ -92,7 +92,7 @@ pub async fn send(
     let claude_tools = tools::to_claude_format(&tool_defs);
     // Pre-compute static fields once to avoid re-allocating each iteration
     let model: String = "claude-sonnet-4-6-20250610".into();
-    let system: String = tools::SYSTEM_PROMPT.into();
+    let system: String = tools::build_system_prompt(db);
 
     let mut claude_messages: Vec<ClaudeMessage> = messages
         .into_iter()

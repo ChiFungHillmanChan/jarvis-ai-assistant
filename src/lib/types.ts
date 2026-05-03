@@ -22,6 +22,42 @@ export interface DashboardData {
   pending_tasks: Task[];
 }
 
+export interface LaunchReadiness {
+  launch_stage: string;
+  aws_region: string | null;
+  bedrock_model_id: string;
+  aws_credentials_present: boolean;
+  provider_chain_has_bedrock: boolean;
+  waitlist_count: number;
+  feedback_count: number;
+  pro_price_hkd: string;
+  team_price_hkd: string;
+}
+
+export interface BetaTesterInput {
+  name?: string;
+  email: string;
+  segment?: string;
+  use_case?: string;
+}
+
+export interface BetaTesterView {
+  id: number;
+  name: string | null;
+  email: string;
+  segment: string | null;
+  use_case: string | null;
+  status: string;
+  created_at: string;
+}
+
+export interface BetaFeedbackInput {
+  tester_email?: string;
+  category: string;
+  rating: number;
+  message: string;
+}
+
 export interface Settings {
   values: Record<string, string>;
 }
@@ -208,7 +244,7 @@ export interface LocalModel {
 
 export interface ProviderChainEntry {
   position: number;
-  provider_type: "gemini" | "claude" | "openai" | "local";
+  provider_type: "gemini" | "claude" | "openai" | "bedrock" | "local";
   endpoint_id?: string;
   model_id?: string;
   enabled: boolean;

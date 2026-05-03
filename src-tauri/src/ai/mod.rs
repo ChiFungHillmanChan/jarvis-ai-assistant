@@ -1,3 +1,4 @@
+pub mod bedrock;
 pub mod claude;
 pub mod gemini;
 pub mod local;
@@ -13,7 +14,7 @@ use tauri::Emitter;
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ProviderChainEntry {
     pub position: i32,
-    pub provider_type: String, // "gemini", "claude", "openai", "local"
+    pub provider_type: String, // "gemini", "claude", "openai", "bedrock", "local"
     pub endpoint_id: Option<String>,
     pub model_id: Option<String>,
     pub enabled: bool,
@@ -203,6 +204,13 @@ impl AiRouter {
                     let model = entry.model_id.as_deref().unwrap_or("unknown");
                     format!("{} (local)", model)
                 }
+                "bedrock" => {
+                    let model = entry
+                        .model_id
+                        .clone()
+                        .unwrap_or_else(bedrock::default_model);
+                    format!("bedrock ({})", model)
+                }
                 other => other.to_string(),
             };
 
@@ -264,6 +272,22 @@ impl AiRouter {
                     } else {
                         Err("No OpenAI API key configured".to_string())
                     }
+                }
+                "bedrock" => {
+                    let model = entry
+                        .model_id
+                        .clone()
+                        .unwrap_or_else(bedrock::default_model);
+                    bedrock::send(
+                        &model,
+                        messages.clone(),
+                        db,
+                        google_auth,
+                        app_handle,
+                        tts_tx.clone(),
+                    )
+                    .await
+                    .map_err(|e| e.to_string())
                 }
                 "local" => {
                     let endpoint_id = match &entry.endpoint_id {

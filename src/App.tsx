@@ -12,6 +12,7 @@ const EmailPage = lazy(() => import("./pages/EmailPage"));
 const CalendarPage = lazy(() => import("./pages/CalendarPage"));
 const GitHubPage = lazy(() => import("./pages/GitHubPage"));
 const NotionPage = lazy(() => import("./pages/NotionPage"));
+const LaunchPage = lazy(() => import("./pages/LaunchPage"));
 import { useKeyboard } from "./hooks/useKeyboard";
 import VoiceIndicator from "./components/VoiceIndicator";
 import { useVoiceState } from "./hooks/useVoiceState";
@@ -306,6 +307,7 @@ export default function App() {
       case "github": return <GitHubPage />;
       case "notion": return <NotionPage />;
       case "cron": return <CronDashboard />;
+      case "launch": return <LaunchPage />;
       case "settings": return <Settings />;
       case "home": default: return <Dashboard />;
     }

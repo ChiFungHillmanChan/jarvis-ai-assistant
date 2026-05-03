@@ -1,20 +1,56 @@
-# JARVIS -- Personal AI Assistant
+# JARVIS -- AI-Powered Command Center for macOS
 
-A macOS desktop AI assistant inspired by Iron Man's JARVIS. Holographic dark UI, real-time voice I/O, multi-service integrations, and an interactive 3D data sphere -- all running natively as a single binary.
+> One voice. Five tools. Zero context switching.
+
+A native macOS AI assistant that turns email chaos into calendar action. Say "Hey JARVIS" -- it scans your inbox, surfaces urgent items, drafts replies, blocks calendar time, and syncs across Notion, GitHub, and Obsidian. One command. No tab switches.
 
 Built with **Tauri v2** (Rust) + **React** + **TypeScript**. No Electron. No web server. Just Rust and a webview.
 
-[Features](#features) | [Tech Stack](#tech-stack) | [Getting Started](#getting-started) | [Architecture](#architecture) | [How It Was Built](#how-it-was-built) | [Planned Improvements](#planned-improvements)
+**Hillman Chan** | Founder & AI Engineer | [hillmanchan.com](https://hillmanchan.com) | [jarvis-automation.com](https://jarvis-automation.com)
+
+[The Problem](#the-problem) | [Solution](#solution) | [Features](#features) | [Tech Stack](#tech-stack) | [Getting Started](#getting-started) | [Architecture](#architecture) | [Business](#business) | [Roadmap](#roadmap)
 
 ---
 
-> **This project is under active development.** Found a bug or have a suggestion? [Open an issue](https://github.com/ChiFungHillmanChan/jarvis-ai-assistant/issues) -- all feedback is welcome.
+> **HKSTP Ideation Programme** | Cohort AWS26-04 | Jun 2026 -- May 2027
+> Supported by **AWS Activate** (US$25K credits) and **HKSTP** (HK$100K grant pathway)
 
 ---
 
-## What It Does
+## The Problem
 
-JARVIS sits on your desktop and connects to your email, calendar, notes, and code. It syncs everything in the background, surfaces what matters through an AI-curated timeline, and lets you interact via chat or voice. You can ask it to open apps, run shell commands, create tasks, search your Notion, check your GitHub PRs -- and it executes the actions directly on your machine.
+Knowledge workers are drowning in tools. The data is clear:
+
+- **11.7 hours/week** spent on email alone (McKinsey)
+- **9.5 apps** used daily by the average knowledge worker (HBR 2024)
+- **23% of productive time** lost to context switching between siloed tools (Qatalog/Cornell 2022)
+- **Interrupted every 2 minutes** during core hours (Microsoft Work Trend 2025)
+
+For an indie developer billing HK$800/hr, that's **HK$1,600 of lost output every working day.**
+
+Existing AI tools are siloed: Notion AI stays in Notion, Copilot stays in code, Siri does not execute SaaS workflows. Nobody connects them.
+
+## Solution
+
+JARVIS sits on your desktop and connects everything. It syncs your email, calendar, notes, and code in the background, surfaces what matters through an AI-curated timeline, and lets you interact via voice or chat.
+
+**Speak or type** -> **JARVIS routes & executes** -> **Unified response**
+
+Example: *"Summarise unread emails, add urgent ones to Notion, block 2pm tomorrow."*
+
+JARVIS picks the right tools (Gmail, Notion, Calendar), chains the actions, and returns one clear result. Local actions are near-instant. Background jobs (daily briefs, email triage) run unattended.
+
+### Why JARVIS is Different
+
+| | JARVIS | OpenClaw | ChatGPT | Claude |
+|--|--------|----------|---------|--------|
+| Target user | Indie devs & solo founders on macOS | Open-source devs | General consumers | Knowledge workers |
+| Cross-tool depth | 5+ native macOS integrations | DIY plugins | Limited connectors | Computer Use (beta) |
+| Setup | Voice-first, one-click install | Self-host manually | Browser-based | Manual prompts |
+| Privacy | **Local-first, cloud opt-in** | Self-host | Cloud-only | Cloud-only |
+| Pricing | Freemium -> HK$148/mo | Free / OSS | US$20/mo | US$20/mo |
+
+**Different layers of the stack.** Use OpenClaw for coding. Use JARVIS for everything else.
 
 ---
 
@@ -22,7 +58,7 @@ JARVIS sits on your desktop and connects to your email, calendar, notes, and cod
 
 ![JARVIS Dashboard](docs/screenshots/dashboard.png)
 
-*Dashboard view: 3D data sphere with live email/cron/calendar nodes, sidebar navigation, AI-curated timeline, and real-time stats panel. Full holographic theme with cyan glow accents.*
+*Dashboard: 3D data sphere with live email/cron/calendar nodes, sidebar navigation, AI-curated timeline, real-time stats panel. Full holographic theme with cyan glow accents.*
 
 ---
 
@@ -30,39 +66,33 @@ JARVIS sits on your desktop and connects to your email, calendar, notes, and cod
 
 ### Interactive 3D Data Sphere
 
-A real-time holographic sphere rendered entirely with **Canvas2D** (no Three.js, no WebGL). It visualizes your actual data as color-coded nodes orbiting a glowing core:
+Real-time holographic sphere rendered with **Canvas2D** (no Three.js, no WebGL). Visualizes your actual data as color-coded nodes orbiting a glowing core:
 
-- **Cyan** nodes = tasks
-- **Light blue** nodes = emails
-- **Amber** nodes = calendar events
-- **Green** nodes = GitHub items
-- **Purple** nodes = Notion pages
-- **Teal** nodes = cron jobs
+- **Cyan** = tasks | **Light blue** = emails | **Amber** = calendar | **Green** = GitHub | **Purple** = Notion | **Teal** = cron
 
-The sphere supports mouse-drag rotation, click-to-zoom on individual nodes, and idle auto-rotation. Energy arcs animate between connected nodes. Voice activity modulates the ring speed and color intensity in real time. Data refreshes every 10 seconds without resetting node positions.
+Mouse-drag rotation, click-to-zoom, idle auto-rotation. Voice activity modulates ring speed and color intensity. Data refreshes every 10 seconds.
 
 ### AI Chat with Tool Execution
 
-- **Cmd+K** opens a floating chat panel (never blocks the main view)
-- Dual-model architecture: Claude (primary) with OpenAI fallback
+- **Cmd+K** opens floating chat panel
+- Dual-model: Claude (primary) + OpenAI fallback
 - Streaming responses with real-time token display
-- **18 native tools** the AI can call: open apps, run commands, manage files, create tasks, search email, compose messages, query calendar, control system volume/brightness, manage windows, read/write clipboard, take screenshots, send notifications, and more
-- Claude uses native tool calling; OpenAI uses function calling -- both resolve multi-step actions in a loop before responding
+- **18 native tools** the AI can call: open apps, run commands, manage files, create tasks, search email, compose messages, query calendar, control system
 - Conversation history persisted in local SQLite
 
 ### Voice I/O
 
 - **Cmd+Shift+J** for push-to-talk
-- Speech-to-text via OpenAI Whisper API (cloud) with local Whisper model fallback (offline-capable)
-- Text-to-speech via macOS `say` command with configurable voice, rate, and volume
-- Visual indicator overlay: cyan (listening), amber (processing), green (speaking)
-- Mic amplitude drives the 3D sphere ring animations
+- Speech-to-text: OpenAI Whisper API (cloud) + local Whisper model (offline)
+- Text-to-speech: macOS `say` with configurable voice, rate, volume
+- Visual indicator: cyan (listening), amber (processing), green (speaking)
+- Mic amplitude drives 3D sphere animations
 
 ### Integrations
 
 | Service | What JARVIS Does | Sync |
 |---------|-----------------|------|
-| **Gmail** | Inbox sync, email summaries, smart archive with learning | Every 5 min |
+| **Gmail** | Inbox sync, summaries, smart archive with learning | Every 5 min |
 | **Google Calendar** | Event sync (7-day horizon), meeting prep alerts | Every 5 min |
 | **Notion** | Page search, content snippets, create new pages | Every 10 min |
 | **GitHub** | Assigned issues, PRs for review, CI status | Every 10 min |
@@ -70,42 +100,20 @@ The sphere supports mouse-drag rotation, click-to-zoom on individual nodes, and 
 
 ### Smart Assistant
 
-- **Morning briefing** generated on launch using aggregated context (tasks, calendar, email, GitHub)
-- **Email learning** tracks your archive patterns -- after 3 archives from the same sender, suggests an auto-archive rule
-- **Context builder** gathers pending/overdue tasks, urgent deadlines, unread counts, and open PRs into a single structured snapshot for the AI
-- **Action parser** intercepts AI responses and executes embedded commands (create task, open app, set reminder, etc.)
+- **Morning briefing** on launch using aggregated context
+- **Email learning** tracks archive patterns -- auto-suggests rules after 3 archives from same sender
+- **Context builder** gathers tasks, deadlines, unread counts, PRs into one AI snapshot
+- **Action parser** intercepts AI responses and executes commands
 
 ### Automation Engine
 
 - **7 built-in cron jobs**: email sync, calendar sync, deadline monitor (daily 9 AM), Notion sync, GitHub digest, email auto-archive, proactive alerts
-- **Custom cron jobs**: describe what you want in natural language (e.g., "every Monday at 9am check for spam emails") and the AI generates the cron schedule
-- Full execution history with status tracking (running/completed/failed)
-- Cron dashboard with timeline view and job management
+- **Custom cron jobs** via natural language -- AI generates the cron schedule
+- Full execution history with status tracking
 
 ### System Control
 
-The AI can execute these directly on your Mac:
-
-- Open applications and URLs
-- Run shell commands (with safety blocklist -- blocks `rm`, `sudo`, `mkfs`, etc.)
-- Search files via Spotlight (`mdfind`)
-- Read/write clipboard
-- Manage windows (list, focus, resize, move)
-- Control volume, brightness, dark mode
-- Send native macOS notifications
-- Take screenshots (fullscreen, selection, or window)
-
-### Pages
-
-| Page | Purpose |
-|------|---------|
-| **Dashboard** | 3-column layout: sidebar, AI timeline, live stats panel |
-| **Email** | Inbox with filters, archive/delete, conversation threads |
-| **Calendar** | Event list with day/week/month views |
-| **GitHub** | Issues, PRs, CI status organized by repo |
-| **Notion** | Page browser, search, preview, create new pages |
-| **Cron** | Job list, execution timeline, custom job creator |
-| **Settings** | API keys, OAuth, AI provider, voice config, TTS settings |
+The AI can execute directly on your Mac: open apps/URLs, run shell commands (with safety blocklist), search files, read/write clipboard, manage windows, control volume/brightness/dark mode, send notifications, take screenshots.
 
 ---
 
@@ -113,29 +121,27 @@ The AI can execute these directly on your Mac:
 
 | Layer | Technology | Why |
 |-------|-----------|-----|
-| **Desktop framework** | [Tauri v2](https://v2.tauri.app/) | Native binary, ~10MB, Rust backend with webview frontend. No Electron bloat. |
-| **Backend** | Rust | Memory-safe, fast, async (tokio). Handles all API calls, auth, scheduling, voice, and system control. |
-| **Frontend** | React 18 + TypeScript + Vite | Minimal deps -- no UI library, no state management library. Just React hooks and custom CSS. |
-| **3D rendering** | Canvas2D | Custom math for 3D projection, rotation matrices, z-sorting. No Three.js or WebGL needed. |
-| **Database** | SQLite via rusqlite + refinery | Local-first. 11 tables, 6 migrations, runs on startup. All data on your machine. |
-| **AI (primary)** | Claude API | Streaming SSE, native tool calling, up to 5 multi-step iterations per request. |
-| **AI (fallback)** | OpenAI API (GPT) | Same 18 tools via function calling. Automatic fallback if Claude errors. |
-| **Voice STT** | OpenAI Whisper API + local whisper-rs | Cloud primary, offline fallback with downloadable tiny/base models. |
-| **Voice TTS** | macOS `say` | Zero-dependency TTS with voice/rate/volume control. |
-| **Audio capture** | cpal 0.17 | Cross-platform audio device access, 16kHz sampling for Whisper compatibility. |
-| **Auth** | OAuth2 PKCE | Google sign-in for Gmail + Calendar. Tokens stored in SQLite, auto-refresh. |
-| **Scheduling** | tokio-cron-scheduler | Background cron jobs on the tokio async runtime, persisted across restarts. |
-| **IPC** | Tauri invoke | Frontend calls Rust via `invoke("command", {args})`. 40+ registered commands. |
+| **Desktop** | [Tauri v2](https://v2.tauri.app/) | Native binary ~10MB. Rust backend + webview. Not Electron. |
+| **Backend** | Rust | Memory-safe, fast, async (tokio). All API calls, auth, scheduling, voice, system control. |
+| **Frontend** | React 18 + TypeScript + Vite | Minimal deps. No UI library. Just React hooks and custom CSS. |
+| **3D** | Canvas2D | Custom math for 3D projection. No Three.js needed. |
+| **Database** | SQLite (rusqlite + refinery) | Local-first. 11 tables, 6 migrations. All data on your machine. |
+| **AI (primary)** | Claude API | Streaming SSE, native tool calling, multi-step iterations. |
+| **AI (fallback)** | OpenAI API | Same 18 tools via function calling. Auto fallback. |
+| **Voice STT** | Whisper API + local whisper-rs | Cloud primary, offline fallback. |
+| **Voice TTS** | macOS `say` | Zero-dependency TTS. |
+| **Auth** | OAuth2 PKCE | Google sign-in. Tokens in SQLite, auto-refresh. |
+| **Scheduling** | tokio-cron-scheduler | Background cron on tokio runtime, persisted across restarts. |
 
 ### Why These Choices
 
-**Tauri over Electron:** JARVIS ships as a ~10MB native binary instead of a ~200MB Electron app. The Rust backend handles CPU-intensive work (audio processing, local Whisper inference, concurrent API calls) without blocking the UI. Tauri v2's `#[tauri::command]` macro makes IPC between React and Rust feel like calling a local function.
+**Tauri over Electron:** ~10MB native binary vs ~200MB Electron. Rust handles CPU-intensive work (audio, local inference, concurrent APIs) without blocking UI.
 
-**Canvas2D over Three.js/WebGL:** The 3D data sphere uses basic trigonometry and projection math. Canvas2D is simpler to debug, has no dependency overhead, and performs well for a particle system of this scale. The entire 3D scene is one React component with a single `<canvas>` element.
+**Local-first over cloud-first:** Privacy is the competitive moat. Emails, notes, code stay on-device. Cloud inference is opt-in only. This is why big players (Apple, Microsoft, Google) can't build JARVIS -- they need ecosystem lock-in.
 
-**No UI library:** The holographic theme is custom CSS -- glassmorphism panels, cyan glow effects, JetBrains Mono typography. Adding a component library would fight the design rather than help it. Total frontend dependencies: React, React DOM, and the Tauri API bindings. That's it.
+**Canvas2D over Three.js:** Simpler, no dependencies, performs well for this scale. One React component, one `<canvas>`.
 
-**SQLite over a cloud database:** Everything stays on your machine. JARVIS is a personal assistant, not a SaaS product. The external services (Gmail, Calendar, Notion, GitHub) remain the source of truth; SQLite is a local cache that enables offline access and fast queries.
+**No UI library:** Custom holographic CSS. Component libraries would fight the design.
 
 ---
 
@@ -175,6 +181,73 @@ The AI can execute these directly on your Mac:
 +--------------------------------------------------+
 ```
 
+### AWS Cloud Architecture (Scaling Phase)
+
+```
++-------------------+     +--------------------+
+|   JARVIS macOS    |---->|  AWS Cognito       |  Auth + user accounts
+|   (Local-first)   |     +--------------------+
+|                   |---->|  AWS S3 + KMS      |  Encrypted sync (opt-in)
+|  80% local AI     |     +--------------------+
+|  20% cloud AI     |---->|  AWS Bedrock       |  Heavy inference (opt-in)
+|                   |     +--------------------+
+|                   |---->|  AWS Lambda         |  Webhooks + background
++-------------------+     +--------------------+
+```
+
+---
+
+## Business
+
+### Market Opportunity
+
+| Segment | Size | Basis |
+|---------|------|-------|
+| **TAM** -- Global productivity AI | ~US$36B by 2033 | Grand View 2025, CAGR 15.9% |
+| **SAM** -- English-speaking macOS pros | ~US$400M | ~1.8M reachable workers x US$228/yr |
+| **SOM** -- HK/GBA beachhead (3 years) | HK$0.5--1.4M ARR | 300-800 paying users x HK$148/mo |
+
+### Pricing
+
+| Tier | Price | What You Get |
+|------|-------|-------------|
+| **Free** | $0 | Gmail + Calendar, 20 AI chats/day |
+| **Pro** | HK$148/mo (~US$19) | All 5 integrations, unlimited voice, automation, wake word |
+| **Team** | HK$298/seat/mo (~US$39) | Pro + shared workspace, admin controls, RBAC, team digest |
+
+### Traction (v0.1.0 Beta)
+
+| Metric | Value |
+|--------|-------|
+| Beta testers | 12 (HK/GBA + international) |
+| Avg time saved/day | ~85 min per user |
+| WTP at HK$148/mo | 9 of 12 testers (75%) |
+| Codebase | 46+ Rust files, 41+ TypeScript files, 32 AI tools, 10 DB tables |
+
+### Programme Support
+
+| Programme | Value | Status |
+|-----------|-------|--------|
+| **HKSTP Ideation** | HK$100K grant (Silver + Gold + Platinum badges) | Accepted, Jun 2026 |
+| **HKSTP Incubation** (next phase) | Up to HK$1.29M | Target May 2027 |
+| **AWS Activate** | US$25K credits | Approved |
+
+---
+
+## Roadmap
+
+Full detailed roadmap: [`docs/business/BUSINESS_ROADMAP.md`](docs/business/BUSINESS_ROADMAP.md)
+
+| Quarter | Theme | Key Milestones |
+|---------|-------|---------------|
+| **Q1** Jun--Aug 2026 | Silver Badge + Foundation | AWS control plane, v0.2 beta, 30 customer interviews, 50-person waitlist, HKSTP license signed |
+| **Q2** Sep--Nov 2026 | Gold Badge + Market Validation | v1.0 closed beta (50 users), HK incorporation, pricing validation, pitch video, market report |
+| **Q3** Dec 2026--Feb 2027 | Open Beta + Soft Launch | Plugin SDK, 100 active users, Product Hunt launch (Jan), paid conversion testing |
+| **Q4** Mar--May 2027 | Platinum Badge + Scale | Pro tier launch, 100+ paying users, HK$10--18K MRR, PRD, Incubation Panel |
+
+### North Star
+
+**100+ paying users / HK$10--18K MRR by May 2027**
 
 ---
 
@@ -207,22 +280,23 @@ Add your API keys:
 ```env
 ANTHROPIC_API_KEY=sk-ant-...    # Claude API (primary AI)
 OPENAI_API_KEY=sk-...            # OpenAI (fallback AI + Whisper STT)
+GEMINI_API_KEY=...               # Gemini provider chain option
+AWS_ACCESS_KEY_ID=...            # Amazon Bedrock fallback provider
+AWS_SECRET_ACCESS_KEY=...
+AWS_BEDROCK_REGION=us-east-1
+AWS_BEDROCK_MODEL_ID=anthropic.claude-sonnet-4-6
 GOOGLE_CLIENT_ID=...             # Gmail + Calendar OAuth (optional)
 GOOGLE_CLIENT_SECRET=...         # Gmail + Calendar OAuth (optional)
 ```
 
-**Minimum requirement:** You need at least one of `ANTHROPIC_API_KEY` or `OPENAI_API_KEY` to use the AI chat. If you provide both, Claude is used as the primary model with OpenAI as an automatic fallback. Voice input (speech-to-text) requires `OPENAI_API_KEY` for the Whisper API. Google and all other integrations are optional -- the app runs fine without them.
+**Minimum requirement:** At least one AI provider configured in Settings. JARVIS supports local endpoints, Gemini, Claude, OpenAI, and Amazon Bedrock in a priority chain.
 
-Notion, GitHub, and Obsidian tokens are configured in the app's Settings page and stored in the local database.
+### Google OAuth Setup
 
-### Google OAuth Setup (for Gmail + Calendar)
-
-1. Go to [Google Cloud Console](https://console.cloud.google.com)
-2. Create a project, enable **Gmail API** and **Google Calendar API**
-3. Configure OAuth consent screen (add scopes: `gmail.readonly`, `gmail.modify`, `calendar`)
-4. Create OAuth credentials (Desktop app type)
-5. Add your email as a test user
-6. Put Client ID and Secret in `.env`
+1. [Google Cloud Console](https://console.cloud.google.com) -- create project, enable Gmail + Calendar APIs
+2. Configure OAuth consent, create Desktop app credentials
+3. Add your email as test user
+4. Put Client ID and Secret in `.env`
 
 ### Run
 
@@ -230,7 +304,7 @@ Notion, GitHub, and Obsidian tokens are configured in the app's Settings page an
 npm run tauri dev
 ```
 
-The first build compiles ~530 Rust crates and may take several minutes. You'll see Cargo output in the terminal -- once it finishes, the app window opens automatically. Subsequent builds are incremental and fast.
+First build compiles ~530 Rust crates (several minutes). Subsequent builds are incremental.
 
 ---
 
@@ -239,27 +313,26 @@ The first build compiles ~530 Rust crates and may take several minutes. You'll s
 | Action | Shortcut |
 |--------|----------|
 | Open chat | **Cmd+K** |
-| Close chat / cancel | **Esc** |
+| Close chat | **Esc** |
 | Push-to-talk | **Cmd+Shift+J** |
 
 ---
 
 ## Design
 
-Full holographic theme built with pure CSS -- no UI component library.
+Full holographic theme, pure CSS -- no UI component library.
 
 - **Background:** #060a14 (near-black with blue undertone)
-- **Accent:** rgba(0, 180, 255) (glowing cyan) at varying opacities
-- **Panels:** Glassmorphism with backdrop-filter blur, translucent backgrounds, cyan border glow on hover
-- **Typography:** JetBrains Mono for system labels and monospace elements, Inter/system sans-serif for body text
-- **Data colors:** Cyan (tasks), light blue (email), amber (calendar), green (GitHub), purple (Notion), teal (cron)
+- **Accent:** rgba(0, 180, 255) (glowing cyan)
+- **Panels:** Glassmorphism with backdrop-filter blur, cyan border glow on hover
+- **Typography:** JetBrains Mono (system labels), Inter (body text)
 - **No emojis** -- text and geometric elements only
 
 ---
 
 ## Local Whisper Model (Optional)
 
-JARVIS uses the OpenAI Whisper API for speech-to-text by default. For offline fallback, download a local model:
+For offline speech-to-text fallback:
 
 ```bash
 mkdir -p ~/Library/Application\ Support/jarvis/models
@@ -267,13 +340,9 @@ curl -L https://huggingface.co/ggerganov/whisper.cpp/resolve/main/ggml-base.bin 
   -o ~/Library/Application\ Support/jarvis/models/ggml-base.bin
 ```
 
-The app will automatically use the local model when the cloud API is unavailable.
-
 ---
 
 ## Development
-
-### Build Commands
 
 | Command | Purpose |
 |---------|---------|
@@ -281,58 +350,38 @@ The app will automatically use the local model when the cloud API is unavailable
 | `npm run dev` | Frontend-only dev server (port 1420) |
 | `npm run build` | TypeScript check + Vite production build |
 | `npm run tauri build` | Desktop release build |
-| `cargo test --manifest-path src-tauri/Cargo.toml` | Run Rust tests |
-| `cargo fmt --all --check --manifest-path src-tauri/Cargo.toml` | Rust format check |
-
-### Coding Style
-
-- **TypeScript:** Strict mode, ES modules, double quotes, 2-space indent. React components in `PascalCase`, hooks as `useSomething`, helpers in `camelCase`.
-- **Rust:** Standard conventions -- 4-space indent, `snake_case` modules/functions, small focused modules.
-- **Tauri commands:** Wrappers centralized in `src/lib/commands.ts`, types in `src/lib/types.ts`.
+| `cargo test --manifest-path src-tauri/Cargo.toml` | Rust tests |
 
 ### Commits
 
-Follow Conventional Commits: `feat(scope): message`, `fix(scope): message`, `refactor:`, etc. Use imperative, scoped summaries.
-
-### Testing
-
-No frontend test runner yet -- `npm run build` is the minimum validation for UI changes. For interactive work, verify in `npm run tauri dev`. Add Rust unit tests for non-trivial backend behavior.
+Follow Conventional Commits: `feat(scope): message`, `fix(scope): message`, `refactor:`, etc.
 
 ---
 
 ## How It Was Built
 
-This project was built iteratively with [Claude Code](https://claude.ai/code) as the primary development tool. The workflow:
+Built iteratively with [Claude Code](https://claude.ai/code). Workflow: design specs -> Tauri scaffold -> Rust modules one integration at a time -> AI layer -> voice pipeline -> 3D sphere -> smart features -> scheduler.
 
-1. **Design specs first** -- detailed markdown specs covering architecture, UI, data flow, and component breakdowns before writing any code
-2. **Tauri v2 scaffold** -- `npm create tauri-app` with React + TypeScript template
-3. **Rust backend modules** -- built one integration at a time (database, then Gmail, Calendar, Notion, GitHub), each with its own Tauri commands
-4. **AI layer** -- Claude API client with streaming SSE, then OpenAI as fallback, then shared tool definitions for both
-5. **Voice pipeline** -- audio capture with cpal, cloud Whisper transcription, then local Whisper fallback, then macOS TTS
-6. **3D sphere** -- started with particles, added data binding, projection math, interaction, and voice-reactive animation
-7. **Smart features** -- context aggregation, morning briefing, email learning, action execution
-8. **Scheduler** -- cron jobs seeded on first run, custom job creation via natural language
-
-Key tools and resources:
-- **[Tauri v2](https://v2.tauri.app/)** -- the desktop framework that makes this possible. Rust backend + webview frontend, native binary output.
-- **[Claude Code](https://claude.ai/code)** -- AI-assisted development for both Rust and TypeScript. Used for architecture decisions, implementation, and debugging.
-- **[Anthropic Claude API](https://docs.anthropic.com/)** -- primary AI provider with tool/function calling support
-- **[OpenAI API](https://platform.openai.com/)** -- fallback AI + Whisper for speech-to-text
-- **[rusqlite](https://github.com/rusqlite/rusqlite)** -- SQLite bindings for Rust
-- **[tokio-cron-scheduler](https://github.com/mvniekerk/tokio-cron-scheduler)** -- background job scheduling
-- **[cpal](https://github.com/RustAudio/cpal)** -- cross-platform audio capture
-- **[whisper-rs](https://github.com/tazz4843/whisper-rs)** -- local Whisper model inference in Rust
+Key tools: [Tauri v2](https://v2.tauri.app/), [Claude Code](https://claude.ai/code), [Anthropic Claude API](https://docs.anthropic.com/), [OpenAI API](https://platform.openai.com/), [rusqlite](https://github.com/rusqlite/rusqlite), [tokio-cron-scheduler](https://github.com/mvniekerk/tokio-cron-scheduler), [cpal](https://github.com/RustAudio/cpal), [whisper-rs](https://github.com/tazz4843/whisper-rs).
 
 ---
 
-## Planned Improvements
+## Coming Next
 
-- **API cost tracking** -- monitor token usage and estimated spend per provider, with per-conversation breakdowns and daily/monthly summaries
-- **Local model support** -- run local LLMs (e.g., Ollama, llama.cpp) as an alternative to cloud APIs for fully offline AI chat
-- **More syncing integrations** -- expand beyond Gmail, Calendar, Notion, and GitHub to support additional services (Slack, Linear, Jira, Google Drive, etc.)
+- **Plugin SDK** -- let users add their own SaaS integrations
+- **End-to-end encrypted sync** -- cross-device with zero-knowledge encryption
+- **Team tier** -- RBAC, admin controls, audit logs for B2B
+- **Model routing** -- smart routing between local/cheap/expensive models for cost efficiency
+- **Cantonese voice support** -- via AWS Transcribe + Polly
+
+See [`docs/business/BUSINESS_ROADMAP.md`](docs/business/BUSINESS_ROADMAP.md) for the full quarterly breakdown.
 
 ---
 
 ## License
 
 MIT
+
+---
+
+*Built in Hong Kong. Scaling on AWS.*

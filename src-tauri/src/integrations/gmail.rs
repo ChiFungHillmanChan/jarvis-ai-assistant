@@ -17,10 +17,14 @@ pub struct GmailMessage {
 }
 
 #[derive(Deserialize)]
-struct ListResponse { messages: Option<Vec<MessageRef>> }
+struct ListResponse {
+    messages: Option<Vec<MessageRef>>,
+}
 
 #[derive(Deserialize)]
-struct MessageRef { id: String }
+struct MessageRef {
+    id: String,
+}
 
 #[derive(Deserialize)]
 struct MessageDetail {
@@ -58,23 +62,43 @@ struct BodyData {
 }
 
 #[derive(Deserialize)]
-struct Header { name: String, value: String }
+struct Header {
+    name: String,
+    value: String,
+}
 
-pub async fn fetch_inbox(access_token: &str, max_results: u32) -> Result<Vec<GmailMessage>, String> {
+pub async fn fetch_inbox(
+    access_token: &str,
+    max_results: u32,
+) -> Result<Vec<GmailMessage>, String> {
     let client = Client::builder()
         .connect_timeout(std::time::Duration::from_secs(10))
         .timeout(std::time::Duration::from_secs(15))
         .build()
         .map_err(|e| format!("HTTP client error: {}", e))?;
-    let url = format!("{}/messages?maxResults={}&labelIds=INBOX", GMAIL_API, max_results);
-    let resp = client.get(&url).bearer_auth(access_token).send().await.map_err(|e| format!("Gmail list error: {}", e))?;
-    if resp.status() == 401 { return Err("UNAUTHORIZED".to_string()); }
-    if !resp.status().is_success() { return Err(format!("Gmail API error: {}", resp.status())); }
+    let url = format!(
+        "{}/messages?maxResults={}&labelIds=INBOX",
+        GMAIL_API, max_results
+    );
+    let resp = client
+        .get(&url)
+        .bearer_auth(access_token)
+        .send()
+        .await
+        .map_err(|e| format!("Gmail list error: {}", e))?;
+    if resp.status() == 401 {
+        return Err("UNAUTHORIZED".to_string());
+    }
+    if !resp.status().is_success() {
+        return Err(format!("Gmail API error: {}", resp.status()));
+    }
     let list: ListResponse = resp.json().await.map_err(|e| e.to_string())?;
     let refs = list.messages.unwrap_or_default();
 
     // Fetch message details in parallel (up to max_results concurrently)
-    let futures: Vec<_> = refs.iter().take(max_results as usize)
+    let futures: Vec<_> = refs
+        .iter()
+        .take(max_results as usize)
         .map(|msg_ref| fetch_message_detail(access_token, &msg_ref.id))
         .collect();
     let results = futures_util::future::join_all(futures).await;
@@ -88,30 +112,64 @@ pub async fn fetch_inbox(access_token: &str, max_results: u32) -> Result<Vec<Gma
     Ok(messages)
 }
 
-pub async fn fetch_message_detail(access_token: &str, message_id: &str) -> Result<GmailMessage, String> {
+pub async fn fetch_message_detail(
+    access_token: &str,
+    message_id: &str,
+) -> Result<GmailMessage, String> {
     let client = Client::builder()
         .connect_timeout(std::time::Duration::from_secs(10))
         .timeout(std::time::Duration::from_secs(15))
         .build()
         .map_err(|e| format!("HTTP client error: {}", e))?;
     let url = format!("{}/messages/{}?format=metadata&metadataHeaders=Subject&metadataHeaders=From&metadataHeaders=Date", GMAIL_API, message_id);
-    let resp = client.get(&url).bearer_auth(access_token).send().await.map_err(|e| e.to_string())?;
+    let resp = client
+        .get(&url)
+        .bearer_auth(access_token)
+        .send()
+        .await
+        .map_err(|e| e.to_string())?;
     let detail: MessageDetail = resp.json().await.map_err(|e| e.to_string())?;
     let headers = detail.payload.and_then(|p| p.headers).unwrap_or_default();
-    let subject = headers.iter().find(|h| h.name == "Subject").map(|h| h.value.clone());
-    let sender = headers.iter().find(|h| h.name == "From").map(|h| h.value.clone());
-    let date = headers.iter().find(|h| h.name == "Date").map(|h| h.value.clone());
+    let subject = headers
+        .iter()
+        .find(|h| h.name == "Subject")
+        .map(|h| h.value.clone());
+    let sender = headers
+        .iter()
+        .find(|h| h.name == "From")
+        .map(|h| h.value.clone());
+    let date = headers
+        .iter()
+        .find(|h| h.name == "Date")
+        .map(|h| h.value.clone());
     let labels = detail.label_ids.unwrap_or_default();
     let is_read = !labels.contains(&"UNREAD".to_string());
-    Ok(GmailMessage { id: detail.id, thread_id: detail.thread_id, subject, sender, snippet: detail.snippet, label_ids: labels, is_read, received_at: date.or(detail.internal_date) })
+    Ok(GmailMessage {
+        id: detail.id,
+        thread_id: detail.thread_id,
+        subject,
+        sender,
+        snippet: detail.snippet,
+        label_ids: labels,
+        is_read,
+        received_at: date.or(detail.internal_date),
+    })
 }
 
 pub async fn archive_message(access_token: &str, message_id: &str) -> Result<(), String> {
     let client = Client::new();
     let url = format!("{}/messages/{}/modify", GMAIL_API, message_id);
     let body = serde_json::json!({ "removeLabelIds": ["INBOX"] });
-    let resp = client.post(&url).bearer_auth(access_token).json(&body).send().await.map_err(|e| format!("Gmail archive error: {}", e))?;
-    if !resp.status().is_success() { return Err(format!("Gmail archive failed: {}", resp.status())); }
+    let resp = client
+        .post(&url)
+        .bearer_auth(access_token)
+        .json(&body)
+        .send()
+        .await
+        .map_err(|e| format!("Gmail archive error: {}", e))?;
+    if !resp.status().is_success() {
+        return Err(format!("Gmail archive failed: {}", resp.status()));
+    }
     Ok(())
 }
 
@@ -132,10 +190,18 @@ pub async fn search_messages(access_token: &str, query: &str) -> Result<Vec<Gmai
     let client = Client::new();
     let encoded_query = urlencoding::encode(query);
     let url = format!("{}/messages?q={}&maxResults=10", GMAIL_API, encoded_query);
-    let resp = client.get(&url).bearer_auth(access_token).send().await
+    let resp = client
+        .get(&url)
+        .bearer_auth(access_token)
+        .send()
+        .await
         .map_err(|e| format!("Gmail search error: {}", e))?;
-    if resp.status() == 401 { return Err("UNAUTHORIZED".to_string()); }
-    if !resp.status().is_success() { return Err(format!("Gmail API error: {}", resp.status())); }
+    if resp.status() == 401 {
+        return Err("UNAUTHORIZED".to_string());
+    }
+    if !resp.status().is_success() {
+        return Err(format!("Gmail API error: {}", resp.status()));
+    }
     let list: ListResponse = resp.json().await.map_err(|e| e.to_string())?;
     let refs = list.messages.unwrap_or_default();
     let mut messages = Vec::new();
@@ -148,30 +214,68 @@ pub async fn search_messages(access_token: &str, query: &str) -> Result<Vec<Gmai
     Ok(messages)
 }
 
-pub async fn get_message_full(access_token: &str, message_id: &str) -> Result<(GmailMessage, String), String> {
+pub async fn get_message_full(
+    access_token: &str,
+    message_id: &str,
+) -> Result<(GmailMessage, String), String> {
     let client = Client::new();
     let url = format!("{}/messages/{}?format=full", GMAIL_API, message_id);
-    let resp = client.get(&url).bearer_auth(access_token).send().await
+    let resp = client
+        .get(&url)
+        .bearer_auth(access_token)
+        .send()
+        .await
         .map_err(|e| format!("Gmail read error: {}", e))?;
-    if resp.status() == 401 { return Err("UNAUTHORIZED".to_string()); }
-    if !resp.status().is_success() { return Err(format!("Gmail API error: {}", resp.status())); }
+    if resp.status() == 401 {
+        return Err("UNAUTHORIZED".to_string());
+    }
+    if !resp.status().is_success() {
+        return Err(format!("Gmail API error: {}", resp.status()));
+    }
     let detail: MessageDetail = resp.json().await.map_err(|e| e.to_string())?;
 
     let payload = detail.payload.as_ref();
-    let headers = payload.and_then(|p| p.headers.as_ref()).map(|h| h.as_slice()).unwrap_or(&[]);
-    let subject = headers.iter().find(|h| h.name == "Subject").map(|h| h.value.clone());
-    let sender = headers.iter().find(|h| h.name == "From").map(|h| h.value.clone());
-    let to = headers.iter().find(|h| h.name == "To").map(|h| h.value.clone());
-    let date = headers.iter().find(|h| h.name == "Date").map(|h| h.value.clone());
+    let headers = payload
+        .and_then(|p| p.headers.as_ref())
+        .map(|h| h.as_slice())
+        .unwrap_or(&[]);
+    let subject = headers
+        .iter()
+        .find(|h| h.name == "Subject")
+        .map(|h| h.value.clone());
+    let sender = headers
+        .iter()
+        .find(|h| h.name == "From")
+        .map(|h| h.value.clone());
+    let to = headers
+        .iter()
+        .find(|h| h.name == "To")
+        .map(|h| h.value.clone());
+    let date = headers
+        .iter()
+        .find(|h| h.name == "Date")
+        .map(|h| h.value.clone());
     let labels = detail.label_ids.unwrap_or_default();
     let is_read = !labels.contains(&"UNREAD".to_string());
 
-    // Extract body from payload
-    let body_text = if let Some(ref pl) = detail.payload {
+    // Extract body from payload; fall back to the Gmail-provided snippet if extraction yields nothing.
+    let mut body_text = if let Some(ref pl) = detail.payload {
         extract_body_from_payload(pl)
     } else {
         String::new()
     };
+    if body_text.trim().is_empty() {
+        if let Some(ref snippet) = detail.snippet {
+            if !snippet.is_empty() {
+                body_text = snippet.clone();
+                log::warn!(
+                    "[gmail] body extraction empty for {}, falling back to snippet ({} chars)",
+                    detail.id,
+                    snippet.len()
+                );
+            }
+        }
+    }
 
     let msg = GmailMessage {
         id: detail.id,
@@ -203,7 +307,11 @@ fn extract_body_from_payload(payload: &Payload) -> String {
             if !data.is_empty() {
                 if let Ok(decoded) = decode_base64url(data) {
                     let is_html = payload.mime_type.as_deref() == Some("text/html");
-                    return if is_html { strip_html(&decoded) } else { decoded };
+                    return if is_html {
+                        strip_html(&decoded)
+                    } else {
+                        decoded
+                    };
                 }
             }
         }
@@ -244,42 +352,113 @@ fn find_body_in_parts(parts: &[Part], target_mime: &str) -> Option<String> {
 }
 
 fn decode_base64url(data: &str) -> Result<String, String> {
+    // Gmail sometimes includes padding, sometimes not. Strip whitespace and any
+    // trailing '=' then decode with NO_PAD to accept both forms.
+    let cleaned: String = data
+        .chars()
+        .filter(|c| !c.is_whitespace())
+        .collect::<String>()
+        .trim_end_matches('=')
+        .to_string();
     let engine = base64::engine::general_purpose::URL_SAFE_NO_PAD;
-    let bytes = engine.decode(data).map_err(|e| format!("Base64 decode error: {}", e))?;
-    String::from_utf8(bytes).map_err(|e| format!("UTF-8 decode error: {}", e))
+    let bytes = engine
+        .decode(&cleaned)
+        .map_err(|e| format!("Base64 decode error: {}", e))?;
+    // Lossy UTF-8 so weird encodings still give us readable text
+    Ok(String::from_utf8_lossy(&bytes).into_owned())
 }
 
 fn strip_html(html: &str) -> String {
-    let mut result = String::with_capacity(html.len());
+    // Drop <script>/<style> blocks wholesale -- they contain noise that blows up context.
+    let cleaned_blocks = {
+        let mut out = String::with_capacity(html.len());
+        let lower = html.to_ascii_lowercase();
+        let mut i = 0;
+        while i < html.len() {
+            let rest_lower = &lower[i..];
+            let rest = &html[i..];
+            if let Some(start) = rest_lower.find("<script") {
+                out.push_str(&rest[..start]);
+                if let Some(end) = rest_lower[start..].find("</script>") {
+                    i += start + end + "</script>".len();
+                    continue;
+                }
+                break;
+            }
+            if let Some(start) = rest_lower.find("<style") {
+                out.push_str(&rest[..start]);
+                if let Some(end) = rest_lower[start..].find("</style>") {
+                    i += start + end + "</style>".len();
+                    continue;
+                }
+                break;
+            }
+            out.push_str(rest);
+            break;
+        }
+        out
+    };
+
+    // Convert block-level tags into newlines so paragraphs survive.
+    let block_tags = [
+        "</p>", "<br>", "<br/>", "<br />", "</div>", "</h1>", "</h2>", "</h3>", "</h4>", "</li>",
+        "</tr>", "</td>",
+    ];
+    let mut normalized = cleaned_blocks;
+    for tag in block_tags.iter() {
+        normalized = normalized.replace(tag, "\n");
+        let upper = tag.to_uppercase();
+        normalized = normalized.replace(&upper, "\n");
+    }
+
+    // Strip remaining tags.
+    let mut text = String::with_capacity(normalized.len());
     let mut inside_tag = false;
-    for ch in html.chars() {
+    for ch in normalized.chars() {
         match ch {
             '<' => inside_tag = true,
             '>' => inside_tag = false,
-            _ if !inside_tag => result.push(ch),
+            _ if !inside_tag => text.push(ch),
             _ => {}
         }
     }
-    // Collapse excessive whitespace
-    let mut cleaned = String::with_capacity(result.len());
-    let mut prev_newline = false;
-    for line in result.lines() {
+
+    // Decode the common HTML entities we care about.
+    let text = text
+        .replace("&nbsp;", " ")
+        .replace("&amp;", "&")
+        .replace("&lt;", "<")
+        .replace("&gt;", ">")
+        .replace("&quot;", "\"")
+        .replace("&#39;", "'")
+        .replace("&apos;", "'");
+
+    // Collapse runs of blank lines to at most one blank line so paragraphs remain visible.
+    let mut cleaned = String::with_capacity(text.len());
+    let mut blank_streak = 0;
+    for line in text.lines() {
         let trimmed = line.trim();
         if trimmed.is_empty() {
-            if !prev_newline {
+            blank_streak += 1;
+            if blank_streak == 1 {
                 cleaned.push('\n');
-                prev_newline = true;
             }
         } else {
+            blank_streak = 0;
             cleaned.push_str(trimmed);
             cleaned.push('\n');
-            prev_newline = false;
         }
     }
     cleaned.trim().to_string()
 }
 
-pub async fn send_message(access_token: &str, to: &str, subject: &str, body: &str, cc: Option<&str>) -> Result<String, String> {
+pub async fn send_message(
+    access_token: &str,
+    to: &str,
+    subject: &str,
+    body: &str,
+    cc: Option<&str>,
+) -> Result<String, String> {
     let mut raw_msg = format!(
         "To: {}\r\nSubject: {}\r\nContent-Type: text/plain; charset=utf-8\r\n",
         to, subject
@@ -297,9 +476,16 @@ pub async fn send_message(access_token: &str, to: &str, subject: &str, body: &st
     let client = Client::new();
     let url = format!("{}/messages/send", GMAIL_API);
     let payload = serde_json::json!({ "raw": encoded });
-    let resp = client.post(&url).bearer_auth(access_token).json(&payload).send().await
+    let resp = client
+        .post(&url)
+        .bearer_auth(access_token)
+        .json(&payload)
+        .send()
+        .await
         .map_err(|e| format!("Gmail send error: {}", e))?;
-    if resp.status() == 401 { return Err("UNAUTHORIZED".to_string()); }
+    if resp.status() == 401 {
+        return Err("UNAUTHORIZED".to_string());
+    }
     if !resp.status().is_success() {
         let status = resp.status();
         let body_text = resp.text().await.unwrap_or_default();

@@ -15,6 +15,12 @@ use db::Database;
 use tauri::Manager;
 
 pub fn run() {
+    if let Some(data_dir) = dirs::data_dir() {
+        let env_path = data_dir.join("jarvis").join(".env");
+        if env_path.exists() {
+            dotenvy::from_path(&env_path).ok();
+        }
+    }
     dotenvy::dotenv().ok();
     env_logger::init();
 
@@ -276,6 +282,9 @@ pub fn run() {
             commands::github::sync_github,
             commands::github::save_github_token,
             commands::github::get_github_stats,
+            commands::launch::get_launch_readiness,
+            commands::launch::save_beta_tester,
+            commands::launch::submit_beta_feedback,
             voice::commands::start_listening,
             voice::commands::stop_listening,
             voice::commands::get_voice_state,

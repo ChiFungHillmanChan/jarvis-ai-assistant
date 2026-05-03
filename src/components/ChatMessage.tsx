@@ -19,5 +19,5 @@ export default memo(function ChatMessage({ message }: ChatMessageProps) {
 const styles: Record<string, React.CSSProperties> = {
   container: { display: "flex", flexDirection: "column", marginBottom: 14, maxWidth: "85%" },
   label: { color: "rgba(0, 180, 255, 0.4)", fontSize: 9, fontFamily: "var(--font-mono)", letterSpacing: 1.5, marginBottom: 4 },
-  bubble: { border: "1px solid", borderRadius: 8, padding: "10px 14px", color: "rgba(0, 180, 255, 0.8)", fontSize: 13, lineHeight: 1.5 },
+  bubble: { border: "1px solid", borderRadius: 8, padding: "12px 16px", color: "rgba(0, 180, 255, 0.8)", fontSize: 13, lineHeight: 1.65 },
 };

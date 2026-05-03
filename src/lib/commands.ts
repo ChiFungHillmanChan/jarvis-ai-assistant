@@ -1,5 +1,5 @@
 import { invoke } from "@tauri-apps/api/core";
-import type { Task, ChatMessage, DashboardData, Settings, EmailSummary, EmailStats, CalendarEventView, CronJobView, CronRunView, NotionPageView, GitHubItemView, GitHubStats, VoiceState, VoiceSettings, WakeWordStatus, EmailRule, BriefingResult, LocalEndpoint, LocalModel, ProviderChainEntry, EndpointHealth, SystemCompatibility, PrerequisiteCheck, RecommendedModel } from "./types";
+import type { Task, ChatMessage, DashboardData, Settings, EmailSummary, EmailStats, CalendarEventView, CronJobView, CronRunView, NotionPageView, GitHubItemView, GitHubStats, VoiceState, VoiceSettings, WakeWordStatus, EmailRule, BriefingResult, LocalEndpoint, LocalModel, ProviderChainEntry, EndpointHealth, SystemCompatibility, PrerequisiteCheck, RecommendedModel, LaunchReadiness, BetaTesterInput, BetaTesterView, BetaFeedbackInput } from "./types";
 
 export async function getTasks(): Promise<Task[]> {
   return invoke("get_tasks");
@@ -19,6 +19,12 @@ export async function getConversations(): Promise<ChatMessage[]> {
 export async function getDashboardData(): Promise<DashboardData> {
   return invoke("get_dashboard_data");
 }
+
+// Launch
+export async function getLaunchReadiness(): Promise<LaunchReadiness> { return invoke("get_launch_readiness"); }
+export async function saveBetaTester(input: BetaTesterInput): Promise<BetaTesterView> { return invoke("save_beta_tester", { input }); }
+export async function submitBetaFeedback(input: BetaFeedbackInput): Promise<void> { return invoke("submit_beta_feedback", { input }); }
+
 export async function getSettings(): Promise<Settings> {
   return invoke("get_settings");
 }

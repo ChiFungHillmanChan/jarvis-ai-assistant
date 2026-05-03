@@ -198,10 +198,10 @@ function renderMarkdown(text: string): JSX.Element {
       continue;
     }
 
-    // Empty line
+    // Empty line -- treat as paragraph separator
     if (trimmed === "") {
       flushList();
-      elements.push(<div key={key++} style={{ height: 6 }} />);
+      elements.push(<div key={key++} style={{ height: 8 }} />);
       continue;
     }
 
@@ -322,15 +322,17 @@ const mdStyles: Record<string, React.CSSProperties> = {
     fontFamily: "var(--font-sans)",
   },
   paragraph: {
-    marginBottom: 2,
+    marginBottom: 10,
+    lineHeight: 1.65,
   },
   list: {
-    paddingLeft: 18,
-    marginBottom: 4,
-    marginTop: 2,
+    paddingLeft: 20,
+    marginBottom: 10,
+    marginTop: 4,
   },
   listItem: {
-    marginBottom: 2,
+    marginBottom: 4,
+    lineHeight: 1.65,
     color: "rgba(0, 180, 255, 0.8)",
   },
 };

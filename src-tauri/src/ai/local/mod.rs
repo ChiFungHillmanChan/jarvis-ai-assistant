@@ -159,7 +159,7 @@ pub async fn send_local(
     let openai_tools = tools::to_openai_format(&all_tool_defs);
 
     // Build system prompt
-    let mut system_prompt = tools::SYSTEM_PROMPT.to_string();
+    let mut system_prompt = tools::build_system_prompt(db);
 
     // Determine tools to use based on capability
     let (request_tools, use_response_format) = match effective_cap {
@@ -310,9 +310,9 @@ pub async fn send_local(
                             if let Some(ref tool_calls) = delta.tool_calls {
                                 for tc in tool_calls {
                                     let idx = tc.index.unwrap_or(0);
-                                    let entry = tool_map
-                                        .entry(idx)
-                                        .or_insert_with(|| (String::new(), String::new(), String::new()));
+                                    let entry = tool_map.entry(idx).or_insert_with(|| {
+                                        (String::new(), String::new(), String::new())
+                                    });
                                     if let Some(ref id) = tc.id {
                                         entry.0 = id.clone();
                                     }
@@ -384,9 +384,11 @@ pub async fn send_local(
 
                     let args_str =
                         serde_json::to_string(&call.arguments).unwrap_or_else(|_| "{}".into());
-                    let result =
-                        tools::execute_tool(&call.name, &args_str, db, google_auth).await;
-                    log::info!("Local LLM tool result: {}", &result[..result.len().min(200)]);
+                    let result = tools::execute_tool(&call.name, &args_str, db, google_auth).await;
+                    log::info!(
+                        "Local LLM tool result: {}",
+                        &result[..result.len().min(200)]
+                    );
 
                     // Add tool results to messages and continue the loop
                     local_messages.push(LocalMessage {
@@ -463,7 +465,10 @@ pub async fn send_local(
             for tc in &tool_calls_vec {
                 let is_duplicate = executed_tools.contains(&tc.function.name);
                 if is_duplicate {
-                    log::info!("Local LLM skipping duplicate tool call: {}", tc.function.name);
+                    log::info!(
+                        "Local LLM skipping duplicate tool call: {}",
+                        tc.function.name
+                    );
                     local_messages.push(LocalMessage {
                         role: "tool".into(),
                         content: Some(
@@ -498,7 +503,10 @@ pub async fn send_local(
                 let result =
                     tools::execute_tool(&tc.function.name, &tc.function.arguments, db, google_auth)
                         .await;
-                log::info!("Local LLM tool result: {}", &result[..result.len().min(200)]);
+                log::info!(
+                    "Local LLM tool result: {}",
+                    &result[..result.len().min(200)]
+                );
                 local_messages.push(LocalMessage {
                     role: "tool".into(),
                     content: Some(result),

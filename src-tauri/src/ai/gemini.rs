@@ -17,20 +17,30 @@ struct GeminiContent {
     parts: Vec<GeminiPart>,
 }
 
-#[derive(Serialize, Deserialize, Clone, Debug)]
-#[serde(untagged)]
-enum GeminiPart {
-    Text {
-        text: String,
-    },
-    FunctionCall {
-        #[serde(rename = "functionCall")]
-        function_call: FunctionCallData,
-    },
-    FunctionResponse {
-        #[serde(rename = "functionResponse")]
-        function_response: FunctionResponseData,
-    },
+#[derive(Serialize, Deserialize, Clone, Debug, Default)]
+struct GeminiPart {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    text: Option<String>,
+    #[serde(
+        rename = "functionCall",
+        default,
+        skip_serializing_if = "Option::is_none"
+    )]
+    function_call: Option<FunctionCallData>,
+    #[serde(
+        rename = "functionResponse",
+        default,
+        skip_serializing_if = "Option::is_none"
+    )]
+    function_response: Option<FunctionResponseData>,
+    #[serde(
+        rename = "thoughtSignature",
+        default,
+        skip_serializing_if = "Option::is_none"
+    )]
+    thought_signature: Option<String>,
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    thought: bool,
 }
 
 #[derive(Serialize, Deserialize, Clone, Debug)]
@@ -61,14 +71,7 @@ struct Candidate {
 
 #[derive(Deserialize, Debug)]
 struct CandidateContent {
-    parts: Option<Vec<ResponsePart>>,
-}
-
-#[derive(Deserialize, Debug)]
-struct ResponsePart {
-    text: Option<String>,
-    #[serde(rename = "functionCall")]
-    function_call: Option<FunctionCallData>,
+    parts: Option<Vec<GeminiPart>>,
 }
 
 pub async fn send(
@@ -92,13 +95,17 @@ pub async fn send(
             let gemini_role = if role == "assistant" { "model" } else { &role };
             GeminiContent {
                 role: gemini_role.to_string(),
-                parts: vec![GeminiPart::Text { text: content }],
+                parts: vec![GeminiPart {
+                    text: Some(content),
+                    ..Default::default()
+                }],
             }
         })
         .collect();
 
+    let system_prompt = tools::build_system_prompt(db);
     let system_instruction = json!({
-        "parts": [{"text": tools::SYSTEM_PROMPT}]
+        "parts": [{"text": system_prompt}]
     });
 
     let max_iterations = 5;
@@ -134,10 +141,13 @@ pub async fn send(
         let mut stream = response.bytes_stream();
         let mut buffer = String::new();
         let mut text_parts: Vec<String> = Vec::new();
-        let mut function_calls: Vec<FunctionCallData> = Vec::new();
+        let mut function_call_parts: Vec<GeminiPart> = Vec::new();
         let mut announced_tools: HashSet<String> = HashSet::new();
         let mut response_started = false;
         let mut finish_reason: Option<String> = None;
+        let mut event_count: usize = 0;
+        let mut total_bytes: usize = 0;
+        let mut first_chunk_sample: Option<String> = None;
 
         while let Some(chunk_result) = stream.next().await {
             let chunk = match chunk_result {
@@ -148,11 +158,20 @@ pub async fn send(
                 }
             };
 
-            buffer.push_str(&String::from_utf8_lossy(&chunk));
+            total_bytes += chunk.len();
+            let chunk_str = String::from_utf8_lossy(&chunk);
+            if first_chunk_sample.is_none() {
+                first_chunk_sample = Some(chunk_str.chars().take(400).collect());
+            }
+            buffer.push_str(&chunk_str);
 
-            while let Some(pos) = buffer.find("\n\n") {
+            while let Some((pos, delim_len)) = buffer
+                .find("\r\n\r\n")
+                .map(|p| (p, 4))
+                .or_else(|| buffer.find("\n\n").map(|p| (p, 2)))
+            {
                 let event_block = buffer[..pos].to_string();
-                buffer = buffer[pos + 2..].to_string();
+                buffer = buffer[pos + delim_len..].to_string();
 
                 let mut data_str = String::new();
                 for line in event_block.lines() {
@@ -167,6 +186,7 @@ pub async fn send(
                 if data_str.is_empty() {
                     continue;
                 }
+                event_count += 1;
 
                 let sse: StreamChunk = match serde_json::from_str(&data_str) {
                     Ok(c) => c,
@@ -226,7 +246,7 @@ pub async fn send(
                                                 json!({"tool_name": &fc.name}),
                                             );
                                         }
-                                        function_calls.push(fc.clone());
+                                        function_call_parts.push(part.clone());
                                     }
                                 }
                             }
@@ -236,16 +256,17 @@ pub async fn send(
             }
         }
 
-        if !function_calls.is_empty() {
+        if !function_call_parts.is_empty() {
             let mut assistant_parts: Vec<GeminiPart> = Vec::new();
             let full_text = text_parts.join("");
             if !full_text.is_empty() {
-                assistant_parts.push(GeminiPart::Text { text: full_text });
-            }
-            for fc in &function_calls {
-                assistant_parts.push(GeminiPart::FunctionCall {
-                    function_call: fc.clone(),
+                assistant_parts.push(GeminiPart {
+                    text: Some(full_text),
+                    ..Default::default()
                 });
+            }
+            for fc_part in &function_call_parts {
+                assistant_parts.push(fc_part.clone());
             }
             contents.push(GeminiContent {
                 role: "model".into(),
@@ -255,15 +276,20 @@ pub async fn send(
             let mut response_parts: Vec<GeminiPart> = Vec::new();
             let mut executed_tools: HashSet<String> = HashSet::new();
             let mut narrated = false;
-            for fc in &function_calls {
+            for fc_part in &function_call_parts {
+                let fc = match fc_part.function_call.as_ref() {
+                    Some(fc) => fc,
+                    None => continue,
+                };
                 let is_duplicate = executed_tools.contains(&fc.name);
                 if is_duplicate {
                     log::info!("JARVIS skipping duplicate tool call: {}", fc.name);
-                    response_parts.push(GeminiPart::FunctionResponse {
-                        function_response: FunctionResponseData {
+                    response_parts.push(GeminiPart {
+                        function_response: Some(FunctionResponseData {
                             name: fc.name.clone(),
                             response: json!({"result": "Skipped: already executed this tool in this batch."}),
-                        },
+                        }),
+                        ..Default::default()
                     });
                     continue;
                 }
@@ -287,11 +313,12 @@ pub async fn send(
                 }
                 let result = tools::execute_tool(&fc.name, &args_str, db, google_auth).await;
                 log::info!("JARVIS tool result: {}", &result[..result.len().min(200)]);
-                response_parts.push(GeminiPart::FunctionResponse {
-                    function_response: FunctionResponseData {
+                response_parts.push(GeminiPart {
+                    function_response: Some(FunctionResponseData {
                         name: fc.name.clone(),
                         response: json!({"result": result}),
-                    },
+                    }),
+                    ..Default::default()
                 });
             }
             contents.push(GeminiContent {
@@ -299,10 +326,6 @@ pub async fn send(
                 parts: response_parts,
             });
 
-            if finish_reason.as_deref() == Some("STOP") && !text_parts.is_empty() {
-                let _ = app_handle.emit("chat-token", json!({"token": "", "done": true}));
-                return Ok(text_parts.join(""));
-            }
             let _ = app_handle.emit(
                 "chat-status",
                 json!({
@@ -317,6 +340,15 @@ pub async fn send(
         if !text_parts.is_empty() {
             return Ok(text_parts.join(""));
         }
+        log::warn!(
+            "[gemini] empty response: model={} finish_reason={:?} function_calls={} events={} bytes={} first_chunk={:?}",
+            model,
+            finish_reason,
+            function_call_parts.len(),
+            event_count,
+            total_bytes,
+            first_chunk_sample
+        );
         return Ok(String::new());
     }
 

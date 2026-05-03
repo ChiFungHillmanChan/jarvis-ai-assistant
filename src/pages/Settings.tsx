@@ -155,7 +155,7 @@ export default function Settings() {
   async function handleAddToChain(providerType: string, endpointId?: string, modelId?: string) {
     const newEntry: ProviderChainEntry = {
       position: chain.length,
-      provider_type: providerType as "gemini" | "local",
+      provider_type: providerType as ProviderChainEntry["provider_type"],
       endpoint_id: endpointId,
       model_id: modelId,
       enabled: true,
@@ -402,6 +402,8 @@ export default function Settings() {
                 ? `Claude (${entry.model_id || "default"})`
                 : entry.provider_type === "openai"
                 ? `OpenAI (${entry.model_id || "default"})`
+                : entry.provider_type === "bedrock"
+                ? `Bedrock (${entry.model_id || "default"})`
                 : entry.provider_type;
               return (
                 <div key={i} style={{ display: "flex", alignItems: "center", gap: 6, marginBottom: 6, opacity: entry.enabled ? 1 : 0.4 }}>
@@ -421,9 +423,10 @@ export default function Settings() {
               <div style={{ color: "rgba(0, 180, 255, 0.3)", fontSize: 11, marginBottom: 8 }}>No providers configured. Add cloud or local providers below.</div>
             )}
 
-            <div style={{ display: "flex", gap: 6, marginTop: 8 }}>
+            <div style={{ display: "flex", gap: 6, marginTop: 8, flexWrap: "wrap" }}>
               <button onClick={() => handleAddToChain("gemini", undefined, "gemini-3-pro-preview")} style={styles.saveBtn}>+ Gemini Pro</button>
               <button onClick={() => handleAddToChain("gemini", undefined, "gemini-3-flash")} style={styles.saveBtn}>+ Gemini Flash</button>
+              <button onClick={() => handleAddToChain("bedrock", undefined, "anthropic.claude-sonnet-4-6")} style={styles.saveBtn}>+ Bedrock Claude</button>
             </div>
           </div>
 
@@ -442,6 +445,10 @@ export default function Settings() {
             <div className="label" style={styles.sectionTitle}>API KEYS</div>
             <div style={styles.hint}>Set in .env file at project root:</div>
             <code style={styles.code}>GEMINI_API_KEY</code>
+            <code style={styles.code}>AWS_ACCESS_KEY_ID</code>
+            <code style={styles.code}>AWS_SECRET_ACCESS_KEY</code>
+            <code style={styles.code}>AWS_BEDROCK_REGION</code>
+            <code style={styles.code}>AWS_BEDROCK_MODEL_ID</code>
           </div>
 
           <div className="panel" style={styles.panel}>

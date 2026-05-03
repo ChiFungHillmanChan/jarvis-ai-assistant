@@ -402,6 +402,41 @@ pub fn get_tool_definitions() -> Vec<Tool> {
                 "required": ["status_type", "data"]
             }),
         },
+        Tool {
+            name: "remember".into(),
+            description: "Save a durable fact about Hillman to persistent memory. Use when he tells you who he is, what he prefers, what he's working on, or anything worth recalling next time. Keep entries short and atomic (one fact each).".into(),
+            parameters: json!({
+                "type": "object",
+                "properties": {
+                    "content": { "type": "string", "description": "The fact to remember, written in third person (e.g. 'Prefers dark mode in all apps')." },
+                    "category": {
+                        "type": "string",
+                        "enum": ["identity", "preference", "project", "fact"],
+                        "description": "identity = who he is; preference = how he likes things; project = what he's working on; fact = anything else"
+                    }
+                },
+                "required": ["content", "category"]
+            }),
+        },
+        Tool {
+            name: "forget".into(),
+            description: "Remove a fact from persistent memory. Use when Hillman says to forget something, or when a stored fact is no longer true. Pass either the exact id from list_memories OR a keyword that uniquely matches the entry.".into(),
+            parameters: json!({
+                "type": "object",
+                "properties": {
+                    "id": { "type": "integer", "description": "Memory entry id (preferred when known)" },
+                    "keyword": { "type": "string", "description": "Substring that matches the entry to remove" }
+                }
+            }),
+        },
+        Tool {
+            name: "list_memories".into(),
+            description: "List all stored persistent memory entries about Hillman. Use sparingly -- most facts are already in your system prompt. Only call when Hillman explicitly asks 'what do you remember about me'.".into(),
+            parameters: json!({
+                "type": "object",
+                "properties": {}
+            }),
+        },
     ]
 }
 
@@ -414,23 +449,33 @@ pub struct Tool {
 
 /// Format tools for OpenAI API format
 pub fn to_openai_format(tools: &[Tool]) -> Vec<serde_json::Value> {
-    tools.iter().map(|t| json!({
-        "type": "function",
-        "function": {
-            "name": t.name,
-            "description": t.description,
-            "parameters": t.parameters,
-        }
-    })).collect()
+    tools
+        .iter()
+        .map(|t| {
+            json!({
+                "type": "function",
+                "function": {
+                    "name": t.name,
+                    "description": t.description,
+                    "parameters": t.parameters,
+                }
+            })
+        })
+        .collect()
 }
 
 /// Format tools for Claude API format
 pub fn to_claude_format(tools: &[Tool]) -> Vec<serde_json::Value> {
-    tools.iter().map(|t| json!({
-        "name": t.name,
-        "description": t.description,
-        "input_schema": t.parameters,
-    })).collect()
+    tools
+        .iter()
+        .map(|t| {
+            json!({
+                "name": t.name,
+                "description": t.description,
+                "input_schema": t.parameters,
+            })
+        })
+        .collect()
 }
 
 /// Format tools for Gemini API format (functionDeclarations)
@@ -485,6 +530,9 @@ pub fn tool_status_label(name: &str) -> &'static str {
         "read_file" => "Reading file...",
         "render_chart" => "Rendering chart...",
         "render_status" => "Showing result...",
+        "remember" => "Saving to memory...",
+        "forget" => "Removing from memory...",
+        "list_memories" => "Checking memory...",
         _ => "Processing...",
     }
 }
@@ -526,7 +574,90 @@ pub fn tool_voice_narration(name: &str) -> &'static str {
         "read_file" => "Reading that file.",
         "render_chart" => "Putting together a chart for you.",
         "render_status" => "Here are the results.",
+        "remember" => "Noting that down.",
+        "forget" => "Letting that one go.",
+        "list_memories" => "Pulling up what I remember.",
         _ => "Working on it.",
+    }
+}
+
+fn execute_memory_tool(name: &str, args: &serde_json::Value, db: &crate::db::Database) -> String {
+    let conn = match db.conn.lock() {
+        Ok(c) => c,
+        Err(e) => return format!("Memory error: {}", e),
+    };
+    match name {
+        "remember" => {
+            let content = match args["content"].as_str() {
+                Some(s) if !s.trim().is_empty() => s.trim(),
+                _ => return "Nothing to remember -- content was empty.".to_string(),
+            };
+            let category = args["category"].as_str().unwrap_or("fact");
+            let category = match category {
+                "identity" | "preference" | "project" | "fact" => category,
+                _ => "fact",
+            };
+            match conn.execute(
+                "INSERT INTO user_memory (content, category) VALUES (?1, ?2)",
+                rusqlite::params![content, category],
+            ) {
+                Ok(_) => format!(
+                    "Remembered ({}): {}",
+                    category,
+                    &content.chars().take(120).collect::<String>()
+                ),
+                Err(e) => format!("Memory error: {}", e),
+            }
+        }
+        "forget" => {
+            if let Some(id) = args["id"].as_i64() {
+                match conn.execute(
+                    "DELETE FROM user_memory WHERE id = ?1",
+                    rusqlite::params![id],
+                ) {
+                    Ok(0) => format!("No memory entry with id {}.", id),
+                    Ok(_) => format!("Forgot memory entry #{}.", id),
+                    Err(e) => format!("Memory error: {}", e),
+                }
+            } else if let Some(keyword) = args["keyword"].as_str() {
+                let pattern = format!("%{}%", keyword);
+                match conn.execute(
+                    "DELETE FROM user_memory WHERE content LIKE ?1",
+                    rusqlite::params![pattern],
+                ) {
+                    Ok(0) => format!("No memory entry matched '{}'.", keyword),
+                    Ok(n) => format!(
+                        "Forgot {} memory entr{}.",
+                        n,
+                        if n == 1 { "y" } else { "ies" }
+                    ),
+                    Err(e) => format!("Memory error: {}", e),
+                }
+            } else {
+                "Need either an id or a keyword to forget.".to_string()
+            }
+        }
+        "list_memories" => {
+            let mut stmt = match conn
+                .prepare("SELECT id, category, content FROM user_memory ORDER BY category, id")
+            {
+                Ok(s) => s,
+                Err(e) => return format!("Memory error: {}", e),
+            };
+            let rows: Vec<(i64, String, String)> =
+                match stmt.query_map([], |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?))) {
+                    Ok(r) => r.filter_map(|x| x.ok()).collect(),
+                    Err(e) => return format!("Memory error: {}", e),
+                };
+            if rows.is_empty() {
+                return "No memories stored yet.".to_string();
+            }
+            rows.iter()
+                .map(|(id, cat, content)| format!("#{} [{}] {}", id, cat, content))
+                .collect::<Vec<_>>()
+                .join("\n")
+        }
+        _ => format!("Unknown memory tool: {}", name),
     }
 }
 
@@ -553,15 +684,18 @@ async fn execute_gmail_tool(
             if messages.is_empty() {
                 return Ok("No emails found matching that query.".to_string());
             }
-            let lines: Vec<String> = messages.iter().map(|m| {
-                format!(
-                    "ID: {} | From: {} | Subject: {} | Date: {}",
-                    m.id,
-                    m.sender.as_deref().unwrap_or("unknown"),
-                    m.subject.as_deref().unwrap_or("(no subject)"),
-                    m.received_at.as_deref().unwrap_or("unknown"),
-                )
-            }).collect();
+            let lines: Vec<String> = messages
+                .iter()
+                .map(|m| {
+                    format!(
+                        "ID: {} | From: {} | Subject: {} | Date: {}",
+                        m.id,
+                        m.sender.as_deref().unwrap_or("unknown"),
+                        m.subject.as_deref().unwrap_or("(no subject)"),
+                        m.received_at.as_deref().unwrap_or("unknown"),
+                    )
+                })
+                .collect();
             Ok(lines.join("\n"))
         }
         "read_email" => {
@@ -608,25 +742,34 @@ async fn execute_calendar_tool(
         "list_events" => {
             let now = chrono::Local::now();
             let tz_offset = now.format("%:z").to_string();
-            let date_from = args["date_from"].as_str().map(|s| s.to_string()).unwrap_or_else(|| {
-                now.format("%Y-%m-%d").to_string()
-            });
-            let date_to = args["date_to"].as_str().map(|s| s.to_string()).unwrap_or_else(|| {
-                (now + chrono::TimeDelta::days(7)).format("%Y-%m-%d").to_string()
-            });
+            let date_from = args["date_from"]
+                .as_str()
+                .map(|s| s.to_string())
+                .unwrap_or_else(|| now.format("%Y-%m-%d").to_string());
+            let date_to = args["date_to"]
+                .as_str()
+                .map(|s| s.to_string())
+                .unwrap_or_else(|| {
+                    (now + chrono::TimeDelta::days(7))
+                        .format("%Y-%m-%d")
+                        .to_string()
+                });
             let time_min = format!("{}T00:00:00{}", date_from, tz_offset);
             let time_max = format!("{}T23:59:59{}", date_to, tz_offset);
             let events = calendar::fetch_events(token, &time_min, &time_max).await?;
             if events.is_empty() {
                 return Ok("No events found in the specified date range.".to_string());
             }
-            let lines: Vec<String> = events.iter().map(|e| {
-                let loc = e.location.as_deref().unwrap_or("none");
-                format!(
-                    "ID: {} | {} | {} - {} | Location: {}",
-                    e.id, e.summary, e.start_time, e.end_time, loc,
-                )
-            }).collect();
+            let lines: Vec<String> = events
+                .iter()
+                .map(|e| {
+                    let loc = e.location.as_deref().unwrap_or("none");
+                    format!(
+                        "ID: {} | {} | {} - {} | Location: {}",
+                        e.id, e.summary, e.start_time, e.end_time, loc,
+                    )
+                })
+                .collect();
             Ok(lines.join("\n"))
         }
         "create_event" => {
@@ -636,7 +779,9 @@ async fn execute_calendar_tool(
             let location = args["location"].as_str();
             let description = args["description"].as_str();
             let attendees = args["attendees"].as_str();
-            let result = calendar::create_event(token, title, start, end, description, location, attendees).await?;
+            let result =
+                calendar::create_event(token, title, start, end, description, location, attendees)
+                    .await?;
             Ok(format!("Event created: {}", result))
         }
         "update_event" => {
@@ -646,7 +791,9 @@ async fn execute_calendar_tool(
             let end = args["end"].as_str();
             let location = args["location"].as_str();
             let description = args["description"].as_str();
-            let result = calendar::update_event(token, event_id, title, start, end, location, description).await?;
+            let result =
+                calendar::update_event(token, event_id, title, start, end, location, description)
+                    .await?;
             Ok(format!("Event updated: {}", result))
         }
         "delete_event" => {
@@ -670,11 +817,18 @@ async fn execute_obsidian_tool(
             if notes.is_empty() {
                 return Ok("No notes found matching that query.".to_string());
             }
-            let lines: Vec<String> = notes.iter().map(|n| {
-                let snippet = n.content.as_deref().unwrap_or("");
-                let truncated = if snippet.len() > 100 { &snippet[..100] } else { snippet };
-                format!("{} | {}", n.path, truncated)
-            }).collect();
+            let lines: Vec<String> = notes
+                .iter()
+                .map(|n| {
+                    let snippet = n.content.as_deref().unwrap_or("");
+                    let truncated = if snippet.len() > 100 {
+                        &snippet[..100]
+                    } else {
+                        snippet
+                    };
+                    format!("{} | {}", n.path, truncated)
+                })
+                .collect();
             Ok(lines.join("\n"))
         }
         "read_note" => {
@@ -699,16 +853,19 @@ async fn execute_github_tool(
             if items.is_empty() {
                 return Ok("No GitHub items found matching that filter.".to_string());
             }
-            let lines: Vec<String> = items.iter().map(|i| {
-                format!(
-                    "[{}] {} - {} ({}) | {}",
-                    i.item_type,
-                    i.repo,
-                    i.title,
-                    i.state,
-                    i.url.as_deref().unwrap_or("none"),
-                )
-            }).collect();
+            let lines: Vec<String> = items
+                .iter()
+                .map(|i| {
+                    format!(
+                        "[{}] {} - {} ({}) | {}",
+                        i.item_type,
+                        i.repo,
+                        i.title,
+                        i.state,
+                        i.url.as_deref().unwrap_or("none"),
+                    )
+                })
+                .collect();
             Ok(lines.join("\n"))
         }
         "create_github_issue" => {
@@ -740,15 +897,18 @@ async fn execute_notion_tool(
             if pages.is_empty() {
                 return Ok("No Notion pages found matching that query.".to_string());
             }
-            let lines: Vec<String> = pages.iter().map(|p| {
-                format!(
-                    "ID: {} | {} | Edited: {} | URL: {}",
-                    p.notion_id,
-                    p.title,
-                    p.last_edited.as_deref().unwrap_or("unknown"),
-                    p.url.as_deref().unwrap_or("none"),
-                )
-            }).collect();
+            let lines: Vec<String> = pages
+                .iter()
+                .map(|p| {
+                    format!(
+                        "ID: {} | {} | Edited: {} | URL: {}",
+                        p.notion_id,
+                        p.title,
+                        p.last_edited.as_deref().unwrap_or("unknown"),
+                        p.url.as_deref().unwrap_or("none"),
+                    )
+                })
+                .collect();
             Ok(lines.join("\n"))
         }
         "read_notion_page" => {
@@ -770,25 +930,38 @@ async fn google_token_or_err(
     google_auth: &std::sync::Arc<crate::auth::google::GoogleAuth>,
     service: &str,
 ) -> Result<String, String> {
-    google_auth.ensure_access_token().await
-        .map_err(|_| format!("Google account not connected. Please connect in Settings to use {} tools.", service))
+    google_auth.ensure_access_token().await.map_err(|_| {
+        format!(
+            "Google account not connected. Please connect in Settings to use {} tools.",
+            service
+        )
+    })
 }
 
 async fn refresh_google_token(
     google_auth: &std::sync::Arc<crate::auth::google::GoogleAuth>,
 ) -> Result<String, String> {
-    google_auth.refresh_access_token().await
-        .map_err(|e| format!("Google token refresh failed: {}. Please re-connect in Settings.", e))?;
-    google_auth.get_access_token()
+    google_auth.refresh_access_token().await.map_err(|e| {
+        format!(
+            "Google token refresh failed: {}. Please re-connect in Settings.",
+            e
+        )
+    })?;
+    google_auth
+        .get_access_token()
         .ok_or_else(|| "Token refresh succeeded but no token available.".to_string())
 }
 
 fn get_preference(db: &crate::db::Database, key: &str) -> Option<String> {
-    db.conn.lock().ok()?.query_row(
-        "SELECT value FROM user_preferences WHERE key = ?1",
-        rusqlite::params![key],
-        |row| row.get::<_, String>(0),
-    ).ok()
+    db.conn
+        .lock()
+        .ok()?
+        .query_row(
+            "SELECT value FROM user_preferences WHERE key = ?1",
+            rusqlite::params![key],
+            |row| row.get::<_, String>(0),
+        )
+        .ok()
 }
 
 /// Execute a tool by name with JSON arguments. Shared by both APIs.
@@ -954,15 +1127,20 @@ pub async fn execute_tool(
             let data = &args["data"];
             format!("[STATUS:{}|{}]", status_type, serde_json::to_string(data).unwrap_or_default())
         }
+        "remember" => execute_memory_tool("remember", &args, db),
+        "forget" => execute_memory_tool("forget", &args, db),
+        "list_memories" => execute_memory_tool("list_memories", &args, db),
         _ => format!("Unknown tool: {}", name),
     };
     truncate_result(result)
 }
 
-pub const SYSTEM_PROMPT: &str = "You are JARVIS, a personal AI assistant on macOS for Hillman Chan (GitHub: ChiFungHillmanChan). You speak exactly like JARVIS from Iron Man -- polished, witty, and effortlessly conversational.
+pub const SYSTEM_PROMPT_BASE: &str = "You are JARVIS, a personal AI assistant on macOS for Hillman Chan (GitHub: ChiFungHillmanChan). You speak exactly like JARVIS from Iron Man -- polished, witty, and effortlessly conversational.
 
 CRITICAL -- YOUR OUTPUT IS SPOKEN ALOUD:
 Everything you write is read by text-to-speech. You are having a live voice conversation. Write EXACTLY as you would speak. Follow these rules strictly:
+
+Address Hillman by his first name when it feels natural (\"Right away, Hillman\", \"Of course, Hillman\"), never as \"sir\" or \"Mr. Chan\".
 
 Speech style:
 - Short, flowing sentences. Never more than one or two clauses per sentence.
@@ -975,7 +1153,7 @@ Speech style:
 - Keep responses concise. Two to four sentences for simple answers. A short paragraph for complex ones.
 
 Before tool calls:
-- ALWAYS say something before calling a tool. One short sentence: \"On it.\", \"Let me check.\", \"Right away, sir.\"
+- ALWAYS say something before calling a tool. One short sentence: \"On it.\", \"Let me check.\", \"Right away, Hillman.\"
 - NEVER call a tool silently.
 - When chaining tools, bridge naturally: \"Got it. Now let me also check your calendar.\"
 
@@ -984,15 +1162,63 @@ After tool calls:
 - Bad: \"Here are your upcoming events: - 9:00 AM: Standup - 11:00 AM: Design Review\"
 - Good: \"You've got two meetings today. Standup at 9, then a design review at 11.\"
 
-You have 34 tools to control the computer and manage integrations. Use them proactively when the user asks you to do something.
+When a tool fails:
+- Respond conversationally and apologetically. Briefly name what failed, without quoting raw error text.
+- Examples: \"Apologies, Hillman -- I can't reach Gmail right now.\" / \"That one's not going through, Hillman. Looks like Notion isn't connected.\" / \"Hmm, the calendar's unreachable at the moment.\"
+- Do NOT dump raw error messages, stack traces, or technical details.
+
+You have 37 tools to control the computer, manage integrations, and maintain your own memory of Hillman. Use them proactively.
 
 IMPORTANT -- be minimal with tool calls:
 - Open ONE URL per request, not multiple. If the user says \"play happy music\", open one good link, not four search pages.
 - Never call the same tool more than once in a single response unless the user explicitly asked for multiple items.
 - Prefer quality over quantity. One precise action beats four scattered ones.
 
-Capabilities: system control (apps, URLs, files, commands, clipboard, screenshots, windows, volume, notifications, processes), Gmail, Google Calendar, Notion, GitHub, Obsidian, tasks, file I/O, and data visualization (render inline charts and status cards in chat using render_chart and render_status tools -- use these when presenting data, stats, or confirming completed actions).
+MEMORY:
+You have persistent memory about Hillman. When he tells you durable facts about himself (his role, preferences, projects, people he works with, things he always/never wants), call the `remember` tool so you recall next time. When he explicitly says \"forget X\" or a stored fact becomes wrong, call `forget`. Use memory naturally -- do not recite all stored facts unprompted. Typical categories: identity (who he is), preference (how he likes things done), project (what he's working on), fact (anything else worth remembering).
+
+Capabilities: system control (apps, URLs, files, commands, clipboard, screenshots, windows, volume, notifications, processes), Gmail, Google Calendar, Notion, GitHub, Obsidian, tasks, file I/O, persistent memory (remember/forget/list_memories), and data visualization (render inline charts and status cards in chat using render_chart and render_status tools -- use these when presenting data, stats, or confirming completed actions).
 
 You can chain different tools in sequence. Think step by step -- gather information first, then act. Always confirm destructive actions before executing them.
 
 Always attempt tool calls when the user asks about their data. Do not preemptively refuse -- if authentication is missing, the tool will return a clear error. Never say \"I don't have access\" without trying first.";
+
+/// Build system prompt with current user_memory injected. Called per request.
+pub fn build_system_prompt(db: &crate::db::Database) -> String {
+    let memory_block = load_memory_block(db);
+    if memory_block.is_empty() {
+        SYSTEM_PROMPT_BASE.to_string()
+    } else {
+        format!("{}\n\n{}", SYSTEM_PROMPT_BASE, memory_block)
+    }
+}
+
+fn load_memory_block(db: &crate::db::Database) -> String {
+    let conn = match db.conn.lock() {
+        Ok(c) => c,
+        Err(_) => return String::new(),
+    };
+    let mut stmt =
+        match conn.prepare("SELECT category, content FROM user_memory ORDER BY category, id") {
+            Ok(s) => s,
+            Err(_) => return String::new(),
+        };
+    let rows = match stmt.query_map([], |row| {
+        Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+    }) {
+        Ok(r) => r,
+        Err(_) => return String::new(),
+    };
+    let entries: Vec<(String, String)> = rows.filter_map(|r| r.ok()).collect();
+    if entries.is_empty() {
+        return String::new();
+    }
+    let mut out = String::from("KNOWN FACTS ABOUT HILLMAN (your persistent memory):\n");
+    for (cat, content) in entries {
+        out.push_str(&format!("- [{}] {}\n", cat, content));
+    }
+    out
+}
+
+/// Back-compat alias used elsewhere in the codebase.
+pub const SYSTEM_PROMPT: &str = SYSTEM_PROMPT_BASE;

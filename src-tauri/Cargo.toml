@@ -44,6 +44,9 @@ sysinfo = "0.33"
 async-trait = "0.1"
 tokio-util = "0.7"
 cocoa = "0.26"
+aws-config = "1.8.16"
+aws-sdk-bedrockruntime = "1.130.0"
+aws-smithy-types = "1.4.7"
 
 [profile.release]
 opt-level = 3

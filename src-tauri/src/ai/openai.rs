@@ -89,7 +89,7 @@ pub async fn send(
 
     let mut openai_messages: Vec<OpenAIMessage> = vec![OpenAIMessage {
         role: "system".into(),
-        content: Some(tools::SYSTEM_PROMPT.into()),
+        content: Some(tools::build_system_prompt(db)),
         tool_calls: None,
         tool_call_id: None,
     }];
