@@ -52,23 +52,21 @@ echo "==> 5/10 Stapling notarization ticket"
 xcrun stapler staple "${DMG_PATH}"
 xcrun stapler validate "${DMG_PATH}"
 
-echo "==> 6/10 Verifying Tauri updater signature"
-# tauri.conf.json sets createUpdaterArtifacts: true, so `tauri build` (step 2) automatically
-# runs `tauri signer sign --private-key-path <TAURI_SIGNING_PRIVATE_KEY>` and writes a .sig file
-# next to the .dmg. The `tauri signer sign` CLI writes its output to <FILE>.sig; there is no
-# stdout redirect required (confirmed via `tauri signer sign --help`: no --output flag exists).
-SIG_PATH="${DMG_PATH}.sig"
-if [ ! -f "${SIG_PATH}" ]; then
-  echo "WARNING: ${SIG_PATH} was not produced by the build step."
-  echo "Running explicit signer now. This can happen if TAURI_SIGNING_PRIVATE_KEY was not"
-  echo "set in the environment when the build ran."
-  npx tauri signer sign \
-    --private-key-path "${TAURI_SIGNING_PRIVATE_KEY}" \
-    "${DMG_PATH}"
-  # The signer writes ${DMG_PATH}.sig automatically; no stdout redirect needed.
-fi
-[ -f "${SIG_PATH}" ] || { echo "ERROR: Updater signature file still missing: ${SIG_PATH}"; exit 1; }
-echo "Updater signature present: ${SIG_PATH}"
+echo "==> 6/10 Verifying Tauri updater artifact + signature"
+# Tauri's updater payload is a .app.tar.gz tarball, NOT the DMG. With
+# createUpdaterArtifacts: true, `tauri build` produces:
+#   bundle/macos/JARVIS.app.tar.gz       <- updater downloads this
+#   bundle/macos/JARVIS.app.tar.gz.sig   <- ed25519 signature over the tarball
+#   bundle/dmg/JARVIS_<ver>_aarch64.dmg  <- first-time install (website /download)
+# The DMG is for first install via the website. The updater fetches the tarball
+# referenced in latest.json. Both must ship to S3.
+APP_BUNDLE_DIR="$(dirname "${APP_PATH}")"
+TARBALL_PATH="${APP_BUNDLE_DIR}/JARVIS.app.tar.gz"
+SIG_PATH="${TARBALL_PATH}.sig"
+[ -f "${TARBALL_PATH}" ] || { echo "ERROR: Updater tarball missing: ${TARBALL_PATH}"; exit 1; }
+[ -f "${SIG_PATH}" ] || { echo "ERROR: Updater signature missing: ${SIG_PATH} (createUpdaterArtifacts must be true and TAURI_SIGNING_PRIVATE_KEY must be set during build)"; exit 1; }
+echo "Updater tarball: ${TARBALL_PATH}"
+echo "Updater signature: ${SIG_PATH}"
 
 echo "==> 7/10 Local install confirmation"
 open "${DMG_PATH}"
@@ -80,14 +78,20 @@ if [[ "${ANSWER}" != "y" && "${ANSWER}" != "Y" ]]; then
   exit 1
 fi
 
-echo "==> 8/10 Uploading DMG + signature to s3://${BUCKET}"
+echo "==> 8/10 Uploading DMG + updater tarball + signature to s3://${BUCKET}"
 DMG_NAME="$(basename "${DMG_PATH}")"
+# Use a versioned tarball name so old + new tarballs can coexist while users update.
+TARBALL_NAME="JARVIS_${VERSION}_aarch64.app.tar.gz"
 aws s3 cp "${DMG_PATH}" "s3://${BUCKET}/${DMG_NAME}" --profile "${PROFILE}"
-aws s3 cp "${SIG_PATH}" "s3://${BUCKET}/${DMG_NAME}.sig" --profile "${PROFILE}"
+aws s3 cp "${TARBALL_PATH}" "s3://${BUCKET}/${TARBALL_NAME}" --profile "${PROFILE}"
+aws s3 cp "${SIG_PATH}" "s3://${BUCKET}/${TARBALL_NAME}.sig" --profile "${PROFILE}"
 
 echo "==> 9/10 Generating latest.json"
 PUB_DATE="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
-DOWNLOAD_URL="https://${BUCKET}.s3.${REGION}.amazonaws.com/${DMG_NAME}"
+# DMG_PUBLIC_URL is shown by the website /download page for first-time install.
+DMG_PUBLIC_URL="https://${BUCKET}.s3.${REGION}.amazonaws.com/${DMG_NAME}"
+# UPDATER_URL is what the in-app updater downloads (must be the .app.tar.gz, not the DMG).
+UPDATER_URL="https://${BUCKET}.s3.${REGION}.amazonaws.com/${TARBALL_NAME}"
 NOTES_FILE="${REPO_ROOT}/RELEASE_NOTES.md"
 NOTES="$([ -f "${NOTES_FILE}" ] && cat "${NOTES_FILE}" || echo "Routine update.")"
 SIG_CONTENT="$(cat "${SIG_PATH}")"
@@ -99,7 +103,7 @@ cat > /tmp/latest.json <<MANIFEST
   "platforms": {
     "darwin-aarch64": {
       "signature": $(jq -Rs . <<< "${SIG_CONTENT}"),
-      "url": "${DOWNLOAD_URL}"
+      "url": "${UPDATER_URL}"
     }
   }
 }
@@ -114,5 +118,6 @@ aws s3 cp /tmp/latest.json "s3://${BUCKET}/latest.json" \
 
 echo ""
 echo "Released v${VERSION}"
-echo "Manifest: https://${BUCKET}.s3.${REGION}.amazonaws.com/latest.json"
-echo "Download: ${DOWNLOAD_URL}"
+echo "Manifest:        https://${BUCKET}.s3.${REGION}.amazonaws.com/latest.json"
+echo "Download (DMG):  ${DMG_PUBLIC_URL}"
+echo "Updater payload: ${UPDATER_URL}"

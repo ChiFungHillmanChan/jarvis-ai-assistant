@@ -29,7 +29,7 @@ aws s3api put-public-access-block \
   --public-access-block-configuration BlockPublicAcls=true,IgnorePublicAcls=true,BlockPublicPolicy=false,RestrictPublicBuckets=false \
   --profile "${PROFILE}"
 
-# 3. Public-read bucket policy on .dmg / .sig / latest.json
+# 3. Public-read bucket policy on .dmg / .app.tar.gz / .sig / latest.json
 cat > /tmp/jarvis-bucket-policy.json <<POLICY
 {
   "Version": "2012-10-17",
@@ -42,6 +42,8 @@ cat > /tmp/jarvis-bucket-policy.json <<POLICY
       "Resource": [
         "arn:aws:s3:::${BUCKET}/*.dmg",
         "arn:aws:s3:::${BUCKET}/*.dmg.sig",
+        "arn:aws:s3:::${BUCKET}/*.app.tar.gz",
+        "arn:aws:s3:::${BUCKET}/*.app.tar.gz.sig",
         "arn:aws:s3:::${BUCKET}/latest.json"
       ]
     }
