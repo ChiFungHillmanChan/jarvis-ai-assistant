@@ -10,10 +10,14 @@ BUCKET="${2:-jarvis-releases}"
 REGION="ap-east-1"
 PROFILE="${AWS_PROFILE:-jarvis-release-bot}"
 
-# Required env (release-only secrets):
-: "${APPLE_ID:?APPLE_ID env var required}"
-: "${APPLE_TEAM_ID:?APPLE_TEAM_ID env var required}"
-: "${APPLE_APP_PASSWORD:?APPLE_APP_PASSWORD env var required}"
+# Required env / Keychain entries:
+# - TAURI_SIGNING_PRIVATE_KEY: path to the ed25519 private key for the Tauri updater
+#   (defaults to ~/.tauri/jarvis.key in this project's setup; set in ~/.zshrc).
+# - Apple notarization credentials are stored in the macOS Keychain under the
+#   profile name in NOTARYTOOL_PROFILE (default: jarvis-notarytool). Create with:
+#     xcrun notarytool store-credentials jarvis-notarytool \
+#       --apple-id <id> --team-id <team> --password <app-specific-password>
+NOTARYTOOL_PROFILE="${NOTARYTOOL_PROFILE:-jarvis-notarytool}"
 : "${TAURI_SIGNING_PRIVATE_KEY:?TAURI_SIGNING_PRIVATE_KEY env var required}"
 
 REPO_ROOT="$(cd "$(dirname "$0")/.." && pwd)"
@@ -39,11 +43,9 @@ codesign --deep --force --options runtime --timestamp \
   "${APP_PATH}"
 codesign --verify --verbose "${APP_PATH}"
 
-echo "==> 4/10 Submitting to Apple notarytool (5-15 min)"
+echo "==> 4/10 Submitting to Apple notarytool (5-15 min) using keychain profile ${NOTARYTOOL_PROFILE}"
 xcrun notarytool submit "${DMG_PATH}" \
-  --apple-id "${APPLE_ID}" \
-  --team-id "${APPLE_TEAM_ID}" \
-  --password "${APPLE_APP_PASSWORD}" \
+  --keychain-profile "${NOTARYTOOL_PROFILE}" \
   --wait
 
 echo "==> 5/10 Stapling notarization ticket"
