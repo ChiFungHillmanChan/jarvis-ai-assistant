@@ -27,8 +27,8 @@ fn read_onboarding_complete(db: &Arc<Database>) -> Result<bool, String> {
 fn write_onboarding_complete(db: &Arc<Database>) -> Result<(), String> {
     let conn = db.conn.lock().map_err(|e| e.to_string())?;
     conn.execute(
-        "INSERT INTO user_preferences (key, value) VALUES ('onboarding_complete', 'true')
-         ON CONFLICT(key) DO UPDATE SET value='true'",
+        "INSERT INTO user_preferences (key, value, updated_at) VALUES ('onboarding_complete', 'true', datetime('now'))
+         ON CONFLICT(key) DO UPDATE SET value='true', updated_at=datetime('now')",
         [],
     )
     .map_err(|e| e.to_string())?;
@@ -45,7 +45,7 @@ mod tests {
     fn make_db_with_pref(value: Option<&str>) -> Arc<Database> {
         let conn = Connection::open_in_memory().unwrap();
         conn.execute_batch(
-            "CREATE TABLE user_preferences (key TEXT PRIMARY KEY, value TEXT NOT NULL);",
+            "CREATE TABLE user_preferences (key TEXT PRIMARY KEY, value TEXT NOT NULL, updated_at TEXT NOT NULL DEFAULT (datetime('now')));",
         )
         .unwrap();
         if let Some(v) = value {
@@ -81,6 +81,14 @@ mod tests {
     #[test]
     fn mark_sets_value_to_true() {
         let db = make_db_with_pref(Some("false"));
+        write_onboarding_complete(&db).unwrap();
+        assert!(read_onboarding_complete(&db).unwrap());
+    }
+
+    #[test]
+    fn mark_is_idempotent() {
+        let db = make_db_with_pref(Some("false"));
+        write_onboarding_complete(&db).unwrap();
         write_onboarding_complete(&db).unwrap();
         assert!(read_onboarding_complete(&db).unwrap());
     }
