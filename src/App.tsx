@@ -7,6 +7,7 @@ import ChatPanel from "./components/ChatPanel";
 import CommandBar from "./components/CommandBar";
 import Dashboard from "./pages/Dashboard";
 import OnboardingWizard from "./pages/OnboardingWizard";
+import UpdatePrompt from "./components/UpdatePrompt";
 import { checkOnboardingStatus } from "./lib/commands";
 const Settings = lazy(() => import("./pages/Settings"));
 const CronDashboard = lazy(() => import("./pages/CronDashboard"));
@@ -327,12 +328,19 @@ export default function App() {
   }
 
   if (!onboardingDone) {
-    return <OnboardingWizard onComplete={() => setOnboardingDone(true)} />;
+    return (
+      <>
+        <UpdatePrompt />
+        <OnboardingWizard onComplete={() => setOnboardingDone(true)} />
+      </>
+    );
   }
 
   return (
-    <ChatProvider>
-    <div style={styles.root}>
+    <>
+      <UpdatePrompt />
+      <ChatProvider>
+      <div style={styles.root}>
       <JarvisScene activityLevel={activityLevel} assistantPhase={assistantPhase} ttsAmplitudeRef={ttsAmplitudeRef} micAmplitudeRef={micAmplitudeRef} pendingToolCall={pendingToolCall} onToolCallConsumed={handleToolCallConsumed} />
 
       <div style={styles.uiLayer}>
@@ -377,7 +385,8 @@ export default function App() {
         <ModelPullToast progress={modelPullProgress} visible={activeView !== "settings" && modelPullProgress !== null} />
       </div>
     </div>
-    </ChatProvider>
+      </ChatProvider>
+    </>
   );
 }
 
