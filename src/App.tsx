@@ -6,6 +6,8 @@ import Sidebar from "./components/Sidebar";
 import ChatPanel from "./components/ChatPanel";
 import CommandBar from "./components/CommandBar";
 import Dashboard from "./pages/Dashboard";
+import OnboardingWizard from "./pages/OnboardingWizard";
+import { checkOnboardingStatus } from "./lib/commands";
 const Settings = lazy(() => import("./pages/Settings"));
 const CronDashboard = lazy(() => import("./pages/CronDashboard"));
 const EmailPage = lazy(() => import("./pages/EmailPage"));
@@ -86,6 +88,7 @@ export default function App() {
   const micAmplitudeRef = useRef(0);
   const [pendingToolCall, setPendingToolCall] = useState<string | null>(null);
   const [modelPullProgress, setModelPullProgress] = useState<ModelPullProgress | null>(null);
+  const [onboardingDone, setOnboardingDone] = useState<boolean | null>(null);
   const prevView = useRef(activeView);
   const hudResetTimer = useRef<number | null>(null);
   const aiStateRef = useRef(aiState);
@@ -93,6 +96,12 @@ export default function App() {
   const hudTokenBuffer = useRef("");
   const hudThinkingBuffer = useRef("");
   const hudRafId = useRef<number | null>(null);
+
+  useEffect(() => {
+    checkOnboardingStatus()
+      .then(setOnboardingDone)
+      .catch(() => setOnboardingDone(true)); // fail-open: never trap user behind a broken check
+  }, []);
 
   const toggleChat = useCallback(() => { setChatOpen((prev) => !prev); }, []);
   const closeChat = useCallback(() => { setChatOpen(false); }, []);
@@ -311,6 +320,14 @@ export default function App() {
       case "settings": return <Settings />;
       case "home": default: return <Dashboard />;
     }
+  }
+
+  if (onboardingDone === null) {
+    return <div style={{ padding: 32, color: "rgba(0,180,255,0.5)" }}>Loading...</div>;
+  }
+
+  if (!onboardingDone) {
+    return <OnboardingWizard onComplete={() => setOnboardingDone(true)} />;
   }
 
   return (
