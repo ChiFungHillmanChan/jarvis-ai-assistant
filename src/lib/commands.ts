@@ -146,3 +146,12 @@ export async function getRecommendedModels(endpointId?: string): Promise<Recomme
 // Model Pull
 export async function pullModel(endpointId: string, modelName: string): Promise<void> { return invoke("pull_model", { endpoint_id: endpointId, model_name: modelName }); }
 export async function cancelModelPull(): Promise<void> { return invoke("cancel_model_pull"); }
+
+// Onboarding
+export async function checkOnboardingStatus(): Promise<boolean> {
+  return invoke<boolean>("check_onboarding_status");
+}
+
+export async function markOnboardingComplete(): Promise<void> {
+  return invoke<void>("mark_onboarding_complete");
+}
