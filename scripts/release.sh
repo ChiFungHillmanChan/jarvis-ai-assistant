@@ -52,7 +52,7 @@ xcrun stapler validate "${DMG_PATH}"
 
 echo "==> 6/10 Verifying Tauri updater signature"
 # tauri.conf.json sets createUpdaterArtifacts: true, so `tauri build` (step 2) automatically
-# runs `tauri signer sign --private-key <TAURI_SIGNING_PRIVATE_KEY>` and writes a .sig file
+# runs `tauri signer sign --private-key-path <TAURI_SIGNING_PRIVATE_KEY>` and writes a .sig file
 # next to the .dmg. The `tauri signer sign` CLI writes its output to <FILE>.sig; there is no
 # stdout redirect required (confirmed via `tauri signer sign --help`: no --output flag exists).
 SIG_PATH="${DMG_PATH}.sig"
@@ -61,7 +61,7 @@ if [ ! -f "${SIG_PATH}" ]; then
   echo "Running explicit signer now. This can happen if TAURI_SIGNING_PRIVATE_KEY was not"
   echo "set in the environment when the build ran."
   npx tauri signer sign \
-    --private-key "${TAURI_SIGNING_PRIVATE_KEY}" \
+    --private-key-path "${TAURI_SIGNING_PRIVATE_KEY}" \
     "${DMG_PATH}"
   # The signer writes ${DMG_PATH}.sig automatically; no stdout redirect needed.
 fi
