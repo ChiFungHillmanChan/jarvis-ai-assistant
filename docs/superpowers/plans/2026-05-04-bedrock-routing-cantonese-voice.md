@@ -46,11 +46,16 @@ These must be done **before** Task A1. They are not code work; they are environm
 - [ ] **0.4 Verify AWS Bedrock Singapore CRIS access**
 
   ```bash
-  aws bedrock list-foundation-models --region ap-southeast-1 \
-    --query 'modelSummaries[?contains(modelId, `claude-haiku-4-5`)].[modelId]' \
+  aws bedrock list-inference-profiles --region ap-southeast-1 \
+    --query 'inferenceProfileSummaries[?contains(inferenceProfileId, `claude-haiku-4-5`) || contains(inferenceProfileId, `claude-sonnet-4-6`) || contains(inferenceProfileId, `nova-micro`)].[inferenceProfileId,status]' \
     --output text
   ```
-  Expected: `apac.anthropic.claude-haiku-4-5-v1:0` listed. If not, request model access in AWS Console → Bedrock → Model access → ap-southeast-1.
+  Expected three rows ACTIVE:
+  - `apac.amazon.nova-micro-v1:0`
+  - `global.anthropic.claude-haiku-4-5-20251001-v1:0`
+  - `global.anthropic.claude-sonnet-4-6`
+
+  (Anthropic Claude 4.5/4.6 are only available as `global.` CRIS profiles — verified May 2026.) If any are missing, request model access in AWS Console → Bedrock → Model access → ap-southeast-1.
 
 ---
 
@@ -84,9 +89,9 @@ These must be done **before** Task A1. They are not code work; they are environm
   );
 
   INSERT OR IGNORE INTO workload_routing (workload, model_id) VALUES
-      ('volume',  'amazon.nova-micro-v1:0'),
-      ('tools',   'apac.anthropic.claude-haiku-4-5-v1:0'),
-      ('premium', 'apac.anthropic.claude-sonnet-4-6-v1:0');
+      ('volume',  'apac.amazon.nova-micro-v1:0'),
+      ('tools',   'global.anthropic.claude-haiku-4-5-20251001-v1:0'),
+      ('premium', 'global.anthropic.claude-sonnet-4-6');
 
   -- Inference metrics for cache-hit verification (R4 mitigation)
   CREATE TABLE IF NOT EXISTS inference_metrics (
@@ -618,9 +623,9 @@ These must be done **before** Task A1. They are not code work; they are environm
       async fn defaults_match_v11_seed() {
           let db = fresh_db().await;
           let r = WorkloadRouter::new(db);
-          assert_eq!(r.model_for(Workload::Volume).await.unwrap(), "amazon.nova-micro-v1:0");
-          assert_eq!(r.model_for(Workload::Tools).await.unwrap(), "apac.anthropic.claude-haiku-4-5-v1:0");
-          assert_eq!(r.model_for(Workload::Premium).await.unwrap(), "apac.anthropic.claude-sonnet-4-6-v1:0");
+          assert_eq!(r.model_for(Workload::Volume).await.unwrap(), "apac.amazon.nova-micro-v1:0");
+          assert_eq!(r.model_for(Workload::Tools).await.unwrap(), "global.anthropic.claude-haiku-4-5-20251001-v1:0");
+          assert_eq!(r.model_for(Workload::Premium).await.unwrap(), "global.anthropic.claude-sonnet-4-6");
       }
   }
   ```
@@ -716,7 +721,7 @@ The existing `bedrock::send` (276 LOC) uses a shape that's been working but does
           };
           let resp = send_simple(
               &creds,
-              "apac.anthropic.claude-haiku-4-5-v1:0",
+              "global.anthropic.claude-haiku-4-5-20251001-v1:0",
               "Say only the word: pong",
           ).await.unwrap();
           assert!(resp.to_lowercase().contains("pong"), "got: {resp}");
@@ -892,7 +897,7 @@ The existing `bedrock::send` (276 LOC) uses a shape that's been working but does
   ```bash
   cd src-tauri && cargo test --lib ai::bedrock::tests::haiku_singapore_round_trip -- --ignored --nocapture
   ```
-  Expected: PASS, output contains "pong". If `apac.anthropic.claude-haiku-4-5-v1:0` not available, model access not granted — go back to Step 0.4.
+  Expected: PASS, output contains "pong". If `global.anthropic.claude-haiku-4-5-20251001-v1:0` not available, model access not granted — go back to Step 0.4.
 
 - [ ] **A6.8 Manual smoke: chat through the app**
 
@@ -1239,7 +1244,7 @@ Before moving to Phase B, verify all of the following:
 - [ ] `cargo test --lib` passes (all unit tests).
 - [ ] App launches with no migration errors. `aws_credentials`, `workload_routing`, `inference_metrics`, `daily_briefings` tables exist.
 - [ ] Settings → AWS Bedrock saves credentials. Keychain entry verified via `security find-generic-password -s com.jarvis.aws`.
-- [ ] Chat with Bedrock provider returns text. `inference_metrics` row shows model `apac.anthropic.claude-haiku-4-5-v1:0`.
+- [ ] Chat with Bedrock provider returns text. `inference_metrics` row shows model `global.anthropic.claude-haiku-4-5-20251001-v1:0`.
 - [ ] Send 3 chat messages — second and third have `cache_read_tokens > 0` (≥80% of `input_tokens` ideally).
 - [ ] `Think harder` toggle on chat composer — verify next message routes to Sonnet 4.6 (check metrics).
 - [ ] Manual `trigger_daily_briefing` produces an English markdown summary + JSON actions in `daily_briefings`.

@@ -30,7 +30,7 @@
 
 | Decision | Choice | Reason |
 |---|---|---|
-| Bedrock region | **Singapore CRIS profile** (`apac.anthropic.claude-haiku-4-5-v1:0`) | ~70ms RTT from HK vs ~220ms from us-east-1. Voice UX needs sub-100ms first-token. Singapore CRIS confirmed available for Claude Opus 4.6 / Sonnet 4.6 / Haiku 4.5 since Feb 2026. |
+| Bedrock endpoint | **`ap-southeast-1` (Singapore) endpoint, model IDs use Cross-Region Inference profiles** | SDK calls go to ap-southeast-1 (~70ms RTT from HK vs ~220ms from us-east-1). Anthropic Claude 4.5/4.6 are only available as `global.` CRIS profiles (verified May 2026 via `aws bedrock list-inference-profiles --region ap-southeast-1`). Nova Micro available as `apac.` regional profile. |
 | Default workload model | **Claude Haiku 4.5** (Bedrock Singapore CRIS) | Only sub-US$5-output-token model that reliably handles 4–6 step tool chains. Strong Cantonese quality (Anthropic frontier-tier). |
 | Volume model | **Amazon Nova Micro** (US$0.035 in / US$0.14 out per 1M tokens) | ~28× cheaper than Haiku for English email triage / classification. Production-ready for extractive tasks. NOT used for Cantonese (quality drop). |
 | Premium model | **Claude Sonnet 4.6** | Reserved for explicit user "think harder" flag (new UI toggle) or after Haiku tool-use fails twice in a row. |
@@ -142,9 +142,9 @@ CREATE TABLE IF NOT EXISTS workload_routing (
 
 -- Defaults
 INSERT OR IGNORE INTO workload_routing (workload, model_id) VALUES
-    ('volume',  'amazon.nova-micro-v1:0'),
-    ('tools',   'apac.anthropic.claude-haiku-4-5-v1:0'),
-    ('premium', 'apac.anthropic.claude-sonnet-4-6-v1:0');
+    ('volume',  'apac.amazon.nova-micro-v1:0'),
+    ('tools',   'global.anthropic.claude-haiku-4-5-20251001-v1:0'),
+    ('premium', 'global.anthropic.claude-sonnet-4-6');
 ```
 
 ### 4.2 V12: Voice language preferences
