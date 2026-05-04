@@ -1,4 +1,4 @@
-use crate::ai::AiRouter;
+use crate::ai::{AiRouter, Workload};
 use crate::assistant::context::DayContext;
 use crate::db::Database;
 use std::sync::Arc;
@@ -21,7 +21,7 @@ pub async fn generate_briefing(
     let prompt = context.to_prompt();
 
     let messages = vec![("user".to_string(), prompt)];
-    let briefing_text = router.send(messages, db, google_auth, app_handle, None).await?;
+    let briefing_text = router.send(messages, db, google_auth, app_handle, None, Workload::Tools).await?;
 
     Ok(BriefingResult {
         greeting: context.greeting,

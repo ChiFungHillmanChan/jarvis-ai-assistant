@@ -1,4 +1,4 @@
-use crate::ai::AiRouter;
+use crate::ai::{AiRouter, Workload};
 use crate::db::Database;
 use crate::voice::tts::StreamingTts;
 use crate::voice::VoiceEngine;
@@ -183,7 +183,7 @@ pub async fn send_message(
                     }),
                 );
                 let search_response = match router
-                    .send(search_messages, &db, &google_auth, &app_handle, None)
+                    .send(search_messages, &db, &google_auth, &app_handle, None, Workload::Tools)
                     .await
                 {
                     Ok(r) => r,
@@ -308,7 +308,7 @@ pub async fn send_message(
     let tts_tx = Some(streaming_tts.sender());
 
     let response_text = match router
-        .send(messages, &db, &google_auth, &app_handle, tts_tx)
+        .send(messages, &db, &google_auth, &app_handle, tts_tx, Workload::Tools)
         .await
     {
         Ok(r) => r,

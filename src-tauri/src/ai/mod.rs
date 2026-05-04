@@ -3,7 +3,9 @@ pub mod claude;
 pub mod gemini;
 pub mod local;
 pub mod openai;
+pub mod routing;
 pub mod tools;
+pub use routing::Workload;
 
 use crate::voice::tts::TtsCommand;
 use local::backend::{BackendType, LocalEndpoint};
@@ -187,6 +189,7 @@ impl AiRouter {
         google_auth: &std::sync::Arc<crate::auth::google::GoogleAuth>,
         app_handle: &tauri::AppHandle,
         tts_tx: Option<tokio::sync::mpsc::Sender<TtsCommand>>,
+        workload: Workload,
     ) -> Result<String, String> {
         let mut errors: Vec<String> = Vec::new();
 
@@ -278,6 +281,10 @@ impl AiRouter {
                         .model_id
                         .clone()
                         .unwrap_or_else(bedrock::default_model);
+                    // TODO(A6): replace this stub with a WorkloadRouter lookup once `db` is
+                    // available as Arc<Database> in this call path.  For now we just log the
+                    // workload tier so the signal is visible in the log output.
+                    log::info!("Bedrock workload={:?} (model routing wired in A6)", workload);
                     bedrock::send(
                         &model,
                         messages.clone(),

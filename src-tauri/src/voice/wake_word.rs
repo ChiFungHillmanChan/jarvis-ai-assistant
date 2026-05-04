@@ -1,4 +1,4 @@
-use crate::ai::AiRouter;
+use crate::ai::{AiRouter, Workload};
 use crate::auth::google::GoogleAuth;
 use crate::db::Database;
 use crate::voice::model_manager;
@@ -363,7 +363,7 @@ async fn handle_wake_word_detection(
     };
     let tts_tx = Some(streaming_tts.sender());
 
-    let response = match router.send(messages, &db, &auth, &app_handle, tts_tx).await {
+    let response = match router.send(messages, &db, &auth, &app_handle, tts_tx, Workload::Tools).await {
         Ok(r) => r,
         Err(e) => {
             let _ = app_handle.emit("chat-voice-active", json!({"active": false}));

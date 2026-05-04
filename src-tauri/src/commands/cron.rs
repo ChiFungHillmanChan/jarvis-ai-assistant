@@ -1,4 +1,4 @@
-use crate::ai::AiRouter;
+use crate::ai::{AiRouter, Workload};
 use crate::db::Database;
 use serde::Serialize;
 use std::sync::{Arc, Mutex};
@@ -48,7 +48,7 @@ pub async fn create_custom_cron(
 
     let messages = vec![("user".to_string(), prompt)];
     let router = router.lock().map_err(|e| e.to_string())?.clone();
-    let response = router.send(messages, &db, &google_auth, &app_handle, None).await?;
+    let response = router.send(messages, &db, &google_auth, &app_handle, None, Workload::Tools).await?;
 
     // Parse AI response as JSON
     let parsed: serde_json::Value = serde_json::from_str(response.trim().trim_start_matches("```json").trim_end_matches("```").trim())

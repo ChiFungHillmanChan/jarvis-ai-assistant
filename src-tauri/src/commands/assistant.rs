@@ -1,4 +1,4 @@
-use crate::ai::AiRouter;
+use crate::ai::{AiRouter, Workload};
 use crate::assistant::{briefing, context::DayContext};
 use crate::auth::google::GoogleAuth;
 use crate::db::Database;
@@ -108,7 +108,7 @@ pub async fn ask_jarvis(
 
     let messages = vec![("user".to_string(), prompt)];
     let router = router.lock().map_err(|e| e.to_string())?.clone();
-    router.send(messages, &db, &google_auth, &app_handle, None).await
+    router.send(messages, &db, &google_auth, &app_handle, None, Workload::Tools).await
 }
 
 #[tauri::command]
@@ -154,5 +154,5 @@ pub async fn search_conversations(
 
     let messages = vec![("user".to_string(), prompt)];
     let router = router.lock().map_err(|e| e.to_string())?.clone();
-    router.send(messages, &db, &google_auth, &app_handle, None).await
+    router.send(messages, &db, &google_auth, &app_handle, None, Workload::Tools).await
 }
