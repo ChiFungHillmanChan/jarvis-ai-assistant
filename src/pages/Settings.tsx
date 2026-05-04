@@ -30,6 +30,8 @@ import {
   clearAwsCredentials,
   getPreference,
   setPreference,
+  enableOfflineVoice,
+  checkCosyvoiceBinary,
 } from "../lib/commands";
 import { listen } from "@tauri-apps/api/event";
 import type { VoiceSettings, WakeWordStatus, VoiceState, LocalEndpoint, LocalModel, ProviderChainEntry, EndpointHealth } from "../lib/types";
@@ -70,6 +72,11 @@ export default function Settings() {
   const [sttLanguage, setSttLanguage] = useState("auto");
   const [ttsContentProvider, setTtsContentProvider] = useState("sin-ji");
   const [minimaxKey, setMinimaxKey] = useState("");
+
+  // CosyVoice 2 offline voice
+  const [offlineEnabled, setOfflineEnabled] = useState(false);
+  const [downloadProgress, setDownloadProgress] = useState<string | null>(null);
+  const [hasCosyBinary, setHasCosyBinary] = useState<boolean | null>(null);
 
   // Local LLM state
   const [endpoints, setEndpoints] = useState<LocalEndpoint[]>([]);
@@ -122,10 +129,37 @@ export default function Settings() {
         setSttLanguage(await getPreference("stt_language"));
         setTtsContentProvider(await getPreference("tts_content_provider"));
         setMinimaxKey(await getPreference("minimax_api_key"));
+        setOfflineEnabled((await getPreference("tts_offline_mode")) === "1");
+        setHasCosyBinary(await checkCosyvoiceBinary());
       } catch (e) {
         console.error("load language prefs:", e);
       }
     })();
+  }, []);
+
+  useEffect(() => {
+    let unlisten: (() => void) | null = null;
+    (async () => {
+      const { listen } = await import("@tauri-apps/api/event");
+      const u = await listen<unknown>("cosyvoice_progress", (e) => {
+        const p = e.payload;
+        if (p === "Complete") {
+          setDownloadProgress("Download complete");
+        } else if (p !== null && typeof p === "object" && "File" in p) {
+          const f = (p as { File: { name: string; bytes_done: number } }).File;
+          setDownloadProgress(`Downloading ${f.name} (${f.bytes_done} bytes)`);
+        } else if (p !== null && typeof p === "object" && "Failed" in p) {
+          const err = (p as { Failed: { error: string } }).Failed;
+          setDownloadProgress(`Failed: ${err.error}`);
+        } else {
+          setDownloadProgress(JSON.stringify(p));
+        }
+      });
+      unlisten = u;
+    })();
+    return () => {
+      if (unlisten) unlisten();
+    };
   }, []);
 
   async function refreshWakeStatus() {
@@ -630,6 +664,48 @@ export default function Settings() {
                 }}
                 placeholder="Required for tts_content_provider = minimax"
               />
+            </div>
+
+            <div style={{ marginTop: 12 }}>
+              <label style={{ display: "flex", gap: 8, alignItems: "center" }}>
+                <input
+                  type="checkbox"
+                  style={styles.radio}
+                  checked={offlineEnabled}
+                  onChange={async (e) => {
+                    if (e.target.checked) {
+                      if (!hasCosyBinary) {
+                        alert(
+                          "speech-swift CosyVoice binary not found in PATH. " +
+                          "Install via `swift build -c release` from https://github.com/soniqo/speech-swift, " +
+                          "then either add it to PATH as `cosyvoice` or set $JARVIS_COSYVOICE_BIN, and re-toggle."
+                        );
+                        return;
+                      }
+                      setDownloadProgress("Starting model download...");
+                      await enableOfflineVoice();
+                      setOfflineEnabled(true);
+                    } else {
+                      await setPreference("tts_offline_mode", "0");
+                      setOfflineEnabled(false);
+                      setDownloadProgress(null);
+                    }
+                  }}
+                />
+                <span style={styles.optionLabel}>
+                  Offline voice mode (downloads ~500MB CosyVoice 2 model on first enable)
+                </span>
+              </label>
+              {hasCosyBinary === false && (
+                <div style={{ ...styles.hint, color: "rgba(255,180,80,0.85)", marginTop: 4 }}>
+                  Note: speech-swift CosyVoice CLI not detected. Build and install it before enabling.
+                </div>
+              )}
+              {downloadProgress && (
+                <div style={{ ...styles.hint, marginTop: 4, fontFamily: "var(--font-mono)" }}>
+                  {downloadProgress}
+                </div>
+              )}
             </div>
           </div>
         </div>

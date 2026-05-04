@@ -178,3 +178,11 @@ export async function getPreference(key: string): Promise<string> {
 export async function setPreference(key: string, value: string): Promise<void> {
   await invoke("set_user_preference", { key, value });
 }
+
+// CosyVoice 2 offline TTS
+export async function enableOfflineVoice(): Promise<void> {
+  await invoke("enable_offline_voice");
+}
+export async function checkCosyvoiceBinary(): Promise<boolean> {
+  return await invoke<boolean>("check_cosyvoice_binary");
+}

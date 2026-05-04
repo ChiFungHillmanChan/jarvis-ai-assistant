@@ -345,6 +345,8 @@ pub fn run() {
             commands::model_pull::pull_model,
             commands::model_pull::cancel_model_pull,
             commands::scheduler::trigger_daily_briefing,
+            commands::voice_setup::enable_offline_voice,
+            commands::voice_setup::check_cosyvoice_binary,
         ])
         .run(tauri::generate_context!())
         .expect("error while running JARVIS");

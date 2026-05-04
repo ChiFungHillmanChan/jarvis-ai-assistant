@@ -1,5 +1,7 @@
 pub mod audio_router;
 pub mod commands;
+pub mod cosyvoice;
+pub mod cosyvoice_download;
 pub mod minimax;
 pub mod model_manager;
 pub mod transcribe;

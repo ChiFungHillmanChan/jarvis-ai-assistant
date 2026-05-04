@@ -18,3 +18,4 @@ pub mod settings;
 pub mod system;
 pub mod system_check;
 pub mod tasks;
+pub mod voice_setup;
