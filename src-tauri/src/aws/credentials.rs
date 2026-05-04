@@ -1,4 +1,5 @@
 use crate::db::Database;
+use crate::security::keychain::KeychainStore;
 use std::sync::Arc;
 
 const KEYCHAIN_SERVICE: &str = "com.jarvis.aws";
@@ -22,27 +23,30 @@ impl AwsCredsRepo {
     }
 
     pub async fn save(&self, c: &AwsCredentials) -> Result<(), String> {
-        use crate::security::keychain::KeychainStore;
-        KeychainStore::put(KEYCHAIN_SERVICE, KEYCHAIN_ACCOUNT, &c.secret_access_key)?;
+        // SQL row first; if it fails we never wrote a secret to the keychain that
+        // points at no row. Keychain second; if it fails the SQL row reflects
+        // intent and the user can re-save to repair.
         let now = chrono::Utc::now().timestamp();
-        let conn = self.db.conn.lock().unwrap();
-        conn.execute(
-            "INSERT INTO aws_credentials (id, access_key_id, secret_access_key, region, inference_profile, updated_at)
-             VALUES (1, ?1, '__keychain__', ?2, ?3, ?4)
-             ON CONFLICT(id) DO UPDATE SET
-               access_key_id = excluded.access_key_id,
-               region = excluded.region,
-               inference_profile = excluded.inference_profile,
-               updated_at = excluded.updated_at",
-            rusqlite::params![&c.access_key_id, &c.region, &c.inference_profile, now],
-        )
-        .map_err(|e| format!("db save: {e}"))?;
+        {
+            let conn = self.db.conn.lock().map_err(|e| format!("db lock: {e}"))?;
+            conn.execute(
+                "INSERT INTO aws_credentials (id, access_key_id, secret_access_key, region, inference_profile, updated_at)
+                 VALUES (1, ?1, '__keychain__', ?2, ?3, ?4)
+                 ON CONFLICT(id) DO UPDATE SET
+                   access_key_id = excluded.access_key_id,
+                   region = excluded.region,
+                   inference_profile = excluded.inference_profile,
+                   updated_at = excluded.updated_at",
+                rusqlite::params![&c.access_key_id, &c.region, &c.inference_profile, now],
+            )
+            .map_err(|e| format!("db save: {e}"))?;
+        }
+        KeychainStore::put(KEYCHAIN_SERVICE, KEYCHAIN_ACCOUNT, &c.secret_access_key)?;
         Ok(())
     }
 
     pub async fn load(&self) -> Result<Option<AwsCredentials>, String> {
-        use crate::security::keychain::KeychainStore;
-        let conn = self.db.conn.lock().unwrap();
+        let conn = self.db.conn.lock().map_err(|e| format!("db lock: {e}"))?;
         let row = conn.query_row(
             "SELECT access_key_id, region, inference_profile FROM aws_credentials WHERE id = 1",
             [],
@@ -71,9 +75,8 @@ impl AwsCredsRepo {
     }
 
     pub async fn clear(&self) -> Result<(), String> {
-        use crate::security::keychain::KeychainStore;
         {
-            let conn = self.db.conn.lock().unwrap();
+            let conn = self.db.conn.lock().map_err(|e| format!("db lock: {e}"))?;
             conn.execute("DELETE FROM aws_credentials WHERE id = 1", [])
                 .map_err(|e| format!("db clear: {e}"))?;
         }
