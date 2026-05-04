@@ -5,6 +5,7 @@ pub mod commands;
 pub mod db;
 pub mod integrations;
 pub mod scheduler;
+pub mod security;
 pub mod system;
 pub mod tray;
 pub mod voice;
