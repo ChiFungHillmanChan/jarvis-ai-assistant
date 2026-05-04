@@ -119,7 +119,8 @@ pub async fn send(
             .unwrap_or_else(|| "User".to_string())
     };
     let today_iso = chrono::Local::now().format("%Y-%m-%d").to_string();
-    let dynamic = tools::build_dynamic_suffix(&user_name, &today_iso, "en", db);
+    let language = tools::read_language_pref(db);
+    let dynamic = tools::build_dynamic_suffix(&user_name, &today_iso, &language, db);
     let system_blocks = build_system_blocks(static_prompt, dynamic)?;
     let inference_config = InferenceConfiguration::builder()
         .max_tokens(4096)

@@ -1,5 +1,18 @@
 use serde_json::json;
 
+pub fn read_language_pref(db: &crate::db::Database) -> String {
+    let conn = match db.conn.lock() {
+        Ok(c) => c,
+        Err(_) => return "en".into(),
+    };
+    conn.query_row(
+        "SELECT value FROM user_preferences WHERE key = 'language'",
+        [],
+        |r| r.get::<_, String>(0),
+    )
+    .unwrap_or_else(|_| "en".into())
+}
+
 /// Shared tool definitions used by Gemini, OpenAI-compatible local, and legacy APIs
 pub fn get_tool_definitions() -> Vec<Tool> {
     vec![
