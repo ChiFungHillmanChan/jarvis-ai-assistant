@@ -31,3 +31,31 @@ pub fn update_setting(db: State<Arc<Database>>, key: String, value: String) -> R
     ).map_err(|e| e.to_string())?;
     Ok(())
 }
+
+#[tauri::command]
+pub async fn get_user_preference(
+    key: String,
+    db: tauri::State<'_, std::sync::Arc<crate::db::Database>>,
+) -> Result<String, String> {
+    let conn = db.conn.lock().map_err(|e| format!("db lock: {e}"))?;
+    conn.query_row(
+        "SELECT value FROM user_preferences WHERE key = ?1",
+        rusqlite::params![key],
+        |r| r.get::<_, String>(0),
+    ).map_err(|e| format!("db read: {e}"))
+}
+
+#[tauri::command]
+pub async fn set_user_preference(
+    key: String,
+    value: String,
+    db: tauri::State<'_, std::sync::Arc<crate::db::Database>>,
+) -> Result<(), String> {
+    let conn = db.conn.lock().map_err(|e| format!("db lock: {e}"))?;
+    conn.execute(
+        "INSERT INTO user_preferences (key, value) VALUES (?1, ?2)
+         ON CONFLICT(key) DO UPDATE SET value = ?2, updated_at = datetime('now')",
+        rusqlite::params![key, value],
+    ).map_err(|e| format!("db write: {e}"))?;
+    Ok(())
+}

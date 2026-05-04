@@ -170,3 +170,11 @@ export async function getAwsCredentialsStatus(): Promise<AwsCredsStatus> {
 export async function clearAwsCredentials(): Promise<void> {
   await invoke("clear_aws_credentials");
 }
+
+// User preferences (single key/value)
+export async function getPreference(key: string): Promise<string> {
+  return await invoke<string>("get_user_preference", { key });
+}
+export async function setPreference(key: string, value: string): Promise<void> {
+  await invoke("set_user_preference", { key, value });
+}

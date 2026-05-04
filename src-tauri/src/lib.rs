@@ -253,6 +253,8 @@ pub fn run() {
             commands::tasks::update_task,
             commands::settings::get_settings,
             commands::settings::update_setting,
+            commands::settings::get_user_preference,
+            commands::settings::set_user_preference,
             commands::chat::send_message,
             commands::chat::get_conversations,
             commands::chat::clear_conversations,

@@ -28,6 +28,8 @@ import {
   setAwsCredentials,
   getAwsCredentialsStatus,
   clearAwsCredentials,
+  getPreference,
+  setPreference,
 } from "../lib/commands";
 import { listen } from "@tauri-apps/api/event";
 import type { VoiceSettings, WakeWordStatus, VoiceState, LocalEndpoint, LocalModel, ProviderChainEntry, EndpointHealth } from "../lib/types";
@@ -62,6 +64,11 @@ export default function Settings() {
   const [awsStatus, setAwsStatus] = useState<{ configured: boolean; region: string | null }>(
     { configured: false, region: null }
   );
+
+  // Language & Voice prefs
+  const [language, setLanguage] = useState("en");
+  const [sttLanguage, setSttLanguage] = useState("auto");
+  const [ttsContentProvider, setTtsContentProvider] = useState("sin-ji");
 
   // Local LLM state
   const [endpoints, setEndpoints] = useState<LocalEndpoint[]>([]);
@@ -105,6 +112,18 @@ export default function Settings() {
 
   useEffect(() => {
     getAwsCredentialsStatus().then(setAwsStatus).catch(console.error);
+  }, []);
+
+  useEffect(() => {
+    (async () => {
+      try {
+        setLanguage(await getPreference("language"));
+        setSttLanguage(await getPreference("stt_language"));
+        setTtsContentProvider(await getPreference("tts_content_provider"));
+      } catch (e) {
+        console.error("load language prefs:", e);
+      }
+    })();
   }, []);
 
   async function refreshWakeStatus() {
@@ -548,6 +567,52 @@ export default function Settings() {
                   setAwsStatus({ configured: false, region: null });
                 }} style={{ ...styles.saveBtn, borderColor: "rgba(255, 100, 100, 0.3)", color: "rgba(255, 100, 100, 0.7)" }}>CLEAR</button>
               )}
+            </div>
+          </div>
+
+          <div className="panel" style={styles.panel}>
+            <div className="label" style={styles.sectionTitle}>LANGUAGE &amp; VOICE</div>
+            <div style={styles.hint}>
+              Controls the assistant's response language, speech-to-text language, and which TTS provider voices Cantonese content.
+            </div>
+
+            <div style={{ marginTop: 12 }}>
+              <div style={{ color: "rgba(0, 180, 255, 0.5)", fontSize: 10, marginBottom: 4 }}>Response language</div>
+              <select value={language} style={styles.select} onChange={async (e) => {
+                const v = e.target.value;
+                setLanguage(v);
+                await setPreference("language", v);
+              }}>
+                <option value="en">English</option>
+                <option value="yue">廣東話 (Cantonese)</option>
+                <option value="bilingual">Bilingual (code-mix)</option>
+              </select>
+            </div>
+
+            <div style={{ marginTop: 12 }}>
+              <div style={{ color: "rgba(0, 180, 255, 0.5)", fontSize: 10, marginBottom: 4 }}>Speech-to-text language</div>
+              <select value={sttLanguage} style={styles.select} onChange={async (e) => {
+                const v = e.target.value;
+                setSttLanguage(v);
+                await setPreference("stt_language", v);
+              }}>
+                <option value="auto">Auto-detect</option>
+                <option value="en">English</option>
+                <option value="yue">廣東話</option>
+              </select>
+            </div>
+
+            <div style={{ marginTop: 12 }}>
+              <div style={{ color: "rgba(0, 180, 255, 0.5)", fontSize: 10, marginBottom: 4 }}>Cantonese content voice</div>
+              <select value={ttsContentProvider} style={styles.select} onChange={async (e) => {
+                const v = e.target.value;
+                setTtsContentProvider(v);
+                await setPreference("tts_content_provider", v);
+              }}>
+                <option value="sin-ji">Sin-ji (free, local, basic)</option>
+                <option value="minimax">MiniMax Speech-02-HD (cloud, best quality)</option>
+                <option value="cosyvoice">CosyVoice 2 (offline, requires download)</option>
+              </select>
             </div>
           </div>
         </div>
