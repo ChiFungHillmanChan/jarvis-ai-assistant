@@ -1,5 +1,6 @@
 pub mod audio_router;
 pub mod commands;
+pub mod minimax;
 pub mod model_manager;
 pub mod transcribe;
 pub mod tts;

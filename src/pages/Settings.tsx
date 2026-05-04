@@ -69,6 +69,7 @@ export default function Settings() {
   const [language, setLanguage] = useState("en");
   const [sttLanguage, setSttLanguage] = useState("auto");
   const [ttsContentProvider, setTtsContentProvider] = useState("sin-ji");
+  const [minimaxKey, setMinimaxKey] = useState("");
 
   // Local LLM state
   const [endpoints, setEndpoints] = useState<LocalEndpoint[]>([]);
@@ -120,6 +121,7 @@ export default function Settings() {
         setLanguage(await getPreference("language"));
         setSttLanguage(await getPreference("stt_language"));
         setTtsContentProvider(await getPreference("tts_content_provider"));
+        setMinimaxKey(await getPreference("minimax_api_key"));
       } catch (e) {
         console.error("load language prefs:", e);
       }
@@ -613,6 +615,21 @@ export default function Settings() {
                 <option value="minimax">MiniMax Speech-02-HD (cloud, best quality)</option>
                 <option value="cosyvoice">CosyVoice 2 (offline, requires download)</option>
               </select>
+            </div>
+
+            <div style={{ marginTop: 12 }}>
+              <div style={{ color: "rgba(0, 180, 255, 0.5)", fontSize: 10, marginBottom: 4 }}>MiniMax API key (for cloud Cantonese voice)</div>
+              <input
+                type="password"
+                value={minimaxKey}
+                style={styles.tokenInput}
+                onChange={async (e) => {
+                  const v = e.target.value;
+                  setMinimaxKey(v);
+                  await setPreference("minimax_api_key", v);
+                }}
+                placeholder="Required for tts_content_provider = minimax"
+              />
             </div>
           </div>
         </div>
