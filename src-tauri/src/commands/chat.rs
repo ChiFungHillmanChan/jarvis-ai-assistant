@@ -23,7 +23,12 @@ pub async fn send_message(
     google_auth: State<'_, Arc<crate::auth::google::GoogleAuth>>,
     engine: State<'_, Arc<VoiceEngine>>,
     message: String,
+    workload: Option<String>,
 ) -> Result<ChatMessage, String> {
+    let selected_workload = match workload.as_deref() {
+        Some("premium") => Workload::Premium,
+        _ => Workload::Tools,
+    };
     // Cancel any in-progress TTS and emit thinking state FIRST for immediate UI feedback
     {
         let tts = engine.tts.lock().map_err(|e| e.to_string())?.clone();
@@ -308,7 +313,7 @@ pub async fn send_message(
     let tts_tx = Some(streaming_tts.sender());
 
     let response_text = match router
-        .send(messages, &db, &google_auth, &app_handle, tts_tx, Workload::Tools)
+        .send(messages, &db, &google_auth, &app_handle, tts_tx, selected_workload)
         .await
     {
         Ok(r) => r,

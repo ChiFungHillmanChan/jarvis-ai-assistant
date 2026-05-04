@@ -10,8 +10,8 @@ export async function createTask(title: string, description: string | null, dead
 export async function updateTask(id: number, status: string): Promise<void> {
   return invoke("update_task", { id, status });
 }
-export async function sendMessage(message: string): Promise<ChatMessage> {
-  return invoke("send_message", { message });
+export async function sendMessage(message: string, workload?: "tools" | "premium"): Promise<ChatMessage> {
+  return invoke("send_message", { message, workload });
 }
 export async function getConversations(): Promise<ChatMessage[]> {
   return invoke("get_conversations");

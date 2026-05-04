@@ -117,7 +117,7 @@ export function useChat() {
     };
   }, []);
 
-  async function send(text: string) {
+  async function send(text: string, workload?: "tools" | "premium") {
     if (!text.trim() || loading) return;
     const userMessage: ChatMessage = { id: null, role: "user", content: text, created_at: new Date().toISOString() };
     setMessages((prev) => [...prev, userMessage]);
@@ -130,7 +130,7 @@ export function useChat() {
     chatInitiatedRef.current = true;
 
     try {
-      const response = await sendMessage(text);
+      const response = await sendMessage(text, workload);
       const finalContent = streamingTextRef.current || response.content;
       setMessages((prev) => [...prev, { ...response, content: finalContent }]);
       setStreamingText("");

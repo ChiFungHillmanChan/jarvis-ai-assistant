@@ -11,6 +11,7 @@ interface ChatPanelProps {
 export default memo(function ChatPanel({ isOpen, onClose, onNavigateToChat }: ChatPanelProps) {
   const { messages, loading, error, send, clearChat, currentStatus, streamingText } = useChatContext();
   const [input, setInput] = useState("");
+  const [thinkHarder, setThinkHarder] = useState(false);
   const messagesEndRef = useRef<HTMLDivElement>(null);
   const inputRef = useRef<HTMLTextAreaElement>(null);
   const scrollRafRef = useRef<number | null>(null);
@@ -32,8 +33,12 @@ export default memo(function ChatPanel({ isOpen, onClose, onNavigateToChat }: Ch
 
   const handleSubmit = useCallback((e: React.FormEvent) => {
     e.preventDefault();
-    if (input.trim()) { send(input); setInput(""); }
-  }, [input, send]);
+    if (input.trim()) {
+      send(input, thinkHarder ? "premium" : "tools");
+      setInput("");
+      setThinkHarder(false);
+    }
+  }, [input, send, thinkHarder]);
 
   if (!isOpen) return null;
 
@@ -94,6 +99,14 @@ export default memo(function ChatPanel({ isOpen, onClose, onNavigateToChat }: Ch
             style={styles.input}
             rows={1}
           />
+          <button
+            type="button"
+            onClick={() => setThinkHarder((v) => !v)}
+            style={thinkHarder ? styles.thinkHarderButtonActive : styles.thinkHarderButton}
+            title="Think harder (routes to Sonnet 4.6)"
+          >
+            [TH]
+          </button>
           <button type="submit" style={styles.sendButton} disabled={!input.trim()}>
             <svg width="14" height="14" viewBox="0 0 14 14">
               <path d="M3 7h8M8 4l3 3-3 3" fill="none" stroke="rgba(0, 180, 255, 0.7)" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round" />
@@ -115,6 +128,8 @@ const styles: Record<string, React.CSSProperties> = {
   inputBar: { display: "flex", alignItems: "flex-end", gap: 8 },
   input: { flex: 1, background: "rgba(0, 180, 255, 0.04)", border: "1px solid rgba(0, 180, 255, 0.18)", borderRadius: 12, padding: "10px 14px", color: "rgba(0, 180, 255, 0.8)", fontSize: 13, fontFamily: "var(--font-sans)", outline: "none", resize: "none" as const, overflow: "hidden", lineHeight: 1.5, boxSizing: "border-box" as const },
   sendButton: { width: 34, height: 34, borderRadius: "50%", background: "rgba(0, 180, 255, 0.12)", border: "1px solid rgba(0, 180, 255, 0.25)", display: "flex", alignItems: "center", justifyContent: "center", cursor: "pointer", flexShrink: 0, boxShadow: "0 0 8px rgba(0, 180, 255, 0.08)" },
+  thinkHarderButton: { height: 34, padding: "0 8px", borderRadius: 6, background: "transparent", border: "1px solid rgba(0, 180, 255, 0.18)", color: "rgba(0, 180, 255, 0.4)", fontFamily: "var(--font-mono)", fontSize: 10, cursor: "pointer", flexShrink: 0, whiteSpace: "nowrap" as const },
+  thinkHarderButtonActive: { height: 34, padding: "0 8px", borderRadius: 6, background: "rgba(0, 180, 255, 0.12)", border: "1px solid rgba(0, 180, 255, 0.5)", color: "rgba(0, 180, 255, 0.9)", fontFamily: "var(--font-mono)", fontSize: 10, cursor: "pointer", flexShrink: 0, whiteSpace: "nowrap" as const, boxShadow: "0 0 8px rgba(0, 180, 255, 0.2)" },
   empty: { color: "rgba(0, 180, 255, 0.2)", fontSize: 12, fontStyle: "italic", textAlign: "center" as const, padding: 40 },
   liveResponse: { margin: "8px 0", background: "rgba(0, 180, 255, 0.03)", border: "1px solid rgba(0, 180, 255, 0.1)", borderRadius: 8, overflow: "hidden" },
   statusBar: { display: "flex", alignItems: "center", gap: 8, padding: "8px 12px", borderBottom: "1px solid rgba(0, 180, 255, 0.06)", background: "rgba(0, 180, 255, 0.02)" },
