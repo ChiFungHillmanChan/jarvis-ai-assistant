@@ -121,9 +121,13 @@ pub async fn run_briefing(
     let classified =
         classify_with_nova(&messages, &router_val, &db, &auth, &app_handle).await?;
 
+    // Read language preference before summarising so the prompt and persisted
+    // record both reflect the user's actual setting.
+    let language = crate::ai::tools::read_language_pref(&db);
+
     // Step 2: Haiku 4.5 — 5-bullet summary + 3 suggested actions.
     let (summary_md, actions_json) =
-        summarize_with_haiku(&classified, &router_val, &db, &auth, &app_handle, "en").await?;
+        summarize_with_haiku(&classified, &router_val, &db, &auth, &app_handle, &language).await?;
 
     // Persist.
     let now_ts = chrono::Utc::now().timestamp();
@@ -132,13 +136,29 @@ pub async fn run_briefing(
         conn.execute(
             "INSERT INTO daily_briefings \
              (date_hkt, summary_md, actions_json, language, created_at) \
-             VALUES (?1, ?2, ?3, 'en', ?4)",
-            rusqlite::params![&date, &summary_md, &actions_json, now_ts],
+             VALUES (?1, ?2, ?3, ?4, ?5)",
+            rusqlite::params![&date, &summary_md, &actions_json, &language, now_ts],
         )
         .map_err(|e| format!("db insert: {e}"))?;
     }
 
     log::info!("[daily_briefing] persisted briefing for {}", date);
+
+    // Speak the briefing if voice is enabled in user preferences.
+    let speak_briefing = {
+        let conn = db.conn.lock().map_err(|e| format!("db lock: {e}"))?;
+        conn.query_row(
+            "SELECT value FROM user_preferences WHERE key = 'tts_enabled'",
+            [],
+            |r| r.get::<_, String>(0),
+        )
+        .unwrap_or_else(|_| "0".into())
+            == "1"
+    };
+    if speak_briefing {
+        speak_briefing_via_router(&db, &summary_md, &language).await?;
+    }
+
     Ok(())
 }
 
@@ -287,4 +307,100 @@ async fn summarize_with_haiku(
         .unwrap_or_else(|_| "[]".to_string());
 
     Ok((summary, validated_actions))
+}
+
+// ---------------------------------------------------------------------------
+// TTS dispatch for the briefing
+// ---------------------------------------------------------------------------
+
+/// Dispatch the briefing summary through TtsRouter.
+///
+/// MacSay: invokes the macOS `say` binary directly (works immediately).
+/// MiniMax / CosyVoice: the audio byte stream is consumed but not routed to
+/// an output device in this implementation. Properly wiring cloud/offline
+/// audio output to the system audio sink is the same problem that
+/// `tts.rs::speak` solves and will be addressed in the post-B9 tts.rs
+/// refactor. The dispatch path exists so TtsRouter selection is exercised and
+/// Sin-ji (MacSay) plays for most users at CHECKPOINT 2.
+async fn speak_briefing_via_router(
+    db: &std::sync::Arc<crate::db::Database>,
+    text: &str,
+    language: &str,
+) -> Result<(), String> {
+    use crate::voice::tts_router::{TtsMode, TtsProvider, TtsRequest, TtsRouter};
+
+    let router = TtsRouter::new(db.clone());
+    let req = TtsRequest {
+        text: text.to_string(),
+        mode: TtsMode::Content,
+        language: language.to_string(),
+    };
+    let provider = router.select_provider(&req)?;
+
+    match provider {
+        TtsProvider::MacSay { voice } => {
+            tokio::process::Command::new("say")
+                .args(["-v", &voice, text])
+                .status()
+                .await
+                .map_err(|e| format!("say spawn: {e}"))?;
+        }
+        TtsProvider::Minimax => {
+            let api_key = {
+                let conn = db.conn.lock().map_err(|e| format!("db lock: {e}"))?;
+                conn.query_row(
+                    "SELECT value FROM user_preferences WHERE key = 'minimax_api_key'",
+                    [],
+                    |r| r.get::<_, String>(0),
+                )
+                .unwrap_or_default()
+            };
+            if api_key.is_empty() {
+                log::warn!(
+                    "[daily_briefing] TTS: MiniMax selected but no API key — skipping audio"
+                );
+                return Ok(());
+            }
+            let voice_id = match language {
+                "yue" => "Cantonese_PrettyGirl",
+                _ => "English_FriendlyMan",
+            };
+            let client = crate::voice::minimax::MinimaxClient::new(api_key);
+            let mut rx = client.stream_speak(text, voice_id).await?;
+            // Drain stream — audio playback wiring is post-B9.
+            while let Some(_chunk) = rx.recv().await {}
+            log::info!(
+                "[daily_briefing] TTS: MiniMax stream consumed (audio playback wiring is post-B9)"
+            );
+        }
+        TtsProvider::CosyVoice => {
+            let model_path = {
+                let conn = db.conn.lock().map_err(|e| format!("db lock: {e}"))?;
+                conn.query_row(
+                    "SELECT value FROM user_preferences WHERE key = 'cosyvoice_model_path'",
+                    [],
+                    |r| r.get::<_, String>(0),
+                )
+                .unwrap_or_default()
+            };
+            if model_path.is_empty() {
+                log::warn!(
+                    "[daily_briefing] TTS: CosyVoice selected but model not downloaded — skipping audio"
+                );
+                return Ok(());
+            }
+            let mut rx = crate::voice::cosyvoice::speak(
+                text,
+                language,
+                std::path::Path::new(&model_path),
+            )
+            .await?;
+            // Drain stream — audio playback wiring is post-B9.
+            while let Some(_chunk) = rx.recv().await {}
+            log::info!(
+                "[daily_briefing] TTS: CosyVoice stream consumed (audio playback wiring is post-B9)"
+            );
+        }
+    }
+    Ok(())
 }
