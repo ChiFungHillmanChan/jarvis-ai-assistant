@@ -342,6 +342,7 @@ pub fn run() {
             commands::system_check::get_recommended_models,
             commands::model_pull::pull_model,
             commands::model_pull::cancel_model_pull,
+            commands::scheduler::trigger_daily_briefing,
         ])
         .run(tauri::generate_context!())
         .expect("error while running JARVIS");

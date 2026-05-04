@@ -13,6 +13,7 @@ pub mod model_pull;
 pub mod notion;
 pub mod obsidian;
 pub mod onboarding;
+pub mod scheduler;
 pub mod settings;
 pub mod system;
 pub mod system_check;

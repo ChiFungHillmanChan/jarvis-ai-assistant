@@ -1,3 +1,4 @@
+pub mod daily_briefing;
 pub mod jobs;
 
 use crate::auth::google::GoogleAuth;

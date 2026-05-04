@@ -4,7 +4,7 @@ use serde::{Deserialize, Serialize};
 
 const GMAIL_API: &str = "https://gmail.googleapis.com/gmail/v1/users/me";
 
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct GmailMessage {
     pub id: String,
     pub thread_id: Option<String>,
