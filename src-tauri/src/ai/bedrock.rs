@@ -438,4 +438,109 @@ mod tests {
         .unwrap();
         assert!(resp.to_lowercase().contains("pong"), "got: {resp}");
     }
+
+    /// Verifies cachePoint actually produces cache_read_input_tokens > 0 on a
+    /// repeat call within the 5-minute TTL window. This is the runtime proof
+    /// that A6 + A7's cache wiring is correct end-to-end.
+    #[tokio::test]
+    #[ignore] // run manually: cargo test --lib ai::bedrock::tests::cache_hit_smoke -- --ignored --nocapture
+    async fn cache_hit_smoke() {
+        let creds = crate::aws::credentials::AwsCredentials {
+            access_key_id: std::env::var("AWS_ACCESS_KEY_ID").unwrap_or_default(),
+            secret_access_key: std::env::var("AWS_SECRET_ACCESS_KEY").unwrap_or_default(),
+            region: "ap-southeast-1".to_string(),
+            inference_profile: "apac".to_string(),
+        };
+        if creds.access_key_id.is_empty() {
+            eprintln!("Skipping: no AWS_ACCESS_KEY_ID in env");
+            return;
+        }
+        let client = client_for(&creds).await;
+        let model_id = "global.anthropic.claude-haiku-4-5-20251001-v1:0";
+
+        // Anthropic prompt caching needs >= 1024 tokens in the cached prefix.
+        // Repeat a 10-word sentence ~150 times -> ~1500 tokens, comfortably above.
+        let cacheable = "You are a helpful assistant that answers concisely. ".repeat(150);
+        let system = vec![
+            SystemContentBlock::Text(cacheable),
+            SystemContentBlock::CachePoint(
+                CachePointBlock::builder()
+                    .r#type(CachePointType::Default)
+                    .build()
+                    .unwrap(),
+            ),
+        ];
+        let make_msg = || {
+            Message::builder()
+                .role(ConversationRole::User)
+                .content(ContentBlock::Text("Say only: ok".to_string()))
+                .build()
+                .unwrap()
+        };
+
+        // Call 1 - should write cache.
+        let r1 = match client
+            .converse()
+            .model_id(model_id)
+            .set_system(Some(system.clone()))
+            .messages(make_msg())
+            .send()
+            .await
+        {
+            Ok(r) => r,
+            Err(e) => {
+                let msg = format!("{e:?}");
+                if msg.contains("Model use case details have not been submitted") {
+                    eprintln!(
+                        "Skipping: account requires Anthropic use case form. \
+                         Submit at AWS Console > Bedrock > Model access, wait 15 min."
+                    );
+                    return;
+                }
+                panic!("call 1 failed: {msg}");
+            }
+        };
+        let u1 = r1.usage.expect("usage 1");
+        let cw1 = u1.cache_write_input_tokens().unwrap_or(0);
+        let cr1 = u1.cache_read_input_tokens().unwrap_or(0);
+        eprintln!(
+            "call 1: input={}, output={}, cache_write={}, cache_read={}",
+            u1.input_tokens(),
+            u1.output_tokens(),
+            cw1,
+            cr1
+        );
+
+        // Brief pause so the cache settles before call 2.
+        tokio::time::sleep(std::time::Duration::from_millis(800)).await;
+
+        // Call 2 - should hit cache.
+        let r2 = client
+            .converse()
+            .model_id(model_id)
+            .set_system(Some(system.clone()))
+            .messages(make_msg())
+            .send()
+            .await
+            .expect("call 2");
+        let u2 = r2.usage.expect("usage 2");
+        let cw2 = u2.cache_write_input_tokens().unwrap_or(0);
+        let cr2 = u2.cache_read_input_tokens().unwrap_or(0);
+        eprintln!(
+            "call 2: input={}, output={}, cache_write={}, cache_read={}",
+            u2.input_tokens(),
+            u2.output_tokens(),
+            cw2,
+            cr2
+        );
+
+        assert!(
+            cw1 > 0,
+            "expected call 1 to write cache (cache_write_input_tokens > 0), got {cw1}"
+        );
+        assert!(
+            cr2 > 0,
+            "expected call 2 to read from cache (cache_read_input_tokens > 0), got {cr2}"
+        );
+    }
 }
