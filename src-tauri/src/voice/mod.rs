@@ -3,6 +3,7 @@ pub mod commands;
 pub mod model_manager;
 pub mod transcribe;
 pub mod tts;
+pub mod tts_router;
 pub mod wake_commands;
 pub mod wake_word;
 
