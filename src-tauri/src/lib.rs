@@ -1,5 +1,6 @@
 pub mod ai;
 pub mod assistant;
+pub mod aws;
 pub mod auth;
 pub mod commands;
 pub mod db;
@@ -308,6 +309,9 @@ pub fn run() {
             commands::obsidian::save_obsidian_note,
             commands::obsidian::list_obsidian_files,
             commands::obsidian::save_obsidian_key,
+            commands::aws::set_aws_credentials,
+            commands::aws::get_aws_credentials_status,
+            commands::aws::clear_aws_credentials,
             commands::onboarding::check_onboarding_status,
             commands::onboarding::mark_onboarding_complete,
             commands::local_llm::list_local_endpoints,
