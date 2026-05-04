@@ -5,7 +5,7 @@ CREATE TABLE IF NOT EXISTS aws_credentials (
     secret_access_key TEXT NOT NULL,
     region TEXT NOT NULL DEFAULT 'ap-southeast-1',
     inference_profile TEXT NOT NULL DEFAULT 'apac',
-    updated_at INTEGER NOT NULL
+    updated_at INTEGER NOT NULL DEFAULT (unixepoch())
 );
 
 -- Workload → model routing (3 fixed workload tiers)
@@ -24,7 +24,7 @@ INSERT OR IGNORE INTO workload_routing (workload, model_id) VALUES
 CREATE TABLE IF NOT EXISTS inference_metrics (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     ts INTEGER NOT NULL,
-    workload TEXT NOT NULL,
+    workload TEXT NOT NULL CHECK (workload IN ('volume', 'tools', 'premium', 'unknown')),
     model_id TEXT NOT NULL,
     input_tokens INTEGER NOT NULL,
     output_tokens INTEGER NOT NULL,
