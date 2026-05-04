@@ -126,6 +126,7 @@ mod tests {
         assert_eq!(loaded.access_key_id, "AKIATEST");
         assert_eq!(loaded.secret_access_key, "SECRETTEST");
         assert_eq!(loaded.region, "ap-southeast-1");
+        assert_eq!(loaded.inference_profile, "apac");
         repo.clear().await.unwrap();
         assert!(repo.load().await.unwrap().is_none());
     }
