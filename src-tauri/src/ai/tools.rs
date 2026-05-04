@@ -1222,3 +1222,42 @@ fn load_memory_block(db: &crate::db::Database) -> String {
 
 /// Back-compat alias used elsewhere in the codebase.
 pub const SYSTEM_PROMPT: &str = SYSTEM_PROMPT_BASE;
+
+/// Returns the static portion of the system prompt that should be cached.
+/// Must be byte-stable across requests for cache hits.
+pub fn build_cacheable_system_prompt() -> String {
+    include_str!("system_prompt_static.md").to_string()
+}
+
+/// Returns the per-request dynamic suffix appended (as a separate SystemContentBlock
+/// AFTER the cachePoint) so it doesn't break the cached prefix.
+/// Includes user_name, today's date, language preference, and any persisted memory.
+pub fn build_dynamic_suffix(
+    user_name: &str,
+    today_iso: &str,
+    language: &str, // "en" | "yue" | "bilingual" -- used by B4
+    db: &crate::db::Database,
+) -> String {
+    let header = format!(
+        "Current user: {user_name}\nToday: {today_iso}\nResponse language: {language}\n",
+    );
+    let memory_block = load_memory_block(db);
+    if memory_block.is_empty() {
+        header
+    } else {
+        format!("{}\n{}", header, memory_block)
+    }
+}
+
+#[cfg(test)]
+mod prompt_tests {
+    use super::*;
+
+    #[test]
+    fn cacheable_prompt_is_byte_stable() {
+        let a = build_cacheable_system_prompt();
+        let b = build_cacheable_system_prompt();
+        assert_eq!(a, b, "cacheable prompt must be byte-stable for cache hits");
+        assert!(a.len() > 500, "expected non-trivial static prompt");
+    }
+}

@@ -99,11 +99,28 @@ pub async fn send(
     let tool_config = build_tool_config()?;
 
     let mut bedrock_messages = build_messages(messages)?;
-    // The system prompt is large and mostly stable across turns within a
-    // session, so we mark it cacheable.  A6/A7 will further split this into
-    // a strictly-static prefix + per-call dynamic suffix; for now we cache
-    // whatever `tools::build_system_prompt` produces.
-    let system_blocks = build_system_blocks(tools::build_system_prompt(db))?;
+    // A7: split system prompt into a byte-stable cacheable prefix and a
+    // per-request dynamic suffix.  The CachePoint sits between them so the
+    // static prefix is served from cache while the dynamic suffix (user name,
+    // date, memory) is sent fresh each call without invalidating the cache.
+    let static_prompt = tools::build_cacheable_system_prompt();
+    let user_name = {
+        db.conn
+            .lock()
+            .ok()
+            .and_then(|conn| {
+                conn.query_row(
+                    "SELECT value FROM user_preferences WHERE key = 'user_name'",
+                    [],
+                    |row| row.get::<_, String>(0),
+                )
+                .ok()
+            })
+            .unwrap_or_else(|| "User".to_string())
+    };
+    let today_iso = chrono::Local::now().format("%Y-%m-%d").to_string();
+    let dynamic = tools::build_dynamic_suffix(&user_name, &today_iso, "en", db);
+    let system_blocks = build_system_blocks(static_prompt, dynamic)?;
     let inference_config = InferenceConfiguration::builder()
         .max_tokens(4096)
         .temperature(0.2)
@@ -226,15 +243,22 @@ pub async fn send(
 }
 
 fn build_system_blocks(
-    prompt: String,
+    static_prompt: String,
+    dynamic_suffix: String,
 ) -> Result<Vec<SystemContentBlock>, Box<dyn std::error::Error + Send + Sync>> {
     let cache_point = CachePointBlock::builder()
         .r#type(CachePointType::Default)
         .build()
         .map_err(|e| format!("cachepoint build: {e}"))?;
+    // Order: [static_text, CachePoint, dynamic_text]
+    // The CachePoint marks the end of the cached region -- everything before it
+    // is served from cache on subsequent calls.  The dynamic suffix (user name,
+    // date, persisted memory) is sent fresh each request without breaking the
+    // cache key for the static prefix.
     Ok(vec![
-        SystemContentBlock::Text(prompt),
+        SystemContentBlock::Text(static_prompt),
         SystemContentBlock::CachePoint(cache_point),
+        SystemContentBlock::Text(dynamic_suffix),
     ])
 }
 
