@@ -7,6 +7,17 @@ use whisper_rs::{FullParams, SamplingStrategy, WhisperContext, WhisperContextPar
 
 use crate::ai::gemini;
 
+fn read_stt_language(db: &crate::db::Database) -> String {
+    let conn = db.conn.lock().ok();
+    conn.and_then(|c| {
+        c.query_row(
+            "SELECT value FROM user_preferences WHERE key = 'stt_language'",
+            [],
+            |r| r.get::<_, String>(0),
+        ).ok()
+    }).unwrap_or_else(|| "auto".into())
+}
+
 #[derive(Clone)]
 pub struct Transcriber {
     api_key: String,
@@ -20,7 +31,7 @@ impl Transcriber {
         Ok(Transcriber { api_key })
     }
 
-    pub async fn transcribe(&self, audio_data: &[f32]) -> Result<String, String> {
+    pub async fn transcribe(&self, audio_data: &[f32], db: &crate::db::Database) -> Result<String, String> {
         if audio_data.len() < 1600 {
             return Ok(String::new());
         }
@@ -28,6 +39,13 @@ impl Transcriber {
         let wav_bytes = self.to_wav(audio_data)?;
         let base64_audio =
             base64::engine::general_purpose::STANDARD.encode(&wav_bytes);
+
+        let lang = read_stt_language(db);
+        let prompt = match lang.as_str() {
+            "yue" => "Transcribe this Cantonese audio to written Chinese (use traditional characters and Hong Kong colloquial style 廣東話, NOT 書面語). Return ONLY the transcription, nothing else. If the audio is silent or unintelligible, return an empty string.",
+            "en"  => "Transcribe this audio to text in English. Return ONLY the transcription, nothing else. If the audio is silent or unintelligible, return an empty string.",
+            _     => "Transcribe this audio to text in the speaker's language (auto-detect English or Cantonese). Return ONLY the transcription, nothing else. If the audio is silent or unintelligible, return an empty string.",
+        };
 
         let request_body = serde_json::json!({
             "contents": [{
@@ -39,7 +57,7 @@ impl Transcriber {
                         }
                     },
                     {
-                        "text": "Transcribe this audio to text. Return ONLY the transcription, nothing else. If the audio is silent or unintelligible, return an empty string."
+                        "text": prompt
                     }
                 ]
             }],
@@ -131,7 +149,7 @@ impl LocalTranscriber {
         Ok(Self { ctx: Arc::new(ctx) })
     }
 
-    pub fn transcribe(&self, audio_data: &[f32]) -> Result<String, String> {
+    pub fn transcribe(&self, audio_data: &[f32], db: &crate::db::Database) -> Result<String, String> {
         if audio_data.len() < 1600 {
             return Ok(String::new());
         }
@@ -142,7 +160,13 @@ impl LocalTranscriber {
             .map_err(|e| format!("Failed to create Whisper state: {}", e))?;
 
         let mut params = FullParams::new(SamplingStrategy::Greedy { best_of: 1 });
-        params.set_language(Some("en"));
+        let lang = read_stt_language(db);
+        let whisper_lang = match lang.as_str() {
+            "yue" => Some("yue"),
+            "en"  => Some("en"),
+            _     => None, // auto-detect
+        };
+        params.set_language(whisper_lang);
         params.set_translate(false);
         params.set_print_special(false);
         params.set_print_progress(false);

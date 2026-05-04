@@ -243,7 +243,7 @@ async fn detection_loop(
                 }
 
                 let window_rms = rms(&audio_window);
-                let transcript = transcribe_local_window(local_transcriber.clone(), audio_window).await?;
+                let transcript = transcribe_local_window(local_transcriber.clone(), audio_window, Arc::clone(&db)).await?;
                 if transcript.is_empty() {
                     continue;
                 }
@@ -324,7 +324,7 @@ async fn handle_wake_word_detection(
     );
 
     let user_text =
-        transcribe_with_fallback(Arc::clone(&voice_engine), local_transcriber, &command_audio)
+        transcribe_with_fallback(Arc::clone(&voice_engine), local_transcriber, &command_audio, Arc::clone(&db))
             .await?;
     if user_text.trim().is_empty() {
         let _ = app_handle.emit("chat-voice-active", json!({"active": false}));
@@ -397,8 +397,9 @@ async fn handle_wake_word_detection(
 async fn transcribe_local_window(
     local_transcriber: LocalTranscriber,
     audio_window: Vec<f32>,
+    db: Arc<crate::db::Database>,
 ) -> Result<String, String> {
-    tauri::async_runtime::spawn_blocking(move || local_transcriber.transcribe(&audio_window))
+    tauri::async_runtime::spawn_blocking(move || local_transcriber.transcribe(&audio_window, &db))
         .await
         .map_err(|e| format!("Wake-word transcription task failed: {}", e))?
 }
@@ -407,6 +408,7 @@ async fn transcribe_with_fallback(
     voice_engine: Arc<VoiceEngine>,
     local_transcriber: LocalTranscriber,
     audio_data: &[f32],
+    db: Arc<crate::db::Database>,
 ) -> Result<String, String> {
     let cloud_transcriber = {
         let guard = voice_engine.transcriber.lock().map_err(|e| e.to_string())?;
@@ -414,7 +416,7 @@ async fn transcribe_with_fallback(
     };
 
     if let Some(transcriber) = cloud_transcriber {
-        match transcriber.transcribe(audio_data).await {
+        match transcriber.transcribe(audio_data, &db).await {
             Ok(text) if !text.is_empty() => return Ok(text),
             Ok(_) => log::info!("Wake-word cloud STT returned empty text, using local fallback"),
             Err(e) => log::warn!("Wake-word cloud STT failed, using local fallback: {}", e),
@@ -422,7 +424,7 @@ async fn transcribe_with_fallback(
     }
 
     let samples = audio_data.to_vec();
-    tauri::async_runtime::spawn_blocking(move || local_transcriber.transcribe(&samples))
+    tauri::async_runtime::spawn_blocking(move || local_transcriber.transcribe(&samples, &db))
         .await
         .map_err(|e| format!("Wake-word local STT task failed: {}", e))?
 }

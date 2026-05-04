@@ -37,11 +37,12 @@ pub struct VoiceEngine {
     pub state: Mutex<VoiceState>,
     pub muted: Mutex<bool>,
     pub app_handle: Option<JarvisAppHandle>,
+    pub db: Arc<crate::db::Database>,
     mic_emitter_active: Arc<AtomicBool>,
 }
 
 impl VoiceEngine {
-    pub fn new(db: &crate::db::Database, app_handle: Option<JarvisAppHandle>) -> Self {
+    pub fn new(db: &Arc<crate::db::Database>, app_handle: Option<JarvisAppHandle>) -> Self {
         let mut router = AudioRouter::new();
         if let Err(e) = router.start() {
             log::warn!("AudioRouter start failed (will retry on first use): {}", e);
@@ -57,7 +58,7 @@ impl VoiceEngine {
             _ => { log::info!("No GEMINI_API_KEY set. Voice STT disabled."); None }
         };
 
-        let tts = TextToSpeech::from_db(db);
+        let tts = TextToSpeech::from_db(&**db);
         log::info!("TTS initialized from DB preferences");
 
         VoiceEngine {
@@ -67,6 +68,7 @@ impl VoiceEngine {
             state: Mutex::new(VoiceState::Idle),
             muted: Mutex::new(false),
             app_handle,
+            db: Arc::clone(db),
             mic_emitter_active: Arc::new(AtomicBool::new(false)),
         }
     }
@@ -93,7 +95,7 @@ impl VoiceEngine {
         };
 
         if let Some(transcriber) = cloud_transcriber {
-            match transcriber.transcribe(audio_data).await {
+            match transcriber.transcribe(audio_data, &self.db).await {
                 Ok(text) if !text.is_empty() => return Ok(text),
                 Ok(_) => log::info!("Cloud transcription returned empty text, trying local fallback"),
                 Err(e) => log::warn!("Cloud transcription failed, trying local fallback: {}", e),
@@ -103,9 +105,10 @@ impl VoiceEngine {
         if model_manager::is_downloaded() {
             let model_path = model_manager::model_path();
             let samples = audio_data.to_vec();
+            let db = Arc::clone(&self.db);
             let local_result = tauri::async_runtime::spawn_blocking(move || {
                 let transcriber = LocalTranscriber::new(&model_path)?;
-                transcriber.transcribe(&samples)
+                transcriber.transcribe(&samples, &db)
             })
             .await
             .map_err(|e| format!("Local Whisper task failed: {}", e))?;
