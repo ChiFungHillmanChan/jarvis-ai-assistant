@@ -120,10 +120,10 @@ voice/tts_router.rs::speak(text, mode)
 
 ## 4. Migrations
 
-### 4.1 V11: AWS credentials + workload routing
+### 4.1 V13: AWS credentials + workload routing
 
 ```sql
--- src-tauri/migrations/V11__aws_credentials_and_routing.sql
+-- src-tauri/migrations/V13__aws_credentials_and_routing.sql
 
 CREATE TABLE IF NOT EXISTS aws_credentials (
     id INTEGER PRIMARY KEY CHECK (id = 1),
@@ -147,10 +147,10 @@ INSERT OR IGNORE INTO workload_routing (workload, model_id) VALUES
     ('premium', 'global.anthropic.claude-sonnet-4-6');
 ```
 
-### 4.2 V12: Voice language preferences
+### 4.2 V14: Voice language preferences
 
 ```sql
--- src-tauri/migrations/V12__voice_language.sql
+-- src-tauri/migrations/V14__voice_language.sql
 
 INSERT OR IGNORE INTO user_preferences (key, value) VALUES
     ('language',          'en'),       -- en | yue | bilingual
@@ -173,8 +173,8 @@ INSERT OR IGNORE INTO user_preferences (key, value) VALUES
 
 | File | Change | Est. LOC |
 |---|---|---|
-| `src-tauri/migrations/V11__aws_credentials_and_routing.sql` | New | 35 |
-| `src-tauri/migrations/V12__voice_language.sql` | New | 15 |
+| `src-tauri/migrations/V13__aws_credentials_and_routing.sql` | New | 35 |
+| `src-tauri/migrations/V14__voice_language.sql` | New | 15 |
 | `src-tauri/src/ai/bedrock.rs` | Replace InvokeModel path with Converse / ConverseStream + cachePoint blocks. Accept `model_id` and `Workload` parameters. Read creds from in-memory cache, not env. | ~180 (rewrite of 276) |
 | `src-tauri/src/ai/mod.rs` | Add `Workload` enum. Extend `AiRouter::send` signature. Routing logic: lookup `workload_routing` table for model id. Heuristic for inferring workload from message context. | ~80 |
 | `src-tauri/src/ai/tools.rs` | Restructure system prompt build: split into `cacheable_block()` (static system + tools) and `dynamic_suffix(user_language)`. Add language-conditional response rule. | ~30 |

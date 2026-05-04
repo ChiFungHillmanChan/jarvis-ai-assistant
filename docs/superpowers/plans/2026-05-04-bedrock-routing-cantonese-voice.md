@@ -61,15 +61,15 @@ These must be done **before** Task A1. They are not code work; they are environm
 
 ## Phase A — Bedrock Smart Routing
 
-### Task A1: V11 migration — AWS credentials + workload routing
+### Task A1: V13 migration — AWS credentials + workload routing
 
 **Files:**
-- Create: `src-tauri/migrations/V11__aws_credentials_and_routing.sql`
+- Create: `src-tauri/migrations/V13__aws_credentials_and_routing.sql`
 - Modify: none (refinery auto-discovers migrations)
 
 - [ ] **A1.1 Write the migration SQL**
 
-  Create `src-tauri/migrations/V11__aws_credentials_and_routing.sql`:
+  Create `src-tauri/migrations/V13__aws_credentials_and_routing.sql`:
   ```sql
   -- AWS credentials (singleton row, secret encrypted by app keychain wrapper)
   CREATE TABLE IF NOT EXISTS aws_credentials (
@@ -111,7 +111,7 @@ These must be done **before** Task A1. They are not code work; they are environm
 - [ ] **A1.2 Run app to trigger migration**
 
   Run: `npm run tauri dev`
-  Wait for app to launch. Check logs for `Migrations applied: V11`.
+  Wait for app to launch. Check logs for `Migrations applied: V13`.
 
 - [ ] **A1.3 Verify schema**
 
@@ -126,8 +126,8 @@ These must be done **before** Task A1. They are not code work; they are environm
 - [ ] **A1.4 Commit**
 
   ```bash
-  git add src-tauri/migrations/V11__aws_credentials_and_routing.sql
-  git commit -m "feat(db): V11 add aws_credentials, workload_routing, inference_metrics"
+  git add src-tauri/migrations/V13__aws_credentials_and_routing.sql
+  git commit -m "feat(db): V13 add aws_credentials, workload_routing, inference_metrics"
   ```
 
 ---
@@ -865,7 +865,7 @@ The existing `bedrock::send` (276 LOC) uses a shape that's been working but does
 
   Notes:
   - The `consume_stream`, `run_tool`, `assistant_msg_from`, `tool_result_msg` helpers should be copied/adapted from the existing implementation — preserve their TTS-emit and tool-routing behavior.
-  - `record_metrics` writes to the `inference_metrics` table created in V11 — implementation in A6.6.
+  - `record_metrics` writes to the `inference_metrics` table created in V13 — implementation in A6.6.
 
 - [ ] **A6.5 Update all callers in `ai/mod.rs`**
 
@@ -1063,13 +1063,11 @@ The existing `bedrock::send` (276 LOC) uses a shape that's been working but does
 **Files:**
 - Create: `src-tauri/src/scheduler/daily_briefing.rs`
 - Modify: `src-tauri/src/scheduler/mod.rs`
-- Modify: `src-tauri/migrations/V11__aws_credentials_and_routing.sql` (add `daily_briefings` table — actually do this as V11.5 to keep V11 clean; or add a separate V11b migration)
+- Create: `src-tauri/migrations/V15__daily_briefings.sql` (separate migration so V13 stays a clean checkpoint)
 
-Decision: instead of editing V11 (already committed), add a small follow-up migration here so V11 stays a clean checkpoint.
+- [ ] **A9.1 Create migration V15 for briefing table**
 
-- [ ] **A9.1 Create migration V11b for briefing table**
-
-  Create `src-tauri/migrations/V11b__daily_briefings.sql`:
+  Create `src-tauri/migrations/V15__daily_briefings.sql`:
   ```sql
   CREATE TABLE IF NOT EXISTS daily_briefings (
       id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -1231,7 +1229,7 @@ Decision: instead of editing V11 (already committed), add a small follow-up migr
 - [ ] **A9.7 Commit**
 
   ```bash
-  git add src-tauri/migrations/V11b__daily_briefings.sql src-tauri/src/scheduler/daily_briefing.rs src-tauri/src/scheduler/mod.rs src-tauri/src/commands/scheduler.rs src-tauri/src/lib.rs src-tauri/src/commands/mod.rs
+  git add src-tauri/migrations/V15__daily_briefings.sql src-tauri/src/scheduler/daily_briefing.rs src-tauri/src/scheduler/mod.rs src-tauri/src/commands/scheduler.rs src-tauri/src/lib.rs src-tauri/src/commands/mod.rs
   git commit -m "feat(scheduler): daily briefing cron with Nova classify + Haiku summarize"
   ```
 
@@ -1255,14 +1253,14 @@ If any of these fail, fix before proceeding.
 
 ## Phase B — Cantonese Voice Path
 
-### Task B1: V12 migration — voice language preferences
+### Task B1: V14 migration — voice language preferences
 
 **Files:**
-- Create: `src-tauri/migrations/V12__voice_language.sql`
+- Create: `src-tauri/migrations/V14__voice_language.sql`
 
 - [ ] **B1.1 Write the migration SQL**
 
-  Create `src-tauri/migrations/V12__voice_language.sql`:
+  Create `src-tauri/migrations/V14__voice_language.sql`:
   ```sql
   INSERT OR IGNORE INTO user_preferences (key, value) VALUES
       ('language',             'en'),       -- en | yue | bilingual
@@ -1287,8 +1285,8 @@ If any of these fail, fix before proceeding.
 - [ ] **B1.3 Commit**
 
   ```bash
-  git add src-tauri/migrations/V12__voice_language.sql
-  git commit -m "feat(db): V12 voice language preferences"
+  git add src-tauri/migrations/V14__voice_language.sql
+  git commit -m "feat(db): V14 voice language preferences"
   ```
 
 ---
@@ -2294,7 +2292,7 @@ Run through this checklist before handing off to executor:
 - [x] Prompt caching — Tasks A6, A7
 - [x] AWS credentials in Settings (encrypted) — Tasks A2, A3, A4
 - [x] Daily Cantonese Inbox Briefing — Tasks A9, B9
-- [x] V11 + V12 migrations — Tasks A1, B1
+- [x] V13 + V14 + V15 migrations — Tasks A1, B1, A9
 - [x] STT language unhardcoding — Task B2
 - [x] TTS router (Sin-ji + MiniMax + CosyVoice) — Tasks B3, B6, B8
 - [x] Bilingual system prompt with code-mix Cantonese — Task B4
