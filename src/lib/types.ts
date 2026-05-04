@@ -320,3 +320,8 @@ export interface ModelPullProgress {
   total_bytes: number;
   error?: string;
 }
+
+export interface AwsCredsStatus {
+  configured: boolean;
+  region: string | null;
+}

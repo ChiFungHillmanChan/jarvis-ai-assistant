@@ -1,5 +1,5 @@
 import { invoke } from "@tauri-apps/api/core";
-import type { Task, ChatMessage, DashboardData, Settings, EmailSummary, EmailStats, CalendarEventView, CronJobView, CronRunView, NotionPageView, GitHubItemView, GitHubStats, VoiceState, VoiceSettings, WakeWordStatus, EmailRule, BriefingResult, LocalEndpoint, LocalModel, ProviderChainEntry, EndpointHealth, SystemCompatibility, PrerequisiteCheck, RecommendedModel, LaunchReadiness, BetaTesterInput, BetaTesterView, BetaFeedbackInput } from "./types";
+import type { Task, ChatMessage, DashboardData, Settings, EmailSummary, EmailStats, CalendarEventView, CronJobView, CronRunView, NotionPageView, GitHubItemView, GitHubStats, VoiceState, VoiceSettings, WakeWordStatus, EmailRule, BriefingResult, LocalEndpoint, LocalModel, ProviderChainEntry, EndpointHealth, SystemCompatibility, PrerequisiteCheck, RecommendedModel, LaunchReadiness, BetaTesterInput, BetaTesterView, BetaFeedbackInput, AwsCredsStatus } from "./types";
 
 export async function getTasks(): Promise<Task[]> {
   return invoke("get_tasks");
@@ -154,4 +154,19 @@ export async function checkOnboardingStatus(): Promise<boolean> {
 
 export async function markOnboardingComplete(): Promise<void> {
   return invoke<void>("mark_onboarding_complete");
+}
+
+// AWS Bedrock credentials
+export async function setAwsCredentials(
+  accessKeyId: string,
+  secretAccessKey: string,
+  region: string,
+): Promise<void> {
+  await invoke("set_aws_credentials", { accessKeyId, secretAccessKey, region });
+}
+export async function getAwsCredentialsStatus(): Promise<AwsCredsStatus> {
+  return await invoke<AwsCredsStatus>("get_aws_credentials_status");
+}
+export async function clearAwsCredentials(): Promise<void> {
+  await invoke("clear_aws_credentials");
 }

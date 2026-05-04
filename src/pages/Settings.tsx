@@ -25,6 +25,9 @@ import {
   listEndpointModels,
   getProviderChain,
   updateProviderChain,
+  setAwsCredentials,
+  getAwsCredentialsStatus,
+  clearAwsCredentials,
 } from "../lib/commands";
 import { listen } from "@tauri-apps/api/event";
 import type { VoiceSettings, WakeWordStatus, VoiceState, LocalEndpoint, LocalModel, ProviderChainEntry, EndpointHealth } from "../lib/types";
@@ -51,6 +54,14 @@ export default function Settings() {
   const { state: voiceState } = useVoiceState();
   const [wallpaperActive, setWallpaperActive] = useState(false);
   const [wallpaperBusy, setWallpaperBusy] = useState(false);
+
+  // AWS Bedrock credentials state
+  const [awsAccessKey, setAwsAccessKey] = useState("");
+  const [awsSecret, setAwsSecret] = useState("");
+  const [awsRegion, setAwsRegion] = useState("ap-southeast-1");
+  const [awsStatus, setAwsStatus] = useState<{ configured: boolean; region: string | null }>(
+    { configured: false, region: null }
+  );
 
   // Local LLM state
   const [endpoints, setEndpoints] = useState<LocalEndpoint[]>([]);
@@ -90,6 +101,10 @@ export default function Settings() {
       setWallpaperActive(event.payload);
     });
     return () => { unlisten.then((fn) => fn()); };
+  }, []);
+
+  useEffect(() => {
+    getAwsCredentialsStatus().then(setAwsStatus).catch(console.error);
   }, []);
 
   async function refreshWakeStatus() {
@@ -493,6 +508,46 @@ export default function Settings() {
             </div>
             <div style={{ color: "rgba(0, 180, 255, 0.3)", fontSize: 9, marginTop: 6 }}>
               Install "Local REST API" plugin in Obsidian, enable it, copy the API key
+            </div>
+          </div>
+
+          <div className="panel" style={styles.panel}>
+            <div className="label" style={styles.sectionTitle}>AWS BEDROCK</div>
+            <div style={styles.hint}>
+              Used for Claude (Haiku 4.5 / Sonnet 4.6) and Amazon Nova models via the
+              apac. inference profile (Singapore region).
+              {awsStatus.configured && (
+                <> Currently configured for <code style={{ fontFamily: "var(--font-mono)", color: "rgba(0, 180, 255, 0.8)" }}>{awsStatus.region}</code>.</>
+              )}
+            </div>
+            <div style={{ marginBottom: 8 }}>
+              <div style={{ color: "rgba(0, 180, 255, 0.5)", fontSize: 10, marginBottom: 4 }}>Access Key ID</div>
+              <input value={awsAccessKey} onChange={(e) => setAwsAccessKey(e.target.value)} placeholder="AKIA..." style={styles.tokenInput} />
+            </div>
+            <div style={{ marginBottom: 8 }}>
+              <div style={{ color: "rgba(0, 180, 255, 0.5)", fontSize: 10, marginBottom: 4 }}>Secret Access Key</div>
+              <input type="password" value={awsSecret} onChange={(e) => setAwsSecret(e.target.value)} placeholder="Secret key" style={styles.tokenInput} />
+            </div>
+            <div style={{ marginBottom: 12 }}>
+              <div style={{ color: "rgba(0, 180, 255, 0.5)", fontSize: 10, marginBottom: 4 }}>Region</div>
+              <select value={awsRegion} onChange={(e) => setAwsRegion(e.target.value)} style={styles.select}>
+                <option value="ap-southeast-1">Singapore (ap-southeast-1) -- recommended</option>
+                <option value="ap-northeast-1">Tokyo (ap-northeast-1) -- fallback</option>
+                <option value="us-east-1">US East (us-east-1) -- high latency from HK</option>
+              </select>
+            </div>
+            <div style={{ display: "flex", gap: 8 }}>
+              <button onClick={async () => {
+                await setAwsCredentials(awsAccessKey, awsSecret, awsRegion);
+                setAwsAccessKey(""); setAwsSecret("");
+                setAwsStatus(await getAwsCredentialsStatus());
+              }} style={styles.saveBtn}>SAVE</button>
+              {awsStatus.configured && (
+                <button onClick={async () => {
+                  await clearAwsCredentials();
+                  setAwsStatus({ configured: false, region: null });
+                }} style={{ ...styles.saveBtn, borderColor: "rgba(255, 100, 100, 0.3)", color: "rgba(255, 100, 100, 0.7)" }}>CLEAR</button>
+              )}
             </div>
           </div>
         </div>
