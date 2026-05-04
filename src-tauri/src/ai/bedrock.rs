@@ -1,18 +1,23 @@
 use super::tools;
+use crate::aws::credentials::AwsCredentials;
 use crate::voice::tts::TtsCommand;
 use aws_config::BehaviorVersion;
 use aws_sdk_bedrockruntime::config::Region;
 use aws_sdk_bedrockruntime::types::{
-    ContentBlock, ConversationRole, InferenceConfiguration, Message, StopReason,
-    SystemContentBlock, ToolConfiguration, ToolInputSchema, ToolResultBlock,
-    ToolResultContentBlock, ToolResultStatus, ToolSpecification,
+    CachePointBlock, CachePointType, ContentBlock, ConversationRole, InferenceConfiguration,
+    Message, StopReason, SystemContentBlock, TokenUsage, Tool, ToolConfiguration, ToolInputSchema,
+    ToolResultBlock, ToolResultContentBlock, ToolResultStatus, ToolSpecification,
 };
 use aws_smithy_types::{Document, Number};
 use serde_json::json;
 use std::collections::{HashMap, HashSet};
 use tauri::Emitter;
 
-pub const DEFAULT_MODEL: &str = "anthropic.claude-sonnet-4-6";
+/// Legacy default model id used as a last-resort fallback when no per-workload
+/// routing entry is configured.  New code paths look up the model via
+/// `WorkloadRouter`; this constant is kept for the chain-entry default in
+/// `AiRouter` so the existing UI continues to render a sensible label.
+pub const DEFAULT_MODEL: &str = "global.anthropic.claude-sonnet-4-6";
 
 pub fn default_model() -> String {
     std::env::var("AWS_BEDROCK_MODEL_ID")
@@ -21,24 +26,84 @@ pub fn default_model() -> String {
         .unwrap_or_else(|| DEFAULT_MODEL.to_string())
 }
 
+/// Build a Bedrock client from explicit credentials.  We intentionally do not
+/// rely on the ambient AWS environment because credentials live in our SQLite +
+/// keychain pair, not in the process environment.
+async fn client_for(creds: &AwsCredentials) -> aws_sdk_bedrockruntime::Client {
+    let region = Region::new(creds.region.clone());
+    let provider = aws_credential_types::Credentials::new(
+        creds.access_key_id.clone(),
+        creds.secret_access_key.clone(),
+        None,
+        None,
+        "jarvis-aws-creds",
+    );
+    let cfg = aws_config::defaults(BehaviorVersion::latest())
+        .region(region)
+        .credentials_provider(provider)
+        .load()
+        .await;
+    aws_sdk_bedrockruntime::Client::new(&cfg)
+}
+
+/// One-shot helper used by the integration test below.  Sends a single user
+/// message and returns the assistant's text reply -- no tool loop, no caching,
+/// no metrics.  This is intentionally minimal so it can serve as a "round trip
+/// works" smoke test for a freshly-saved AWS credential set.
+pub async fn send_simple(
+    creds: &AwsCredentials,
+    model_id: &str,
+    user_text: &str,
+) -> Result<String, String> {
+    let client = client_for(creds).await;
+    let msg = Message::builder()
+        .role(ConversationRole::User)
+        .content(ContentBlock::Text(user_text.to_string()))
+        .build()
+        .map_err(|e| format!("msg build: {e}"))?;
+    let out = client
+        .converse()
+        .model_id(model_id)
+        .messages(msg)
+        .send()
+        .await
+        .map_err(|e| format!("converse: {e}"))?;
+    let output = out.output.ok_or("no output")?;
+    let message = output
+        .as_message()
+        .map_err(|_| "output is not a message".to_string())?;
+    let text = message
+        .content()
+        .iter()
+        .filter_map(|b| match b {
+            ContentBlock::Text(t) => Some(t.clone()),
+            _ => None,
+        })
+        .collect::<Vec<_>>()
+        .join("");
+    Ok(text)
+}
+
+#[allow(clippy::too_many_arguments)]
 pub async fn send(
-    model: &str,
+    creds: &AwsCredentials,
+    model_id: &str,
+    workload: crate::ai::Workload,
     messages: Vec<(String, String)>,
     db: &crate::db::Database,
     google_auth: &std::sync::Arc<crate::auth::google::GoogleAuth>,
     app_handle: &tauri::AppHandle,
     tts_tx: Option<tokio::sync::mpsc::Sender<TtsCommand>>,
 ) -> Result<String, Box<dyn std::error::Error + Send + Sync>> {
-    let mut config_loader = aws_config::defaults(BehaviorVersion::latest());
-    if let Some(region) = bedrock_region() {
-        config_loader = config_loader.region(region);
-    }
-    let sdk_config = config_loader.load().await;
-    let client = aws_sdk_bedrockruntime::Client::new(&sdk_config);
+    let client = client_for(creds).await;
     let tool_config = build_tool_config()?;
 
     let mut bedrock_messages = build_messages(messages)?;
-    let system = SystemContentBlock::Text(tools::build_system_prompt(db));
+    // The system prompt is large and mostly stable across turns within a
+    // session, so we mark it cacheable.  A6/A7 will further split this into
+    // a strictly-static prefix + per-call dynamic suffix; for now we cache
+    // whatever `tools::build_system_prompt` produces.
+    let system_blocks = build_system_blocks(tools::build_system_prompt(db))?;
     let inference_config = InferenceConfiguration::builder()
         .max_tokens(4096)
         .temperature(0.2)
@@ -46,15 +111,21 @@ pub async fn send(
 
     let max_iterations = 5;
     for _ in 0..max_iterations {
+        let start = std::time::Instant::now();
         let response = client
             .converse()
-            .model_id(model)
+            .model_id(model_id)
             .set_messages(Some(bedrock_messages.clone()))
-            .system(system.clone())
+            .set_system(Some(system_blocks.clone()))
             .tool_config(tool_config.clone())
             .inference_config(inference_config.clone())
             .send()
             .await?;
+        let latency_ms = start.elapsed().as_millis() as i64;
+
+        if let Some(usage) = response.usage() {
+            record_metrics(db, workload, model_id, usage, latency_ms).await;
+        }
 
         let output_message = match response.output() {
             Some(aws_sdk_bedrockruntime::types::ConverseOutput::Message(message)) => {
@@ -154,11 +225,17 @@ pub async fn send(
     Ok("I've completed the actions.".into())
 }
 
-fn bedrock_region() -> Option<Region> {
-    std::env::var("AWS_BEDROCK_REGION")
-        .ok()
-        .filter(|value| !value.trim().is_empty())
-        .map(Region::new)
+fn build_system_blocks(
+    prompt: String,
+) -> Result<Vec<SystemContentBlock>, Box<dyn std::error::Error + Send + Sync>> {
+    let cache_point = CachePointBlock::builder()
+        .r#type(CachePointType::Default)
+        .build()
+        .map_err(|e| format!("cachepoint build: {e}"))?;
+    Ok(vec![
+        SystemContentBlock::Text(prompt),
+        SystemContentBlock::CachePoint(cache_point),
+    ])
 }
 
 fn build_messages(
@@ -181,7 +258,7 @@ fn build_messages(
 }
 
 fn build_tool_config() -> Result<ToolConfiguration, Box<dyn std::error::Error + Send + Sync>> {
-    let tool_specs = tools::get_tool_definitions()
+    let mut tool_specs = tools::get_tool_definitions()
         .into_iter()
         .map(|tool| {
             let spec = ToolSpecification::builder()
@@ -189,9 +266,18 @@ fn build_tool_config() -> Result<ToolConfiguration, Box<dyn std::error::Error + 
                 .description(tool.description)
                 .input_schema(ToolInputSchema::Json(json_to_document(&tool.parameters)))
                 .build()?;
-            Ok(aws_sdk_bedrockruntime::types::Tool::ToolSpec(spec))
+            Ok(Tool::ToolSpec(spec))
         })
         .collect::<Result<Vec<_>, Box<dyn std::error::Error + Send + Sync>>>()?;
+
+    // Cache the tool specs as well -- they are stable for the lifetime of the
+    // process and reusing the cache prefix keeps per-call cost low for tool-
+    // heavy workloads (volume + tools tiers).
+    let cache_point = CachePointBlock::builder()
+        .r#type(CachePointType::Default)
+        .build()
+        .map_err(|e| format!("tool cachepoint build: {e}"))?;
+    tool_specs.push(Tool::CachePoint(cache_point));
 
     Ok(ToolConfiguration::builder()
         .set_tools(Some(tool_specs))
@@ -218,6 +304,38 @@ fn collect_tool_uses(message: &Message) -> Vec<aws_sdk_bedrockruntime::types::To
             _ => None,
         })
         .collect()
+}
+
+async fn record_metrics(
+    db: &crate::db::Database,
+    workload: crate::ai::Workload,
+    model_id: &str,
+    usage: &TokenUsage,
+    latency_ms: i64,
+) {
+    let workload_str = match workload {
+        crate::ai::Workload::Volume => "volume",
+        crate::ai::Workload::Tools => "tools",
+        crate::ai::Workload::Premium => "premium",
+    };
+    let now = chrono::Utc::now().timestamp();
+    if let Ok(conn) = db.conn.lock() {
+        let _ = conn.execute(
+            "INSERT INTO inference_metrics (ts, workload, model_id, input_tokens, output_tokens,
+              cache_read_tokens, cache_write_tokens, latency_ms)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
+            rusqlite::params![
+                now,
+                workload_str,
+                model_id,
+                usage.input_tokens(),
+                usage.output_tokens(),
+                usage.cache_read_input_tokens().unwrap_or(0),
+                usage.cache_write_input_tokens().unwrap_or(0),
+                latency_ms,
+            ],
+        );
+    }
 }
 
 fn json_to_document(value: &serde_json::Value) -> Document {
@@ -267,5 +385,33 @@ fn document_to_json(document: &Document) -> serde_json::Value {
         Document::Number(Number::Float(value)) => serde_json::Number::from_f64(*value)
             .map(serde_json::Value::Number)
             .unwrap_or(serde_json::Value::Null),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    // Requires AWS_ACCESS_KEY_ID + AWS_SECRET_ACCESS_KEY in env, region ap-southeast-1
+    #[tokio::test]
+    #[ignore] // run manually: cargo test --lib ai::bedrock::tests::haiku_singapore_round_trip -- --ignored --nocapture
+    async fn haiku_singapore_round_trip() {
+        let creds = crate::aws::credentials::AwsCredentials {
+            access_key_id: std::env::var("AWS_ACCESS_KEY_ID").unwrap_or_default(),
+            secret_access_key: std::env::var("AWS_SECRET_ACCESS_KEY").unwrap_or_default(),
+            region: "ap-southeast-1".to_string(),
+            inference_profile: "apac".to_string(),
+        };
+        if creds.access_key_id.is_empty() {
+            eprintln!("Skipping: no AWS_ACCESS_KEY_ID in env");
+            return;
+        }
+        let resp = send_simple(
+            &creds,
+            "global.anthropic.claude-haiku-4-5-20251001-v1:0",
+            "Say only the word: pong",
+        )
+        .await
+        .unwrap();
+        assert!(resp.to_lowercase().contains("pong"), "got: {resp}");
     }
 }

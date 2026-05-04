@@ -277,16 +277,92 @@ impl AiRouter {
                     }
                 }
                 "bedrock" => {
-                    let model = entry
-                        .model_id
-                        .clone()
-                        .unwrap_or_else(bedrock::default_model);
-                    // TODO(A6): replace this stub with a WorkloadRouter lookup once `db` is
-                    // available as Arc<Database> in this call path.  For now we just log the
-                    // workload tier so the signal is visible in the log output.
-                    log::info!("Bedrock workload={:?} (model routing wired in A6)", workload);
+                    // Load AwsCredentials directly from sqlite + keychain.  We do the
+                    // lookups inline rather than going through `AwsCredsRepo::new(Arc)`
+                    // because `AiRouter::send` only holds `&Database` -- routing one
+                    // borrow through an `Arc` would require restructuring every caller
+                    // of `AiRouter`.  This is a thin equivalent of `AwsCredsRepo::load`.
+                    let creds_row = {
+                        let conn = match db.conn.lock() {
+                            Ok(c) => c,
+                            Err(e) => {
+                                errors.push(format!("bedrock db lock: {e}"));
+                                continue;
+                            }
+                        };
+                        conn.query_row(
+                            "SELECT access_key_id, region, inference_profile \
+                             FROM aws_credentials WHERE id = 1",
+                            [],
+                            |r| {
+                                Ok((
+                                    r.get::<_, String>(0)?,
+                                    r.get::<_, String>(1)?,
+                                    r.get::<_, String>(2)?,
+                                ))
+                            },
+                        )
+                        .ok()
+                    };
+                    let Some((akid, region, profile)) = creds_row else {
+                        errors.push(
+                            "bedrock: AWS credentials not configured in Settings".to_string(),
+                        );
+                        continue;
+                    };
+                    let secret = match crate::security::keychain::KeychainStore::get(
+                        "com.jarvis.aws",
+                        "secret_access_key",
+                    ) {
+                        Ok(s) => s,
+                        Err(e) => {
+                            errors.push(format!("bedrock keychain load: {e}"));
+                            continue;
+                        }
+                    };
+                    let creds = crate::aws::credentials::AwsCredentials {
+                        access_key_id: akid,
+                        secret_access_key: secret,
+                        region,
+                        inference_profile: profile,
+                    };
+
+                    // Look up the model id for this workload tier.  Falls back to
+                    // the chain-entry model_id (or the legacy default) if the
+                    // workload_routing table is missing the requested row.
+                    let workload_key = match workload {
+                        Workload::Volume => "volume",
+                        Workload::Tools => "tools",
+                        Workload::Premium => "premium",
+                    };
+                    let model = {
+                        let conn = match db.conn.lock() {
+                            Ok(c) => c,
+                            Err(e) => {
+                                errors.push(format!("bedrock db lock: {e}"));
+                                continue;
+                            }
+                        };
+                        conn.query_row(
+                            "SELECT model_id FROM workload_routing \
+                             WHERE workload = ?1 AND enabled = 1",
+                            rusqlite::params![workload_key],
+                            |r| r.get::<_, String>(0),
+                        )
+                        .ok()
+                        .or_else(|| entry.model_id.clone())
+                        .unwrap_or_else(bedrock::default_model)
+                    };
+                    log::info!(
+                        "Bedrock workload={:?} -> model={} (region={})",
+                        workload,
+                        model,
+                        creds.region
+                    );
                     bedrock::send(
+                        &creds,
                         &model,
+                        workload,
                         messages.clone(),
                         db,
                         google_auth,
