@@ -109,30 +109,32 @@ pub fn record_inference(
         ],
     ) {
         log::warn!("cost: insert failed: {e}");
+    } else {
+        log::debug!(
+            "cost: recorded provider={provider} model={model_id} workload={} in={input_tokens} out={output_tokens} usd_micro={usd_micro} latency_ms={latency_ms}",
+            workload_str(workload)
+        );
     }
 }
 
 /// 回傳(自 since_ts 起嘅 usd_cost_micro 總和, 有 inference 嘅唯一 UTC 日數)。
-pub fn blended_cost_micro(db: &crate::db::Database, since_ts: i64) -> (i64, i64) {
-    let conn = match db.conn.lock() {
-        Ok(c) => c,
-        Err(_) => return (0, 0),
-    };
-    let total: i64 = conn
-        .query_row(
-            "SELECT COALESCE(SUM(usd_cost_micro), 0) FROM inference_metrics WHERE ts >= ?1",
-            rusqlite::params![since_ts],
-            |r| r.get(0),
-        )
-        .unwrap_or(0);
-    let days: i64 = conn
-        .query_row(
-            "SELECT COUNT(DISTINCT CAST(ts / 86400 AS INTEGER)) FROM inference_metrics WHERE ts >= ?1",
-            rusqlite::params![since_ts],
-            |r| r.get(0),
-        )
-        .unwrap_or(0);
-    (total, days)
+/// Errors propagate so a telemetry failure never renders as a real "$0.00/mo".
+pub fn blended_cost_micro(db: &crate::db::Database, since_ts: i64) -> Result<(i64, i64), String> {
+    let conn = db.conn.lock().map_err(|e| {
+        log::warn!("cost: db lock failed reading blended cost (since_ts={since_ts}): {e}");
+        format!("db lock failed: {e}")
+    })?;
+    conn.query_row(
+        "SELECT COALESCE(SUM(usd_cost_micro), 0),
+                COUNT(DISTINCT CAST(ts / 86400 AS INTEGER))
+         FROM inference_metrics WHERE ts >= ?1",
+        rusqlite::params![since_ts],
+        |r| Ok((r.get(0)?, r.get(1)?)),
+    )
+    .map_err(|e| {
+        log::warn!("cost: blended cost query failed: {e}");
+        format!("blended cost query failed: {e}")
+    })
 }
 
 #[cfg(test)]
@@ -159,27 +161,58 @@ mod tests {
         assert_eq!(compute_usd_cost_micro("mystery-model", 1000, 1000, 0, 0), 0);
     }
 
-    #[tokio::test]
-    async fn blended_sums_and_counts_active_days() {
+    /// Temp sqlite db seeded with rows_sql. Caller removes the file at test end.
+    /// Mirrors V13 + V16 inference_metrics DDL (minus id/NOT NULL/CHECK) --
+    /// update if that schema changes.
+    fn temp_metrics_db(rows_sql: &str) -> (crate::db::Database, std::path::PathBuf) {
         use rusqlite::Connection;
         use std::sync::Mutex;
-        let path = std::env::temp_dir()
-            .join(format!("jarvis-cost-{}.db", uuid::Uuid::new_v4()));
+        let path = std::env::temp_dir().join(format!("jarvis-cost-{}.db", uuid::Uuid::new_v4()));
         let conn = Connection::open(&path).unwrap();
-        conn.execute_batch(
+        conn.execute_batch(&format!(
             "CREATE TABLE inference_metrics (
                 ts INTEGER, workload TEXT, model_id TEXT,
                 input_tokens INTEGER, output_tokens INTEGER,
                 cache_read_tokens INTEGER, cache_write_tokens INTEGER,
                 latency_ms INTEGER, provider TEXT, usd_cost_micro INTEGER);
-             INSERT INTO inference_metrics (ts, usd_cost_micro) VALUES
+             {rows_sql}"
+        ))
+        .unwrap();
+        (crate::db::Database { conn: Mutex::new(conn) }, path)
+    }
+
+    const SEED_ROWS: &str = "INSERT INTO inference_metrics (ts, usd_cost_micro) VALUES
                (1000, 500000),        -- day A: 0.50 USD
                (1500, 250000),        -- day A: 0.25 USD
-               (90000, 1000000);      -- day B: 1.00 USD",
-        ).unwrap();
-        let db = crate::db::Database { conn: Mutex::new(conn) };
-        let (total, days) = blended_cost_micro(&db, 0);
+               (90000, 1000000);      -- day B: 1.00 USD";
+
+    #[test]
+    fn blended_sums_and_counts_active_days() {
+        let (db, path) = temp_metrics_db(SEED_ROWS);
+        let (total, days) = blended_cost_micro(&db, 0).unwrap();
         assert_eq!(total, 1_750_000); // 1.75 USD
         assert_eq!(days, 2);          // 兩個唔同 UTC 日
+        drop(db);
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
+    fn blended_since_ts_excludes_rows_before_window() {
+        let (db, path) = temp_metrics_db(SEED_ROWS);
+        // Window opens after both day-A rows: only the 90000-ts row counts.
+        let (total, days) = blended_cost_micro(&db, 50_000).unwrap();
+        assert_eq!(total, 1_000_000);
+        assert_eq!(days, 1);
+        drop(db);
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
+    fn blended_empty_table_returns_zero_zero() {
+        let (db, path) = temp_metrics_db("");
+        let (total, days) = blended_cost_micro(&db, 0).unwrap();
+        assert_eq!((total, days), (0, 0));
+        drop(db);
+        let _ = std::fs::remove_file(path);
     }
 }

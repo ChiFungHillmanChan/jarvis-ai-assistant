@@ -148,18 +148,43 @@ pub struct BlendedCost {
 }
 
 #[tauri::command]
-pub fn get_blended_cost(
+pub async fn get_blended_cost(
     db: tauri::State<'_, std::sync::Arc<crate::db::Database>>,
     days: i64,
 ) -> Result<BlendedCost, String> {
+    let days = days.clamp(1, 3650);
     let now = chrono::Utc::now().timestamp();
-    let since = now - days.max(1) * 86400;
-    let (total_micro, active_days) = crate::ai::cost::blended_cost_micro(&db, since);
+    let since = now - days * 86400;
+    let (total_micro, active_days) = crate::ai::cost::blended_cost_micro(&db, since)?;
     let total_usd = total_micro as f64 / 1_000_000.0;
-    let implied_monthly_usd = if active_days > 0 {
+    Ok(BlendedCost {
+        total_usd,
+        active_days,
+        implied_monthly_usd: implied_monthly_usd(total_usd, active_days),
+    })
+}
+
+fn implied_monthly_usd(total_usd: f64, active_days: i64) -> f64 {
+    if active_days > 0 {
         total_usd / active_days as f64 * 30.0
     } else {
         0.0
-    };
-    Ok(BlendedCost { total_usd, active_days, implied_monthly_usd })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn implied_monthly_zero_days_is_zero_not_nan() {
+        assert_eq!(implied_monthly_usd(0.0, 0), 0.0);
+        assert_eq!(implied_monthly_usd(5.0, 0), 0.0);
+    }
+
+    #[test]
+    fn implied_monthly_scales_daily_average_to_30_days() {
+        // 1.75 USD over 2 active days -> 0.875/day -> 26.25/mo
+        assert!((implied_monthly_usd(1.75, 2) - 26.25).abs() < 1e-9);
+    }
 }

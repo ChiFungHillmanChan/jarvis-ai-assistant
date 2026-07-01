@@ -51,7 +51,7 @@ function shortModel(id: string): string {
 
 export default memo(function CostPanel() {
   const { data, error, loading } = useTauriCommand<CostStats>("get_cost_stats");
-  const { data: blended } = useTauriCommand<BlendedCost>("get_blended_cost", { days: 30 });
+  const { data: blended, error: blendedError } = useTauriCommand<BlendedCost>("get_blended_cost", { days: 30 });
 
   if (loading) {
     return (
@@ -98,6 +98,9 @@ export default memo(function CostPanel() {
         <div style={styles.blended}>
           Implied blended: ${blended.implied_monthly_usd.toFixed(2)}/mo  ({blended.active_days}d active)
         </div>
+      )}
+      {!blended && blendedError && (
+        <div style={styles.blended}>Implied blended: unavailable ({blendedError})</div>
       )}
 
       <div style={styles.subheader}>BY PROVIDER</div>
