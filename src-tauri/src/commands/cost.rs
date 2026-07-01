@@ -139,3 +139,27 @@ pub async fn get_cost_stats(db: State<'_, Arc<Database>>) -> Result<CostStats, S
         top_expensive_30d: top_expensive,
     })
 }
+
+#[derive(serde::Serialize)]
+pub struct BlendedCost {
+    pub total_usd: f64,
+    pub active_days: i64,
+    pub implied_monthly_usd: f64,
+}
+
+#[tauri::command]
+pub fn get_blended_cost(
+    db: tauri::State<'_, std::sync::Arc<crate::db::Database>>,
+    days: i64,
+) -> Result<BlendedCost, String> {
+    let now = chrono::Utc::now().timestamp();
+    let since = now - days.max(1) * 86400;
+    let (total_micro, active_days) = crate::ai::cost::blended_cost_micro(&db, since);
+    let total_usd = total_micro as f64 / 1_000_000.0;
+    let implied_monthly_usd = if active_days > 0 {
+        total_usd / active_days as f64 * 30.0
+    } else {
+        0.0
+    };
+    Ok(BlendedCost { total_usd, active_days, implied_monthly_usd })
+}

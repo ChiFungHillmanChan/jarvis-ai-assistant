@@ -112,6 +112,29 @@ pub fn record_inference(
     }
 }
 
+/// 回傳(自 since_ts 起嘅 usd_cost_micro 總和, 有 inference 嘅唯一 UTC 日數)。
+pub fn blended_cost_micro(db: &crate::db::Database, since_ts: i64) -> (i64, i64) {
+    let conn = match db.conn.lock() {
+        Ok(c) => c,
+        Err(_) => return (0, 0),
+    };
+    let total: i64 = conn
+        .query_row(
+            "SELECT COALESCE(SUM(usd_cost_micro), 0) FROM inference_metrics WHERE ts >= ?1",
+            rusqlite::params![since_ts],
+            |r| r.get(0),
+        )
+        .unwrap_or(0);
+    let days: i64 = conn
+        .query_row(
+            "SELECT COUNT(DISTINCT CAST(ts / 86400 AS INTEGER)) FROM inference_metrics WHERE ts >= ?1",
+            rusqlite::params![since_ts],
+            |r| r.get(0),
+        )
+        .unwrap_or(0);
+    (total, days)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -134,5 +157,29 @@ mod tests {
     #[test]
     fn unknown_model_returns_zero() {
         assert_eq!(compute_usd_cost_micro("mystery-model", 1000, 1000, 0, 0), 0);
+    }
+
+    #[tokio::test]
+    async fn blended_sums_and_counts_active_days() {
+        use rusqlite::Connection;
+        use std::sync::Mutex;
+        let path = std::env::temp_dir()
+            .join(format!("jarvis-cost-{}.db", uuid::Uuid::new_v4()));
+        let conn = Connection::open(&path).unwrap();
+        conn.execute_batch(
+            "CREATE TABLE inference_metrics (
+                ts INTEGER, workload TEXT, model_id TEXT,
+                input_tokens INTEGER, output_tokens INTEGER,
+                cache_read_tokens INTEGER, cache_write_tokens INTEGER,
+                latency_ms INTEGER, provider TEXT, usd_cost_micro INTEGER);
+             INSERT INTO inference_metrics (ts, usd_cost_micro) VALUES
+               (1000, 500000),        -- day A: 0.50 USD
+               (1500, 250000),        -- day A: 0.25 USD
+               (90000, 1000000);      -- day B: 1.00 USD",
+        ).unwrap();
+        let db = crate::db::Database { conn: Mutex::new(conn) };
+        let (total, days) = blended_cost_micro(&db, 0);
+        assert_eq!(total, 1_750_000); // 1.75 USD
+        assert_eq!(days, 2);          // 兩個唔同 UTC 日
     }
 }

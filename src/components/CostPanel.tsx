@@ -30,6 +30,12 @@ interface CostStats {
   top_expensive_30d: ExpensiveTurn[];
 }
 
+interface BlendedCost {
+  total_usd: number;
+  active_days: number;
+  implied_monthly_usd: number;
+}
+
 function formatUsd(usd: number): string {
   if (usd === 0) return "$0";
   if (usd < 0.01) return `$${usd.toFixed(4)}`;
@@ -45,6 +51,7 @@ function shortModel(id: string): string {
 
 export default memo(function CostPanel() {
   const { data, error, loading } = useTauriCommand<CostStats>("get_cost_stats");
+  const { data: blended } = useTauriCommand<BlendedCost>("get_blended_cost", { days: 30 });
 
   if (loading) {
     return (
@@ -86,6 +93,12 @@ export default memo(function CostPanel() {
           highlight={data.local_share_pct >= 50}
         />
       </div>
+
+      {blended && (
+        <div style={styles.blended}>
+          Implied blended: ${blended.implied_monthly_usd.toFixed(2)}/mo  ({blended.active_days}d active)
+        </div>
+      )}
 
       <div style={styles.subheader}>BY PROVIDER</div>
       <div style={styles.providerList}>
@@ -152,6 +165,7 @@ const styles: Record<string, React.CSSProperties> = {
     marginTop: 14,
     marginBottom: 6,
   },
+  blended: { fontSize: 11, color: "rgba(180, 220, 255, 0.7)", marginTop: 10 },
   kpiRow: { display: "flex", gap: 16 },
   kpi: { display: "flex", flexDirection: "column", gap: 2 },
   kpiLabel: { fontSize: 10, color: "rgba(180, 220, 255, 0.5)", letterSpacing: 1 },

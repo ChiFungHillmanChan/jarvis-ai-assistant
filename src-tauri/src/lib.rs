@@ -295,6 +295,7 @@ pub fn run() {
             commands::chat::get_conversations,
             commands::chat::clear_conversations,
             commands::cost::get_cost_stats,
+            commands::cost::get_blended_cost,
             commands::dashboard::get_dashboard_data,
             commands::email::get_emails,
             commands::email::sync_emails,
