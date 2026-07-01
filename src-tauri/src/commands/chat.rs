@@ -1,4 +1,4 @@
-use crate::ai::{AiRouter, Workload};
+use crate::ai::{classify_workload, AiRouter, Workload};
 use crate::db::Database;
 use crate::voice::tts::StreamingTts;
 use crate::voice::VoiceEngine;
@@ -25,10 +25,7 @@ pub async fn send_message(
     message: String,
     workload: Option<String>,
 ) -> Result<ChatMessage, String> {
-    let selected_workload = match workload.as_deref() {
-        Some("premium") => Workload::Premium,
-        _ => Workload::Tools,
-    };
+    let selected_workload = classify_workload(&message, workload.as_deref() == Some("premium"));
     // Cancel any in-progress TTS and emit thinking state FIRST for immediate UI feedback
     {
         let tts = engine.tts.lock().map_err(|e| e.to_string())?.clone();
@@ -188,7 +185,7 @@ pub async fn send_message(
                     }),
                 );
                 let search_response = match router
-                    .send(search_messages, &db, &google_auth, &app_handle, None, Workload::Tools)
+                    .send(search_messages, &db, &google_auth, &app_handle, None, Workload::Volume)
                     .await
                 {
                     Ok(r) => r,

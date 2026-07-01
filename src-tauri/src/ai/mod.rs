@@ -6,7 +6,7 @@ pub mod local;
 pub mod openai;
 pub mod routing;
 pub mod tools;
-pub use routing::Workload;
+pub use routing::{classify_workload, Workload};
 
 use crate::voice::tts::TtsCommand;
 use local::backend::{BackendType, LocalEndpoint};
