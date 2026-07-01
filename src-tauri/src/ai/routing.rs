@@ -8,6 +8,35 @@ pub enum Workload {
     Premium,
 }
 
+/// Conservative classification: if uncertain, return Tools (= status quo, no regression).
+/// Only clearly read-only / summarize intent returns cheapest Volume tier.
+/// Action requests (send / reply / schedule ...) return Tools (needs tool-calling capability).
+pub fn classify_workload(message: &str, explicit_premium: bool) -> Workload {
+    if explicit_premium {
+        return Workload::Premium;
+    }
+    let m = message.trim().to_lowercase();
+
+    const TOOL_TRIGGERS: &[&str] = &[
+        "send", "reply", "draft", "schedule", "create", "delete", "archive",
+        "label", "move ", "book ", "cancel", "forward", "mark ", "unsubscribe",
+    ];
+    if TOOL_TRIGGERS.iter().any(|t| m.contains(t)) {
+        return Workload::Tools;
+    }
+
+    const VOLUME_INTENTS: &[&str] = &[
+        "summar", "what emails", "what's in my inbox", "whats in my inbox",
+        "unread", "list ", "show me", "any new", "catch me up", "tl;dr",
+        "digest", "what do i have", "what needs",
+    ];
+    if VOLUME_INTENTS.iter().any(|t| m.contains(t)) {
+        return Workload::Volume;
+    }
+
+    Workload::Tools
+}
+
 pub struct WorkloadRouter {
     db: Arc<Database>,
 }
@@ -77,5 +106,29 @@ mod tests {
             r.model_for(Workload::Premium).await.unwrap(),
             "global.anthropic.claude-sonnet-4-6"
         );
+    }
+
+    #[test]
+    fn explicit_premium_always_wins() {
+        assert_eq!(classify_workload("summarize my inbox", true), Workload::Premium);
+    }
+
+    #[test]
+    fn readonly_triage_goes_volume() {
+        assert_eq!(classify_workload("summarize my unread emails", false), Workload::Volume);
+        assert_eq!(classify_workload("what's in my inbox today", false), Workload::Volume);
+        assert_eq!(classify_workload("catch me up", false), Workload::Volume);
+    }
+
+    #[test]
+    fn action_requests_stay_tools() {
+        assert_eq!(classify_workload("reply to the recruiter", false), Workload::Tools);
+        assert_eq!(classify_workload("draft an email to Sam", false), Workload::Tools);
+        assert_eq!(classify_workload("schedule a call tomorrow", false), Workload::Tools);
+    }
+
+    #[test]
+    fn ambiguous_defaults_to_tools_no_regression() {
+        assert_eq!(classify_workload("hmm ok interesting", false), Workload::Tools);
     }
 }
