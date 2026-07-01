@@ -20,6 +20,10 @@ pub fn price_for(model_id: &str) -> ModelPrice {
         ModelPrice { input_per_million: 0.06, output_per_million: 0.24, cache_read_per_million: 0.015, cache_write_per_million: 0.075 }
     } else if m.contains("nova-pro") {
         ModelPrice { input_per_million: 0.80, output_per_million: 3.20, cache_read_per_million: 0.20, cache_write_per_million: 1.00 }
+    } else if m.contains("gemini-3.1-pro") {
+        ModelPrice { input_per_million: 2.0, output_per_million: 12.0, cache_read_per_million: 0.50, cache_write_per_million: 2.0 }
+    } else if m.contains("gemini-3-flash") {
+        ModelPrice { input_per_million: 0.50, output_per_million: 3.0, cache_read_per_million: 0.125, cache_write_per_million: 0.50 }
     } else if m.contains("gemini-2.5-pro") || m.contains("gemini-pro") {
         ModelPrice { input_per_million: 1.25, output_per_million: 10.0, cache_read_per_million: 0.31, cache_write_per_million: 1.25 }
     } else if m.contains("gemini-2.5-flash") || m.contains("gemini-flash") {

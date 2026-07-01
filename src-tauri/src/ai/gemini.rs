@@ -60,6 +60,18 @@ struct FunctionResponseData {
 #[derive(Deserialize, Debug)]
 struct StreamChunk {
     candidates: Option<Vec<Candidate>>,
+    #[serde(rename = "usageMetadata")]
+    usage_metadata: Option<UsageMetadata>,
+}
+
+#[derive(Deserialize, Debug, Default, Clone)]
+struct UsageMetadata {
+    #[serde(rename = "promptTokenCount")]
+    prompt_token_count: Option<i64>,
+    #[serde(rename = "candidatesTokenCount")]
+    candidates_token_count: Option<i64>,
+    #[serde(rename = "cachedContentTokenCount")]
+    cached_content_token_count: Option<i64>,
 }
 
 #[derive(Deserialize, Debug)]
@@ -82,7 +94,10 @@ pub async fn send(
     google_auth: &std::sync::Arc<crate::auth::google::GoogleAuth>,
     app_handle: &tauri::AppHandle,
     tts_tx: Option<tokio::sync::mpsc::Sender<TtsCommand>>,
+    workload: crate::ai::Workload,
 ) -> Result<String, Box<dyn std::error::Error + Send + Sync>> {
+    let started_at = std::time::Instant::now();
+    let mut usage = UsageMetadata::default();
     let client = Client::builder()
         .read_timeout(std::time::Duration::from_secs(90))
         .build()?;
@@ -199,6 +214,10 @@ pub async fn send(
                         continue;
                     }
                 };
+
+                if let Some(u) = sse.usage_metadata {
+                    usage = u;
+                }
 
                 if let Some(candidates) = sse.candidates {
                     for candidate in &candidates {
@@ -338,6 +357,14 @@ pub async fn send(
 
         let _ = app_handle.emit("chat-token", json!({"token": "", "done": true}));
         if !text_parts.is_empty() {
+            crate::ai::cost::record_inference(
+                db, "gemini", workload, model,
+                usage.prompt_token_count.unwrap_or(0),
+                usage.candidates_token_count.unwrap_or(0),
+                usage.cached_content_token_count.unwrap_or(0),
+                0,
+                started_at.elapsed().as_millis() as i64,
+            );
             return Ok(text_parts.join(""));
         }
         log::warn!(
@@ -349,9 +376,25 @@ pub async fn send(
             total_bytes,
             first_chunk_sample
         );
+        crate::ai::cost::record_inference(
+            db, "gemini", workload, model,
+            usage.prompt_token_count.unwrap_or(0),
+            usage.candidates_token_count.unwrap_or(0),
+            usage.cached_content_token_count.unwrap_or(0),
+            0,
+            started_at.elapsed().as_millis() as i64,
+        );
         return Ok(String::new());
     }
 
     let _ = app_handle.emit("chat-token", json!({"token": "", "done": true}));
+    crate::ai::cost::record_inference(
+        db, "gemini", workload, model,
+        usage.prompt_token_count.unwrap_or(0),
+        usage.candidates_token_count.unwrap_or(0),
+        usage.cached_content_token_count.unwrap_or(0),
+        0,
+        started_at.elapsed().as_millis() as i64,
+    );
     Ok("I've completed the actions.".into())
 }

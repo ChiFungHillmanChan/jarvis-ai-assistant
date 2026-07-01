@@ -201,7 +201,10 @@ impl AiRouter {
 
             let provider_name = match entry.provider_type.as_str() {
                 "gemini" => {
-                    let model = entry.model_id.as_deref().unwrap_or(gemini::MODEL_PRO);
+                    let model = match workload {
+                        Workload::Premium => gemini::MODEL_PRO,
+                        _ => gemini::MODEL_FLASH,
+                    };
                     format!("gemini ({})", model)
                 }
                 "local" => {
@@ -229,7 +232,10 @@ impl AiRouter {
             let result = match entry.provider_type.as_str() {
                 "gemini" => {
                     if let Some(ref key) = self.gemini_key {
-                        let model = entry.model_id.as_deref().unwrap_or(gemini::MODEL_PRO);
+                        let model = match workload {
+                            Workload::Premium => gemini::MODEL_PRO,
+                            _ => gemini::MODEL_FLASH,
+                        };
                         gemini::send(
                             key,
                             model,
@@ -238,6 +244,7 @@ impl AiRouter {
                             google_auth,
                             app_handle,
                             tts_tx.clone(),
+                            workload,
                         )
                         .await
                         .map_err(|e| e.to_string())
