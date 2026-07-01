@@ -278,6 +278,7 @@ impl AiRouter {
                             google_auth,
                             app_handle,
                             tts_tx.clone(),
+                            workload,
                         )
                         .await
                         .map_err(|e| e.to_string())

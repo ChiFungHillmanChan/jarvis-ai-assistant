@@ -14,6 +14,18 @@ struct OpenAIRequest {
     tools: Vec<serde_json::Value>,
     max_completion_tokens: u32,
     stream: bool,
+    stream_options: StreamOptions,
+}
+
+#[derive(Serialize)]
+struct StreamOptions {
+    include_usage: bool,
+}
+
+#[derive(Deserialize, Debug, Default, Clone)]
+struct OpenAIUsage {
+    prompt_tokens: Option<i64>,
+    completion_tokens: Option<i64>,
 }
 
 #[derive(Serialize, Deserialize, Clone, Debug)]
@@ -46,6 +58,7 @@ struct FunctionCall {
 #[derive(Deserialize)]
 struct SseChunk {
     choices: Vec<SseChoice>,
+    usage: Option<OpenAIUsage>,
 }
 
 #[derive(Deserialize)]
@@ -80,7 +93,11 @@ pub async fn send(
     google_auth: &std::sync::Arc<crate::auth::google::GoogleAuth>,
     app_handle: &tauri::AppHandle,
     tts_tx: Option<tokio::sync::mpsc::Sender<TtsCommand>>,
+    workload: crate::ai::Workload,
 ) -> Result<String, Box<dyn std::error::Error + Send + Sync>> {
+    let started_at = std::time::Instant::now();
+    let mut usage = OpenAIUsage::default();
+    let model_id = "gpt-5".to_string();
     let client = Client::builder()
         .read_timeout(std::time::Duration::from_secs(60))
         .build()?;
@@ -103,11 +120,12 @@ pub async fn send(
     let max_iterations = 5;
     for _ in 0..max_iterations {
         let request = OpenAIRequest {
-            model: "gpt-5".into(),
+            model: model_id.clone(),
             messages: openai_messages.clone(),
             tools: openai_tools.clone(),
             max_completion_tokens: 4096,
             stream: true,
+            stream_options: StreamOptions { include_usage: true },
         };
 
         let response = client
@@ -169,6 +187,10 @@ pub async fn send(
                     Ok(c) => c,
                     Err(_) => continue,
                 };
+
+                if let Some(u) = chunk.usage.clone() {
+                    usage = u;
+                }
 
                 for choice in &chunk.choices {
                     if let Some(ref delta) = choice.delta {
@@ -325,9 +347,23 @@ pub async fn send(
 
         // No tool calls -- emit done and return the text
         let _ = app_handle.emit("chat-token", json!({"token": "", "done": true}));
+        crate::ai::cost::record_inference(
+            db, "openai", workload, &model_id,
+            usage.prompt_tokens.unwrap_or(0),
+            usage.completion_tokens.unwrap_or(0),
+            0, 0,
+            started_at.elapsed().as_millis() as i64,
+        );
         return Ok(text_parts.join(""));
     }
 
     let _ = app_handle.emit("chat-token", json!({"token": "", "done": true}));
+    crate::ai::cost::record_inference(
+        db, "openai", workload, &model_id,
+        usage.prompt_tokens.unwrap_or(0),
+        usage.completion_tokens.unwrap_or(0),
+        0, 0,
+        started_at.elapsed().as_millis() as i64,
+    );
     Ok("I've completed the actions.".into())
 }

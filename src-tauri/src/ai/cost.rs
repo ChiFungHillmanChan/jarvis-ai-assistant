@@ -32,6 +32,8 @@ pub fn price_for(model_id: &str) -> ModelPrice {
         ModelPrice { input_per_million: 0.15, output_per_million: 0.60, cache_read_per_million: 0.075, cache_write_per_million: 0.15 }
     } else if m.contains("gpt-4o") {
         ModelPrice { input_per_million: 2.50, output_per_million: 10.0, cache_read_per_million: 1.25, cache_write_per_million: 2.50 }
+    } else if m.contains("gpt-5") {
+        ModelPrice { input_per_million: 1.25, output_per_million: 10.0, cache_read_per_million: 0.125, cache_write_per_million: 1.25 }
     } else {
         ModelPrice { input_per_million: 0.0, output_per_million: 0.0, cache_read_per_million: 0.0, cache_write_per_million: 0.0 }
     }
