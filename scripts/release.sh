@@ -23,6 +23,22 @@ NOTARYTOOL_PROFILE="${NOTARYTOOL_PROFILE:-jarvis-notarytool}"
 REPO_ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 cd "${REPO_ROOT}"
 
+# Source .env so option_env! macros (GOOGLE_CLIENT_ID etc.) get baked into the
+# release binary at compile time. dotenvy at runtime is enough for `tauri dev`,
+# but a packaged DMG has no .env to read — these values must be in the env when
+# `tauri build` runs.
+if [ -f "${REPO_ROOT}/.env" ]; then
+  set -a
+  # shellcheck disable=SC1091
+  . "${REPO_ROOT}/.env"
+  set +a
+fi
+if [ -z "${GOOGLE_CLIENT_ID:-}" ]; then
+  echo "WARNING: GOOGLE_CLIENT_ID not set — the shipped DMG will have no Google sign-in."
+  read -r -p "Continue anyway? [y/N] " GO_ANYWAY
+  if [[ "${GO_ANYWAY}" != "y" && "${GO_ANYWAY}" != "Y" ]]; then exit 1; fi
+fi
+
 echo "==> 1/10 Bumping version to ${VERSION}"
 node -e 'const fs=require("fs"); const p=JSON.parse(fs.readFileSync("package.json")); p.version=process.argv[1]; fs.writeFileSync("package.json", JSON.stringify(p,null,2)+"\n");' "${VERSION}"
 node -e 'const fs=require("fs"); const f="src-tauri/tauri.conf.json"; const p=JSON.parse(fs.readFileSync(f)); p.version=process.argv[1]; fs.writeFileSync(f, JSON.stringify(p,null,2)+"\n");' "${VERSION}"
@@ -80,9 +96,13 @@ fi
 
 echo "==> 8/10 Uploading DMG + updater tarball + signature to s3://${BUCKET}"
 DMG_NAME="$(basename "${DMG_PATH}")"
+# Stable alias used by the website's /download page and as a fallback URL when
+# latest.json is unreachable. Always points to the most recently released DMG.
+LATEST_DMG_NAME="JARVIS_latest_aarch64.dmg"
 # Use a versioned tarball name so old + new tarballs can coexist while users update.
 TARBALL_NAME="JARVIS_${VERSION}_aarch64.app.tar.gz"
 aws s3 cp "${DMG_PATH}" "s3://${BUCKET}/${DMG_NAME}" --profile "${PROFILE}"
+aws s3 cp "${DMG_PATH}" "s3://${BUCKET}/${LATEST_DMG_NAME}" --profile "${PROFILE}"
 aws s3 cp "${TARBALL_PATH}" "s3://${BUCKET}/${TARBALL_NAME}" --profile "${PROFILE}"
 aws s3 cp "${SIG_PATH}" "s3://${BUCKET}/${TARBALL_NAME}.sig" --profile "${PROFILE}"
 
@@ -100,6 +120,7 @@ cat > /tmp/latest.json <<MANIFEST
   "version": "${VERSION}",
   "notes": $(jq -Rs . <<< "${NOTES}"),
   "pub_date": "${PUB_DATE}",
+  "dmg_url": "${DMG_PUBLIC_URL}",
   "platforms": {
     "darwin-aarch64": {
       "signature": $(jq -Rs . <<< "${SIG_CONTENT}"),

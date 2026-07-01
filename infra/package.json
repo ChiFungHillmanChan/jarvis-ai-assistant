@@ -1,0 +1,31 @@
+{
+  "name": "jarvis-infra",
+  "version": "0.1.0",
+  "private": true,
+  "description": "AWS CDK infrastructure for JARVIS AI cloud control plane",
+  "bin": {
+    "jarvis": "bin/jarvis.js"
+  },
+  "scripts": {
+    "build": "tsc",
+    "watch": "tsc -w",
+    "synth": "cdk synth",
+    "diff": "cdk diff",
+    "deploy:sandbox": "cdk deploy --profile jarvis --context env=sandbox --require-approval broadening",
+    "deploy:dev": "cdk deploy --profile jarvis --context env=dev --require-approval broadening",
+    "deploy:prod": "cdk deploy --profile jarvis --context env=prod --require-approval any-change",
+    "destroy:sandbox": "cdk destroy --profile jarvis --context env=sandbox",
+    "bootstrap": "cdk bootstrap --profile jarvis aws://759626151650/ap-southeast-1"
+  },
+  "devDependencies": {
+    "@types/aws-lambda": "^8.10.161",
+    "@types/node": "^22.0.0",
+    "aws-cdk": "^2.170.0",
+    "esbuild": "^0.28.0",
+    "typescript": "~5.6.0"
+  },
+  "dependencies": {
+    "aws-cdk-lib": "^2.170.0",
+    "constructs": "^10.4.0"
+  }
+}

@@ -338,29 +338,17 @@ async fn record_metrics(
     usage: &TokenUsage,
     latency_ms: i64,
 ) {
-    let workload_str = match workload {
-        crate::ai::Workload::Volume => "volume",
-        crate::ai::Workload::Tools => "tools",
-        crate::ai::Workload::Premium => "premium",
-    };
-    let now = chrono::Utc::now().timestamp();
-    if let Ok(conn) = db.conn.lock() {
-        let _ = conn.execute(
-            "INSERT INTO inference_metrics (ts, workload, model_id, input_tokens, output_tokens,
-              cache_read_tokens, cache_write_tokens, latency_ms)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
-            rusqlite::params![
-                now,
-                workload_str,
-                model_id,
-                usage.input_tokens(),
-                usage.output_tokens(),
-                usage.cache_read_input_tokens().unwrap_or(0),
-                usage.cache_write_input_tokens().unwrap_or(0),
-                latency_ms,
-            ],
-        );
-    }
+    crate::ai::cost::record_inference(
+        db,
+        "bedrock",
+        workload,
+        model_id,
+        usage.input_tokens() as i64,
+        usage.output_tokens() as i64,
+        usage.cache_read_input_tokens().unwrap_or(0) as i64,
+        usage.cache_write_input_tokens().unwrap_or(0) as i64,
+        latency_ms,
+    );
 }
 
 fn json_to_document(value: &serde_json::Value) -> Document {

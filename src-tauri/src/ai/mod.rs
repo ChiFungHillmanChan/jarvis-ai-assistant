@@ -1,5 +1,6 @@
 pub mod bedrock;
 pub mod claude;
+pub mod cost;
 pub mod gemini;
 pub mod local;
 pub mod openai;
@@ -253,6 +254,7 @@ impl AiRouter {
                             google_auth,
                             app_handle,
                             tts_tx.clone(),
+                            workload,
                         )
                         .await
                         .map_err(|e| e.to_string())

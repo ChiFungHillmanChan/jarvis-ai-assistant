@@ -2,6 +2,7 @@ pub mod assistant;
 pub mod aws;
 pub mod calendar;
 pub mod chat;
+pub mod cost;
 pub mod cron;
 pub mod dashboard;
 pub mod email;

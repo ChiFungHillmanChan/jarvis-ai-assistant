@@ -67,6 +67,7 @@ export async function getGitHubStats(): Promise<GitHubStats> { return invoke("ge
 // Voice
 export async function startListening(): Promise<string> { return invoke("start_listening"); }
 export async function stopListening(): Promise<string> { return invoke("stop_listening"); }
+export async function stopSpeaking(): Promise<void> { return invoke("stop_speaking"); }
 export async function getVoiceState(): Promise<VoiceState> { return invoke("get_voice_state"); }
 export async function toggleMute(): Promise<boolean> { return invoke("toggle_mute"); }
 export async function getVoiceSettings(): Promise<VoiceSettings> { return invoke("get_voice_settings"); }

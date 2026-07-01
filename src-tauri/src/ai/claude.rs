@@ -57,6 +57,8 @@ struct SseEvent {
     index: Option<usize>,
     delta: Option<SseDelta>,
     content_block: Option<SseContentBlock>,
+    message: Option<SseMessageStart>,
+    usage: Option<SseUsage>,
 }
 
 #[derive(Deserialize)]
@@ -77,6 +79,19 @@ struct SseContentBlock {
     name: Option<String>,
 }
 
+#[derive(Deserialize)]
+struct SseMessageStart {
+    usage: Option<SseUsage>,
+}
+
+#[derive(Deserialize)]
+struct SseUsage {
+    input_tokens: Option<i64>,
+    output_tokens: Option<i64>,
+    cache_read_input_tokens: Option<i64>,
+    cache_creation_input_tokens: Option<i64>,
+}
+
 pub async fn send(
     api_key: &str,
     messages: Vec<(String, String)>,
@@ -84,6 +99,7 @@ pub async fn send(
     google_auth: &std::sync::Arc<crate::auth::google::GoogleAuth>,
     app_handle: &tauri::AppHandle,
     tts_tx: Option<tokio::sync::mpsc::Sender<TtsCommand>>,
+    workload: crate::ai::Workload,
 ) -> Result<String, Box<dyn std::error::Error + Send + Sync>> {
     let client = Client::builder()
         .read_timeout(std::time::Duration::from_secs(60))
@@ -101,6 +117,12 @@ pub async fn send(
             content: ClaudeContent::Text(content),
         })
         .collect();
+
+    let mut total_input_tokens: i64 = 0;
+    let mut total_output_tokens: i64 = 0;
+    let mut total_cache_read: i64 = 0;
+    let mut total_cache_write: i64 = 0;
+    let started_at = std::time::Instant::now();
 
     let max_iterations = 5;
     for _ in 0..max_iterations {
@@ -196,6 +218,15 @@ pub async fn send(
 
                 log::debug!("[claude] SSE: {}", sse.event_type);
                 match sse.event_type.as_str() {
+                    "message_start" => {
+                        if let Some(ref msg) = sse.message {
+                            if let Some(ref u) = msg.usage {
+                                total_input_tokens += u.input_tokens.unwrap_or(0);
+                                total_cache_read += u.cache_read_input_tokens.unwrap_or(0);
+                                total_cache_write += u.cache_creation_input_tokens.unwrap_or(0);
+                            }
+                        }
+                    }
                     "content_block_start" => {
                         if let Some(ref cb) = sse.content_block {
                             if cb.block_type == "tool_use" {
@@ -274,6 +305,9 @@ pub async fn send(
                             if let Some(ref sr) = delta.stop_reason {
                                 stop_reason = Some(sr.clone());
                             }
+                        }
+                        if let Some(ref u) = sse.usage {
+                            total_output_tokens += u.output_tokens.unwrap_or(0);
                         }
                     }
                     _ => {}
@@ -359,6 +393,11 @@ pub async fn send(
             if stop_reason.as_deref() == Some("end_turn") && !text_parts.is_empty() {
                 let _ = app_handle.emit("chat-token", json!({"token": "", "done": true}));
                 let _ = app_handle.emit("chat-thinking", json!({"text": "", "done": true}));
+                crate::ai::cost::record_inference(
+                    db, "claude", workload, &model,
+                    total_input_tokens, total_output_tokens, total_cache_read, total_cache_write,
+                    started_at.elapsed().as_millis() as i64,
+                );
                 return Ok(text_parts.join(""));
             }
             let _ = app_handle.emit(
@@ -374,6 +413,11 @@ pub async fn send(
         // No tool calls -- emit done and return text
         let _ = app_handle.emit("chat-token", json!({"token": "", "done": true}));
         let _ = app_handle.emit("chat-thinking", json!({"text": "", "done": true}));
+        crate::ai::cost::record_inference(
+            db, "claude", workload, &model,
+            total_input_tokens, total_output_tokens, total_cache_read, total_cache_write,
+            started_at.elapsed().as_millis() as i64,
+        );
         if !text_parts.is_empty() {
             return Ok(text_parts.join(""));
         }
@@ -382,5 +426,10 @@ pub async fn send(
 
     let _ = app_handle.emit("chat-token", json!({"token": "", "done": true}));
     let _ = app_handle.emit("chat-thinking", json!({"text": "", "done": true}));
+    crate::ai::cost::record_inference(
+        db, "claude", workload, &model,
+        total_input_tokens, total_output_tokens, total_cache_read, total_cache_write,
+        started_at.elapsed().as_millis() as i64,
+    );
     Ok("I've completed the actions.".into())
 }

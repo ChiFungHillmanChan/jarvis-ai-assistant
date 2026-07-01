@@ -82,6 +82,42 @@ pub fn run() {
                 }
             });
 
+            // Detect a locally-running Ollama on first boot. If reachable,
+            // ensure an endpoint row exists so the user can wire it into the
+            // provider chain from Settings without manual URL entry. We do
+            // not auto-insert into provider_chain -- that stays a user choice.
+            let db_for_ollama = std::sync::Arc::clone(&db_arc);
+            tauri::async_runtime::spawn(async move {
+                let client = match reqwest::Client::builder()
+                    .timeout(std::time::Duration::from_secs(2))
+                    .build()
+                {
+                    Ok(c) => c,
+                    Err(_) => return,
+                };
+                let body = match client.get("http://localhost:11434/").send().await {
+                    Ok(r) => r.text().await.unwrap_or_default(),
+                    Err(_) => return,
+                };
+                if !body.contains("Ollama") {
+                    return;
+                }
+                if let Ok(conn) = db_for_ollama.conn.lock() {
+                    let res = conn.execute(
+                        "INSERT OR IGNORE INTO local_endpoints
+                            (id, name, url, backend_type, is_active)
+                         VALUES ('ollama-local', 'Ollama (local)',
+                                 'http://localhost:11434', 'ollama', 1)",
+                        [],
+                    );
+                    match res {
+                        Ok(0) => log::debug!("Ollama endpoint already registered"),
+                        Ok(_) => log::info!("Detected local Ollama at :11434, endpoint registered"),
+                        Err(e) => log::warn!("Ollama endpoint insert failed: {e}"),
+                    }
+                }
+            });
+
             let voice_engine = std::sync::Arc::new(voice::VoiceEngine::new(
                 &db_arc,
                 Some(app.handle().clone()),
@@ -258,6 +294,7 @@ pub fn run() {
             commands::chat::send_message,
             commands::chat::get_conversations,
             commands::chat::clear_conversations,
+            commands::cost::get_cost_stats,
             commands::dashboard::get_dashboard_data,
             commands::email::get_emails,
             commands::email::sync_emails,

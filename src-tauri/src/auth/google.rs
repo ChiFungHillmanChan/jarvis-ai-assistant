@@ -16,13 +16,33 @@ pub struct GoogleAuth {
     pub refresh_token: Mutex<Option<String>>,
 }
 
+/// Resolve a credential by checking the runtime env var first, then falling back to
+/// a value baked in at compile time via `option_env!`. Empty strings count as missing.
+fn resolve_credential(env_key: &str, compile_time: Option<&'static str>) -> Option<String> {
+    std::env::var(env_key)
+        .ok()
+        .filter(|v| !v.is_empty())
+        .or_else(|| compile_time.map(str::to_string).filter(|v| !v.is_empty()))
+}
+
 impl GoogleAuth {
+    /// Construct from credentials. Reads `GOOGLE_CLIENT_ID` / `GOOGLE_CLIENT_SECRET`
+    /// from the runtime env, falling back to values embedded at compile time. Returns
+    /// `None` only if no client_id is available — packaged release builds inject these
+    /// via the build environment so end users never need an .env file.
     pub fn new() -> Option<Self> {
-        let client_id = std::env::var("GOOGLE_CLIENT_ID").ok()?;
-        let client_secret = std::env::var("GOOGLE_CLIENT_SECRET").ok()?;
-        if client_id.is_empty() || client_secret.is_empty() { return None; }
+        let client_id = resolve_credential(
+            "GOOGLE_CLIENT_ID",
+            option_env!("GOOGLE_CLIENT_ID"),
+        )?;
+        let client_secret = resolve_credential(
+            "GOOGLE_CLIENT_SECRET",
+            option_env!("GOOGLE_CLIENT_SECRET"),
+        )
+        .unwrap_or_default();
         Some(GoogleAuth {
-            client_id, client_secret,
+            client_id,
+            client_secret,
             access_token: Mutex::new(None),
             refresh_token: Mutex::new(None),
         })
@@ -37,10 +57,25 @@ impl GoogleAuth {
         }
     }
 
+    pub fn has_credentials(&self) -> bool {
+        !self.client_id.is_empty()
+    }
+
     fn build_client(&self, redirect_port: u16) -> Result<BasicClient, String> {
+        if self.client_id.is_empty() {
+            return Err(
+                "Google sign-in is not configured for this build. Please contact support."
+                    .to_string(),
+            );
+        }
+        let secret = if self.client_secret.is_empty() {
+            None
+        } else {
+            Some(ClientSecret::new(self.client_secret.clone()))
+        };
         let client = BasicClient::new(
             ClientId::new(self.client_id.clone()),
-            Some(ClientSecret::new(self.client_secret.clone())),
+            secret,
             AuthUrl::new(AUTH_URL.to_string()).map_err(|e| e.to_string())?,
             Some(TokenUrl::new(TOKEN_URL.to_string()).map_err(|e| e.to_string())?),
         )
@@ -96,16 +131,26 @@ impl GoogleAuth {
             }
         });
 
-        let code = tokio::time::timeout(std::time::Duration::from_secs(30), rx)
-            .await.map_err(|_| "OAuth timeout: no response within 30 seconds. Please try again.".to_string())?
+        let code = tokio::time::timeout(std::time::Duration::from_secs(180), rx)
+            .await.map_err(|_| "OAuth timeout: no response within 3 minutes. Please try again.".to_string())?
             .map_err(|_| "OAuth cancelled".to_string())?
             .map_err(|e| format!("Google OAuth denied: {}", e))?;
 
-        let token_result = client
+        let exchange_future = client
             .exchange_code(AuthorizationCode::new(code))
             .set_pkce_verifier(pkce_verifier)
-            .request_async(async_http_client)
-            .await.map_err(|e| format!("Token exchange failed: {}", e))?;
+            .request_async(async_http_client);
+        let token_result = tokio::time::timeout(
+            std::time::Duration::from_secs(30),
+            exchange_future,
+        )
+        .await
+        .map_err(|_| {
+            "Google did not respond within 30 seconds while exchanging the authorization code. \
+             Check your network and try again."
+                .to_string()
+        })?
+        .map_err(|e| format!("Token exchange failed: {}", e))?;
 
         let access = token_result.access_token().secret().clone();
         let refresh = token_result.refresh_token().map(|t| t.secret().clone());
@@ -121,10 +166,17 @@ impl GoogleAuth {
         let refresh = self.refresh_token.lock().unwrap().clone()
             .ok_or("No refresh token available")?;
         let client = self.build_client(0)?;
-        let token_result = client
-            .exchange_refresh_token(&RefreshToken::new(refresh))
-            .request_async(async_http_client)
-            .await.map_err(|e| format!("Token refresh failed: {}", e))?;
+        let refresh_token = RefreshToken::new(refresh);
+        let refresh_future = client
+            .exchange_refresh_token(&refresh_token)
+            .request_async(async_http_client);
+        let token_result = tokio::time::timeout(
+            std::time::Duration::from_secs(30),
+            refresh_future,
+        )
+        .await
+        .map_err(|_| "Google did not respond within 30 seconds while refreshing the access token.".to_string())?
+        .map_err(|e| format!("Token refresh failed: {}", e))?;
 
         *self.access_token.lock().unwrap() = Some(token_result.access_token().secret().clone());
         if let Some(new_refresh) = token_result.refresh_token() {

@@ -1,11 +1,43 @@
 import { useState } from "react";
 import LocalAiSetup from "../components/LocalAiSetup";
-import { googleConnect, markOnboardingComplete, updateSetting } from "../lib/commands";
+import {
+  googleConnect,
+  markOnboardingComplete,
+  openUrl,
+  updateSetting,
+} from "../lib/commands";
 
 type Step = 1 | 2 | 3 | 4;
+type OauthErrorKind = "denied" | "timeout" | "no-creds" | "generic";
 
 interface Props {
   onComplete: () => void;
+}
+
+// Public legal pages. Update if the marketing domain changes.
+const LEGAL_BASE_URL = "https://jarvis-automation.com";
+const PRIVACY_URL = `${LEGAL_BASE_URL}/privacy`;
+const TERMS_URL = `${LEGAL_BASE_URL}/terms`;
+
+function classifyOauthError(message: string): OauthErrorKind {
+  const m = message.toLowerCase();
+  if (m.includes("not configured")) return "no-creds";
+  if (m.includes("timeout") || m.includes("did not respond")) return "timeout";
+  if (m.includes("denied") || m.includes("access_denied")) return "denied";
+  return "generic";
+}
+
+function describeOauthError(kind: OauthErrorKind, raw: string): string {
+  switch (kind) {
+    case "no-creds":
+      return "Google sign-in is not available in this build. Please contact support.";
+    case "timeout":
+      return "Google did not respond within 3 minutes. Check your internet connection and try again.";
+    case "denied":
+      return "Permission was declined in the browser. JARVIS needs Gmail and Calendar access to triage email — try again, or skip and connect later in Settings.";
+    default:
+      return raw;
+  }
 }
 
 export default function OnboardingWizard({ onComplete }: Props) {
@@ -13,28 +45,49 @@ export default function OnboardingWizard({ onComplete }: Props) {
   const [openaiKey, setOpenaiKey] = useState("");
   const [claudeKey, setClaudeKey] = useState("");
   const [geminiKey, setGeminiKey] = useState("");
-  const [error, setError] = useState<string | null>(null);
+
+  const [oauthInFlight, setOauthInFlight] = useState(false);
+  const [oauthError, setOauthError] = useState<{ kind: OauthErrorKind; raw: string } | null>(null);
+
+  const [globalError, setGlobalError] = useState<string | null>(null);
 
   async function saveByokKeys() {
-    if (openaiKey.trim()) {
-      await updateSetting("openai_api_key", openaiKey.trim());
+    if (geminiKey.trim()) await updateSetting("gemini_api_key", geminiKey.trim());
+    if (openaiKey.trim()) await updateSetting("openai_api_key", openaiKey.trim());
+    if (claudeKey.trim()) await updateSetting("claude_api_key", claudeKey.trim());
+  }
+
+  async function handleStep1Next() {
+    setGlobalError(null);
+    try {
+      await saveByokKeys();
+      setStep(2);
+    } catch (e) {
+      setGlobalError(String(e));
     }
-    if (claudeKey.trim()) {
-      await updateSetting("claude_api_key", claudeKey.trim());
-    }
-    if (geminiKey.trim()) {
-      await updateSetting("gemini_api_key", geminiKey.trim());
+  }
+
+  async function handleConnectGoogle() {
+    setOauthError(null);
+    setOauthInFlight(true);
+    try {
+      await googleConnect();
+      setOauthInFlight(false);
+      setStep(4);
+    } catch (e) {
+      const raw = String(e);
+      setOauthError({ kind: classifyOauthError(raw), raw });
+      setOauthInFlight(false);
     }
   }
 
   async function handleFinish() {
-    setError(null);
+    setGlobalError(null);
     try {
-      await saveByokKeys();
       await markOnboardingComplete();
       onComplete();
     } catch (e) {
-      setError(String(e));
+      setGlobalError(String(e));
     }
   }
 
@@ -42,23 +95,39 @@ export default function OnboardingWizard({ onComplete }: Props) {
     <div style={styles.container}>
       <div style={styles.stepBadge}>STEP {step} / 4</div>
       <h1 style={styles.title}>{titleFor(step)}</h1>
-      {error && <div style={styles.error}>{error}</div>}
+      {globalError && <div style={styles.error}>{globalError}</div>}
 
       {step === 1 && (
         <div>
           <p style={styles.body}>
-            JARVIS runs an on-device model by default for privacy. Pick one below
-            (skip if you only want cloud providers).
+            Paste any cloud provider keys you already have. JARVIS uses whichever is
+            available, falling back automatically. All optional — you can skip and add
+            them later in Settings.
           </p>
-          <LocalAiSetup
-            endpoints={[]}
-            onEndpointAdded={() => {}}
-            onModelsLoaded={() => {}}
-            onAddToChain={() => {}}
+          <input
+            type="password"
+            style={styles.input}
+            placeholder="Gemini API key (recommended for fastest replies)"
+            value={geminiKey}
+            onChange={(e) => setGeminiKey(e.target.value)}
+          />
+          <input
+            type="password"
+            style={styles.input}
+            placeholder="OpenAI API key"
+            value={openaiKey}
+            onChange={(e) => setOpenaiKey(e.target.value)}
+          />
+          <input
+            type="password"
+            style={styles.input}
+            placeholder="Claude API key"
+            value={claudeKey}
+            onChange={(e) => setClaudeKey(e.target.value)}
           />
           <div style={styles.row}>
             <button style={styles.skip} onClick={() => setStep(2)}>Skip</button>
-            <button style={styles.next} onClick={() => setStep(2)}>Next</button>
+            <button style={styles.next} onClick={handleStep1Next}>Next</button>
           </div>
         </div>
       )}
@@ -66,12 +135,23 @@ export default function OnboardingWizard({ onComplete }: Props) {
       {step === 2 && (
         <div>
           <p style={styles.body}>
-            Optional: paste any cloud provider keys you already have. All optional --
-            you can skip and add them later in Settings.
+            Optional. JARVIS can run a model on your Mac for full privacy, but it requires
+            installing a local backend such as Ollama or LM Studio. If you set up cloud
+            keys on the previous step, you can skip this entirely.
           </p>
-          <input type="password" style={styles.input} placeholder="OpenAI API key" value={openaiKey} onChange={(e) => setOpenaiKey(e.target.value)} />
-          <input type="password" style={styles.input} placeholder="Claude API key" value={claudeKey} onChange={(e) => setClaudeKey(e.target.value)} />
-          <input type="password" style={styles.input} placeholder="Gemini API key" value={geminiKey} onChange={(e) => setGeminiKey(e.target.value)} />
+          <div style={styles.skipBanner}>
+            <div>
+              <div style={styles.skipBannerTitle}>Already configured cloud?</div>
+              <div style={styles.skipBannerHint}>You can skip local setup.</div>
+            </div>
+            <button style={styles.skipPrimary} onClick={() => setStep(3)}>Skip local setup</button>
+          </div>
+          <LocalAiSetup
+            endpoints={[]}
+            onEndpointAdded={() => {}}
+            onModelsLoaded={() => {}}
+            onAddToChain={() => {}}
+          />
           <div style={styles.row}>
             <button style={styles.skip} onClick={() => setStep(3)}>Skip</button>
             <button style={styles.next} onClick={() => setStep(3)}>Next</button>
@@ -85,28 +165,78 @@ export default function OnboardingWizard({ onComplete }: Props) {
             Connect Gmail and Calendar so JARVIS can triage email and schedule
             follow-ups. You can skip and connect later in Settings.
           </p>
-          <button style={styles.next} onClick={async () => {
-            setError(null);
-            try {
-              await googleConnect();
-              setStep(4);
-            } catch (e) {
-              setError(String(e));
-            }
-          }}>Connect Google</button>
-          <button style={styles.skip} onClick={() => {
-            setError(null);
-            setStep(4);
-          }}>Skip</button>
+          <div style={styles.scopeBox}>
+            <div style={styles.scopeTitle}>JARVIS will request access to:</div>
+            <ul style={styles.scopeList}>
+              <li>Read your Gmail messages and labels</li>
+              <li>Send, archive, and label messages on your behalf</li>
+              <li>Read and create Calendar events</li>
+            </ul>
+            <div style={styles.scopeNote}>
+              Email and calendar content is processed by the AI provider you choose
+              (local model, OpenAI, Anthropic, Gemini, or AWS Bedrock). JARVIS does
+              not store a copy on its servers.
+            </div>
+          </div>
+          <div style={styles.legalNotice}>
+            By continuing, you agree to the{" "}
+            <a
+              href={PRIVACY_URL}
+              onClick={(e) => { e.preventDefault(); openUrl(PRIVACY_URL).catch(() => {}); }}
+              style={styles.link}
+            >Privacy Policy</a>
+            {" "}and{" "}
+            <a
+              href={TERMS_URL}
+              onClick={(e) => { e.preventDefault(); openUrl(TERMS_URL).catch(() => {}); }}
+              style={styles.link}
+            >Terms of Service</a>.
+          </div>
+
+          {oauthError && (
+            <div style={styles.error}>
+              <div style={styles.errorTitle}>Couldn't connect to Google</div>
+              <div style={styles.errorBody}>{describeOauthError(oauthError.kind, oauthError.raw)}</div>
+              {oauthError.kind !== "no-creds" && (
+                <div style={styles.errorRow}>
+                  <button style={styles.errorRetry} onClick={handleConnectGoogle}>Try again</button>
+                  <button
+                    style={styles.errorSkip}
+                    onClick={() => { setOauthError(null); setStep(4); }}
+                  >Skip and connect later</button>
+                </div>
+              )}
+            </div>
+          )}
+
+          {oauthInFlight && (
+            <div style={styles.statusBox}>
+              <div className="animate-glow" style={styles.statusDot} />
+              <div style={styles.statusText}>
+                Opening Google in your browser. Approve the permissions, then return here.
+              </div>
+            </div>
+          )}
+
+          {!oauthInFlight && !oauthError && (
+            <div style={styles.row}>
+              <button style={styles.skip} onClick={() => setStep(4)}>Skip</button>
+              <button style={styles.next} onClick={handleConnectGoogle}>Connect Google</button>
+            </div>
+          )}
         </div>
       )}
 
       {step === 4 && (
         <div>
           <p style={styles.body}>
-            Setup complete. Press Start to open the Dashboard.
+            Setup complete. Press Start to open the Dashboard. You can run a test
+            message from the chat once it loads — if your AI provider is unreachable,
+            the chat will surface a clear error and you can update keys in Settings.
           </p>
-          <button style={styles.next} onClick={handleFinish}>Start</button>
+          <div style={styles.row}>
+            <button style={styles.next} onClick={handleFinish}>Start</button>
+          </div>
         </div>
       )}
     </div>
@@ -115,8 +245,8 @@ export default function OnboardingWizard({ onComplete }: Props) {
 
 function titleFor(step: Step): string {
   switch (step) {
-    case 1: return "Set up your local model";
-    case 2: return "Cloud providers (optional)";
+    case 1: return "Cloud AI providers";
+    case 2: return "Local AI (optional)";
     case 3: return "Connect Google";
     case 4: return "Ready";
   }
@@ -131,5 +261,26 @@ const styles: Record<string, React.CSSProperties> = {
   row: { display: "flex", gap: 8, marginTop: 16 },
   next: { background: "rgba(0,180,255,0.12)", border: "1px solid rgba(0,180,255,0.4)", borderRadius: 6, padding: "10px 14px", color: "rgba(0,180,255,0.9)", cursor: "pointer", fontFamily: "var(--font-mono)" },
   skip: { background: "transparent", border: "1px solid rgba(0,180,255,0.2)", borderRadius: 6, padding: "10px 14px", color: "rgba(0,180,255,0.6)", cursor: "pointer", fontFamily: "var(--font-mono)" },
-  error: { color: "rgba(255,100,100,0.9)", border: "1px solid rgba(255,100,100,0.3)", borderRadius: 6, padding: 10, marginBottom: 12, fontSize: 12 },
+  skipBanner: { display: "flex", justifyContent: "space-between", alignItems: "center", gap: 12, padding: "12px 14px", marginBottom: 16, background: "rgba(0,180,255,0.06)", border: "1px solid rgba(0,180,255,0.25)", borderRadius: 8 },
+  skipBannerTitle: { color: "rgba(0,180,255,0.9)", fontSize: 13, fontWeight: 600 },
+  skipBannerHint: { color: "rgba(0,180,255,0.55)", fontSize: 11, marginTop: 2 },
+  skipPrimary: { background: "rgba(0,180,255,0.18)", border: "1px solid rgba(0,180,255,0.5)", borderRadius: 6, padding: "8px 14px", color: "rgba(0,180,255,0.95)", cursor: "pointer", fontFamily: "var(--font-mono)", fontSize: 11, letterSpacing: 1, whiteSpace: "nowrap" },
+  error: { color: "rgba(255,100,100,0.9)", border: "1px solid rgba(255,100,100,0.3)", borderRadius: 6, padding: 12, marginBottom: 12, fontSize: 12, background: "rgba(255,100,100,0.04)" },
+  errorTitle: { fontWeight: 600, marginBottom: 4, fontSize: 12, letterSpacing: 0.5 },
+  errorBody: { color: "rgba(255,180,180,0.85)", lineHeight: 1.5 },
+  errorRow: { display: "flex", gap: 8, marginTop: 10 },
+  errorRetry: { background: "rgba(255,100,100,0.12)", border: "1px solid rgba(255,100,100,0.4)", borderRadius: 6, padding: "8px 12px", color: "rgba(255,180,180,0.95)", cursor: "pointer", fontFamily: "var(--font-mono)", fontSize: 11 },
+  errorSkip: { background: "transparent", border: "1px solid rgba(255,100,100,0.25)", borderRadius: 6, padding: "8px 12px", color: "rgba(255,180,180,0.7)", cursor: "pointer", fontFamily: "var(--font-mono)", fontSize: 11 },
+  scopeBox: { padding: "12px 14px", marginBottom: 12, background: "rgba(0,180,255,0.04)", border: "1px solid rgba(0,180,255,0.18)", borderRadius: 8 },
+  scopeTitle: { color: "rgba(0,180,255,0.85)", fontSize: 12, fontWeight: 600, marginBottom: 6, fontFamily: "var(--font-mono)", letterSpacing: 1 },
+  scopeList: { color: "rgba(0,180,255,0.7)", fontSize: 12, lineHeight: 1.7, paddingLeft: 18, margin: 0 },
+  scopeNote: { color: "rgba(0,180,255,0.55)", fontSize: 11, lineHeight: 1.5, marginTop: 8, paddingTop: 8, borderTop: "1px solid rgba(0,180,255,0.12)" },
+  legalNotice: { color: "rgba(0,180,255,0.6)", fontSize: 11, lineHeight: 1.6, marginBottom: 14 },
+  link: { color: "rgba(0,180,255,0.9)", textDecoration: "underline", cursor: "pointer" },
+  statusBox: { display: "flex", alignItems: "center", gap: 12, padding: "14px 16px", marginBottom: 12, background: "rgba(0,180,255,0.04)", border: "1px solid rgba(0,180,255,0.25)", borderRadius: 8 },
+  statusDot: { width: 10, height: 10, borderRadius: "50%", background: "rgba(0,180,255,0.8)", boxShadow: "0 0 8px rgba(0,180,255,0.6)", flexShrink: 0 },
+  statusText: { color: "rgba(0,180,255,0.85)", fontSize: 12, lineHeight: 1.5 },
+  testSuccessBox: { padding: "12px 14px", marginBottom: 12, background: "rgba(80,255,180,0.05)", border: "1px solid rgba(80,255,180,0.35)", borderRadius: 8 },
+  testSuccessTitle: { color: "rgba(80,255,180,0.9)", fontSize: 12, fontWeight: 600, fontFamily: "var(--font-mono)", letterSpacing: 1, marginBottom: 6 },
+  testResponseText: { color: "rgba(180,255,220,0.85)", fontSize: 12, lineHeight: 1.5, fontFamily: "var(--font-mono)" },
 };

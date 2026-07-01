@@ -4,6 +4,7 @@ import StatsPanel from "../components/StatsPanel";
 import EmailRuleSuggestion from "../components/EmailRuleSuggestion";
 import Briefing from "../components/Briefing";
 import NotificationBanner from "../components/NotificationBanner";
+import CostPanel from "../components/CostPanel";
 import type { DashboardData } from "../lib/types";
 import { useTauriCommand } from "../hooks/useTauriCommand";
 
@@ -27,6 +28,7 @@ export default function Dashboard() {
         <NotificationBanner />
         <EmailRuleSuggestion />
         <Timeline tasks={data.pending_tasks} />
+        <CostPanel />
       </div>
       <div style={styles.stats}><StatsPanel taskCount={data.task_count} /></div>
     </div>

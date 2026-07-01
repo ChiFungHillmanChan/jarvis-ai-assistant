@@ -20,8 +20,21 @@ If any item fails, block the release, fix the bug, then restart from item 1.
 - [ ] 10. Quit and relaunch app → onboarding does NOT re-trigger; lands directly on Dashboard
 - [ ] 11. Settings → confirm OpenAI key from step 4 is still present
 - [ ] 12. Walk every feature marked `pass` in [trial-audit-results.md](../docs/superpowers/specs/2026-05-04-trial-audit-results.md). 5 minutes per feature, single happy-path action.
+- [ ] 13. **Briefing silent on first run.** During items 2–6 (onboarding flow), the
+      app must NOT speak. CPU should remain low (Activity Monitor: jarvis < 30%
+      sustained). If you hear any voice during onboarding, fail the release and
+      file a bug — the gate at `assistant/briefing.rs::should_run_startup_briefing`
+      regressed.
+- [ ] 14. **Briefing opt-in works.** Settings → Assistant → tick "Speak morning
+      briefing on startup". Quit. `sqlite3 ~/Library/Application\ Support/jarvis/jarvis.db \
+      "DELETE FROM user_preferences WHERE key='last_briefing_date'"`. Relaunch.
+      Within ~10 s the app should speak a briefing. Confirm the checkbox state
+      survives a reload (it was previously hard-coded to checked — bug).
+- [ ] 15. **Escape stops the briefing.** While the briefing from item 14 is
+      mid-sentence, press Escape. Speech must stop within one sentence boundary.
+      Repeat with Cmd+Shift+J (voice toggle) — should not interfere.
 
-All 12 must pass before running `release.sh`.
+All 15 must pass before running `release.sh`.
 
 ## Notes
 

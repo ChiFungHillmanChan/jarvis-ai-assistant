@@ -1,5 +1,4 @@
 import { useState, useCallback, useEffect, useRef, useMemo, lazy, Suspense } from "react";
-import { getCurrentWindow } from "@tauri-apps/api/window";
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 import Sidebar from "./components/Sidebar";
@@ -8,7 +7,7 @@ import CommandBar from "./components/CommandBar";
 import Dashboard from "./pages/Dashboard";
 import OnboardingWizard from "./pages/OnboardingWizard";
 import UpdatePrompt from "./components/UpdatePrompt";
-import { checkOnboardingStatus } from "./lib/commands";
+import { checkOnboardingStatus, stopSpeaking } from "./lib/commands";
 const Settings = lazy(() => import("./pages/Settings"));
 const CronDashboard = lazy(() => import("./pages/CronDashboard"));
 const EmailPage = lazy(() => import("./pages/EmailPage"));
@@ -291,6 +290,10 @@ export default function App() {
   const shortcuts = useMemo(() => ({
     "cmd+k": toggleChat,
     escape: () => {
+      if (aiState === "speaking") {
+        void stopSpeaking();
+        return;
+      }
       if (wallpaperActive && wallpaperRaised) {
         void handleLowerToBackground();
       } else {
@@ -305,7 +308,7 @@ export default function App() {
         (typeof voiceState === "object" && "Error" in voiceState)
       ) { startVoice(); }
     },
-  }), [toggleChat, closeChat, wallpaperActive, wallpaperRaised, handleLowerToBackground, voiceState, startVoice, stopVoice]);
+  }), [toggleChat, closeChat, wallpaperActive, wallpaperRaised, handleLowerToBackground, voiceState, startVoice, stopVoice, aiState]);
 
   useKeyboard(shortcuts);
 
@@ -344,12 +347,11 @@ export default function App() {
       <JarvisScene activityLevel={activityLevel} assistantPhase={assistantPhase} ttsAmplitudeRef={ttsAmplitudeRef} micAmplitudeRef={micAmplitudeRef} pendingToolCall={pendingToolCall} onToolCallConsumed={handleToolCallConsumed} />
 
       <div style={styles.uiLayer}>
-        <div className="drag-region" style={styles.titleBar} onMouseDown={(e) => { if ((e.target as HTMLElement).closest('.no-drag')) return; getCurrentWindow().startDragging(); }}>
-          <span style={styles.titleText}>JARVIS{wallpaperActive ? " [WALLPAPER]" : ""}</span>
-          <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
+        <div data-tauri-drag-region style={styles.titleBar}>
+          <span data-tauri-drag-region style={styles.titleText}>JARVIS{wallpaperActive ? " [WALLPAPER]" : ""}</span>
+          <div data-tauri-drag-region="false" style={{ display: "flex", alignItems: "center", gap: 8 }}>
             {wallpaperActive && wallpaperRaised && (
               <button
-                className="no-drag"
                 onClick={handleLowerToBackground}
                 style={styles.lowerBtn}
               >

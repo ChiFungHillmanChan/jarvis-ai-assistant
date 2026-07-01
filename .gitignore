@@ -8,5 +8,11 @@ scripts/
 docs/*
 !docs/screenshots/
 .env
+.env.*
+src-tauri/.env.*
+infra/cdk.out/
+infra/cdk.context.json
+infra/node_modules/
+infra/lambda/*/node_modules/
 CLAUDE.md
 AGENTS.md
