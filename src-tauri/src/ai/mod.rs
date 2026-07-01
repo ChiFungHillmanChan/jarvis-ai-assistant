@@ -23,6 +23,16 @@ pub struct ProviderChainEntry {
     pub enabled: bool,
 }
 
+/// Gemini model selection: a user-configured provider-chain override wins;
+/// otherwise pick by workload tier. Used by both provider_name display and
+/// dispatch so the emitted label never diverges from the model actually sent.
+fn gemini_model_for(model_override: Option<&str>, workload: Workload) -> &str {
+    model_override.unwrap_or(match workload {
+        Workload::Premium => gemini::MODEL_PRO,
+        _ => gemini::MODEL_FLASH,
+    })
+}
+
 #[derive(Clone)]
 pub struct AiRouter {
     gemini_key: Option<String>,
@@ -201,10 +211,7 @@ impl AiRouter {
 
             let provider_name = match entry.provider_type.as_str() {
                 "gemini" => {
-                    let model = match workload {
-                        Workload::Premium => gemini::MODEL_PRO,
-                        _ => gemini::MODEL_FLASH,
-                    };
+                    let model = gemini_model_for(entry.model_id.as_deref(), workload);
                     format!("gemini ({})", model)
                 }
                 "local" => {
@@ -232,10 +239,7 @@ impl AiRouter {
             let result = match entry.provider_type.as_str() {
                 "gemini" => {
                     if let Some(ref key) = self.gemini_key {
-                        let model = match workload {
-                            Workload::Premium => gemini::MODEL_PRO,
-                            _ => gemini::MODEL_FLASH,
-                        };
+                        let model = gemini_model_for(entry.model_id.as_deref(), workload);
                         gemini::send(
                             key,
                             model,
