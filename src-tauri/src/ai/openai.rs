@@ -57,6 +57,7 @@ struct FunctionCall {
 
 #[derive(Deserialize)]
 struct SseChunk {
+    #[serde(default)]
     choices: Vec<SseChoice>,
     usage: Option<OpenAIUsage>,
 }
@@ -96,7 +97,8 @@ pub async fn send(
     workload: crate::ai::Workload,
 ) -> Result<String, Box<dyn std::error::Error + Send + Sync>> {
     let started_at = std::time::Instant::now();
-    let mut usage = OpenAIUsage::default();
+    let mut total_prompt_tokens: i64 = 0;
+    let mut total_completion_tokens: i64 = 0;
     let model_id = "gpt-5".to_string();
     let client = Client::builder()
         .read_timeout(std::time::Duration::from_secs(60))
@@ -119,6 +121,9 @@ pub async fn send(
 
     let max_iterations = 5;
     for _ in 0..max_iterations {
+        // Per-round usage: OpenAI sends one usage chunk per request, so
+        // overwrite within a round and fold into totals when it ends.
+        let mut usage = OpenAIUsage::default();
         let request = OpenAIRequest {
             model: model_id.clone(),
             messages: openai_messages.clone(),
@@ -139,6 +144,11 @@ pub async fn send(
         if !response.status().is_success() {
             let status = response.status();
             let body = response.text().await.unwrap_or_default();
+            record_partial_usage(
+                db, workload, &model_id,
+                total_prompt_tokens, total_completion_tokens,
+                &started_at,
+            );
             return Err(format!("OpenAI API error {}: {}", status, body).into());
         }
 
@@ -155,6 +165,13 @@ pub async fn send(
                 Ok(bytes) => bytes,
                 Err(e) => {
                     let _ = app_handle.emit("chat-state", json!({"state": "idle"}));
+                    total_prompt_tokens += usage.prompt_tokens.unwrap_or(0);
+                    total_completion_tokens += usage.completion_tokens.unwrap_or(0);
+                    record_partial_usage(
+                        db, workload, &model_id,
+                        total_prompt_tokens, total_completion_tokens,
+                        &started_at,
+                    );
                     return Err(format!("Stream error: {}", e).into());
                 }
             };
@@ -254,6 +271,9 @@ pub async fn send(
             }
         }
 
+        total_prompt_tokens += usage.prompt_tokens.unwrap_or(0);
+        total_completion_tokens += usage.completion_tokens.unwrap_or(0);
+
         // Handle tool calls
         if finish_reason.as_deref() == Some("tool_calls") && !tool_map.is_empty() {
             let text_content = text_parts.join("");
@@ -347,10 +367,13 @@ pub async fn send(
 
         // No tool calls -- emit done and return the text
         let _ = app_handle.emit("chat-token", json!({"token": "", "done": true}));
+        if total_prompt_tokens == 0 && total_completion_tokens == 0 && !text_parts.is_empty() {
+            log::warn!("[openai] no usage chunk received for non-empty response; recording zero tokens");
+        }
         crate::ai::cost::record_inference(
             db, "openai", workload, &model_id,
-            usage.prompt_tokens.unwrap_or(0),
-            usage.completion_tokens.unwrap_or(0),
+            total_prompt_tokens,
+            total_completion_tokens,
             0, 0,
             started_at.elapsed().as_millis() as i64,
         );
@@ -360,10 +383,55 @@ pub async fn send(
     let _ = app_handle.emit("chat-token", json!({"token": "", "done": true}));
     crate::ai::cost::record_inference(
         db, "openai", workload, &model_id,
-        usage.prompt_tokens.unwrap_or(0),
-        usage.completion_tokens.unwrap_or(0),
+        total_prompt_tokens,
+        total_completion_tokens,
         0, 0,
         started_at.elapsed().as_millis() as i64,
     );
     Ok("I've completed the actions.".into())
+}
+
+/// Record usage accumulated so far when a turn ends abnormally, so tokens
+/// already billed by completed rounds are not lost from telemetry.
+fn record_partial_usage(
+    db: &crate::db::Database,
+    workload: crate::ai::Workload,
+    model_id: &str,
+    prompt_tokens: i64,
+    completion_tokens: i64,
+    started_at: &std::time::Instant,
+) {
+    if prompt_tokens > 0 || completion_tokens > 0 {
+        crate::ai::cost::record_inference(
+            db, "openai", workload, model_id,
+            prompt_tokens, completion_tokens, 0, 0,
+            started_at.elapsed().as_millis() as i64,
+        );
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn sse_chunk_parses_final_usage_chunk_with_empty_choices() {
+        let json = r#"{"choices":[],"usage":{"prompt_tokens":100,"completion_tokens":42}}"#;
+        let chunk: SseChunk = serde_json::from_str(json).unwrap();
+        let u = chunk.usage.unwrap();
+        assert_eq!(u.prompt_tokens, Some(100));
+        assert_eq!(u.completion_tokens, Some(42));
+        assert!(chunk.choices.is_empty());
+    }
+
+    #[test]
+    fn sse_chunk_tolerates_null_missing_usage_and_missing_choices() {
+        let with_null: SseChunk = serde_json::from_str(r#"{"choices":[],"usage":null}"#).unwrap();
+        assert!(with_null.usage.is_none());
+        let missing_usage: SseChunk = serde_json::from_str(r#"{"choices":[]}"#).unwrap();
+        assert!(missing_usage.usage.is_none());
+        let missing_choices: SseChunk =
+            serde_json::from_str(r#"{"usage":{"prompt_tokens":1,"completion_tokens":2}}"#).unwrap();
+        assert!(missing_choices.choices.is_empty());
+    }
 }

@@ -97,7 +97,9 @@ pub async fn send(
     workload: crate::ai::Workload,
 ) -> Result<String, Box<dyn std::error::Error + Send + Sync>> {
     let started_at = std::time::Instant::now();
-    let mut usage = UsageMetadata::default();
+    let mut total_prompt_tokens: i64 = 0;
+    let mut total_output_tokens: i64 = 0;
+    let mut total_cached_tokens: i64 = 0;
     let client = Client::builder()
         .read_timeout(std::time::Duration::from_secs(90))
         .build()?;
@@ -125,6 +127,9 @@ pub async fn send(
 
     let max_iterations = 5;
     for _ in 0..max_iterations {
+        // Per-round usage: Gemini reports usageMetadata cumulatively within one
+        // request, so overwrite within a round and fold into totals when it ends.
+        let mut usage = UsageMetadata::default();
         let url = format!(
             "{}/models/{}:streamGenerateContent?alt=sse",
             API_BASE, model
@@ -150,6 +155,11 @@ pub async fn send(
         if !response.status().is_success() {
             let status = response.status();
             let body = response.text().await.unwrap_or_default();
+            record_partial_usage(
+                db, workload, model,
+                total_prompt_tokens, total_output_tokens, total_cached_tokens,
+                &started_at,
+            );
             return Err(format!("Gemini API error {}: {}", status, body).into());
         }
 
@@ -169,6 +179,14 @@ pub async fn send(
                 Ok(bytes) => bytes,
                 Err(e) => {
                     let _ = app_handle.emit("chat-state", json!({"state": "idle"}));
+                    total_prompt_tokens += usage.prompt_token_count.unwrap_or(0);
+                    total_output_tokens += usage.candidates_token_count.unwrap_or(0);
+                    total_cached_tokens += usage.cached_content_token_count.unwrap_or(0);
+                    record_partial_usage(
+                        db, workload, model,
+                        total_prompt_tokens, total_output_tokens, total_cached_tokens,
+                        &started_at,
+                    );
                     return Err(format!("Stream error: {}", e).into());
                 }
             };
@@ -275,6 +293,10 @@ pub async fn send(
             }
         }
 
+        total_prompt_tokens += usage.prompt_token_count.unwrap_or(0);
+        total_output_tokens += usage.candidates_token_count.unwrap_or(0);
+        total_cached_tokens += usage.cached_content_token_count.unwrap_or(0);
+
         if !function_call_parts.is_empty() {
             let mut assistant_parts: Vec<GeminiPart> = Vec::new();
             let full_text = text_parts.join("");
@@ -357,11 +379,17 @@ pub async fn send(
 
         let _ = app_handle.emit("chat-token", json!({"token": "", "done": true}));
         if !text_parts.is_empty() {
+            if total_prompt_tokens == 0 && total_output_tokens == 0 {
+                log::warn!(
+                    "[gemini] no usageMetadata received for non-empty response; recording zero tokens (model={})",
+                    model
+                );
+            }
             crate::ai::cost::record_inference(
                 db, "gemini", workload, model,
-                usage.prompt_token_count.unwrap_or(0),
-                usage.candidates_token_count.unwrap_or(0),
-                usage.cached_content_token_count.unwrap_or(0),
+                total_prompt_tokens,
+                total_output_tokens,
+                total_cached_tokens,
                 0,
                 started_at.elapsed().as_millis() as i64,
             );
@@ -378,9 +406,9 @@ pub async fn send(
         );
         crate::ai::cost::record_inference(
             db, "gemini", workload, model,
-            usage.prompt_token_count.unwrap_or(0),
-            usage.candidates_token_count.unwrap_or(0),
-            usage.cached_content_token_count.unwrap_or(0),
+            total_prompt_tokens,
+            total_output_tokens,
+            total_cached_tokens,
             0,
             started_at.elapsed().as_millis() as i64,
         );
@@ -390,11 +418,52 @@ pub async fn send(
     let _ = app_handle.emit("chat-token", json!({"token": "", "done": true}));
     crate::ai::cost::record_inference(
         db, "gemini", workload, model,
-        usage.prompt_token_count.unwrap_or(0),
-        usage.candidates_token_count.unwrap_or(0),
-        usage.cached_content_token_count.unwrap_or(0),
+        total_prompt_tokens,
+        total_output_tokens,
+        total_cached_tokens,
         0,
         started_at.elapsed().as_millis() as i64,
     );
     Ok("I've completed the actions.".into())
+}
+
+/// Record usage accumulated so far when a turn ends abnormally, so tokens
+/// already billed by completed rounds are not lost from telemetry.
+fn record_partial_usage(
+    db: &crate::db::Database,
+    workload: crate::ai::Workload,
+    model: &str,
+    prompt_tokens: i64,
+    output_tokens: i64,
+    cached_tokens: i64,
+    started_at: &std::time::Instant,
+) {
+    if prompt_tokens > 0 || output_tokens > 0 || cached_tokens > 0 {
+        crate::ai::cost::record_inference(
+            db, "gemini", workload, model,
+            prompt_tokens, output_tokens, cached_tokens, 0,
+            started_at.elapsed().as_millis() as i64,
+        );
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn stream_chunk_parses_usage_metadata_field_names() {
+        let json = r#"{"usageMetadata":{"promptTokenCount":12,"candidatesTokenCount":34,"cachedContentTokenCount":5}}"#;
+        let sse: StreamChunk = serde_json::from_str(json).unwrap();
+        let u = sse.usage_metadata.unwrap();
+        assert_eq!(u.prompt_token_count, Some(12));
+        assert_eq!(u.candidates_token_count, Some(34));
+        assert_eq!(u.cached_content_token_count, Some(5));
+    }
+
+    #[test]
+    fn stream_chunk_tolerates_missing_usage_metadata() {
+        let sse: StreamChunk = serde_json::from_str(r#"{"candidates":[]}"#).unwrap();
+        assert!(sse.usage_metadata.is_none());
+    }
 }
