@@ -1,0 +1,20 @@
+{
+  "Jarvis-sandbox-Auth": {
+    "ExportsOutputFnGetAttJarvisDataKey335A0D18ArnDA3EBA3C": "arn:aws:kms:ap-southeast-1:759626151650:key/15175008-d7c8-4cc4-82fb-a509306f4c03",
+    "UserPoolClientId": "2th1pmdtckqd2cfe7fa4mrbmiq",
+    "UserPoolId": "ap-southeast-1_W895ypkix",
+    "DataKeyArn": "arn:aws:kms:ap-southeast-1:759626151650:key/15175008-d7c8-4cc4-82fb-a509306f4c03"
+  },
+  "Jarvis-sandbox-Data": {
+    "PluginRegistryTableName": "jarvis-sandbox-plugins",
+    "ExportsOutputRefUserMetaTable44FCD1460ED4E4CC": "jarvis-sandbox-user-meta",
+    "SyncBucketName": "jarvis-sync-sandbox-759626151650",
+    "ExportsOutputFnGetAttUserMetaTable44FCD146ArnA2BBBB78": "arn:aws:dynamodb:ap-southeast-1:759626151650:table/jarvis-sandbox-user-meta",
+    "UserMetaTableName": "jarvis-sandbox-user-meta"
+  },
+  "Jarvis-sandbox-Payment": {
+    "StripeWebhookUrl": "https://k2jn2wsgee.execute-api.ap-southeast-1.amazonaws.com/stripe/webhook",
+    "CheckoutUrl": "https://k2jn2wsgee.execute-api.ap-southeast-1.amazonaws.com/checkout",
+    "StripeSecretArn": "arn:aws:secretsmanager:ap-southeast-1:759626151650:secret:jarvis/sandbox/stripe-6K3fI2"
+  }
+}
