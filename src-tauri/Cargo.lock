@@ -2843,6 +2843,7 @@ dependencies = [
  "tauri-plugin-autostart",
  "tauri-plugin-global-shortcut",
  "tauri-plugin-updater",
+ "thiserror 2.0.18",
  "tiktoken-rs",
  "tokio",
  "tokio-cron-scheduler",

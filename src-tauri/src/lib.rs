@@ -5,6 +5,7 @@ pub mod auth;
 pub mod commands;
 pub mod db;
 pub mod integrations;
+pub mod payments;
 pub mod scheduler;
 pub mod security;
 pub mod system;
@@ -328,6 +329,8 @@ pub fn run() {
             commands::launch::get_launch_readiness,
             commands::launch::save_beta_tester,
             commands::launch::submit_beta_feedback,
+            commands::payments::payments_start_checkout,
+            commands::payments::payments_open_portal,
             voice::commands::start_listening,
             voice::commands::stop_listening,
             voice::commands::get_voice_state,
