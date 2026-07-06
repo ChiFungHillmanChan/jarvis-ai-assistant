@@ -32,6 +32,7 @@ import {
   setPreference,
   enableOfflineVoice,
   checkCosyvoiceBinary,
+  paymentsStartCheckout,
 } from "../lib/commands";
 import { listen } from "@tauri-apps/api/event";
 import type { VoiceSettings, WakeWordStatus, VoiceState, LocalEndpoint, LocalModel, ProviderChainEntry, EndpointHealth } from "../lib/types";
@@ -58,6 +59,17 @@ export default function Settings() {
   const { state: voiceState } = useVoiceState();
   const [wallpaperActive, setWallpaperActive] = useState(false);
   const [wallpaperBusy, setWallpaperBusy] = useState(false);
+
+  // Billing / upgrade
+  const [billingEmail, setBillingEmail] = useState("");
+  const [upgrading, setUpgrading] = useState(false);
+  const [payError, setPayError] = useState<string | null>(null);
+
+  useEffect(() => {
+    getPreference("billing_email")
+      .then((v) => { if (v) setBillingEmail(v); })
+      .catch(() => {});
+  }, []);
 
   // AWS Bedrock credentials state
   const [awsAccessKey, setAwsAccessKey] = useState("");
@@ -295,6 +307,20 @@ export default function Settings() {
     if (!notionToken.trim()) return;
     await saveNotionToken(notionToken);
     setNotionSaved(true);
+  }
+
+  async function handleUpgrade() {
+    setUpgrading(true);
+    setPayError(null);
+    try {
+      const email = billingEmail.trim();
+      await setPreference("billing_email", email);
+      await paymentsStartCheckout("pro", email);
+    } catch (e) {
+      setPayError(String(e));
+    } finally {
+      setUpgrading(false);
+    }
   }
 
   async function handleSaveGitHub() {
@@ -778,6 +804,31 @@ export default function Settings() {
               To bring it back later, say "Hey Jarvis", click the tray icon, or press Cmd+Shift+W.
               Closing the window sends it back to the background.
             </div>
+          </div>
+
+          <div className="panel" style={styles.panel}>
+            <div className="label" style={styles.sectionTitle}>UPGRADE</div>
+            <div style={styles.hint}>
+              JARVIS Pro -- HK$148/mo. All 5 integrations, unlimited voice, automation.
+              Checkout opens in your browser. Stripe test mode until public launch.
+            </div>
+            <div style={{ display: "flex", gap: 8 }}>
+              <input
+                type="email"
+                value={billingEmail}
+                onChange={(e) => setBillingEmail(e.target.value)}
+                placeholder="billing email"
+                style={styles.tokenInput}
+              />
+              <button
+                onClick={() => { void handleUpgrade(); }}
+                disabled={upgrading || !billingEmail.includes("@")}
+                style={styles.actionBtn}
+              >
+                {upgrading ? "OPENING..." : "UPGRADE TO PRO"}
+              </button>
+            </div>
+            {payError && <div style={styles.errorText}>{payError}</div>}
           </div>
         </div>
       </div>

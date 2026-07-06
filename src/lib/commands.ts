@@ -25,6 +25,14 @@ export async function getLaunchReadiness(): Promise<LaunchReadiness> { return in
 export async function saveBetaTester(input: BetaTesterInput): Promise<BetaTesterView> { return invoke("save_beta_tester", { input }); }
 export async function submitBetaFeedback(input: BetaFeedbackInput): Promise<void> { return invoke("submit_beta_feedback", { input }); }
 
+// Payments (Stripe test mode until launch; backend set via JARVIS_PAYMENT_API)
+export async function paymentsStartCheckout(tier: "pro" | "team", email: string): Promise<{ url: string; session_id: string }> {
+  return invoke("payments_start_checkout", { tier, email });
+}
+export async function paymentsOpenPortal(): Promise<string> {
+  return invoke("payments_open_portal");
+}
+
 export async function getSettings(): Promise<Settings> {
   return invoke("get_settings");
 }
