@@ -92,10 +92,16 @@ pub async fn create_custom_cron(
 #[tauri::command]
 pub fn delete_cron_job(db: State<Arc<Database>>, job_id: i64) -> Result<(), String> {
     let conn = db.conn.lock().map_err(|e| e.to_string())?;
-    conn.execute("DELETE FROM cron_jobs WHERE id = ?1", rusqlite::params![job_id])
+    // Delete child run rows before the parent job: cron_runs.job_id has a
+    // foreign key to cron_jobs(id) (with foreign_keys=ON), so removing the
+    // parent first fails the constraint and the job can never be deleted. Wrap
+    // both in one transaction so a failure can't leave orphaned run rows.
+    let tx = conn.unchecked_transaction().map_err(|e| e.to_string())?;
+    tx.execute("DELETE FROM cron_runs WHERE job_id = ?1", rusqlite::params![job_id])
         .map_err(|e| e.to_string())?;
-    conn.execute("DELETE FROM cron_runs WHERE job_id = ?1", rusqlite::params![job_id])
+    tx.execute("DELETE FROM cron_jobs WHERE id = ?1", rusqlite::params![job_id])
         .map_err(|e| e.to_string())?;
+    tx.commit().map_err(|e| e.to_string())?;
     Ok(())
 }
 

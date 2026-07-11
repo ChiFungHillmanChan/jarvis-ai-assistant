@@ -6,8 +6,17 @@ use oauth2::{
 use std::sync::Mutex;
 use tokio::sync::oneshot;
 
+use crate::security::keychain::KeychainStore;
+
 const AUTH_URL: &str = "https://accounts.google.com/o/oauth2/v2/auth";
 const TOKEN_URL: &str = "https://oauth2.googleapis.com/token";
+
+// The Google refresh token is a long-lived credential and lives in the macOS
+// Keychain, never in plaintext SQLite. The DB keeps only this non-secret marker
+// so existence checks keep working.
+const REFRESH_KEYCHAIN_SERVICE: &str = "com.jarvis.google";
+const REFRESH_KEYCHAIN_ACCOUNT: &str = "refresh_token";
+const REFRESH_KEYCHAIN_MARKER: &str = "__keychain__";
 
 pub struct GoogleAuth {
     client_id: String,
@@ -218,23 +227,61 @@ impl GoogleAuth {
     }
 
     pub fn load_from_db(&self, db: &crate::db::Database) {
-        let conn = db.conn.lock().unwrap();
-        if let Ok(token) = conn.query_row(
-            "SELECT value FROM user_preferences WHERE key = 'google_refresh_token'",
-            [], |row| row.get::<_, String>(0),
-        ) {
-            *self.refresh_token.lock().unwrap() = Some(token);
+        // Preferred source: the Keychain.
+        if let Ok(token) = KeychainStore::get(REFRESH_KEYCHAIN_SERVICE, REFRESH_KEYCHAIN_ACCOUNT) {
+            if !token.is_empty() {
+                *self.refresh_token.lock().unwrap() = Some(token);
+                return;
+            }
+        }
+
+        // Backward compatibility: older builds stored the refresh token in
+        // plaintext in user_preferences. Read the DB row (tight lock scope, no
+        // Keychain FFI while holding it); if it's a real token, adopt it and
+        // migrate it into the Keychain, replacing the plaintext with a marker so
+        // the credential no longer sits on disk. Existing users stay logged in.
+        let db_value: Option<String> = {
+            let conn = db.conn.lock().unwrap();
+            conn.query_row(
+                "SELECT value FROM user_preferences WHERE key = 'google_refresh_token'",
+                [],
+                |row| row.get::<_, String>(0),
+            )
+            .ok()
+        };
+        if let Some(token) = db_value {
+            if token != REFRESH_KEYCHAIN_MARKER && !token.is_empty() {
+                *self.refresh_token.lock().unwrap() = Some(token.clone());
+                if KeychainStore::put(
+                    REFRESH_KEYCHAIN_SERVICE,
+                    REFRESH_KEYCHAIN_ACCOUNT,
+                    &token,
+                )
+                .is_ok()
+                {
+                    let conn = db.conn.lock().unwrap();
+                    let _ = conn.execute(
+                        "UPDATE user_preferences SET value = ?1, updated_at = datetime('now') WHERE key = 'google_refresh_token'",
+                        rusqlite::params![REFRESH_KEYCHAIN_MARKER],
+                    );
+                }
+            }
         }
     }
 
     pub fn save_to_db(&self, db: &crate::db::Database) {
-        if let Some(ref token) = *self.refresh_token.lock().unwrap() {
-            let conn = db.conn.lock().unwrap();
-            let _ = conn.execute(
-                "INSERT INTO user_preferences (key, value, updated_at) VALUES ('google_refresh_token', ?1, datetime('now'))
-                 ON CONFLICT(key) DO UPDATE SET value = ?1, updated_at = datetime('now')",
-                rusqlite::params![token],
-            );
+        // Clone the secret out and release the lock before any Keychain FFI.
+        let token = self.refresh_token.lock().unwrap().clone();
+        if let Some(token) = token {
+            if KeychainStore::put(REFRESH_KEYCHAIN_SERVICE, REFRESH_KEYCHAIN_ACCOUNT, &token).is_ok()
+            {
+                let conn = db.conn.lock().unwrap();
+                let _ = conn.execute(
+                    "INSERT INTO user_preferences (key, value, updated_at) VALUES ('google_refresh_token', ?1, datetime('now'))
+                     ON CONFLICT(key) DO UPDATE SET value = ?1, updated_at = datetime('now')",
+                    rusqlite::params![REFRESH_KEYCHAIN_MARKER],
+                );
+            }
         }
     }
 }

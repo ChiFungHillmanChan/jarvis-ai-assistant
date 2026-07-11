@@ -6,6 +6,20 @@ use std::sync::Arc;
 pub async fn run_job(db: &Arc<Database>, auth: &Arc<GoogleAuth>, action_type: &str, job_id: i64) -> Result<String, String> {
     {
         let conn = db.conn.lock().map_err(|e| e.to_string())?;
+        // The scheduler registers jobs once at startup. Re-check the job's
+        // current status here so a pause or delete the user made in the
+        // dashboard takes effect immediately instead of only after a restart.
+        let status: Option<String> = conn
+            .query_row(
+                "SELECT status FROM cron_jobs WHERE id = ?1",
+                rusqlite::params![job_id],
+                |row| row.get(0),
+            )
+            .ok();
+        match status.as_deref() {
+            Some("active") => {}
+            _ => return Ok("Skipped: job paused or removed".to_string()),
+        }
         conn.execute("INSERT INTO cron_runs (job_id, status) VALUES (?1, 'running')", rusqlite::params![job_id]).map_err(|e| e.to_string())?;
     }
 

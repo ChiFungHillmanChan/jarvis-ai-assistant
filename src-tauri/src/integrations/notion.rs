@@ -1,5 +1,4 @@
 // jarvis/src-tauri/src/integrations/notion.rs
-use reqwest::Client;
 use serde::{Deserialize, Serialize};
 
 const NOTION_API: &str = "https://api.notion.com/v1";
@@ -37,7 +36,7 @@ struct Parent {
 }
 
 pub async fn search_pages(api_key: &str, query: Option<&str>) -> Result<Vec<NotionPage>, String> {
-    let client = Client::new();
+    let client = crate::util::http_client();
     let mut body = serde_json::json!({ "page_size": 50, "filter": { "property": "object", "value": "page" } });
     if let Some(q) = query {
         body["query"] = serde_json::Value::String(q.to_string());
@@ -84,7 +83,7 @@ pub async fn create_page(
     title: &str,
     content: &str,
 ) -> Result<String, String> {
-    let client = Client::new();
+    let client = crate::util::http_client();
     let body = serde_json::json!({
         "parent": { "page_id": parent_page_id },
         "properties": {
@@ -134,7 +133,7 @@ pub fn save_to_db(db: &crate::db::Database, pages: &[NotionPage]) -> Result<(), 
 }
 
 pub async fn get_page_content(api_key: &str, page_id: &str) -> Result<String, String> {
-    let client = Client::new();
+    let client = crate::util::http_client();
 
     let resp = client
         .get(&format!("{}/blocks/{}/children?page_size=100", NOTION_API, page_id))

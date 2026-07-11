@@ -347,7 +347,7 @@ pub async fn send(
                 let result =
                     tools::execute_tool(&tc.function.name, &tc.function.arguments, db, google_auth)
                         .await;
-                log::info!("JARVIS tool result: {}", &result[..result.len().min(200)]);
+                log::info!("JARVIS tool result: {}", crate::util::truncate_bytes(&result, 200));
                 openai_messages.push(OpenAIMessage {
                     role: "tool".into(),
                     content: Some(result),

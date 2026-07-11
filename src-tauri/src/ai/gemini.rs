@@ -353,7 +353,7 @@ pub async fn send(
                     }
                 }
                 let result = tools::execute_tool(&fc.name, &args_str, db, google_auth).await;
-                log::info!("JARVIS tool result: {}", &result[..result.len().min(200)]);
+                log::info!("JARVIS tool result: {}", crate::util::truncate_bytes(&result, 200));
                 response_parts.push(GeminiPart {
                     function_response: Some(FunctionResponseData {
                         name: fc.name.clone(),

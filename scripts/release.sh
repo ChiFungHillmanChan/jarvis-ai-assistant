@@ -131,14 +131,37 @@ cat > /tmp/latest.json <<MANIFEST
 MANIFEST
 jq . /tmp/latest.json > /dev/null
 
-echo "==> 10/10 Uploading latest.json (cache-control 60s)"
+echo "==> 10/10 Publishing latest.json"
+# The in-app updater and the website /download page both read the manifest from
+# the public website (Vercel-served, publicly readable), NOT from the private S3
+# bucket. Write it into the website repo's public/ so a commit + push deploys the
+# new release. This is the "update on jarvis-automation" step.
+WEBSITE_MANIFEST="${REPO_ROOT}/../jarvis-official-website/public/latest.json"
+if [ -d "$(dirname "${WEBSITE_MANIFEST}")" ]; then
+  cp /tmp/latest.json "${WEBSITE_MANIFEST}"
+  echo "Wrote ${WEBSITE_MANIFEST}"
+  echo ""
+  echo "ACTION REQUIRED — commit + push the website to publish this release:"
+  echo "  git -C \"${REPO_ROOT}/../jarvis-official-website\" add public/latest.json"
+  echo "  git -C \"${REPO_ROOT}/../jarvis-official-website\" commit -m \"release: JARVIS v${VERSION}\""
+  echo "  git -C \"${REPO_ROOT}/../jarvis-official-website\" push"
+  echo "  (Vercel auto-deploys; manifest goes live at https://jarvis-automation.com/latest.json)"
+else
+  echo "WARNING: website repo not found at ${WEBSITE_MANIFEST}."
+  echo "Copy /tmp/latest.json to jarvis-official-website/public/latest.json manually, then commit + push."
+fi
+
+# Optional S3 mirror of the manifest (harmless; not authoritative).
 aws s3 cp /tmp/latest.json "s3://${BUCKET}/latest.json" \
-  --cache-control "max-age=60" \
-  --content-type "application/json" \
-  --profile "${PROFILE}"
+  --cache-control "max-age=60" --content-type "application/json" \
+  --profile "${PROFILE}" || echo "(S3 manifest mirror skipped — the website manifest is authoritative)"
 
 echo ""
 echo "Released v${VERSION}"
-echo "Manifest:        https://${BUCKET}.s3.${REGION}.amazonaws.com/latest.json"
+echo "Manifest (live after website deploy): https://jarvis-automation.com/latest.json"
 echo "Download (DMG):  ${DMG_PUBLIC_URL}"
 echo "Updater payload: ${UPDATER_URL}"
+echo ""
+echo "NOTE: the DMG + updater tarball live on S3 (${BUCKET}). Those objects must be"
+echo "publicly readable or downloads/updates will 403 — make them public-read via a"
+echo "bucket policy, or front the bucket with CloudFront."

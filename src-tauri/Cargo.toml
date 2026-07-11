@@ -1,6 +1,6 @@
 [package]
 name = "jarvis"
-version = "0.1.0"
+version = "0.1.1"
 description = "JARVIS - Personal AI Assistant"
 authors = ["you"]
 edition = "2021"
@@ -27,6 +27,7 @@ dirs = "5"
 chrono = { version = "0.4", features = ["serde"] }
 tauri-plugin-autostart = "2"
 tauri-plugin-updater = "2"
+tauri-plugin-process = "2"
 tauri-plugin-global-shortcut = "2"
 dotenvy = "0.15"
 oauth2 = { version = "4.4", features = ["reqwest"] }

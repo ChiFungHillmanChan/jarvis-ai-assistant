@@ -1,8 +1,20 @@
 use base64::Engine;
 use reqwest::Client;
 use serde::{Deserialize, Serialize};
+use std::sync::LazyLock;
 
 const GMAIL_API: &str = "https://gmail.googleapis.com/gmail/v1/users/me";
+
+/// Shared, connection-pooled Gmail HTTP client with timeouts so no request can
+/// hang a background sync or a chat turn indefinitely. Reused across all calls
+/// to avoid a fresh TLS handshake per request.
+static HTTP: LazyLock<Client> = LazyLock::new(|| {
+    Client::builder()
+        .connect_timeout(std::time::Duration::from_secs(10))
+        .timeout(std::time::Duration::from_secs(30))
+        .build()
+        .unwrap_or_else(|_| Client::new())
+});
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct GmailMessage {
@@ -71,11 +83,7 @@ pub async fn fetch_inbox(
     access_token: &str,
     max_results: u32,
 ) -> Result<Vec<GmailMessage>, String> {
-    let client = Client::builder()
-        .connect_timeout(std::time::Duration::from_secs(10))
-        .timeout(std::time::Duration::from_secs(15))
-        .build()
-        .map_err(|e| format!("HTTP client error: {}", e))?;
+    let client = &*HTTP;
     let url = format!(
         "{}/messages?maxResults={}&labelIds=INBOX",
         GMAIL_API, max_results
@@ -116,11 +124,7 @@ pub async fn fetch_message_detail(
     access_token: &str,
     message_id: &str,
 ) -> Result<GmailMessage, String> {
-    let client = Client::builder()
-        .connect_timeout(std::time::Duration::from_secs(10))
-        .timeout(std::time::Duration::from_secs(15))
-        .build()
-        .map_err(|e| format!("HTTP client error: {}", e))?;
+    let client = &*HTTP;
     let url = format!("{}/messages/{}?format=metadata&metadataHeaders=Subject&metadataHeaders=From&metadataHeaders=Date", GMAIL_API, message_id);
     let resp = client
         .get(&url)
@@ -157,7 +161,7 @@ pub async fn fetch_message_detail(
 }
 
 pub async fn archive_message(access_token: &str, message_id: &str) -> Result<(), String> {
-    let client = Client::new();
+    let client = &*HTTP;
     let url = format!("{}/messages/{}/modify", GMAIL_API, message_id);
     let body = serde_json::json!({ "removeLabelIds": ["INBOX"] });
     let resp = client
@@ -187,7 +191,7 @@ pub fn save_to_db(db: &crate::db::Database, messages: &[GmailMessage]) -> Result
 }
 
 pub async fn search_messages(access_token: &str, query: &str) -> Result<Vec<GmailMessage>, String> {
-    let client = Client::new();
+    let client = &*HTTP;
     let encoded_query = urlencoding::encode(query);
     let url = format!("{}/messages?q={}&maxResults=10", GMAIL_API, encoded_query);
     let resp = client
@@ -204,11 +208,20 @@ pub async fn search_messages(access_token: &str, query: &str) -> Result<Vec<Gmai
     }
     let list: ListResponse = resp.json().await.map_err(|e| e.to_string())?;
     let refs = list.messages.unwrap_or_default();
+
+    // Fetch the matched message details in parallel (mirrors fetch_inbox) so a
+    // 10-result search is one round-trip of latency, not ten sequential ones.
+    let futures: Vec<_> = refs
+        .iter()
+        .take(10)
+        .map(|msg_ref| fetch_message_detail(access_token, &msg_ref.id))
+        .collect();
+    let results = futures_util::future::join_all(futures).await;
     let mut messages = Vec::new();
-    for msg_ref in refs.iter().take(10) {
-        match fetch_message_detail(access_token, &msg_ref.id).await {
+    for (i, result) in results.into_iter().enumerate() {
+        match result {
             Ok(msg) => messages.push(msg),
-            Err(e) => log::warn!("Failed to fetch message {}: {}", msg_ref.id, e),
+            Err(e) => log::warn!("Failed to fetch message {}: {}", refs[i].id, e),
         }
     }
     Ok(messages)
@@ -218,7 +231,7 @@ pub async fn get_message_full(
     access_token: &str,
     message_id: &str,
 ) -> Result<(GmailMessage, String), String> {
-    let client = Client::new();
+    let client = &*HTTP;
     let url = format!("{}/messages/{}?format=full", GMAIL_API, message_id);
     let resp = client
         .get(&url)
@@ -452,6 +465,12 @@ fn strip_html(html: &str) -> String {
     cleaned.trim().to_string()
 }
 
+/// Remove CR/LF (and surrounding whitespace) from a value destined for an
+/// email header, defeating header-injection via newline characters.
+fn strip_header_value(value: &str) -> String {
+    value.replace(['\r', '\n'], " ").trim().to_string()
+}
+
 pub async fn send_message(
     access_token: &str,
     to: &str,
@@ -459,11 +478,16 @@ pub async fn send_message(
     body: &str,
     cc: Option<&str>,
 ) -> Result<String, String> {
+    // Strip CR/LF from header fields so AI- or content-derived values can't
+    // inject extra headers (e.g. a hidden Bcc) into the raw RFC 822 message.
+    let to = strip_header_value(to);
+    let subject = strip_header_value(subject);
     let mut raw_msg = format!(
         "To: {}\r\nSubject: {}\r\nContent-Type: text/plain; charset=utf-8\r\n",
         to, subject
     );
     if let Some(cc_addr) = cc {
+        let cc_addr = strip_header_value(cc_addr);
         if !cc_addr.is_empty() {
             raw_msg.push_str(&format!("Cc: {}\r\n", cc_addr));
         }
@@ -473,7 +497,7 @@ pub async fn send_message(
     let engine = base64::engine::general_purpose::URL_SAFE_NO_PAD;
     let encoded = engine.encode(raw_msg.as_bytes());
 
-    let client = Client::new();
+    let client = &*HTTP;
     let url = format!("{}/messages/send", GMAIL_API);
     let payload = serde_json::json!({ "raw": encoded });
     let resp = client
@@ -493,4 +517,24 @@ pub async fn send_message(
     }
     let result: serde_json::Value = resp.json().await.map_err(|e| e.to_string())?;
     Ok(result["id"].as_str().unwrap_or("unknown").to_string())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn strip_header_value_removes_crlf_injection() {
+        // A subject trying to smuggle a Bcc header must be flattened to one line.
+        let malicious = "Hello\r\nBcc: attacker@evil.com";
+        let cleaned = strip_header_value(malicious);
+        assert!(!cleaned.contains('\r'));
+        assert!(!cleaned.contains('\n'));
+        assert_eq!(cleaned, "Hello  Bcc: attacker@evil.com");
+    }
+
+    #[test]
+    fn strip_header_value_keeps_plain_text() {
+        assert_eq!(strip_header_value("HKSTP invoice"), "HKSTP invoice");
+    }
 }

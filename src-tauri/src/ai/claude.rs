@@ -210,7 +210,7 @@ pub async fn send(
                         log::warn!(
                             "[STREAM-DEBUG] SSE parse failed: {} | data: {}",
                             e,
-                            &data_str[..data_str.len().min(200)]
+                            crate::util::truncate_bytes(&data_str, 200)
                         );
                         continue;
                     }
@@ -378,7 +378,7 @@ pub async fn send(
                     }
                 }
                 let result = tools::execute_tool(name, &args_str, db, google_auth).await;
-                log::info!("JARVIS tool result: {}", &result[..result.len().min(200)]);
+                log::info!("JARVIS tool result: {}", crate::util::truncate_bytes(&result, 200));
                 result_blocks.push(ContentBlock::ToolResult {
                     tool_use_id: id.clone(),
                     content: result,

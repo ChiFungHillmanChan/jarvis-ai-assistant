@@ -192,7 +192,7 @@ pub async fn send(
                     }
 
                     let result = tools::execute_tool(name, &args_str, db, google_auth).await;
-                    log::info!("JARVIS tool result: {}", &result[..result.len().min(200)]);
+                    log::info!("JARVIS tool result: {}", crate::util::truncate_bytes(&result, 200));
                     result
                 };
 

@@ -40,7 +40,7 @@ pub async fn create_checkout_session(req: CheckoutRequest<'_>) -> Result<Checkou
     let base = payment_api_base()?;
     let url = format!("{}/checkout", base.trim_end_matches('/'));
 
-    let client = reqwest::Client::new();
+    let client = crate::util::http_client();
     let resp = client
         .post(&url)
         .json(&req)
@@ -66,7 +66,7 @@ pub async fn open_billing_portal(user_id: &str) -> Result<String, PaymentError> 
     #[derive(Deserialize)]
     struct PortalResp { url: String }
 
-    let client = reqwest::Client::new();
+    let client = crate::util::http_client();
     let resp = client
         .post(&url)
         .json(&PortalReq { user_id })

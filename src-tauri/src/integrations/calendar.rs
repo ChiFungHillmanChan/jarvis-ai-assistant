@@ -1,4 +1,3 @@
-use reqwest::Client;
 use serde::{Deserialize, Serialize};
 
 const CALENDAR_API: &str = "https://www.googleapis.com/calendar/v3";
@@ -42,7 +41,7 @@ impl EventTime {
 }
 
 pub async fn fetch_events(access_token: &str, time_min: &str, time_max: &str) -> Result<Vec<CalendarEvent>, String> {
-    let client = Client::new();
+    let client = crate::util::http_client();
     let url = format!("{}/calendars/primary/events", CALENDAR_API);
     let resp = client.get(&url)
         .bearer_auth(access_token)
@@ -79,7 +78,7 @@ pub async fn create_event(
     location: Option<&str>,
     attendees: Option<&str>,
 ) -> Result<String, String> {
-    let client = Client::new();
+    let client = crate::util::http_client();
     let url = format!("{}/calendars/primary/events", CALENDAR_API);
     let mut body = serde_json::json!({
         "summary": summary,
@@ -117,7 +116,7 @@ pub async fn update_event(
     location: Option<&str>,
     description: Option<&str>,
 ) -> Result<String, String> {
-    let client = Client::new();
+    let client = crate::util::http_client();
     let url = format!("{}/calendars/primary/events/{}", CALENDAR_API, event_id);
     let mut body = serde_json::json!({});
     if let Some(t) = title {
@@ -145,7 +144,7 @@ pub async fn update_event(
 }
 
 pub async fn delete_event(access_token: &str, event_id: &str) -> Result<String, String> {
-    let client = Client::new();
+    let client = crate::util::http_client();
     let url = format!("{}/calendars/primary/events/{}", CALENDAR_API, event_id);
     let resp = client.delete(&url).bearer_auth(access_token).send().await.map_err(|e| format!("Delete event error: {}", e))?;
     if resp.status() == 401 { return Err("UNAUTHORIZED".to_string()); }
