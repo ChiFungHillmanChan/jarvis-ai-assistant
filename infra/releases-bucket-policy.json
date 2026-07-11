@@ -2,11 +2,17 @@
   "Version": "2012-10-17",
   "Statement": [
     {
-      "Sid": "PublicReadReleaseArtifacts",
+      "Sid": "PublicReadReleases",
       "Effect": "Allow",
       "Principal": "*",
       "Action": "s3:GetObject",
-      "Resource": "arn:aws:s3:::jarvis-releases/*"
+      "Resource": [
+        "arn:aws:s3:::jarvis-releases/*.dmg",
+        "arn:aws:s3:::jarvis-releases/*.dmg.sig",
+        "arn:aws:s3:::jarvis-releases/*.app.tar.gz",
+        "arn:aws:s3:::jarvis-releases/*.app.tar.gz.sig",
+        "arn:aws:s3:::jarvis-releases/latest.json"
+      ]
     }
   ]
 }

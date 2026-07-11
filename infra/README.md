@@ -59,31 +59,25 @@ See `scripts/sync-cdk-outputs.sh`.
 
 ## Releases bucket (public read)
 
-The `jarvis-releases` bucket (`ap-east-1`, separate from the CDK stacks above)
-holds the signed DMG + updater tarball. `scripts/release.sh` uploads there. The
-in-app updater and the website `/download` page must be able to GET these
-objects, so the bucket needs public-read. New S3 buckets have Block Public
-Access ON, which overrides bucket policies, so both steps are required:
+The `jarvis-releases` bucket (`ap-east-1`, account 759626151650, separate from
+the CDK stacks above) holds the signed DMG + updater tarball. `scripts/release.sh`
+uploads there via the `jarvis-release-bot` profile.
+
+**This is already configured** — the bucket has a scoped public-read policy (the
+one mirrored in `releases-bucket-policy.json`: public `s3:GetObject` on the DMG /
+tarball / `.sig` / `latest.json` only, no listing or writes) and Block Public
+Access allows it (`BlockPublicPolicy=false`). Nothing to do for a normal release;
+`release.sh` just uploads and the objects are publicly downloadable.
+
+Re-apply the policy only if it is ever lost (use the `jarvis-deploy` profile,
+which has bucket-policy permissions; `jarvis-release-bot` is upload-only):
 
 ```bash
-BUCKET=jarvis-releases
-PROFILE=jarvis-release-bot   # or your releases profile
-
-# 1. Let a bucket policy grant public access (turn off the blockers).
-aws s3api put-public-access-block --bucket "$BUCKET" \
-  --public-access-block-configuration \
-  BlockPublicAcls=false,IgnorePublicAcls=false,BlockPublicPolicy=false,RestrictPublicBuckets=false \
-  --profile "$PROFILE"
-
-# 2. Apply the public-read policy (public GET on objects only; no listing/writes).
-aws s3api put-bucket-policy --bucket "$BUCKET" \
+aws s3api put-bucket-policy --bucket jarvis-releases \
   --policy file://infra/releases-bucket-policy.json \
-  --profile "$PROFILE"
-
-# 3. Verify a public download works (no credentials).
-curl -sI "https://$BUCKET.s3.ap-east-1.amazonaws.com/JARVIS_latest_aarch64.dmg" | head -1
+  --profile jarvis-deploy
 ```
 
-The update *manifest* (`latest.json`) is NOT here — it is served publicly from
-the website at `https://jarvis-automation.com/latest.json`. Only the binaries
-live in this bucket.
+The update *manifest* (`latest.json`) that the app reads is NOT here — it is
+served publicly from the website at `https://jarvis-automation.com/latest.json`.
+This bucket only serves the binaries (and an optional mirror of the manifest).
