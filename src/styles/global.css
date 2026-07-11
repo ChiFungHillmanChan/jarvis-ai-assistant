@@ -35,6 +35,27 @@
   --radius-sm: 4px;
   --radius-md: 8px;
   --radius-lg: 12px;
+
+  /* Spacing scale (4px base) */
+  --space-1: 4px;
+  --space-2: 8px;
+  --space-3: 12px;
+  --space-4: 16px;
+  --space-5: 20px;
+  --space-6: 24px;
+
+  /* Named radii (refreshed chrome) */
+  --r-sm: 8px;
+  --r-md: 12px;
+  --r-lg: 16px;
+
+  /* Surfaces + borders + glow (refreshed chrome) */
+  --surface: rgba(10, 14, 26, 0.62);
+  --surface-solid: rgba(12, 17, 30, 0.94);
+  --border-strong: rgba(0, 180, 255, 0.30);
+  --cyan-dim: rgba(0, 180, 255, 0.62);
+  --muted: rgba(150, 180, 210, 0.55);
+  --glow: rgba(0, 180, 255, 0.22);
 }
 
 /* ============================================================
