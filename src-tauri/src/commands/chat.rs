@@ -162,7 +162,7 @@ pub async fn send_message(
                         let role: String = row.get(0)?;
                         let content: String = row.get(1)?;
                         let date: Option<String> = row.get(2)?;
-                        Ok(format!("[{} - {}]: {}", date.unwrap_or_default(), role, &content[..content.len().min(100)]))
+                        Ok(format!("[{} - {}]: {}", date.unwrap_or_default(), role, crate::util::truncate_bytes(&content, 100)))
                     })
                     .map_err(|e| e.to_string())?
                     .collect::<Result<Vec<_>, _>>()

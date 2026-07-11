@@ -1,5 +1,4 @@
 // jarvis/src-tauri/src/integrations/github.rs
-use reqwest::Client;
 use serde::{Deserialize, Serialize};
 
 const GITHUB_API: &str = "https://api.github.com";
@@ -61,7 +60,7 @@ fn issue_to_item(issue: IssueOrPR, item_type: &str, state_override: Option<&str>
 }
 
 pub async fn fetch_assigned_items(token: &str) -> Result<Vec<GitHubItem>, String> {
-    let client = Client::new();
+    let client = crate::util::http_client();
     let mut items = Vec::new();
 
     // Fetch assigned issues
@@ -148,7 +147,7 @@ pub async fn create_issue(
     body: Option<&str>,
     labels: Option<&str>,
 ) -> Result<String, String> {
-    let client = Client::new();
+    let client = crate::util::http_client();
     let mut payload = serde_json::json!({ "title": title, "body": body });
     if let Some(labels_str) = labels {
         let label_vec: Vec<&str> = labels_str.split(',').map(|s| s.trim()).collect();

@@ -10,6 +10,7 @@ pub mod scheduler;
 pub mod security;
 pub mod system;
 pub mod tray;
+pub mod util;
 pub mod voice;
 pub mod wallpaper;
 

@@ -387,7 +387,7 @@ pub async fn send_local(
                     let result = tools::execute_tool(&call.name, &args_str, db, google_auth).await;
                     log::info!(
                         "Local LLM tool result: {}",
-                        &result[..result.len().min(200)]
+                        crate::util::truncate_bytes(&result, 200)
                     );
 
                     // Add tool results to messages and continue the loop
@@ -505,7 +505,7 @@ pub async fn send_local(
                         .await;
                 log::info!(
                     "Local LLM tool result: {}",
-                    &result[..result.len().min(200)]
+                    crate::util::truncate_bytes(&result, 200)
                 );
                 local_messages.push(LocalMessage {
                     role: "tool".into(),

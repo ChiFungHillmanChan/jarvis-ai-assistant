@@ -610,15 +610,30 @@ fn execute_memory_tool(name: &str, args: &serde_json::Value, db: &crate::db::Dat
                 "identity" | "preference" | "project" | "fact" => category,
                 _ => "fact",
             };
+            let preview = content.chars().take(120).collect::<String>();
+            // De-duplicate: if the same fact (case-insensitive) is already
+            // stored, refresh it instead of appending a duplicate. Otherwise the
+            // memory block injected into every prompt grows with repeats and
+            // wastes tokens on the very hot path.
+            let existing: Option<i64> = conn
+                .query_row(
+                    "SELECT id FROM user_memory WHERE content = ?1 COLLATE NOCASE LIMIT 1",
+                    rusqlite::params![content],
+                    |row| row.get(0),
+                )
+                .ok();
+            if let Some(id) = existing {
+                let _ = conn.execute(
+                    "UPDATE user_memory SET category = ?1, updated_at = CURRENT_TIMESTAMP WHERE id = ?2",
+                    rusqlite::params![category, id],
+                );
+                return format!("Already remembered ({}): {}", category, preview);
+            }
             match conn.execute(
                 "INSERT INTO user_memory (content, category) VALUES (?1, ?2)",
                 rusqlite::params![content, category],
             ) {
-                Ok(_) => format!(
-                    "Remembered ({}): {}",
-                    category,
-                    &content.chars().take(120).collect::<String>()
-                ),
+                Ok(_) => format!("Remembered ({}): {}", category, preview),
                 Err(e) => format!("Memory error: {}", e),
             }
         }
@@ -677,7 +692,7 @@ fn execute_memory_tool(name: &str, args: &serde_json::Value, db: &crate::db::Dat
 /// Truncate tool results to avoid blowing up context windows.
 fn truncate_result(s: String) -> String {
     if s.len() > 4000 {
-        format!("{}... [truncated, {} total chars]", &s[..4000], s.len())
+        format!("{}... [truncated, {} total chars]", crate::util::truncate_bytes(&s, 4000), s.len())
     } else {
         s
     }
@@ -725,7 +740,7 @@ async fn execute_gmail_tool(
             // Log outgoing email to DB before sending
             let now = chrono::Local::now().to_rfc3339();
             let outgoing_id = format!("outgoing_{}", now);
-            let snippet = if body.len() > 100 { &body[..100] } else { body };
+            let snippet = crate::util::truncate_bytes(body, 100);
             if let Ok(conn) = db.conn.lock() {
                 let _ = conn.execute(
                     "INSERT INTO emails (gmail_id, subject, sender, snippet, labels, is_read, received_at) VALUES (?1, ?2, 'me (outgoing)', ?3, 'SENT', 1, ?4)",
@@ -834,11 +849,7 @@ async fn execute_obsidian_tool(
                 .iter()
                 .map(|n| {
                     let snippet = n.content.as_deref().unwrap_or("");
-                    let truncated = if snippet.len() > 100 {
-                        &snippet[..100]
-                    } else {
-                        snippet
-                    };
+                    let truncated = crate::util::truncate_bytes(snippet, 100);
                     format!("{} | {}", n.path, truncated)
                 })
                 .collect();
@@ -1272,5 +1283,56 @@ mod prompt_tests {
         let b = build_cacheable_system_prompt();
         assert_eq!(a, b, "cacheable prompt must be byte-stable for cache hits");
         assert!(a.len() > 500, "expected non-trivial static prompt");
+    }
+}
+
+#[cfg(test)]
+mod memory_tests {
+    use super::*;
+    use crate::db::Database;
+    use rusqlite::Connection;
+    use std::sync::Mutex;
+
+    fn memory_db() -> Database {
+        let conn = Connection::open_in_memory().unwrap();
+        conn.execute_batch(
+            "CREATE TABLE user_memory (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                content TEXT NOT NULL,
+                category TEXT NOT NULL DEFAULT 'fact',
+                created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+                updated_at DATETIME DEFAULT CURRENT_TIMESTAMP
+            );",
+        )
+        .unwrap();
+        Database { conn: Mutex::new(conn) }
+    }
+
+    fn count(db: &Database) -> i64 {
+        db.conn
+            .lock()
+            .unwrap()
+            .query_row("SELECT COUNT(*) FROM user_memory", [], |r| r.get(0))
+            .unwrap()
+    }
+
+    #[test]
+    fn remember_deduplicates_identical_facts() {
+        let db = memory_db();
+        let args = serde_json::json!({ "content": "Hillman 揸緊 JARVIS", "category": "project" });
+        execute_memory_tool("remember", &args, &db);
+        execute_memory_tool("remember", &args, &db); // exact repeat
+        // Case-insensitive repeat with surrounding whitespace should also dedupe.
+        let args2 = serde_json::json!({ "content": "  hillman 揸緊 JARVIS  " });
+        execute_memory_tool("remember", &args2, &db);
+        assert_eq!(count(&db), 1, "identical facts must not be stored twice");
+    }
+
+    #[test]
+    fn remember_stores_distinct_facts() {
+        let db = memory_db();
+        execute_memory_tool("remember", &serde_json::json!({ "content": "fact A" }), &db);
+        execute_memory_tool("remember", &serde_json::json!({ "content": "fact B" }), &db);
+        assert_eq!(count(&db), 2);
     }
 }

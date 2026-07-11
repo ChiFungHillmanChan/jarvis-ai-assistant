@@ -1,4 +1,3 @@
-use reqwest::Client;
 use serde::{Deserialize, Serialize};
 
 const DEFAULT_OBSIDIAN_URL: &str = "http://localhost:27124";
@@ -31,7 +30,7 @@ struct SearchMatchText {
 
 /// Search notes in the Obsidian vault
 pub async fn search_vault(api_key: &str, query: &str) -> Result<Vec<ObsidianNote>, String> {
-    let client = Client::new();
+    let client = crate::util::http_client();
     let url = format!("{}/search/simple/", DEFAULT_OBSIDIAN_URL);
 
     let resp = client
@@ -73,7 +72,7 @@ pub async fn search_vault(api_key: &str, query: &str) -> Result<Vec<ObsidianNote
 
 /// Get a specific note's content
 pub async fn get_note(api_key: &str, path: &str) -> Result<String, String> {
-    let client = Client::new();
+    let client = crate::util::http_client();
     let url = format!("{}/vault/{}", DEFAULT_OBSIDIAN_URL, path);
 
     let resp = client
@@ -94,7 +93,7 @@ pub async fn get_note(api_key: &str, path: &str) -> Result<String, String> {
 
 /// Create or update a note
 pub async fn save_note(api_key: &str, path: &str, content: &str) -> Result<(), String> {
-    let client = Client::new();
+    let client = crate::util::http_client();
     let url = format!("{}/vault/{}", DEFAULT_OBSIDIAN_URL, path);
 
     let resp = client
@@ -115,7 +114,7 @@ pub async fn save_note(api_key: &str, path: &str, content: &str) -> Result<(), S
 
 /// List all files in vault
 pub async fn list_files(api_key: &str) -> Result<Vec<String>, String> {
-    let client = Client::new();
+    let client = crate::util::http_client();
     let url = format!("{}/vault/", DEFAULT_OBSIDIAN_URL);
 
     let resp = client

@@ -339,7 +339,7 @@ impl TextToSpeech {
         amp_handle.abort();
         let _ = app_handle.emit("tts-amplitude", json!({"amplitude": 0.0}));
         if !status.success() {
-            log::warn!("TTS sentence failed: {}", &clean[..clean.len().min(50)]);
+            log::warn!("TTS sentence failed: {}", crate::util::truncate_bytes(&clean, 50));
         }
         let _ = app_handle.emit("tts-sentence-done", json!({"remaining": remaining}));
         Ok(())
