@@ -6,7 +6,7 @@ import ChatPanel from "./components/ChatPanel";
 import CommandBar from "./components/CommandBar";
 import Dashboard from "./pages/Dashboard";
 import OnboardingWizard from "./pages/OnboardingWizard";
-import UpdatePrompt from "./components/UpdatePrompt";
+import UpdateButton from "./components/UpdateButton";
 import { checkOnboardingStatus, stopSpeaking } from "./lib/commands";
 const Settings = lazy(() => import("./pages/Settings"));
 const CronDashboard = lazy(() => import("./pages/CronDashboard"));
@@ -331,17 +331,11 @@ export default function App() {
   }
 
   if (!onboardingDone) {
-    return (
-      <>
-        <UpdatePrompt />
-        <OnboardingWizard onComplete={() => setOnboardingDone(true)} />
-      </>
-    );
+    return <OnboardingWizard onComplete={() => setOnboardingDone(true)} />;
   }
 
   return (
     <>
-      <UpdatePrompt />
       <ChatProvider>
       <div style={styles.root}>
       <JarvisScene activityLevel={activityLevel} assistantPhase={assistantPhase} ttsAmplitudeRef={ttsAmplitudeRef} micAmplitudeRef={micAmplitudeRef} pendingToolCall={pendingToolCall} onToolCallConsumed={handleToolCallConsumed} />
@@ -350,6 +344,7 @@ export default function App() {
         <div data-tauri-drag-region style={styles.titleBar}>
           <span data-tauri-drag-region style={styles.titleText}>JARVIS{wallpaperActive ? " [WALLPAPER]" : ""}</span>
           <div data-tauri-drag-region="false" style={{ display: "flex", alignItems: "center", gap: 8 }}>
+            <UpdateButton />
             {wallpaperActive && wallpaperRaised && (
               <button
                 onClick={handleLowerToBackground}
