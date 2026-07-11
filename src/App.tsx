@@ -20,6 +20,7 @@ import VoiceIndicator from "./components/VoiceIndicator";
 import { useVoiceState } from "./hooks/useVoiceState";
 import ToastContainer from "./components/Toast";
 import WindowControls from "./components/WindowControls";
+import { Minimize2 } from "./components/icons";
 import JarvisScene from "./components/3d/JarvisScene";
 import AssistantHud from "./components/AssistantHud";
 import { ChatProvider, useChatContext } from "./hooks/ChatContext";
@@ -342,15 +343,17 @@ export default function App() {
 
       <div style={styles.uiLayer}>
         <div data-tauri-drag-region style={styles.titleBar}>
-          <span data-tauri-drag-region style={styles.titleText}>JARVIS{wallpaperActive ? " [WALLPAPER]" : ""}</span>
-          <div data-tauri-drag-region="false" style={{ display: "flex", alignItems: "center", gap: 8 }}>
+          <span data-tauri-drag-region style={styles.titleText}>JARVIS{wallpaperActive ? " / WALLPAPER" : ""}</span>
+          <div data-tauri-drag-region="false" style={{ display: "flex", alignItems: "center", gap: 10 }}>
             <UpdateButton />
             {wallpaperActive && wallpaperRaised && (
               <button
                 onClick={handleLowerToBackground}
                 style={styles.lowerBtn}
+                title="Send to background"
+                aria-label="Send to background"
               >
-                SEND TO BACKGROUND
+                <Minimize2 size={13} /> Background
               </button>
             )}
             <WindowControls />
@@ -395,5 +398,5 @@ const styles: Record<string, React.CSSProperties> = {
   layout: { flex: 1, display: "flex", overflow: "hidden", minHeight: 0 },
   content: { flex: 1, display: "flex", flexDirection: "column", overflow: "hidden", minHeight: 0 },
   mainArea: { flex: 1, overflow: "auto", minHeight: 0 },
-  lowerBtn: { background: "rgba(0, 180, 255, 0.1)", border: "1px solid rgba(0, 180, 255, 0.3)", borderRadius: 4, padding: "2px 8px", color: "rgba(0, 180, 255, 0.7)", cursor: "pointer", fontFamily: "var(--font-mono)", fontSize: 9, letterSpacing: 1 },
+  lowerBtn: { display: "flex", alignItems: "center", gap: 6, background: "rgba(0, 180, 255, 0.1)", border: "1px solid var(--border-strong)", borderRadius: 7, padding: "4px 10px", color: "var(--cyan-dim)", cursor: "pointer", fontFamily: "var(--font-mono)", fontSize: 10, letterSpacing: 1 },
 };

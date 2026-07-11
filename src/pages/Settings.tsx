@@ -38,6 +38,7 @@ import { listen } from "@tauri-apps/api/event";
 import type { VoiceSettings, WakeWordStatus, VoiceState, LocalEndpoint, LocalModel, ProviderChainEntry, EndpointHealth } from "../lib/types";
 import { useVoiceState } from "../hooks/useVoiceState";
 import LocalAiSetup from "../components/LocalAiSetup";
+import { Cpu, Key, Globe, Gem, Mic, Bot, Palette, CreditCard, GithubMark, NotionMark } from "../components/icons";
 
 export default function Settings() {
   const [aiProvider, setAiProvider] = useState("gemini_primary");
@@ -99,6 +100,7 @@ export default function Settings() {
   const [endpointModels, setEndpointModels] = useState<Record<string, LocalModel[]>>({});
   const [endpointHealth, setEndpointHealth] = useState<Record<string, EndpointHealth>>({});
   const [llmError, setLlmError] = useState<string | null>(null);
+  const [section, setSection] = useState<string>("ai");
 
   useEffect(() => {
     getSettings().then((s) => {
@@ -418,15 +420,36 @@ export default function Settings() {
       : null;
   const wakeCanEnable = Boolean(wakeStatus?.model_downloaded || wakeStatus?.enabled);
 
-  return (
-    <div style={styles.container}>
-      <div className="system-text" style={{ marginBottom: 20, fontSize: 14, letterSpacing: 4 }}>
-        SETTINGS
-      </div>
+  const SECTIONS = [
+    { id: "ai", label: "AI Providers", Icon: () => <Cpu size={17} /> },
+    { id: "keys", label: "API Keys", Icon: () => <Key size={17} /> },
+    { id: "google", label: "Google", Icon: () => <Globe size={17} /> },
+    { id: "notion", label: "Notion", Icon: () => <NotionMark size={17} /> },
+    { id: "github", label: "GitHub", Icon: () => <GithubMark size={17} /> },
+    { id: "obsidian", label: "Obsidian", Icon: () => <Gem size={17} /> },
+    { id: "voice", label: "Voice", Icon: () => <Mic size={17} /> },
+    { id: "assistant", label: "Assistant", Icon: () => <Bot size={17} /> },
+    { id: "appearance", label: "Appearance", Icon: () => <Palette size={17} /> },
+    { id: "account", label: "Account", Icon: () => <CreditCard size={17} /> },
+  ];
 
-      <div style={styles.grid}>
-        {/* Left column */}
-        <div style={styles.column}>
+  return (
+    <div style={styles.page}>
+      <aside style={styles.nav}>
+        <div className="label" style={{ padding: "0 10px", marginBottom: 12 }}>SETTINGS</div>
+        {SECTIONS.map((s) => {
+          const active = section === s.id;
+          return (
+            <button key={s.id} onClick={() => setSection(s.id)}
+              style={{ ...styles.navItem, ...(active ? styles.navItemActive : {}) }}
+              aria-current={active ? "page" : undefined}>
+              <s.Icon /> <span>{s.label}</span>
+            </button>
+          );
+        })}
+      </aside>
+      <div style={styles.content}>
+        {section === "ai" && (<>
           <LocalAiSetup
             endpoints={endpoints}
             onEndpointAdded={(ep) => setEndpoints((prev) => [...prev, ep])}
@@ -536,7 +559,9 @@ export default function Settings() {
               </label>
             ))}
           </div>
+        </>)}
 
+        {section === "keys" && (
           <div className="panel" style={styles.panel}>
             <div className="label" style={styles.sectionTitle}>API KEYS</div>
             <div style={styles.hint}>Set in .env file at project root:</div>
@@ -546,7 +571,9 @@ export default function Settings() {
             <code style={styles.code}>AWS_BEDROCK_REGION</code>
             <code style={styles.code}>AWS_BEDROCK_MODEL_ID</code>
           </div>
+        )}
 
+        {section === "google" && (
           <div className="panel" style={styles.panel}>
             <div className="label" style={styles.sectionTitle}>GOOGLE SERVICES</div>
             <div style={styles.hint}>Connect Gmail and Google Calendar</div>
@@ -561,7 +588,9 @@ export default function Settings() {
               </>
             )}
           </div>
+        )}
 
+        {section === "notion" && (
           <div className="panel" style={styles.panel}>
             <div className="label" style={styles.sectionTitle}>NOTION</div>
             <div style={styles.hint}>Enter your Notion integration token</div>
@@ -570,7 +599,9 @@ export default function Settings() {
               <button onClick={handleSaveNotion} style={styles.saveBtn}>{notionSaved ? "SAVED" : "SAVE"}</button>
             </div>
           </div>
+        )}
 
+        {section === "github" && (
           <div className="panel" style={styles.panel}>
             <div className="label" style={styles.sectionTitle}>GITHUB</div>
             <div style={styles.hint}>Enter your GitHub personal access token</div>
@@ -579,7 +610,9 @@ export default function Settings() {
               <button onClick={handleSaveGitHub} style={styles.saveBtn}>{githubSaved ? "SAVED" : "SAVE"}</button>
             </div>
           </div>
+        )}
 
+        {section === "obsidian" && (
           <div className="panel" style={styles.panel}>
             <div className="label" style={styles.sectionTitle}>OBSIDIAN</div>
             <div style={styles.hint}>Connect to Obsidian vault via Local REST API plugin</div>
@@ -591,7 +624,9 @@ export default function Settings() {
               Install "Local REST API" plugin in Obsidian, enable it, copy the API key
             </div>
           </div>
+        )}
 
+        {section === "ai" && (
           <div className="panel" style={styles.panel}>
             <div className="label" style={styles.sectionTitle}>AWS BEDROCK</div>
             <div style={styles.hint}>
@@ -631,7 +666,9 @@ export default function Settings() {
               )}
             </div>
           </div>
+        )}
 
+        {section === "voice" && (<>
           <div className="panel" style={styles.panel}>
             <div className="label" style={styles.sectionTitle}>LANGUAGE &amp; VOICE</div>
             <div style={styles.hint}>
@@ -734,10 +771,7 @@ export default function Settings() {
               )}
             </div>
           </div>
-        </div>
 
-        {/* Right column */}
-        <div style={styles.column}>
           <div className="panel" style={styles.panel}>
             <div className="label" style={styles.sectionTitle}>VOICE</div>
             <div style={styles.hint}>Cmd+Shift+J to start/stop voice input</div>
@@ -776,7 +810,9 @@ export default function Settings() {
             </div>
             {wakeError && <div style={styles.errorText}>{wakeError}</div>}
           </div>
+        </>)}
 
+        {section === "assistant" && (
           <div className="panel" style={styles.panel}>
             <div className="label" style={styles.sectionTitle}>ASSISTANT</div>
             <label style={styles.option}>
@@ -784,7 +820,9 @@ export default function Settings() {
               <span style={styles.optionLabel}>Speak morning briefing on startup (once per day)</span>
             </label>
           </div>
+        )}
 
+        {section === "appearance" && (
           <div className="panel" style={styles.panel}>
             <div className="label" style={styles.sectionTitle}>WALLPAPER MODE</div>
             <div style={styles.hint}>
@@ -805,7 +843,9 @@ export default function Settings() {
               Closing the window sends it back to the background.
             </div>
           </div>
+        )}
 
+        {section === "account" && (
           <div className="panel" style={styles.panel}>
             <div className="label" style={styles.sectionTitle}>UPGRADE</div>
             <div style={styles.hint}>
@@ -830,16 +870,18 @@ export default function Settings() {
             </div>
             {payError && <div style={styles.errorText}>{payError}</div>}
           </div>
-        </div>
+        )}
       </div>
     </div>
   );
 }
 
 const styles: Record<string, React.CSSProperties> = {
-  container: { padding: 24, paddingBottom: 48 },
-  grid: { display: "grid", gridTemplateColumns: "1fr 1fr", gap: 12, alignItems: "start" },
-  column: { display: "flex", flexDirection: "column" as const, gap: 12 },
+  page: { display: "flex", height: "100%", overflow: "hidden" },
+  nav: { width: 210, flexShrink: 0, borderRight: "1px solid var(--border-primary)", background: "var(--surface)", backdropFilter: "blur(12px)", padding: "18px 12px", overflowY: "auto" },
+  navItem: { display: "flex", alignItems: "center", gap: 11, width: "100%", textAlign: "left" as const, padding: "9px 11px", marginBottom: 2, borderRadius: 9, border: "1px solid transparent", background: "transparent", color: "var(--muted)", fontSize: 13, cursor: "pointer" },
+  navItemActive: { background: "rgba(0,180,255,0.12)", color: "var(--text-primary)", boxShadow: "inset 0 0 0 1px var(--border-strong)" },
+  content: { flex: 1, overflowY: "auto", padding: "24px 30px", display: "flex", flexDirection: "column" as const, gap: 12 },
   panel: { padding: 16 },
   sectionTitle: { marginBottom: 12 },
   option: { display: "flex", alignItems: "center", gap: 8, marginBottom: 10, cursor: "pointer" },

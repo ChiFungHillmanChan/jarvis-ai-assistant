@@ -1,6 +1,7 @@
 import { useState, useRef, useEffect, useCallback, memo } from "react";
 import ChatMessageComponent from "./ChatMessage";
 import { useChatContext } from "../hooks/ChatContext";
+import { Plus, Maximize2, X, Sparkles, ArrowUp } from "./icons";
 
 interface ChatPanelProps {
   isOpen: boolean;
@@ -45,11 +46,13 @@ export default memo(function ChatPanel({ isOpen, onClose, onNavigateToChat }: Ch
   return (
     <div style={styles.overlay} className="no-drag">
       <div style={styles.header}>
-        <span className="system-text">JARVIS CHAT</span>
+        <span className="system-text" style={{ display: "flex", alignItems: "center", gap: 8 }}>
+          <Sparkles size={14} /> JARVIS
+        </span>
         <div style={styles.headerActions}>
-          <button onClick={clearChat} style={styles.headerBtn} title="New chat">NEW</button>
-          <button onClick={onNavigateToChat} style={styles.headerBtn} title="Open full view">[&gt;]</button>
-          <button onClick={onClose} style={styles.headerBtn}>[X]</button>
+          <button onClick={clearChat} style={styles.iconBtn} title="New chat" aria-label="New chat"><Plus size={16} /></button>
+          <button onClick={onNavigateToChat} style={styles.iconBtn} title="Open full view" aria-label="Open full view"><Maximize2 size={15} /></button>
+          <button onClick={onClose} style={styles.iconBtn} title="Close" aria-label="Close"><X size={16} /></button>
         </div>
       </div>
       <div style={styles.messages}>
@@ -104,13 +107,12 @@ export default memo(function ChatPanel({ isOpen, onClose, onNavigateToChat }: Ch
             onClick={() => setThinkHarder((v) => !v)}
             style={thinkHarder ? styles.thinkHarderButtonActive : styles.thinkHarderButton}
             title="Think harder (routes to Sonnet 4.6)"
+            aria-pressed={thinkHarder}
           >
-            [TH]
+            <Sparkles size={12} /> Think harder
           </button>
-          <button type="submit" style={styles.sendButton} disabled={!input.trim()}>
-            <svg width="14" height="14" viewBox="0 0 14 14">
-              <path d="M3 7h8M8 4l3 3-3 3" fill="none" stroke="rgba(0, 180, 255, 0.7)" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round" />
-            </svg>
+          <button type="submit" style={styles.sendButton} disabled={!input.trim()} aria-label="Send">
+            <ArrowUp size={16} />
           </button>
         </div>
       </form>
@@ -121,15 +123,15 @@ export default memo(function ChatPanel({ isOpen, onClose, onNavigateToChat }: Ch
 const styles: Record<string, React.CSSProperties> = {
   overlay: { position: "fixed", top: 0, right: 0, width: 440, height: "100%", borderLeft: "1px solid rgba(0, 180, 255, 0.15)", background: "rgba(10, 14, 26, 0.97)", display: "flex", flexDirection: "column", zIndex: 100, userSelect: "text" as const },
   header: { display: "flex", justifyContent: "space-between", alignItems: "center", padding: "12px 16px", borderBottom: "1px solid rgba(0, 180, 255, 0.1)" },
-  headerActions: { display: "flex", gap: 8 },
-  headerBtn: { background: "transparent", border: "none", color: "rgba(0, 180, 255, 0.5)", fontFamily: "var(--font-mono)", fontSize: 11, cursor: "pointer" },
+  headerActions: { display: "flex", gap: 4 },
+  iconBtn: { display: "flex", alignItems: "center", justifyContent: "center", width: 28, height: 28, borderRadius: 7, background: "transparent", border: "1px solid transparent", color: "var(--muted)", cursor: "pointer" },
   messages: { flex: 1, overflowY: "auto", padding: 16, userSelect: "text" as const, cursor: "text" },
   inputForm: { padding: 12, borderTop: "1px solid rgba(0, 180, 255, 0.1)" },
   inputBar: { display: "flex", alignItems: "flex-end", gap: 8 },
   input: { flex: 1, background: "rgba(0, 180, 255, 0.04)", border: "1px solid rgba(0, 180, 255, 0.18)", borderRadius: 12, padding: "10px 14px", color: "rgba(0, 180, 255, 0.8)", fontSize: 13, fontFamily: "var(--font-sans)", outline: "none", resize: "none" as const, overflow: "hidden", lineHeight: 1.5, boxSizing: "border-box" as const },
-  sendButton: { width: 34, height: 34, borderRadius: "50%", background: "rgba(0, 180, 255, 0.12)", border: "1px solid rgba(0, 180, 255, 0.25)", display: "flex", alignItems: "center", justifyContent: "center", cursor: "pointer", flexShrink: 0, boxShadow: "0 0 8px rgba(0, 180, 255, 0.08)" },
-  thinkHarderButton: { height: 34, padding: "0 8px", borderRadius: 6, background: "transparent", border: "1px solid rgba(0, 180, 255, 0.18)", color: "rgba(0, 180, 255, 0.4)", fontFamily: "var(--font-mono)", fontSize: 10, cursor: "pointer", flexShrink: 0, whiteSpace: "nowrap" as const },
-  thinkHarderButtonActive: { height: 34, padding: "0 8px", borderRadius: 6, background: "rgba(0, 180, 255, 0.12)", border: "1px solid rgba(0, 180, 255, 0.5)", color: "rgba(0, 180, 255, 0.9)", fontFamily: "var(--font-mono)", fontSize: 10, cursor: "pointer", flexShrink: 0, whiteSpace: "nowrap" as const, boxShadow: "0 0 8px rgba(0, 180, 255, 0.2)" },
+  sendButton: { width: 34, height: 34, borderRadius: "50%", background: "rgba(0, 180, 255, 0.12)", border: "1px solid rgba(0, 180, 255, 0.25)", color: "rgb(0, 180, 255)", display: "flex", alignItems: "center", justifyContent: "center", cursor: "pointer", flexShrink: 0, boxShadow: "0 0 8px rgba(0, 180, 255, 0.08)" },
+  thinkHarderButton: { display: "flex", alignItems: "center", gap: 6, height: 34, padding: "0 10px", borderRadius: 8, background: "transparent", border: "1px solid rgba(0, 180, 255, 0.18)", color: "rgba(0, 180, 255, 0.4)", fontFamily: "var(--font-mono)", fontSize: 10, cursor: "pointer", flexShrink: 0, whiteSpace: "nowrap" as const },
+  thinkHarderButtonActive: { display: "flex", alignItems: "center", gap: 6, height: 34, padding: "0 10px", borderRadius: 8, background: "rgba(0, 180, 255, 0.12)", border: "1px solid rgba(0, 180, 255, 0.5)", color: "rgba(0, 180, 255, 0.9)", fontFamily: "var(--font-mono)", fontSize: 10, cursor: "pointer", flexShrink: 0, whiteSpace: "nowrap" as const, boxShadow: "0 0 8px rgba(0, 180, 255, 0.2)" },
   empty: { color: "rgba(0, 180, 255, 0.2)", fontSize: 12, fontStyle: "italic", textAlign: "center" as const, padding: 40 },
   liveResponse: { margin: "8px 0", background: "rgba(0, 180, 255, 0.03)", border: "1px solid rgba(0, 180, 255, 0.1)", borderRadius: 8, overflow: "hidden" },
   statusBar: { display: "flex", alignItems: "center", gap: 8, padding: "8px 12px", borderBottom: "1px solid rgba(0, 180, 255, 0.06)", background: "rgba(0, 180, 255, 0.02)" },
