@@ -38,15 +38,15 @@ pub fn run() {
         .plugin(tauri_plugin_global_shortcut::Builder::new().build())
         .setup(|app| {
             let db = Database::new().expect("Failed to initialize database");
-            let gemini_key = std::env::var("GEMINI_API_KEY").ok();
             let ai_provider = {
                 let conn = db.conn.lock().unwrap();
                 conn.query_row("SELECT value FROM user_preferences WHERE key = 'ai_provider'", [], |row| row.get::<_, String>(0))
                     .unwrap_or_else(|_| "gemini_primary".to_string())
             };
             log::info!("AI provider: {}", ai_provider);
-            let mut router = AiRouter::new(gemini_key, &ai_provider);
+            let mut router = AiRouter::new(&ai_provider);
             router.load_from_db(&db);
+            router.load_keys_from_db(&db);
             log::info!("Provider chain: {} entries, {} local endpoints",
                 router.provider_chain().len(), router.local_endpoints().len());
 
@@ -164,10 +164,9 @@ pub fn run() {
                     return;
                 }
 
-                let router = crate::ai::AiRouter::new(
-                    std::env::var("GEMINI_API_KEY").ok(),
-                    "gemini_primary",
-                );
+                let mut router = crate::ai::AiRouter::new("gemini_primary");
+                router.load_from_db(&db_brief);
+                router.load_keys_from_db(&db_brief);
                 match crate::assistant::briefing::generate_briefing(&db_brief, &router, &auth_brief, &app_handle_brief).await {
                     Ok(result) => {
                         log::info!("Morning briefing: {}", result.briefing);
@@ -294,6 +293,8 @@ pub fn run() {
             commands::settings::update_setting,
             commands::settings::get_user_preference,
             commands::settings::set_user_preference,
+            commands::settings::set_api_key,
+            commands::settings::get_api_key_status,
             commands::chat::send_message,
             commands::chat::get_conversations,
             commands::chat::clear_conversations,

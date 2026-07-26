@@ -33,6 +33,21 @@ fn gemini_model_for(model_override: Option<&str>, workload: Workload) -> &str {
     })
 }
 
+/// Keychain service holding the provider API keys the user pastes in
+/// onboarding or Settings.
+pub const KEY_SERVICE: &str = "com.jarvis.ai";
+
+/// Credential lookup order: process env first (dev workflow and
+/// `~/Library/Application Support/jarvis/.env`), then the Keychain. An empty
+/// env var counts as absent -- otherwise a stray `GEMINI_API_KEY=` in a
+/// dotfile would mask a key the user actually saved.
+fn resolve_key(env_var: &str, fallback: Option<String>) -> Option<String> {
+    match std::env::var(env_var) {
+        Ok(v) if !v.trim().is_empty() => Some(v),
+        _ => fallback.filter(|v| !v.trim().is_empty()),
+    }
+}
+
 #[derive(Clone)]
 pub struct AiRouter {
     gemini_key: Option<String>,
@@ -43,9 +58,12 @@ pub struct AiRouter {
 }
 
 impl AiRouter {
-    pub fn new(gemini_key: Option<String>, provider_setting: &str) -> Self {
-        let claude_key = std::env::var("ANTHROPIC_API_KEY").ok();
-        let openai_key = std::env::var("OPENAI_API_KEY").ok();
+    pub fn new(provider_setting: &str) -> Self {
+        // Keys start env-only; `load_keys_from_db` layers the Keychain in
+        // afterwards, because construction has no database handle.
+        let gemini_key = resolve_key("GEMINI_API_KEY", None);
+        let claude_key = resolve_key("ANTHROPIC_API_KEY", None);
+        let openai_key = resolve_key("OPENAI_API_KEY", None);
         let chain = match provider_setting {
             "gemini_flash" => vec![
                 ProviderChainEntry {
@@ -171,6 +189,18 @@ impl AiRouter {
                 }
             }
         }
+    }
+
+    /// Layer Keychain-stored provider keys under the env vars. Called at
+    /// startup and again whenever a key is saved in Settings, so a freshly
+    /// pasted key takes effect without restarting the app.
+    pub fn load_keys_from_db(&mut self, _db: &crate::db::Database) {
+        let from_keychain = |account: &str| {
+            crate::security::keychain::KeychainStore::get(KEY_SERVICE, account).ok()
+        };
+        self.gemini_key = resolve_key("GEMINI_API_KEY", from_keychain("gemini_api_key"));
+        self.claude_key = resolve_key("ANTHROPIC_API_KEY", from_keychain("claude_api_key"));
+        self.openai_key = resolve_key("OPENAI_API_KEY", from_keychain("openai_api_key"));
     }
 
     pub fn provider_chain(&self) -> &[ProviderChainEntry] {
@@ -491,5 +521,33 @@ impl AiRouter {
             "All providers failed: {}",
             errors.join("; ")
         ))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn resolve_key_prefers_env_then_falls_back() {
+        std::env::set_var("JARVIS_TEST_KEY_A", "from-env");
+        assert_eq!(
+            resolve_key("JARVIS_TEST_KEY_A", None),
+            Some("from-env".to_string())
+        );
+
+        // An empty env var is treated as absent so it cannot mask a saved key.
+        std::env::set_var("JARVIS_TEST_KEY_B", "");
+        assert_eq!(
+            resolve_key("JARVIS_TEST_KEY_B", Some("from-keychain".to_string())),
+            Some("from-keychain".to_string())
+        );
+
+        std::env::remove_var("JARVIS_TEST_KEY_C");
+        assert_eq!(resolve_key("JARVIS_TEST_KEY_C", None), None);
+        assert_eq!(
+            resolve_key("JARVIS_TEST_KEY_C", Some("  ".to_string())),
+            None
+        );
     }
 }

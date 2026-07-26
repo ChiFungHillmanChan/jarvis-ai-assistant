@@ -33,6 +33,8 @@ import {
   enableOfflineVoice,
   checkCosyvoiceBinary,
   paymentsStartCheckout,
+  setApiKey,
+  getApiKeyStatus,
 } from "../lib/commands";
 import { listen } from "@tauri-apps/api/event";
 import type { VoiceSettings, WakeWordStatus, VoiceState, LocalEndpoint, LocalModel, ProviderChainEntry, EndpointHealth } from "../lib/types";
@@ -40,8 +42,17 @@ import { useVoiceState } from "../hooks/useVoiceState";
 import LocalAiSetup from "../components/LocalAiSetup";
 import { Cpu, Key, Globe, Gem, Mic, Bot, Palette, CreditCard, GithubMark, NotionMark } from "../components/icons";
 
+const API_KEY_PROVIDERS = [
+  { id: "gemini", label: "Google Gemini", help: "Recommended -- fastest replies" },
+  { id: "claude", label: "Anthropic Claude", help: "Optional fallback" },
+  { id: "openai", label: "OpenAI", help: "Optional fallback" },
+] as const;
+
 export default function Settings() {
   const [aiProvider, setAiProvider] = useState("gemini_primary");
+  const [apiKeyDrafts, setApiKeyDrafts] = useState<Record<string, string>>({});
+  const [apiKeyStatus, setApiKeyStatus] = useState<Record<string, boolean>>({});
+  const [apiKeyError, setApiKeyError] = useState<string | null>(null);
   const [loaded, setLoaded] = useState(false);
   const [googleConnected, setGoogleConnected] = useState(false);
   const [connecting, setConnecting] = useState(false);
@@ -71,6 +82,21 @@ export default function Settings() {
       .then((v) => { if (v) setBillingEmail(v); })
       .catch(() => {});
   }, []);
+
+  useEffect(() => {
+    getApiKeyStatus().then(setApiKeyStatus).catch(() => {});
+  }, []);
+
+  async function handleSaveApiKey(provider: string) {
+    setApiKeyError(null);
+    try {
+      await setApiKey(provider, apiKeyDrafts[provider] ?? "");
+      setApiKeyDrafts((d) => ({ ...d, [provider]: "" }));
+      setApiKeyStatus(await getApiKeyStatus());
+    } catch (e) {
+      setApiKeyError(String(e));
+    }
+  }
 
   // AWS Bedrock credentials state
   const [awsAccessKey, setAwsAccessKey] = useState("");
@@ -564,12 +590,26 @@ export default function Settings() {
         {section === "keys" && (
           <div className="panel" style={styles.panel}>
             <div className="label" style={styles.sectionTitle}>API KEYS</div>
-            <div style={styles.hint}>Set in .env file at project root:</div>
-            <code style={styles.code}>GEMINI_API_KEY</code>
-            <code style={styles.code}>AWS_ACCESS_KEY_ID</code>
-            <code style={styles.code}>AWS_SECRET_ACCESS_KEY</code>
-            <code style={styles.code}>AWS_BEDROCK_REGION</code>
-            <code style={styles.code}>AWS_BEDROCK_MODEL_ID</code>
+            <div style={styles.hint}>Stored in your macOS Keychain, never sent anywhere but the provider.</div>
+            {API_KEY_PROVIDERS.map(({ id, label, help }) => (
+              <div key={id} style={{ marginBottom: 12 }}>
+                <div style={styles.hint}>
+                  {label}
+                  {apiKeyStatus[id] ? <span style={{ color: "rgba(16, 185, 129, 0.7)" }}> -- configured</span> : null}
+                </div>
+                <div style={{ display: "flex", gap: 8 }}>
+                  <input
+                    type="password"
+                    style={styles.tokenInput}
+                    placeholder={apiKeyStatus[id] ? "Replace saved key" : help}
+                    value={apiKeyDrafts[id] ?? ""}
+                    onChange={(e) => setApiKeyDrafts((d) => ({ ...d, [id]: e.target.value }))}
+                  />
+                  <button onClick={() => { void handleSaveApiKey(id); }} style={styles.saveBtn}>SAVE</button>
+                </div>
+              </div>
+            ))}
+            {apiKeyError && <div style={styles.errorText}>{apiKeyError}</div>}
           </div>
         )}
 

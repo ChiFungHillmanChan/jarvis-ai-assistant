@@ -4,7 +4,7 @@ import {
   googleConnect,
   markOnboardingComplete,
   openUrl,
-  updateSetting,
+  setApiKey,
 } from "../lib/commands";
 
 type Step = 1 | 2 | 3 | 4;
@@ -52,9 +52,9 @@ export default function OnboardingWizard({ onComplete }: Props) {
   const [globalError, setGlobalError] = useState<string | null>(null);
 
   async function saveByokKeys() {
-    if (geminiKey.trim()) await updateSetting("gemini_api_key", geminiKey.trim());
-    if (openaiKey.trim()) await updateSetting("openai_api_key", openaiKey.trim());
-    if (claudeKey.trim()) await updateSetting("claude_api_key", claudeKey.trim());
+    if (geminiKey.trim()) await setApiKey("gemini", geminiKey.trim());
+    if (openaiKey.trim()) await setApiKey("openai", openaiKey.trim());
+    if (claudeKey.trim()) await setApiKey("claude", claudeKey.trim());
   }
 
   async function handleStep1Next() {

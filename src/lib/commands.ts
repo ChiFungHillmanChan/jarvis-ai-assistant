@@ -39,6 +39,13 @@ export async function getSettings(): Promise<Settings> {
 export async function updateSetting(key: string, value: string): Promise<void> {
   return invoke("update_setting", { key, value });
 }
+// API keys go to the macOS Keychain, never to user_preferences.
+export async function setApiKey(provider: string, value: string): Promise<void> {
+  return invoke("set_api_key", { provider, value });
+}
+export async function getApiKeyStatus(): Promise<Record<string, boolean>> {
+  return invoke("get_api_key_status");
+}
 
 // Email
 export async function getEmails(limit?: number): Promise<EmailSummary[]> { return invoke("get_emails", { limit }); }

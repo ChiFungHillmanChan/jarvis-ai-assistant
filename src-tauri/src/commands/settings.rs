@@ -59,3 +59,43 @@ pub async fn set_user_preference(
     ).map_err(|e| format!("db write: {e}"))?;
     Ok(())
 }
+
+/// Store a provider API key in the macOS Keychain and refresh the live router
+/// so the key works immediately. The secret never touches `user_preferences`.
+#[tauri::command]
+pub fn set_api_key(
+    provider: String,
+    value: String,
+    db: State<'_, Arc<Database>>,
+    router: State<'_, std::sync::Mutex<crate::ai::AiRouter>>,
+) -> Result<(), String> {
+    let account = match provider.as_str() {
+        "gemini" => "gemini_api_key",
+        "claude" => "claude_api_key",
+        "openai" => "openai_api_key",
+        other => return Err(format!("unknown provider: {other}")),
+    };
+    let trimmed = value.trim();
+    if trimmed.is_empty() {
+        crate::security::keychain::KeychainStore::delete(crate::ai::KEY_SERVICE, account).ok();
+    } else {
+        crate::security::keychain::KeychainStore::put(crate::ai::KEY_SERVICE, account, trimmed)?;
+    }
+    let mut router = router.lock().map_err(|e| e.to_string())?;
+    router.load_keys_from_db(&db);
+    Ok(())
+}
+
+/// Report which provider keys are configured, without returning any secret.
+#[tauri::command]
+pub fn get_api_key_status() -> Result<HashMap<String, bool>, String> {
+    let configured = |env_var: &str, account: &str| {
+        std::env::var(env_var).map(|v| !v.trim().is_empty()).unwrap_or(false)
+            || crate::security::keychain::KeychainStore::get(crate::ai::KEY_SERVICE, account).is_ok()
+    };
+    Ok(HashMap::from([
+        ("gemini".to_string(), configured("GEMINI_API_KEY", "gemini_api_key")),
+        ("claude".to_string(), configured("ANTHROPIC_API_KEY", "claude_api_key")),
+        ("openai".to_string(), configured("OPENAI_API_KEY", "openai_api_key")),
+    ]))
+}
