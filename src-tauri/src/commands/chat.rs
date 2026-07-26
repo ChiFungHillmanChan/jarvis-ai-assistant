@@ -7,6 +7,29 @@ use serde_json::json;
 use std::sync::{Arc, Mutex};
 use tauri::{Emitter, State};
 
+/// Whether a message is asking about the user's own data, in which case it is
+/// worth the tokens to inject day context.
+///
+/// `lower` is the lowercased message (for the English terms) and `raw` is the
+/// original (CJK has no case). The Chinese terms mirror the trigger list in
+/// `ai/routing.rs` -- without them a Cantonese user asking "今日有咩會議" got
+/// an answer with no calendar data in it, which quietly broke the bilingual
+/// positioning on the default provider.
+fn needs_personal_context(lower: &str, raw: &str) -> bool {
+    const EN: &[&str] = &[
+        "task", "meeting", "email", "deadline", "schedule", "today", "calendar",
+        "work on", "priority", "github", "pr", "issue", "notion", "what should",
+        "remind", "status", "busy", "free", "obsidian", "notes", "vault", "job",
+        "resume", "interview", "application",
+    ];
+    const ZH: &[&str] = &[
+        "今日", "今天", "會議", "会议", "開會", "开会", "郵件", "邮件", "電郵",
+        "任務", "任务", "日程", "行事曆", "日曆", "日历", "死線", "截止",
+        "提醒", "待辦", "待办", "要做", "安排", "未讀", "未读",
+    ];
+    EN.iter().any(|k| lower.contains(k)) || ZH.iter().any(|k| raw.contains(k))
+}
+
 #[derive(Serialize, Deserialize, Clone)]
 pub struct ChatMessage {
     pub id: Option<i64>,
@@ -77,33 +100,7 @@ pub async fn send_message(
             };
 
             // Only add context for questions about personal data (saves tokens)
-            let needs_context = {
-                msg_lower.contains("task")
-                    || msg_lower.contains("meeting")
-                    || msg_lower.contains("email")
-                    || msg_lower.contains("deadline")
-                    || msg_lower.contains("schedule")
-                    || msg_lower.contains("today")
-                    || msg_lower.contains("calendar")
-                    || msg_lower.contains("work on")
-                    || msg_lower.contains("priority")
-                    || msg_lower.contains("github")
-                    || msg_lower.contains("pr")
-                    || msg_lower.contains("issue")
-                    || msg_lower.contains("notion")
-                    || msg_lower.contains("what should")
-                    || msg_lower.contains("remind")
-                    || msg_lower.contains("status")
-                    || msg_lower.contains("busy")
-                    || msg_lower.contains("free")
-                    || msg_lower.contains("obsidian")
-                    || msg_lower.contains("notes")
-                    || msg_lower.contains("vault")
-                    || msg_lower.contains("job")
-                    || msg_lower.contains("resume")
-                    || msg_lower.contains("interview")
-                    || msg_lower.contains("application")
-            };
+            let needs_context = needs_personal_context(&msg_lower, &msg_clone);
 
             let mut ctx_msgs = Vec::new();
             if needs_context {
@@ -369,4 +366,28 @@ pub fn get_conversations(db: State<Arc<Database>>) -> Result<Vec<ChatMessage>, S
         .collect::<Result<Vec<_>, _>>()
         .map_err(|e| e.to_string())?;
     Ok(messages)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::needs_personal_context;
+
+    fn asks(msg: &str) -> bool {
+        needs_personal_context(&msg.to_lowercase(), msg)
+    }
+
+    #[test]
+    fn cantonese_questions_pull_in_personal_context() {
+        assert!(asks("今日有咩會議"));
+        assert!(asks("幫我睇下啲未讀郵件"));
+        assert!(asks("聽日嘅日程係點"));
+        assert!(asks("有咩任務要做"));
+    }
+
+    #[test]
+    fn english_triggers_still_work() {
+        assert!(asks("what meetings do I have today"));
+        assert!(asks("any urgent email"));
+        assert!(!asks("write me a haiku about rust"));
+    }
 }

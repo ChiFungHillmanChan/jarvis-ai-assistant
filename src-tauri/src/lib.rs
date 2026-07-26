@@ -139,13 +139,15 @@ pub fn run() {
             let app_handle_brief = app.handle().clone();
             tauri::async_runtime::spawn(async move {
                 tokio::time::sleep(std::time::Duration::from_secs(3)).await;
-                // Check if auto-briefing is enabled
+                // Check if auto-briefing is enabled. Defaults to off, matching
+                // the '0' seed in V15 -- an app that starts talking out loud
+                // three seconds after first launch is not a good introduction.
                 let enabled = {
                     let conn = db_brief.conn.lock().unwrap();
                     conn.query_row(
                         "SELECT value FROM user_preferences WHERE key = 'auto_briefing'",
                         [], |row| row.get::<_, String>(0)
-                    ).unwrap_or_else(|_| "true".to_string()) == "true"
+                    ).unwrap_or_else(|_| "false".to_string()) == "true"
                 };
                 if !enabled {
                     log::info!("Auto-briefing disabled");
@@ -250,7 +252,7 @@ pub fn run() {
                 use tauri_plugin_global_shortcut::{GlobalShortcutExt, Shortcut, Code, Modifiers};
                 let shortcut = Shortcut::new(Some(Modifiers::SUPER | Modifiers::SHIFT), Code::KeyW);
                 let app_handle = app.handle().clone();
-                app.global_shortcut().on_shortcut(shortcut, move |_app, _shortcut, event| {
+                let registered = app.global_shortcut().on_shortcut(shortcut, move |_app, _shortcut, event| {
                     if event.state == tauri_plugin_global_shortcut::ShortcutState::Pressed {
                         if !wallpaper::is_active() {
                             return;
@@ -265,8 +267,15 @@ pub fn run() {
                             }
                         }
                     }
-                }).map_err(|e| format!("Failed to register global shortcut: {}", e))?;
-                log::info!("Global shortcut Cmd+Shift+W registered for wallpaper interaction");
+                });
+                // A conflict here used to abort setup() entirely, so JARVIS
+                // silently refused to launch on any Mac where another app
+                // already owned Cmd+Shift+W. The shortcut only toggles an
+                // optional wallpaper mode -- never worth failing startup.
+                match registered {
+                    Ok(()) => log::info!("Global shortcut Cmd+Shift+W registered for wallpaper interaction"),
+                    Err(e) => log::warn!("Cmd+Shift+W unavailable (another app owns it): {}", e),
+                }
             }
 
             log::info!("JARVIS started successfully");

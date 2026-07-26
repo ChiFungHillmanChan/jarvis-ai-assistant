@@ -47,10 +47,12 @@ pub struct VoiceEngine {
 
 impl VoiceEngine {
     pub fn new(db: &Arc<crate::db::Database>, app_handle: Option<JarvisAppHandle>) -> Self {
-        let mut router = AudioRouter::new();
-        if let Err(e) = router.start() {
-            log::warn!("AudioRouter start failed (will retry on first use): {}", e);
-        }
+        // Do NOT open the mic here. Starting the input stream at construction
+        // triggered the macOS microphone prompt on first launch and left the
+        // recording indicator lit for the whole session, even though
+        // wake_word_enabled defaults to false. WakeWordService::enable and the
+        // push-to-talk path both start the router on demand.
+        let router = AudioRouter::new();
 
         let transcriber = match std::env::var("GEMINI_API_KEY") {
             Ok(key) if !key.is_empty() => {
