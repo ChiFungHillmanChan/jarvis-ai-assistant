@@ -76,76 +76,9 @@ pub fn get_tool_definitions() -> Vec<Tool> {
             }),
         },
         Tool {
-            name: "write_note".into(),
-            description: "Write or append to a text file (for notes, logs, etc)".into(),
-            parameters: json!({
-                "type": "object",
-                "properties": {
-                    "path": { "type": "string", "description": "File path (use ~ for home)" },
-                    "content": { "type": "string" },
-                    "append": { "type": "boolean", "description": "true to append, false to overwrite" }
-                },
-                "required": ["path", "content"]
-            }),
-        },
-        Tool {
             name: "system_info".into(),
             description: "Get system information: hostname, uptime, disk usage, memory".into(),
             parameters: json!({ "type": "object", "properties": {} }),
-        },
-        Tool {
-            name: "clipboard_read".into(),
-            description: "Read the current contents of the macOS clipboard".into(),
-            parameters: json!({ "type": "object", "properties": {} }),
-        },
-        Tool {
-            name: "clipboard_write".into(),
-            description: "Write text content to the macOS clipboard".into(),
-            parameters: json!({
-                "type": "object",
-                "properties": {
-                    "content": { "type": "string", "description": "Text to copy to clipboard" }
-                },
-                "required": ["content"]
-            }),
-        },
-        Tool {
-            name: "screenshot".into(),
-            description: "Take a screenshot on macOS. Region can be 'fullscreen', 'selection', or 'window'.".into(),
-            parameters: json!({
-                "type": "object",
-                "properties": {
-                    "region": { "type": "string", "description": "Screenshot region: fullscreen (default), selection, or window" }
-                }
-            }),
-        },
-        Tool {
-            name: "manage_window".into(),
-            description: "Manage application windows: list all visible windows, focus an app, resize or move a window.".into(),
-            parameters: json!({
-                "type": "object",
-                "properties": {
-                    "action": { "type": "string", "description": "Action: list, focus, resize, move" },
-                    "app_name": { "type": "string", "description": "Application name (required for focus/resize/move)" },
-                    "width": { "type": "integer", "description": "Window width in pixels (for resize)" },
-                    "height": { "type": "integer", "description": "Window height in pixels (for resize)" },
-                    "x": { "type": "integer", "description": "X position in pixels (for move)" },
-                    "y": { "type": "integer", "description": "Y position in pixels (for move)" }
-                },
-                "required": ["action"]
-            }),
-        },
-        Tool {
-            name: "system_controls".into(),
-            description: "Control system settings: volume_set, volume_get, volume_mute, volume_unmute, brightness_set, dark_mode_on, dark_mode_off, dark_mode_toggle".into(),
-            parameters: json!({
-                "type": "object",
-                "properties": {
-                    "action": { "type": "string", "description": "Control action: volume_set, volume_get, volume_mute, volume_unmute, brightness_set, dark_mode_on, dark_mode_off, dark_mode_toggle" },
-                    "value": { "type": "integer", "description": "Value for volume_set (0-100) or brightness_set (0-100)" }
-                },
-                "required": ["action"]
-            }),
         },
         Tool {
             name: "send_notification".into(),
@@ -158,39 +91,6 @@ pub fn get_tool_definitions() -> Vec<Tool> {
                     "sound": { "type": "boolean", "description": "Play notification sound (default false)" }
                 },
                 "required": ["title", "message"]
-            }),
-        },
-        Tool {
-            name: "list_processes".into(),
-            description: "List running processes on the system with optional name filter".into(),
-            parameters: json!({
-                "type": "object",
-                "properties": {
-                    "filter": { "type": "string", "description": "Optional process name filter" }
-                }
-            }),
-        },
-        Tool {
-            name: "kill_process".into(),
-            description: "Kill a running process by PID. Refuses to kill system-critical processes.".into(),
-            parameters: json!({
-                "type": "object",
-                "properties": {
-                    "pid": { "type": "integer", "description": "Process ID to kill" }
-                },
-                "required": ["pid"]
-            }),
-        },
-        Tool {
-            name: "read_file".into(),
-            description: "Read a text file and return its contents. Max 100KB, refuses binary files.".into(),
-            parameters: json!({
-                "type": "object",
-                "properties": {
-                    "path": { "type": "string", "description": "File path (use ~ for home directory)" },
-                    "max_lines": { "type": "integer", "description": "Maximum lines to return (default 200)" }
-                },
-                "required": ["path"]
             }),
         },
         Tool {
@@ -216,8 +116,8 @@ pub fn get_tool_definitions() -> Vec<Tool> {
             }),
         },
         Tool {
-            name: "send_email".into(),
-            description: "Send an email via Gmail. Composes and sends immediately.".into(),
+            name: "draft_email".into(),
+            description: "Create a Gmail draft for the user to review and send. JARVIS never sends mail on its own -- always tell the user the draft is waiting in Gmail.".into(),
             parameters: json!({
                 "type": "object",
                 "properties": {
@@ -511,7 +411,7 @@ pub fn tool_status_label(name: &str) -> &'static str {
     match name {
         "search_emails" => "Searching emails...",
         "read_email" => "Reading email...",
-        "send_email" => "Sending email...",
+        "draft_email" => "Drafting email...",
         "archive_email" => "Archiving email...",
         "list_events" => "Checking calendar...",
         "create_event" => "Creating event...",
@@ -530,17 +430,8 @@ pub fn tool_status_label(name: &str) -> &'static str {
         "find_files" => "Finding files...",
         "open_file" => "Opening file...",
         "create_task" => "Creating task...",
-        "write_note" => "Writing note...",
         "system_info" => "Checking system...",
-        "clipboard_read" => "Reading clipboard...",
-        "clipboard_write" => "Copying to clipboard...",
-        "screenshot" => "Taking screenshot...",
-        "manage_window" => "Managing windows...",
-        "system_controls" => "Adjusting system...",
         "send_notification" => "Sending notification...",
-        "list_processes" => "Listing processes...",
-        "kill_process" => "Stopping process...",
-        "read_file" => "Reading file...",
         "render_chart" => "Rendering chart...",
         "render_status" => "Showing result...",
         "remember" => "Saving to memory...",
@@ -555,7 +446,7 @@ pub fn tool_voice_narration(name: &str) -> &'static str {
     match name {
         "search_emails" => "Searching through your emails now.",
         "read_email" => "Pulling up that email.",
-        "send_email" => "Sending that off for you.",
+        "draft_email" => "Putting a draft together for you.",
         "archive_email" => "Archiving that email.",
         "list_events" => "Let me check your calendar.",
         "create_event" => "Setting that up on your calendar.",
@@ -574,17 +465,8 @@ pub fn tool_voice_narration(name: &str) -> &'static str {
         "find_files" => "Looking for those files.",
         "open_file" => "Opening that file.",
         "create_task" => "Creating that task for you.",
-        "write_note" => "Writing that down.",
         "system_info" => "Checking your system.",
-        "clipboard_read" => "Reading your clipboard.",
-        "clipboard_write" => "Copied to your clipboard.",
-        "screenshot" => "Taking a screenshot.",
-        "manage_window" => "Adjusting your windows.",
-        "system_controls" => "Adjusting system settings.",
         "send_notification" => "Sending a notification.",
-        "list_processes" => "Checking running processes.",
-        "kill_process" => "Stopping that process.",
-        "read_file" => "Reading that file.",
         "render_chart" => "Putting together a chart for you.",
         "render_status" => "Here are the results.",
         "remember" => "Noting that down.",
@@ -702,7 +584,6 @@ async fn execute_gmail_tool(
     name: &str,
     args: &serde_json::Value,
     token: &str,
-    db: &crate::db::Database,
 ) -> Result<String, String> {
     use crate::integrations::gmail;
     match name {
@@ -731,25 +612,17 @@ async fn execute_gmail_tool(
             let (_msg, full_text) = gmail::get_message_full(token, email_id).await?;
             Ok(full_text)
         }
-        "send_email" => {
+        "draft_email" => {
             let to = args["to"].as_str().unwrap_or("");
             let subject = args["subject"].as_str().unwrap_or("");
             let body = args["body"].as_str().unwrap_or("");
             let cc = args["cc"].as_str();
 
-            // Log outgoing email to DB before sending
-            let now = chrono::Local::now().to_rfc3339();
-            let outgoing_id = format!("outgoing_{}", now);
-            let snippet = crate::util::truncate_bytes(body, 100);
-            if let Ok(conn) = db.conn.lock() {
-                let _ = conn.execute(
-                    "INSERT INTO emails (gmail_id, subject, sender, snippet, labels, is_read, received_at) VALUES (?1, ?2, 'me (outgoing)', ?3, 'SENT', 1, ?4)",
-                    rusqlite::params![outgoing_id, subject, snippet, now],
-                );
-            }
-
-            let msg_id = gmail::send_message(token, to, subject, body, cc).await?;
-            Ok(format!("Email sent successfully (ID: {})", msg_id))
+            let draft_id = gmail::create_draft(token, to, subject, body, cc).await?;
+            Ok(format!(
+                "Draft saved to Gmail for {} (ID: {}). Review and send it from Gmail.",
+                to, draft_id
+            ))
         }
         "archive_email" => {
             let email_id = args["email_id"].as_str().unwrap_or("");
@@ -1039,39 +912,8 @@ pub async fn execute_tool(
                 Err(e) => format!("Failed to lock database: {}", e),
             }
         }
-        "write_note" => {
-            let path = args["path"].as_str().unwrap_or("~/jarvis-notes.md");
-            let content = args["content"].as_str().unwrap_or("");
-            let append = args["append"].as_bool().unwrap_or(true);
-            crate::system::control::write_note(path, content, append).await.unwrap_or_else(|e| format!("Error: {}", e))
-        }
         "system_info" => {
             crate::system::control::system_info().await.unwrap_or_else(|e| format!("Error: {}", e))
-        }
-        "clipboard_read" => {
-            crate::system::control::clipboard_read().await.unwrap_or_else(|e| format!("Error: {}", e))
-        }
-        "clipboard_write" => {
-            let content = args["content"].as_str().unwrap_or("");
-            crate::system::control::clipboard_write(content).await.unwrap_or_else(|e| format!("Error: {}", e))
-        }
-        "screenshot" => {
-            let region = args["region"].as_str().unwrap_or("fullscreen");
-            crate::system::control::screenshot(region).await.unwrap_or_else(|e| format!("Error: {}", e))
-        }
-        "manage_window" => {
-            let action = args["action"].as_str().unwrap_or("list");
-            let app_name = args["app_name"].as_str();
-            let width = args["width"].as_i64();
-            let height = args["height"].as_i64();
-            let x = args["x"].as_i64();
-            let y = args["y"].as_i64();
-            crate::system::control::manage_window(action, app_name, width, height, x, y).await.unwrap_or_else(|e| format!("Error: {}", e))
-        }
-        "system_controls" => {
-            let action = args["action"].as_str().unwrap_or("");
-            let value = args["value"].as_i64();
-            crate::system::control::system_controls(action, value).await.unwrap_or_else(|e| format!("Error: {}", e))
         }
         "send_notification" => {
             let title = args["title"].as_str().unwrap_or("JARVIS");
@@ -1079,28 +921,15 @@ pub async fn execute_tool(
             let sound = args["sound"].as_bool().unwrap_or(false);
             crate::system::control::send_notification(title, message, sound).await.unwrap_or_else(|e| format!("Error: {}", e))
         }
-        "list_processes" => {
-            let filter = args["filter"].as_str();
-            crate::system::control::list_processes(filter).await.unwrap_or_else(|e| format!("Error: {}", e))
-        }
-        "kill_process" => {
-            let pid = args["pid"].as_i64().unwrap_or(0);
-            crate::system::control::kill_process(pid).await.unwrap_or_else(|e| format!("Error: {}", e))
-        }
-        "read_file" => {
-            let path = args["path"].as_str().unwrap_or("");
-            let max_lines = args["max_lines"].as_i64().map(|v| v as usize);
-            crate::system::control::read_file(path, max_lines).await.unwrap_or_else(|e| format!("Error: {}", e))
-        }
-        "search_emails" | "read_email" | "send_email" | "archive_email" => {
+        "search_emails" | "read_email" | "draft_email" | "archive_email" => {
             let token = match google_token_or_err(google_auth, "Gmail").await {
                 Ok(t) => t,
                 Err(msg) => return msg,
             };
-            match execute_gmail_tool(name, &args, &token, db).await {
+            match execute_gmail_tool(name, &args, &token).await {
                 Ok(r) => r,
                 Err(e) if e.contains("UNAUTHORIZED") => match refresh_google_token(google_auth).await {
-                    Ok(t) => execute_gmail_tool(name, &args, &t, db).await.unwrap_or_else(|e| format!("Gmail error: {}", e)),
+                    Ok(t) => execute_gmail_tool(name, &args, &t).await.unwrap_or_else(|e| format!("Gmail error: {}", e)),
                     Err(e) => e,
                 },
                 Err(e) => format!("Gmail error: {}", e),
@@ -1191,7 +1020,7 @@ When a tool fails:
 - Examples: \"Apologies, {user} -- I can't reach Gmail right now.\" / \"That one's not going through, {user}. Looks like Notion isn't connected.\" / \"Hmm, the calendar's unreachable at the moment.\"
 - Do NOT dump raw error messages, stack traces, or technical details.
 
-You have 37 tools to control the computer, manage integrations, and maintain your own memory of {user}. Use them proactively.
+You have tools to open things, read the user's connected accounts, and maintain your own memory of {user}. Use them proactively. You cannot read arbitrary local files, the clipboard, or the screen, and you cannot send mail -- you draft it.
 
 IMPORTANT -- be minimal with tool calls:
 - Open ONE URL per request, not multiple. If the user says \"play happy music\", open one good link, not four search pages.
@@ -1201,7 +1030,7 @@ IMPORTANT -- be minimal with tool calls:
 MEMORY:
 You have persistent memory about {user}. When they tell you durable facts about themselves (their role, preferences, projects, people they work with, things they always/never want), call the `remember` tool so you recall next time. When they explicitly say \"forget X\" or a stored fact becomes wrong, call `forget`. Use memory naturally -- do not recite all stored facts unprompted. Typical categories: identity (who they are), preference (how they like things done), project (what they are working on), fact (anything else worth remembering).
 
-Capabilities: system control (apps, URLs, files, commands, clipboard, screenshots, windows, volume, notifications, processes), Gmail, Google Calendar, Notion, GitHub, Obsidian, tasks, file I/O, persistent memory (remember/forget/list_memories), and data visualization (render inline charts and status cards in chat using render_chart and render_status tools -- use these when presenting data, stats, or confirming completed actions).
+Capabilities: opening apps and URLs, read-only system commands, finding and opening files, notifications, Gmail (search, read, draft, archive), Google Calendar, Notion, GitHub, Obsidian, tasks, persistent memory (remember/forget/list_memories), and data visualization (render inline charts and status cards in chat using render_chart and render_status tools -- use these when presenting data, stats, or confirming completed actions).
 
 You can chain different tools in sequence. Think step by step -- gather information first, then act. Always confirm destructive actions before executing them.
 
@@ -1274,6 +1103,46 @@ pub fn build_dynamic_suffix(
         header
     } else {
         format!("{}\n{}", header, memory_block)
+    }
+}
+
+#[cfg(test)]
+mod injection_tests {
+    use super::*;
+
+    /// The model reads attacker-controlled text (`read_email`). If it also
+    /// holds a way to read local secrets or to send mail, one crafted email is
+    /// a complete exfiltration chain -- and a sentence in the system prompt is
+    /// not an access control. Keep the surface closed.
+    #[test]
+    fn no_tool_can_read_local_data_or_send_mail() {
+        let names: Vec<String> = get_tool_definitions()
+            .iter()
+            .map(|t| t.name.clone())
+            .collect();
+
+        for banned in [
+            "read_file",
+            "clipboard_read",
+            "clipboard_write",
+            "write_note",
+            "screenshot",
+            "kill_process",
+            "list_processes",
+            "manage_window",
+            "system_controls",
+            "send_email",
+        ] {
+            assert!(
+                !names.iter().any(|n| n == banned),
+                "{banned} re-opens the prompt-injection exfiltration chain"
+            );
+        }
+
+        assert!(
+            names.iter().any(|n| n == "draft_email"),
+            "the compose path must still exist, as a draft"
+        );
     }
 }
 

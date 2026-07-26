@@ -471,15 +471,10 @@ fn strip_header_value(value: &str) -> String {
     value.replace(['\r', '\n'], " ").trim().to_string()
 }
 
-pub async fn send_message(
-    access_token: &str,
-    to: &str,
-    subject: &str,
-    body: &str,
-    cc: Option<&str>,
-) -> Result<String, String> {
-    // Strip CR/LF from header fields so AI- or content-derived values can't
-    // inject extra headers (e.g. a hidden Bcc) into the raw RFC 822 message.
+/// Build the base64url-encoded RFC 822 payload shared by send and draft.
+/// Header fields have CR/LF stripped so AI- or content-derived values cannot
+/// inject extra headers (e.g. a hidden Bcc) into the raw message.
+fn encode_raw_message(to: &str, subject: &str, body: &str, cc: Option<&str>) -> String {
     let to = strip_header_value(to);
     let subject = strip_header_value(subject);
     let mut raw_msg = format!(
@@ -495,7 +490,51 @@ pub async fn send_message(
     raw_msg.push_str(&format!("\r\n{}", body));
 
     let engine = base64::engine::general_purpose::URL_SAFE_NO_PAD;
-    let encoded = engine.encode(raw_msg.as_bytes());
+    engine.encode(raw_msg.as_bytes())
+}
+
+/// Create a Gmail draft. This is the only compose path exposed to the model:
+/// a draft lands in the user's own account for review, so a prompt-injected
+/// email cannot turn JARVIS into an outbound channel.
+pub async fn create_draft(
+    access_token: &str,
+    to: &str,
+    subject: &str,
+    body: &str,
+    cc: Option<&str>,
+) -> Result<String, String> {
+    let encoded = encode_raw_message(to, subject, body, cc);
+
+    let client = &*HTTP;
+    let url = format!("{}/drafts", GMAIL_API);
+    let payload = serde_json::json!({ "message": { "raw": encoded } });
+    let resp = client
+        .post(&url)
+        .bearer_auth(access_token)
+        .json(&payload)
+        .send()
+        .await
+        .map_err(|e| format!("Gmail draft error: {}", e))?;
+    if resp.status() == 401 {
+        return Err("UNAUTHORIZED".to_string());
+    }
+    if !resp.status().is_success() {
+        let status = resp.status();
+        let body_text = resp.text().await.unwrap_or_default();
+        return Err(format!("Gmail draft failed ({}): {}", status, body_text));
+    }
+    let result: serde_json::Value = resp.json().await.map_err(|e| e.to_string())?;
+    Ok(result["id"].as_str().unwrap_or("unknown").to_string())
+}
+
+pub async fn send_message(
+    access_token: &str,
+    to: &str,
+    subject: &str,
+    body: &str,
+    cc: Option<&str>,
+) -> Result<String, String> {
+    let encoded = encode_raw_message(to, subject, body, cc);
 
     let client = &*HTTP;
     let url = format!("{}/messages/send", GMAIL_API);
