@@ -157,11 +157,38 @@ aws s3 cp /tmp/latest.json "s3://${BUCKET}/latest.json" \
   --profile "${PROFILE}" || echo "(S3 manifest mirror skipped — the website manifest is authoritative)"
 
 echo ""
+echo "==> Verifying the published artifacts are actually reachable"
+# A release that reports success while the download 403s is worse than a failed
+# release: the website keeps offering a button that cannot work. Verified broken
+# on 2026-07-26, which is why this gate exists. Check the same URLs a stranger
+# and the in-app updater would fetch.
+RELEASE_OK=1
+for url in "${DMG_PUBLIC_URL}" "${UPDATER_URL}"; do
+  if curl -fsSI "${url}" >/dev/null 2>&1; then
+    echo "  OK  ${url}"
+  else
+    echo "  FAIL ${url} is not publicly downloadable"
+    RELEASE_OK=0
+  fi
+done
+
+if grep -q '"signature"[[:space:]]*:[[:space:]]*""' /tmp/latest.json; then
+  echo "  FAIL latest.json has an empty signature; the in-app updater cannot verify this release"
+  RELEASE_OK=0
+fi
+
+if [ "${RELEASE_OK}" -ne 1 ]; then
+  echo ""
+  echo "RELEASE NOT SHIPPED. Users cannot download or update from this build."
+  echo "Most likely cause: S3 Block Public Access is enabled on '${BUCKET}', which"
+  echo "overrides the bucket policy in infra/releases-bucket-policy.json. Check with:"
+  echo "  aws s3api get-public-access-block --bucket ${BUCKET} --profile ${PROFILE}"
+  echo "Fix that (or front the bucket with CloudFront), then re-run this script."
+  exit 1
+fi
+
+echo ""
 echo "Released v${VERSION}"
 echo "Manifest (live after website deploy): https://jarvis-automation.com/latest.json"
 echo "Download (DMG):  ${DMG_PUBLIC_URL}"
 echo "Updater payload: ${UPDATER_URL}"
-echo ""
-echo "NOTE: the DMG + updater tarball live on S3 (${BUCKET}). Those objects must be"
-echo "publicly readable or downloads/updates will 403 — make them public-read via a"
-echo "bucket policy, or front the bucket with CloudFront."
