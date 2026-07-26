@@ -19,14 +19,9 @@ Built with **Tauri v2** (Rust) + **React** + **TypeScript**. No Electron. No web
 
 ## The Problem
 
-Knowledge workers are drowning in tools. The data is clear:
-
-- **11.7 hours/week** spent on email alone (McKinsey)
-- **9.5 apps** used daily by the average knowledge worker (HBR 2024)
-- **23% of productive time** lost to context switching between siloed tools (Qatalog/Cornell 2022)
-- **Interrupted every 2 minutes** during core hours (Microsoft Work Trend 2025)
-
-For an indie developer billing HK$800/hr, that's **HK$1,600 of lost output every working day.**
+Knowledge workers run their day across a handful of tools that do not talk to
+each other. Reading an email, deciding what it means, and turning it into a
+calendar entry or a task is manual work repeated dozens of times a day.
 
 Existing AI tools are siloed: Notion AI stays in Notion, Copilot stays in code, Siri does not execute SaaS workflows. Nobody connects them.
 
@@ -47,7 +42,8 @@ JARVIS picks the right tools (Gmail, Notion, Calendar), chains the actions, and 
 | Target user | Indie devs & solo founders on macOS | Open-source devs | General consumers | Knowledge workers |
 | Cross-tool depth | 5+ native macOS integrations | DIY plugins | Limited connectors | Computer Use (beta) |
 | Setup | Voice-first, one-click install | Self-host manually | Browser-based | Manual prompts |
-| Privacy | **Local-first, cloud opt-in** | Self-host | Cloud-only | Cloud-only |
+| Data storage | **Local SQLite, no JARVIS server** | Self-host | Cloud | Cloud |
+| Inference | Cloud by default, local via Ollama opt-in | Self-host | Cloud | Cloud |
 | Pricing | Freemium -> HK$148/mo | Free / OSS | US$20/mo | US$20/mo |
 
 **Different layers of the stack.** Use OpenClaw for coding. Use JARVIS for everything else.
@@ -137,7 +133,13 @@ The AI can execute directly on your Mac: open apps/URLs, run shell commands (wit
 
 **Tauri over Electron:** ~10MB native binary vs ~200MB Electron. Rust handles CPU-intensive work (audio, local inference, concurrent APIs) without blocking UI.
 
-**Local-first over cloud-first:** Privacy is the competitive moat. Emails, notes, code stay on-device. Cloud inference is opt-in only. This is why big players (Apple, Microsoft, Google) can't build JARVIS -- they need ecosystem lock-in.
+**Local storage, cloud inference (current state):** Conversations, tasks and
+synced context live in SQLite on the device and never reach a JARVIS server.
+Inference is a different matter and the distinction is worth stating plainly:
+the default provider chain is cloud Gemini (`src-tauri/src/lib.rs`), so message
+and email content is sent to Google's API. Local inference through Ollama is
+supported and opt-in via Settings, not the default. Do not describe JARVIS as
+"local-first inference" until the default chain resolves to a local endpoint.
 
 **Canvas2D over Three.js:** Simpler, no dependencies, performs well for this scale. One React component, one `<canvas>`.
 
@@ -215,14 +217,9 @@ The AI can execute directly on your Mac: open apps/URLs, run shell commands (wit
 | **Pro** | HK$148/mo (~US$19) | All 5 integrations, unlimited voice, automation, wake word |
 | **Team** | HK$298/seat/mo (~US$39) | Pro + shared workspace, admin controls, RBAC, team digest |
 
-### Traction (v0.1.0 Beta)
-
-| Metric | Value |
-|--------|-------|
-| Beta testers | 12 (HK/GBA + international) |
-| Avg time saved/day | ~85 min per user |
-| WTP at HK$148/mo | 9 of 12 testers (75%) |
-| Codebase | 46+ Rust files, 41+ TypeScript files, 32 AI tools, 10 DB tables |
+> Pricing is not live. Stripe is in test mode and the app does not yet
+> enforce tier limits, so the table above describes the intended plans, not
+> what is currently sold.
 
 ### Programme Support
 
