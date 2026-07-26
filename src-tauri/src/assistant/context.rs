@@ -75,7 +75,7 @@ impl DayContext {
         let deadlines = urgent_tasks.clone();
 
         Ok(DayContext {
-            greeting: format!("{}, Hillman.", greeting),
+            greeting: format!("{}, {}.", greeting, crate::util::display_name(db)),
             tasks_summary,
             calendar_summary: todays_events,
             email_summary,

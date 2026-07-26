@@ -36,6 +36,25 @@ pub fn truncate_bytes(s: &str, max_bytes: usize) -> &str {
     &s[..end]
 }
 
+/// The signed-in user's name, for greetings and system prompts. Written from
+/// the Google profile at OAuth time. Falls back to "there" so a fresh install
+/// reads "Good morning, there." rather than naming whoever built the app.
+pub fn display_name(db: &crate::db::Database) -> String {
+    db.conn
+        .lock()
+        .ok()
+        .and_then(|conn| {
+            conn.query_row(
+                "SELECT value FROM user_preferences WHERE key = 'user_name'",
+                [],
+                |row| row.get::<_, String>(0),
+            )
+            .ok()
+        })
+        .filter(|s| !s.trim().is_empty())
+        .unwrap_or_else(|| "there".to_string())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

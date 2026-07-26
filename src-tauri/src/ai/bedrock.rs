@@ -104,20 +104,7 @@ pub async fn send(
     // static prefix is served from cache while the dynamic suffix (user name,
     // date, memory) is sent fresh each call without invalidating the cache.
     let static_prompt = tools::build_cacheable_system_prompt();
-    let user_name = {
-        db.conn
-            .lock()
-            .ok()
-            .and_then(|conn| {
-                conn.query_row(
-                    "SELECT value FROM user_preferences WHERE key = 'user_name'",
-                    [],
-                    |row| row.get::<_, String>(0),
-                )
-                .ok()
-            })
-            .unwrap_or_else(|| "User".to_string())
-    };
+    let user_name = crate::util::display_name(db);
     let today_iso = chrono::Local::now().format("%Y-%m-%d").to_string();
     let language = tools::read_language_pref(db);
     let dynamic = tools::build_dynamic_suffix(&user_name, &today_iso, &language, db);

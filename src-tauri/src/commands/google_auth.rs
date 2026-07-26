@@ -18,7 +18,47 @@ pub async fn google_connect(auth: State<'_, Arc<GoogleAuth>>, db: State<'_, Arc<
     ];
     auth.start_auth_flow(scopes).await?;
     auth.save_to_db(&db);
+    // Learn who the user is, so greetings and the system prompt address them
+    // rather than whoever built the app. Best-effort: a failure here must not
+    // fail an otherwise successful connection.
+    if let Ok(token) = auth.ensure_access_token().await {
+        if let Err(e) = store_profile_name(&token, &db).await {
+            log::warn!("Could not read Google profile name: {}", e);
+        }
+    }
     Ok("Connected to Google".to_string())
+}
+
+/// Fetch the signed-in user's given name and persist it as `user_name`.
+async fn store_profile_name(access_token: &str, db: &Arc<Database>) -> Result<(), String> {
+    let resp = crate::util::http_client()
+        .get("https://www.googleapis.com/oauth2/v2/userinfo")
+        .bearer_auth(access_token)
+        .send()
+        .await
+        .map_err(|e| e.to_string())?;
+    if !resp.status().is_success() {
+        return Err(format!("userinfo HTTP {}", resp.status()));
+    }
+    let body: serde_json::Value = resp.json().await.map_err(|e| e.to_string())?;
+    let name = body
+        .get("given_name")
+        .or_else(|| body.get("name"))
+        .and_then(|v| v.as_str())
+        .unwrap_or_default()
+        .trim()
+        .to_string();
+    if name.is_empty() {
+        return Err("userinfo returned no name".to_string());
+    }
+    let conn = db.conn.lock().map_err(|e| e.to_string())?;
+    conn.execute(
+        "INSERT INTO user_preferences (key, value, updated_at) VALUES ('user_name', ?1, datetime('now'))
+         ON CONFLICT(key) DO UPDATE SET value = ?1, updated_at = datetime('now')",
+        rusqlite::params![name],
+    )
+    .map_err(|e| e.to_string())?;
+    Ok(())
 }
 
 #[tauri::command]

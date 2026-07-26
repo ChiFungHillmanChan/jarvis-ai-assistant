@@ -13,12 +13,13 @@ pub struct DashboardData {
 
 #[tauri::command]
 pub fn get_dashboard_data(db: State<Arc<Database>>) -> Result<DashboardData, String> {
+    let name = crate::util::display_name(&db);
     let conn = db.conn.lock().map_err(|e| e.to_string())?;
     let hour: u32 = chrono::Local::now().hour();
     let greeting = match hour {
-        0..=11 => "Good morning, Hillman.",
-        12..=17 => "Good afternoon, Hillman.",
-        _ => "Good evening, Hillman.",
+        0..=11 => format!("Good morning, {}.", name),
+        12..=17 => format!("Good afternoon, {}.", name),
+        _ => format!("Good evening, {}.", name),
     };
     let task_count: i64 = conn
         .query_row("SELECT COUNT(*) FROM tasks WHERE status != 'completed'", [], |row| row.get(0))
@@ -40,5 +41,5 @@ pub fn get_dashboard_data(db: State<Arc<Database>>) -> Result<DashboardData, Str
         .map_err(|e| e.to_string())?
         .collect::<Result<Vec<_>, _>>()
         .map_err(|e| e.to_string())?;
-    Ok(DashboardData { greeting: greeting.to_string(), task_count, pending_tasks })
+    Ok(DashboardData { greeting, task_count, pending_tasks })
 }
