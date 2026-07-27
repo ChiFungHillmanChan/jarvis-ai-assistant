@@ -32,6 +32,8 @@ struct ChatCompletionRequest {
     stream: bool,
     #[serde(skip_serializing_if = "Option::is_none")]
     response_format: Option<serde_json::Value>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    stream_options: Option<serde_json::Value>,
 }
 
 #[derive(Serialize, Deserialize, Clone, Debug)]
@@ -62,6 +64,13 @@ struct LocalFunction {
 #[derive(Deserialize)]
 struct SseChunk {
     choices: Option<Vec<SseChoice>>,
+    usage: Option<LocalUsage>,
+}
+
+#[derive(Deserialize, Debug, Default, Clone)]
+struct LocalUsage {
+    prompt_tokens: Option<i64>,
+    completion_tokens: Option<i64>,
 }
 
 #[derive(Deserialize)]
@@ -144,7 +153,12 @@ pub async fn send_local(
     google_auth: &std::sync::Arc<crate::auth::google::GoogleAuth>,
     app_handle: &tauri::AppHandle,
     tts_tx: Option<tokio::sync::mpsc::Sender<TtsCommand>>,
+    workload: crate::ai::Workload,
+    ledger: &crate::ai::SideEffectLedger,
 ) -> Result<String, Box<dyn std::error::Error + Send + Sync>> {
+    let started_at = std::time::Instant::now();
+    let mut total_prompt_tokens: i64 = 0;
+    let mut total_completion_tokens: i64 = 0;
     let effective_cap =
         effective_tool_capability(&tool_capability, tool_capability_override, context_length);
 
@@ -205,8 +219,22 @@ pub async fn send_local(
         format!("{}/v1/chat/completions", base_url)
     };
 
+    // Ollama and vLLM both honour stream_options.include_usage on their
+    // OpenAI-compatible endpoint, which is what lets the cost dashboard show
+    // real local token counts. A Generic server may reject the unknown field,
+    // so it is left off there and the turn is recorded with zero tokens.
+    let stream_options = if endpoint.backend_type == BackendType::Generic {
+        None
+    } else {
+        Some(json!({"include_usage": true}))
+    };
+
     let max_iterations = 5;
     for _ in 0..max_iterations {
+        // Per-round usage: the OpenAI-compatible stream reports one usage
+        // object per request, so overwrite within a round and fold into the
+        // totals when the round ends.
+        let mut usage = LocalUsage::default();
         let request = ChatCompletionRequest {
             model: model.to_string(),
             messages: local_messages.clone(),
@@ -218,6 +246,7 @@ pub async fn send_local(
             } else {
                 None
             },
+            stream_options: stream_options.clone(),
         };
 
         let mut req = client
@@ -244,7 +273,7 @@ pub async fn send_local(
         }
 
         let mut stream = response.bytes_stream();
-        let mut buffer = String::new();
+        let mut buffer = crate::ai::SseByteBuffer::new();
         let mut text_parts: Vec<String> = Vec::new();
         let mut tool_map: HashMap<usize, (String, String, String)> = HashMap::new();
         let mut announced_tools: HashSet<usize> = HashSet::new();
@@ -260,12 +289,9 @@ pub async fn send_local(
                 }
             };
 
-            buffer.push_str(&String::from_utf8_lossy(&chunk));
+            buffer.extend(&chunk);
 
-            while let Some(pos) = buffer.find("\n\n") {
-                let event_block = buffer[..pos].to_string();
-                buffer = buffer[pos + 2..].to_string();
-
+            while let Some(event_block) = buffer.next_event() {
                 let mut data_str = String::new();
                 for line in event_block.lines() {
                     if line.starts_with(':') {
@@ -284,6 +310,10 @@ pub async fn send_local(
                     Ok(c) => c,
                     Err(_) => continue,
                 };
+
+                if let Some(u) = chunk.usage.clone() {
+                    usage = u;
+                }
 
                 if let Some(choices) = &chunk.choices {
                     for choice in choices {
@@ -350,6 +380,9 @@ pub async fn send_local(
             }
         }
 
+        total_prompt_tokens += usage.prompt_tokens.unwrap_or(0);
+        total_completion_tokens += usage.completion_tokens.unwrap_or(0);
+
         // Handle prompt-injected tool calls (parse from text response)
         if matches!(effective_cap, ToolCapability::PromptInjected) && tool_map.is_empty() {
             let full_text = text_parts.join("");
@@ -361,10 +394,13 @@ pub async fn send_local(
                 let mut narrated = false;
 
                 for call in &calls {
-                    if executed_tools.contains(&call.name) {
+                    let args_str =
+                        serde_json::to_string(&call.arguments).unwrap_or_else(|_| "{}".into());
+                    let call_key = crate::ai::tool_call_key(&call.name, &args_str);
+                    if executed_tools.contains(&call_key) {
                         continue;
                     }
-                    executed_tools.insert(call.name.clone());
+                    executed_tools.insert(call_key);
 
                     let label = tools::tool_status_label(&call.name);
                     let _ = app_handle.emit(
@@ -382,8 +418,7 @@ pub async fn send_local(
                         }
                     }
 
-                    let args_str =
-                        serde_json::to_string(&call.arguments).unwrap_or_else(|_| "{}".into());
+                    ledger.note(&call.name);
                     let result = tools::execute_tool(&call.name, &args_str, db, google_auth).await;
                     log::info!(
                         "Local LLM tool result: {}",
@@ -422,11 +457,21 @@ pub async fn send_local(
 
                 if !response_text.is_empty() {
                     let _ = app_handle.emit("chat-token", json!({"token": "", "done": true}));
+                    record_local_inference(
+                        db, workload, model,
+                        total_prompt_tokens, total_completion_tokens,
+                        &started_at,
+                    );
                     return Ok(response_text);
                 }
             } else if !response_text.is_empty() {
                 // No tool calls, just text response from JSON parsing
                 let _ = app_handle.emit("chat-token", json!({"token": "", "done": true}));
+                record_local_inference(
+                    db, workload, model,
+                    total_prompt_tokens, total_completion_tokens,
+                    &started_at,
+                );
                 return Ok(response_text);
             }
         }
@@ -463,7 +508,8 @@ pub async fn send_local(
             let mut executed_tools: HashSet<String> = HashSet::new();
             let mut narrated = false;
             for tc in &tool_calls_vec {
-                let is_duplicate = executed_tools.contains(&tc.function.name);
+                let call_key = crate::ai::tool_call_key(&tc.function.name, &tc.function.arguments);
+                let is_duplicate = executed_tools.contains(&call_key);
                 if is_duplicate {
                     log::info!(
                         "Local LLM skipping duplicate tool call: {}",
@@ -472,14 +518,15 @@ pub async fn send_local(
                     local_messages.push(LocalMessage {
                         role: "tool".into(),
                         content: Some(
-                            "Skipped: already executed this tool in this batch.".to_string(),
+                            "Skipped: already executed this tool with these arguments in this batch."
+                                .to_string(),
                         ),
                         tool_calls: None,
                         tool_call_id: Some(tc.id.clone()),
                     });
                     continue;
                 }
-                executed_tools.insert(tc.function.name.clone());
+                executed_tools.insert(call_key);
                 log::info!(
                     "Local LLM tool call: {}({})",
                     tc.function.name,
@@ -500,6 +547,7 @@ pub async fn send_local(
                         narrated = true;
                     }
                 }
+                ledger.note(&tc.function.name);
                 let result =
                     tools::execute_tool(&tc.function.name, &tc.function.arguments, db, google_auth)
                         .await;
@@ -526,9 +574,92 @@ pub async fn send_local(
 
         // No tool calls -- done
         let _ = app_handle.emit("chat-token", json!({"token": "", "done": true}));
+        record_local_inference(
+            db, workload, model,
+            total_prompt_tokens, total_completion_tokens,
+            &started_at,
+        );
         return Ok(text_parts.join(""));
     }
 
     let _ = app_handle.emit("chat-token", json!({"token": "", "done": true}));
+    record_local_inference(
+        db, workload, model,
+        total_prompt_tokens, total_completion_tokens,
+        &started_at,
+    );
     Ok("I've completed the actions.".into())
+}
+
+/// Record a completed local turn. Local models have no price-table entry, so
+/// `compute_usd_cost_micro` returns 0 and the row costs nothing -- but the turn
+/// still counts, which is what the cost dashboard's local share is measured
+/// from. Without this every local turn was invisible and `local_share_pct` was
+/// structurally pinned to 0. Only successful turns are recorded, so a failed
+/// request does not inflate the turn count.
+fn record_local_inference(
+    db: &crate::db::Database,
+    workload: crate::ai::Workload,
+    model: &str,
+    prompt_tokens: i64,
+    completion_tokens: i64,
+    started_at: &std::time::Instant,
+) {
+    crate::ai::cost::record_inference(
+        db, "local", workload, model,
+        prompt_tokens, completion_tokens, 0, 0,
+        started_at.elapsed().as_millis() as i64,
+    );
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn sse_chunk_parses_usage_and_tolerates_its_absence() {
+        let with_usage: SseChunk = serde_json::from_str(
+            r#"{"choices":[],"usage":{"prompt_tokens":128,"completion_tokens":64}}"#,
+        )
+        .unwrap();
+        let u = with_usage.usage.unwrap();
+        assert_eq!(u.prompt_tokens, Some(128));
+        assert_eq!(u.completion_tokens, Some(64));
+
+        // A backend that never sends usage must still stream normally.
+        let without: SseChunk =
+            serde_json::from_str(r#"{"choices":[{"delta":{"content":"hi"}}]}"#).unwrap();
+        assert!(without.usage.is_none());
+    }
+
+    /// A local turn must cost 0 because it ran on the user's own hardware --
+    /// which is a fact about the provider, not about whether the model id
+    /// happens to be missing from the cloud price table. `price_for` now bills
+    /// unrecognised ids at the frontier rate on purpose, so this asserts the
+    /// provider check in `record_inference` rather than the table lookup.
+    #[test]
+    fn local_turns_are_recorded_at_zero_cost() {
+        let db = crate::ai::cost::tests::temp_metrics_db("");
+        crate::ai::cost::record_inference(
+            &db,
+            "local",
+            crate::ai::Workload::Tools,
+            "llama3.1:8b-instruct-q4_K_M",
+            4000,
+            900,
+            0,
+            0,
+            120,
+        );
+        let conn = db.conn.lock().unwrap();
+        let (cost, turns): (i64, i64) = conn
+            .query_row(
+                "SELECT COALESCE(SUM(usd_cost_micro), 0), COUNT(*) FROM inference_metrics",
+                [],
+                |r| Ok((r.get(0)?, r.get(1)?)),
+            )
+            .unwrap();
+        assert_eq!(cost, 0, "local inference must cost nothing");
+        assert_eq!(turns, 1, "but the turn must still be counted");
+    }
 }

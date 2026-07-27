@@ -95,6 +95,7 @@ pub async fn send(
     app_handle: &tauri::AppHandle,
     tts_tx: Option<tokio::sync::mpsc::Sender<TtsCommand>>,
     workload: crate::ai::Workload,
+    ledger: &crate::ai::SideEffectLedger,
 ) -> Result<String, Box<dyn std::error::Error + Send + Sync>> {
     let started_at = std::time::Instant::now();
     let mut total_prompt_tokens: i64 = 0;
@@ -164,7 +165,7 @@ pub async fn send(
         }
 
         let mut stream = response.bytes_stream();
-        let mut buffer = String::new();
+        let mut buffer = super::SseByteBuffer::new();
         let mut text_parts: Vec<String> = Vec::new();
         let mut function_call_parts: Vec<GeminiPart> = Vec::new();
         let mut announced_tools: HashSet<String> = HashSet::new();
@@ -192,20 +193,13 @@ pub async fn send(
             };
 
             total_bytes += chunk.len();
-            let chunk_str = String::from_utf8_lossy(&chunk);
             if first_chunk_sample.is_none() {
-                first_chunk_sample = Some(chunk_str.chars().take(400).collect());
+                first_chunk_sample =
+                    Some(String::from_utf8_lossy(&chunk).chars().take(400).collect());
             }
-            buffer.push_str(&chunk_str);
+            buffer.extend(&chunk);
 
-            while let Some((pos, delim_len)) = buffer
-                .find("\r\n\r\n")
-                .map(|p| (p, 4))
-                .or_else(|| buffer.find("\n\n").map(|p| (p, 2)))
-            {
-                let event_block = buffer[..pos].to_string();
-                buffer = buffer[pos + delim_len..].to_string();
-
+            while let Some(event_block) = buffer.next_event() {
                 let mut data_str = String::new();
                 for line in event_block.lines() {
                     if line.starts_with(':') {
@@ -322,20 +316,21 @@ pub async fn send(
                     Some(fc) => fc,
                     None => continue,
                 };
-                let is_duplicate = executed_tools.contains(&fc.name);
+                let args_str = serde_json::to_string(&fc.args).unwrap_or_default();
+                let call_key = crate::ai::tool_call_key(&fc.name, &args_str);
+                let is_duplicate = executed_tools.contains(&call_key);
                 if is_duplicate {
                     log::info!("JARVIS skipping duplicate tool call: {}", fc.name);
                     response_parts.push(GeminiPart {
                         function_response: Some(FunctionResponseData {
                             name: fc.name.clone(),
-                            response: json!({"result": "Skipped: already executed this tool in this batch."}),
+                            response: json!({"result": "Skipped: already executed this tool with these arguments in this batch."}),
                         }),
                         ..Default::default()
                     });
                     continue;
                 }
-                executed_tools.insert(fc.name.clone());
-                let args_str = serde_json::to_string(&fc.args).unwrap_or_default();
+                executed_tools.insert(call_key);
                 log::info!("JARVIS tool call: {}({})", fc.name, args_str);
                 let label = tools::tool_status_label(&fc.name);
                 let _ = app_handle.emit(
@@ -352,6 +347,7 @@ pub async fn send(
                         narrated = true;
                     }
                 }
+                ledger.note(&fc.name);
                 let result = tools::execute_tool(&fc.name, &args_str, db, google_auth).await;
                 log::info!("JARVIS tool result: {}", crate::util::truncate_bytes(&result, 200));
                 response_parts.push(GeminiPart {

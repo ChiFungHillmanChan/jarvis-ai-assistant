@@ -82,6 +82,30 @@ export class PaymentStack extends cdk.Stack {
       integration: new apigwv2Integ.HttpLambdaIntegration('CheckoutIntegration', checkoutFn),
     });
 
+    // STOPGAP, NOT AUTHENTICATION. POST /checkout has no authorizer: the caller
+    // asserts its own user_id and email and nothing verifies either, so anyone
+    // holding the URL can make the Lambda create Stripe customers and Checkout
+    // Sessions. Throttling caps the blast radius; it does not establish identity,
+    // and because API Gateway throttles per stage/route rather than per caller, a
+    // flood still degrades real users.
+    // An authorizer is REQUIRED before this endpoint sees a live Stripe key. The
+    // intended one is the Cognito user pool AuthStack already provisions — see the
+    // note on resolve_install_id in src-tauri/src/commands/payments.rs about the
+    // Cognito subject replacing install_id. Not wired here because the desktop
+    // client has no Cognito integration yet and would break on day one.
+    const defaultStage = httpApi.defaultStage!.node.defaultChild as apigwv2.CfnStage;
+    defaultStage.defaultRouteSettings = {
+      throttlingRateLimit: 10,
+      throttlingBurstLimit: 20,
+    };
+    defaultStage.routeSettings = {
+      // Real usage is single-digit requests per minute: one click per upgrade.
+      'POST /checkout': {
+        throttlingRateLimit: 2,
+        throttlingBurstLimit: 5,
+      },
+    };
+
     this.webhookUrl = `${httpApi.apiEndpoint}/stripe/webhook`;
     const checkoutUrl = `${httpApi.apiEndpoint}/checkout`;
 

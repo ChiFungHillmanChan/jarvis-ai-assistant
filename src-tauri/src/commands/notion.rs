@@ -29,11 +29,8 @@ pub fn get_notion_pages(db: State<Arc<Database>>, limit: Option<u32>) -> Result<
 
 #[tauri::command]
 pub async fn sync_notion(db: State<'_, Arc<Database>>) -> Result<String, String> {
-    let token = {
-        let conn = db.conn.lock().map_err(|e| e.to_string())?;
-        conn.query_row("SELECT value FROM user_preferences WHERE key = 'notion_api_key'", [], |row| row.get::<_, String>(0))
-            .map_err(|_| "Notion API key not configured".to_string())?
-    };
+    let token = crate::integration_keys::resolve("notion_api_key")
+        .ok_or_else(|| "Notion API key not configured".to_string())?;
     let pages = notion::search_pages(&token, None).await?;
     let count = pages.len();
     notion::save_to_db(&db, &pages)?;
@@ -42,13 +39,8 @@ pub async fn sync_notion(db: State<'_, Arc<Database>>) -> Result<String, String>
 
 #[tauri::command]
 pub fn save_notion_token(db: State<Arc<Database>>, token: String) -> Result<(), String> {
-    let conn = db.conn.lock().map_err(|e| e.to_string())?;
-    conn.execute(
-        "INSERT INTO user_preferences (key, value, updated_at) VALUES ('notion_api_key', ?1, datetime('now'))
-         ON CONFLICT(key) DO UPDATE SET value = ?1, updated_at = datetime('now')",
-        rusqlite::params![token],
-    ).map_err(|e| e.to_string())?;
-    Ok(())
+    // Keychain, not user_preferences -- the row keeps only a marker.
+    crate::integration_keys::store(&db, "notion_api_key", &token)
 }
 
 #[tauri::command]

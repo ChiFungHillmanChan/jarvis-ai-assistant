@@ -16,6 +16,12 @@ export function useChat() {
   const tokenBuffer = useRef("");
   const rafId = useRef<number | null>(null);
   const streamingTextRef = useRef("");
+  // Text from a provider that failed mid-stream, held aside rather than destroyed:
+  // the router only predicts that another provider will RUN, not that it will
+  // produce anything, so on an outage that takes out the whole chain the discarded
+  // text is all the user ever had. Cleared when a replacement token actually
+  // arrives; restored by `send`'s catch if the chain fails outright.
+  const discardedTextRef = useRef("");
   // Track whether voice initiated the current AI request -- skip streaming tokens if so
   const voiceActiveRef = useRef(false);
   // Track whether chat (useChat.send) initiated the current request
@@ -60,6 +66,35 @@ export function useChat() {
       if (voiceActiveRef.current && !chatInitiatedRef.current) return;
 
       if (event.payload.done) {
+        // A provider failed mid-stream AND the router is about to run another one:
+        // clear the partial output so the next provider's answer is not appended to
+        // half an answer from this one. The router only sets `discard` in that case
+        // -- on a terminal failure the partial answer is all the user gets, so it
+        // stays on screen and `send`'s catch marks it " [incomplete]".
+        if (event.payload.discard) {
+          // Held aside, not thrown away: "another provider will run" is not
+          // "another provider will produce tokens". On an outage that kills every
+          // remaining entry, nothing replaces this text, and deleting it here is
+          // what left the pane blank where the user previously had a partial
+          // answer. It is dropped for real on the replacement's first token.
+          const pending = tokenBuffer.current;
+          tokenBuffer.current = "";
+          streamingTextRef.current = "";
+          // Reset through the updater queue as well: a flush queued before this event
+          // would otherwise write the failed provider's text back into the ref. `prev`
+          // there is also the authoritative partial answer -- it includes any flush the
+          // ref has not caught up with yet -- so that is what gets held aside.
+          setStreamingText((prev) => {
+            discardedTextRef.current = prev + pending;
+            streamingTextRef.current = "";
+            return "";
+          });
+          if (rafId.current) {
+            cancelAnimationFrame(rafId.current);
+            rafId.current = null;
+          }
+          return;
+        }
         if (tokenBuffer.current) {
           const remaining = tokenBuffer.current;
           tokenBuffer.current = "";
@@ -75,6 +110,9 @@ export function useChat() {
         }
         return;
       }
+      // The replacement has started arriving, so the discarded text is genuinely
+      // superseded and can go.
+      if (discardedTextRef.current) discardedTextRef.current = "";
       tokenBuffer.current += event.payload.token;
       if (!rafId.current) {
         rafId.current = requestAnimationFrame(flushBuffer);
@@ -127,6 +165,7 @@ export function useChat() {
     setCurrentStatus(null);
     tokenBuffer.current = "";
     streamingTextRef.current = "";
+    discardedTextRef.current = "";
     chatInitiatedRef.current = true;
 
     try {
@@ -135,10 +174,18 @@ export function useChat() {
       setMessages((prev) => [...prev, { ...response, content: finalContent }]);
       setStreamingText("");
       streamingTextRef.current = "";
+      discardedTextRef.current = "";
     } catch (e) {
       setError(String(e));
-      if (streamingTextRef.current) {
-        setStreamingText((prev) => prev + " [incomplete]");
+      // The whole chain failed. If a provider streamed a partial answer that was
+      // discarded for a replacement that never produced anything, give it back --
+      // a partial answer plus an error beats a blank pane plus an error. Captured
+      // into a local first: the updater runs after this handler, by which point
+      // the ref has been cleared.
+      const held = discardedTextRef.current;
+      discardedTextRef.current = "";
+      if (streamingTextRef.current || held) {
+        setStreamingText((prev) => (prev || held) + " [incomplete]");
       }
     } finally {
       setLoading(false);

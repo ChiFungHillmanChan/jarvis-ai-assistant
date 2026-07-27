@@ -2,7 +2,7 @@ use crate::ai::{AiRouter, Workload};
 use crate::assistant::{briefing, context::DayContext};
 use crate::auth::google::GoogleAuth;
 use crate::db::Database;
-use crate::voice::tts::TextToSpeech;
+use crate::voice::VoiceEngine;
 use std::sync::{Arc, Mutex};
 use tauri::State;
 
@@ -68,12 +68,24 @@ pub async fn speak_briefing(
     db: State<'_, Arc<Database>>,
     router: State<'_, Mutex<AiRouter>>,
     google_auth: State<'_, Arc<GoogleAuth>>,
+    engine: State<'_, Arc<VoiceEngine>>,
 ) -> Result<briefing::BriefingResult, String> {
     let router = router.lock().map_err(|e| e.to_string())?.clone();
     let result = briefing::generate_briefing(&db, &router, &google_auth, &app_handle).await?;
 
-    // Speak the briefing
-    let tts = TextToSpeech::new();
+    // Share VoiceEngine's TextToSpeech, and with it the cancel flag the rest of
+    // the app reaches -- send_message and the stop control both cancel that one
+    // instance. A privately built TextToSpeech::new() was uncancellable from
+    // anywhere in the UI, so pressing play on the briefing card committed the
+    // user to the whole briefing, and it also ignored their saved voice, rate
+    // and tts_enabled preferences.
+    let tts = match engine.tts.lock() {
+        Ok(guard) => guard.clone(),
+        Err(e) => {
+            log::warn!("Briefing TTS unavailable: {}", e);
+            return Ok(result);
+        }
+    };
     let speech = format!("{}. {}", result.greeting, result.briefing);
     if let Err(e) = tts.speak(&speech).await {
         log::warn!("Briefing TTS failed: {}", e);

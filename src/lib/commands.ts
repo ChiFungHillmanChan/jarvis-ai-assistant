@@ -1,5 +1,24 @@
-import { invoke } from "@tauri-apps/api/core";
+import { invoke as tauriInvoke } from "@tauri-apps/api/core";
 import type { Task, ChatMessage, DashboardData, Settings, EmailSummary, EmailStats, CalendarEventView, CronJobView, CronRunView, NotionPageView, GitHubItemView, GitHubStats, VoiceState, VoiceSettings, WakeWordStatus, EmailRule, BriefingResult, LocalEndpoint, LocalModel, ProviderChainEntry, EndpointHealth, SystemCompatibility, PrerequisiteCheck, RecommendedModel, LaunchReadiness, BetaTesterInput, BetaTesterView, BetaFeedbackInput, AwsCredsStatus } from "./types";
+
+// Tauri v2 commands default to rename_all = "camelCase", so a Rust parameter named
+// `gmail_id` is looked up on the IPC boundary as `gmailId`. A required arg sent as
+// snake_case is rejected ("missing required key"); an Option arg silently arrives as
+// None. Normalising the top-level arg keys here makes that drift impossible to
+// reintroduce. Shallow on purpose: nested values (structs, Vec<T>) are deserialized by
+// serde and keep their snake_case field names.
+function toCamelCaseKeys(args: Record<string, unknown>): Record<string, unknown> {
+  const out: Record<string, unknown> = {};
+  for (const key of Object.keys(args)) {
+    out[key.replace(/_([a-z0-9])/g, (_m, c: string) => c.toUpperCase())] = args[key];
+  }
+  return out;
+}
+
+// Every IPC call in this file goes through here, never through tauriInvoke directly.
+function invoke<T>(command: string, args?: Record<string, unknown>): Promise<T> {
+  return tauriInvoke<T>(command, args ? toCamelCaseKeys(args) : undefined);
+}
 
 export async function getTasks(): Promise<Task[]> {
   return invoke("get_tasks");
@@ -50,7 +69,7 @@ export async function getApiKeyStatus(): Promise<Record<string, boolean>> {
 // Email
 export async function getEmails(limit?: number): Promise<EmailSummary[]> { return invoke("get_emails", { limit }); }
 export async function syncEmails(): Promise<string> { return invoke("sync_emails"); }
-export async function archiveEmail(gmailId: string): Promise<void> { return invoke("archive_email", { gmail_id: gmailId }); }
+export async function archiveEmail(gmailId: string): Promise<void> { return invoke("archive_email", { gmailId }); }
 export async function getEmailStats(): Promise<EmailStats> { return invoke("get_email_stats"); }
 
 // Calendar
@@ -61,11 +80,17 @@ export async function getTodaysEvents(): Promise<CalendarEventView[]> { return i
 
 // Cron
 export async function getCronJobs(): Promise<CronJobView[]> { return invoke("get_cron_jobs"); }
-export async function getCronRuns(jobId: number, limit?: number): Promise<CronRunView[]> { return invoke("get_cron_runs", { job_id: jobId, limit }); }
+export async function getCronRuns(jobId: number, limit?: number): Promise<CronRunView[]> { return invoke("get_cron_runs", { jobId, limit }); }
 
 // Google Auth
-export async function googleConnect(): Promise<string> { return invoke("google_connect"); }
+// `force` is how the user switches accounts: the backend revokes the current
+// grant and drops the local mirror before re-running the OAuth flow. Without it
+// an already-linked account is reused and the call returns GOOGLE_ALREADY_CONNECTED.
+export async function googleConnect(force = false): Promise<string> { return invoke("google_connect", { force }); }
 export async function googleStatus(): Promise<boolean> { return invoke("google_status"); }
+// Revokes the grant at Google, deletes the refresh token from the Keychain and
+// clears the mail, events and briefings cached from that account.
+export async function googleDisconnect(): Promise<string> { return invoke("google_disconnect"); }
 
 // Notion
 export async function getNotionPages(limit?: number): Promise<NotionPageView[]> { return invoke("get_notion_pages", { limit }); }
@@ -74,7 +99,7 @@ export async function saveNotionToken(token: string): Promise<void> { return inv
 export async function getNotionStats(): Promise<number> { return invoke("get_notion_stats"); }
 
 // GitHub
-export async function getGitHubItems(itemType?: string): Promise<GitHubItemView[]> { return invoke("get_github_items", { item_type: itemType }); }
+export async function getGitHubItems(itemType?: string): Promise<GitHubItemView[]> { return invoke("get_github_items", { itemType }); }
 export async function syncGitHub(): Promise<string> { return invoke("sync_github"); }
 export async function saveGitHubToken(token: string): Promise<void> { return invoke("save_github_token", { token }); }
 export async function getGitHubStats(): Promise<GitHubStats> { return invoke("get_github_stats"); }
@@ -92,18 +117,21 @@ export async function getWakeWordStatus(): Promise<WakeWordStatus> { return invo
 export async function enableWakeWord(): Promise<void> { return invoke("enable_wake_word"); }
 export async function disableWakeWord(): Promise<void> { return invoke("disable_wake_word"); }
 export async function isModelDownloaded(): Promise<boolean> { return invoke("is_model_downloaded"); }
-export async function downloadModel(): Promise<boolean> { return invoke("download_model"); }
+// `force` re-downloads over a file that is already on disk. Without it the
+// backend skips the fetch whenever a model file is present, which leaves a
+// corrupt one unrecoverable from inside the app.
+export async function downloadModel(force = false): Promise<boolean> { return invoke("download_model", { force }); }
 
 // Email Rules
 export async function getSuggestedRules(): Promise<EmailRule[]> { return invoke("get_suggested_rules"); }
-export async function acceptEmailRule(ruleId: number): Promise<void> { return invoke("accept_email_rule", { rule_id: ruleId }); }
-export async function dismissEmailRule(ruleId: number): Promise<void> { return invoke("dismiss_email_rule", { rule_id: ruleId }); }
+export async function acceptEmailRule(ruleId: number): Promise<void> { return invoke("accept_email_rule", { ruleId }); }
+export async function dismissEmailRule(ruleId: number): Promise<void> { return invoke("dismiss_email_rule", { ruleId }); }
 export async function getActiveRules(): Promise<EmailRule[]> { return invoke("get_active_rules"); }
 
 // Custom Cron
 export async function createCustomCron(description: string): Promise<CronJobView> { return invoke("create_custom_cron", { description }); }
-export async function deleteCronJob(jobId: number): Promise<void> { return invoke("delete_cron_job", { job_id: jobId }); }
-export async function toggleCronJob(jobId: number): Promise<string> { return invoke("toggle_cron_job", { job_id: jobId }); }
+export async function deleteCronJob(jobId: number): Promise<void> { return invoke("delete_cron_job", { jobId }); }
+export async function toggleCronJob(jobId: number): Promise<string> { return invoke("toggle_cron_job", { jobId }); }
 export async function getUpcomingRuns(schedule: string, count?: number): Promise<string[]> { return invoke("get_upcoming_runs", { schedule, count }); }
 
 // Assistant
@@ -140,27 +168,27 @@ export async function isWallpaperRaised(): Promise<boolean> { return invoke("is_
 // Local LLM
 export async function listLocalEndpoints(): Promise<LocalEndpoint[]> { return invoke("list_local_endpoints"); }
 export async function addLocalEndpoint(name: string, url: string, backendType?: string, apiKey?: string): Promise<LocalEndpoint> {
-  return invoke("add_local_endpoint", { name, url, backend_type: backendType, api_key: apiKey });
+  return invoke("add_local_endpoint", { name, url, backendType, apiKey });
 }
 export async function updateLocalEndpoint(id: string, updates: { name?: string; url?: string; api_key?: string; connection_timeout_ms?: number; keep_alive_minutes?: number; is_active?: boolean }): Promise<void> {
   return invoke("update_local_endpoint", { id, ...updates });
 }
 export async function removeLocalEndpoint(id: string): Promise<void> { return invoke("remove_local_endpoint", { id }); }
-export async function testEndpointConnection(endpointId: string): Promise<EndpointHealth> { return invoke("test_endpoint_connection", { endpoint_id: endpointId }); }
-export async function listEndpointModels(endpointId: string): Promise<LocalModel[]> { return invoke("list_endpoint_models", { endpoint_id: endpointId }); }
+export async function testEndpointConnection(endpointId: string): Promise<EndpointHealth> { return invoke("test_endpoint_connection", { endpointId }); }
+export async function listEndpointModels(endpointId: string): Promise<LocalModel[]> { return invoke("list_endpoint_models", { endpointId }); }
 export async function getProviderChain(): Promise<ProviderChainEntry[]> { return invoke("get_provider_chain"); }
 export async function updateProviderChain(chain: ProviderChainEntry[]): Promise<void> { return invoke("update_provider_chain", { chain }); }
 export async function updateModelOverride(endpointId: string, modelId: string, overrides: { context_length?: number; tool_capability?: string; system_prompt_suffix?: string }): Promise<void> {
-  return invoke("update_model_override", { endpoint_id: endpointId, model_id: modelId, ...overrides });
+  return invoke("update_model_override", { endpointId, modelId, ...overrides });
 }
 
 // System Check
 export async function checkSystemCompatibility(): Promise<SystemCompatibility> { return invoke("check_system_compatibility"); }
-export async function checkBackendPrerequisites(backendType: string, url?: string): Promise<PrerequisiteCheck[]> { return invoke("check_backend_prerequisites", { backend_type: backendType, url }); }
-export async function getRecommendedModels(endpointId?: string): Promise<RecommendedModel[]> { return invoke("get_recommended_models", { endpoint_id: endpointId }); }
+export async function checkBackendPrerequisites(backendType: string, url?: string): Promise<PrerequisiteCheck[]> { return invoke("check_backend_prerequisites", { backendType, url }); }
+export async function getRecommendedModels(endpointId?: string): Promise<RecommendedModel[]> { return invoke("get_recommended_models", { endpointId }); }
 
 // Model Pull
-export async function pullModel(endpointId: string, modelName: string): Promise<void> { return invoke("pull_model", { endpoint_id: endpointId, model_name: modelName }); }
+export async function pullModel(endpointId: string, modelName: string): Promise<void> { return invoke("pull_model", { endpointId, modelName }); }
 export async function cancelModelPull(): Promise<void> { return invoke("cancel_model_pull"); }
 
 // Onboarding

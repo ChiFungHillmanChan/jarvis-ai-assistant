@@ -36,7 +36,9 @@ pub type JarvisAppHandle = tauri::AppHandle<tauri::Wry>;
 
 pub struct VoiceEngine {
     pub audio_router: Mutex<AudioRouter>,
-    pub transcriber: Mutex<Option<Transcriber>>,
+    /// Cached local Whisper context. Loading `ggml-base.bin` costs seconds, so
+    /// it is built once and shared into every `spawn_blocking` call.
+    local_transcriber: Mutex<Option<LocalTranscriber>>,
     pub tts: Mutex<TextToSpeech>,
     pub state: Mutex<VoiceState>,
     pub muted: Mutex<bool>,
@@ -54,22 +56,12 @@ impl VoiceEngine {
         // push-to-talk path both start the router on demand.
         let router = AudioRouter::new();
 
-        let transcriber = match std::env::var("GEMINI_API_KEY") {
-            Ok(key) if !key.is_empty() => {
-                match Transcriber::new(key) {
-                    Ok(t) => { log::info!("Voice STT ready (Gemini API)"); Some(t) }
-                    Err(e) => { log::warn!("STT init failed: {}", e); None }
-                }
-            }
-            _ => { log::info!("No GEMINI_API_KEY set. Voice STT disabled."); None }
-        };
-
         let tts = TextToSpeech::from_db(&**db);
         log::info!("TTS initialized from DB preferences");
 
         VoiceEngine {
             audio_router: Mutex::new(router),
-            transcriber: Mutex::new(transcriber),
+            local_transcriber: Mutex::new(None),
             tts: Mutex::new(tts),
             state: Mutex::new(VoiceState::Idle),
             muted: Mutex::new(false),
@@ -91,16 +83,38 @@ impl VoiceEngine {
     pub fn get_state(&self) -> VoiceState { self.state.lock().unwrap().clone() }
 
     pub fn is_available(&self) -> bool {
-        self.transcriber.lock().unwrap().is_some() || model_manager::is_downloaded()
+        cloud_transcriber().is_some() || model_manager::is_downloaded()
+    }
+
+    /// Drop the cached local Whisper context so the next transcription reloads
+    /// the model file. Called after the model is (re-)downloaded.
+    pub fn invalidate_local_transcriber(&self) {
+        if let Ok(mut guard) = self.local_transcriber.lock() {
+            *guard = None;
+        }
+    }
+
+    /// Load the local Whisper model once and reuse it for every utterance.
+    async fn local_transcriber(&self) -> Result<LocalTranscriber, String> {
+        let cached = self
+            .local_transcriber
+            .lock()
+            .map_err(|e| e.to_string())?
+            .clone();
+        if let Some(transcriber) = cached {
+            return Ok(transcriber);
+        }
+
+        let model_path = model_manager::model_path();
+        let built = tauri::async_runtime::spawn_blocking(move || LocalTranscriber::new(&model_path))
+            .await
+            .map_err(|e| format!("Local Whisper load task failed: {}", e))??;
+        *self.local_transcriber.lock().map_err(|e| e.to_string())? = Some(built.clone());
+        Ok(built)
     }
 
     pub async fn transcribe_command(&self, audio_data: &[f32]) -> Result<String, String> {
-        let cloud_transcriber = {
-            let guard = self.transcriber.lock().map_err(|e| e.to_string())?;
-            guard.clone()
-        };
-
-        if let Some(transcriber) = cloud_transcriber {
+        if let Some(transcriber) = cloud_transcriber() {
             match transcriber.transcribe(audio_data, &self.db).await {
                 Ok(text) if !text.is_empty() => return Ok(text),
                 Ok(_) => log::info!("Cloud transcription returned empty text, trying local fallback"),
@@ -109,11 +123,10 @@ impl VoiceEngine {
         }
 
         if model_manager::is_downloaded() {
-            let model_path = model_manager::model_path();
+            let transcriber = self.local_transcriber().await?;
             let samples = audio_data.to_vec();
             let db = Arc::clone(&self.db);
             let local_result = tauri::async_runtime::spawn_blocking(move || {
-                let transcriber = LocalTranscriber::new(&model_path)?;
                 transcriber.transcribe(&samples, &db)
             })
             .await
@@ -122,15 +135,18 @@ impl VoiceEngine {
             return local_result;
         }
 
-        Err("Speech-to-text not available. Configure GEMINI_API_KEY or download the local Whisper model.".to_string())
+        Err("Speech-to-text not available. Add a Gemini API key in Settings or download the local Whisper model.".to_string())
     }
 
     pub fn toggle_mute(&self) -> bool {
         let mut muted = self.muted.lock().unwrap();
         *muted = !*muted;
         if *muted {
-            if let Ok(router) = self.audio_router.lock() {
-                router.deactivate();
+            if let Ok(mut router) = self.audio_router.lock() {
+                // Close the stream, not just the routing: leaving it open keeps
+                // the macOS recording indicator lit while the user thinks the
+                // microphone is off.
+                router.stop();
             }
             self.set_state_and_emit(VoiceState::Disabled);
         } else {
@@ -162,5 +178,68 @@ impl VoiceEngine {
     /// Stop emitting mic-amplitude events.
     pub fn stop_mic_emitter(&self) {
         self.mic_emitter_active.store(false, Ordering::Relaxed);
+    }
+}
+
+/// Build the cloud speech-to-text transcriber from the currently configured
+/// Gemini key, or return None when there is none.
+///
+/// Resolved on every use rather than once at startup: users paste the key into
+/// Settings after first launch, which writes it to the Keychain only.
+pub fn cloud_transcriber() -> Option<Transcriber> {
+    let key = resolve_gemini_key()?;
+    match Transcriber::new(key) {
+        Ok(t) => Some(t),
+        Err(e) => {
+            log::warn!("STT init failed: {}", e);
+            None
+        }
+    }
+}
+
+/// Same lookup order as `ai::resolve_key`: process env first, then the
+/// Keychain the Settings screen writes to.
+fn resolve_gemini_key() -> Option<String> {
+    pick_key(
+        std::env::var("GEMINI_API_KEY").ok(),
+        crate::security::keychain::KeychainStore::get(crate::ai::KEY_SERVICE, "gemini_api_key")
+            .ok(),
+    )
+}
+
+/// Env value wins over the Keychain value; a blank value counts as absent.
+/// Split out from the Keychain call so the precedence rule is testable.
+fn pick_key(env_value: Option<String>, keychain_value: Option<String>) -> Option<String> {
+    match env_value {
+        Some(v) if !v.trim().is_empty() => Some(v),
+        _ => keychain_value.filter(|v| !v.trim().is_empty()),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::pick_key;
+
+    #[test]
+    fn keychain_key_is_used_when_no_env_var_is_set() {
+        // The shipped-app case: no .env, key pasted into Settings.
+        assert_eq!(
+            pick_key(None, Some("from-keychain".to_string())),
+            Some("from-keychain".to_string())
+        );
+    }
+
+    #[test]
+    fn env_key_wins_over_keychain_and_blanks_are_ignored() {
+        assert_eq!(
+            pick_key(Some("from-env".to_string()), Some("from-keychain".to_string())),
+            Some("from-env".to_string())
+        );
+        assert_eq!(
+            pick_key(Some("  ".to_string()), Some("from-keychain".to_string())),
+            Some("from-keychain".to_string())
+        );
+        assert_eq!(pick_key(None, Some("  ".to_string())), None);
+        assert_eq!(pick_key(None, None), None);
     }
 }

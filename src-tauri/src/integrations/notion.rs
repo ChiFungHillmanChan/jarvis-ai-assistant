@@ -4,6 +4,17 @@ use serde::{Deserialize, Serialize};
 const NOTION_API: &str = "https://api.notion.com/v1";
 const NOTION_VERSION: &str = "2022-06-28";
 
+/// Hard ceiling on search pagination: 10 pages of 50 results. Without it a
+/// workspace that keeps returning `has_more` would turn one sync into an
+/// unbounded request storm.
+const MAX_SEARCH_PAGES: usize = 10;
+
+/// Page budget for a search issued inside a chat turn. The model-facing
+/// `search_notion` tool truncates its result to a few thousand bytes anyway, so
+/// every page past the first is a sequential round-trip of latency the user
+/// waits through and Notion quota spent on rows the model never sees.
+pub const INTERACTIVE_SEARCH_PAGES: usize = 1;
+
 #[derive(Debug, Serialize, Deserialize, Clone)]
 pub struct NotionPage {
     pub notion_id: String,
@@ -18,6 +29,8 @@ pub struct NotionPage {
 #[derive(Deserialize)]
 struct SearchResponse {
     results: Vec<SearchResult>,
+    has_more: Option<bool>,
+    next_cursor: Option<String>,
 }
 
 #[derive(Deserialize)]
@@ -35,46 +48,102 @@ struct Parent {
     parent_type: Option<String>,
 }
 
+/// The cursor to request next, or None once Notion says the result set is
+/// complete. A missing or empty `next_cursor` ends the loop even if `has_more`
+/// claims otherwise, so a malformed response cannot spin the pagination loop.
+fn next_search_cursor(has_more: Option<bool>, next_cursor: Option<String>) -> Option<String> {
+    match (has_more, next_cursor) {
+        (Some(true), Some(next)) if !next.is_empty() => Some(next),
+        _ => None,
+    }
+}
+
+/// How many pages a search may actually request: at least one, never more than
+/// the hard ceiling, whatever the caller asks for.
+fn effective_page_budget(max_pages: usize) -> usize {
+    max_pages.clamp(1, MAX_SEARCH_PAGES)
+}
+
+/// Full-workspace search, used by the background syncs that need every page.
+/// An interactive caller should use `search_pages_bounded` with a small budget:
+/// this one can cost up to `MAX_SEARCH_PAGES` sequential round-trips.
 pub async fn search_pages(api_key: &str, query: Option<&str>) -> Result<Vec<NotionPage>, String> {
+    search_pages_bounded(api_key, query, MAX_SEARCH_PAGES).await
+}
+
+/// Search with an explicit page budget, so the caller decides how much of the
+/// workspace is worth the round-trips: a background sync wants everything, a
+/// tool call inside a chat turn wants the first page.
+pub async fn search_pages_bounded(
+    api_key: &str,
+    query: Option<&str>,
+    max_pages: usize,
+) -> Result<Vec<NotionPage>, String> {
     let client = crate::util::http_client();
-    let mut body = serde_json::json!({ "page_size": 50, "filter": { "property": "object", "value": "page" } });
-    if let Some(q) = query {
-        body["query"] = serde_json::Value::String(q.to_string());
-    }
+    let mut pages: Vec<NotionPage> = Vec::new();
+    // Notion caps a search at 100 results per request and paginates the rest, so
+    // a single call indexes only the first slice of the workspace.
+    let mut cursor: Option<String> = None;
+    let budget = effective_page_budget(max_pages);
 
-    let resp = client
-        .post(&format!("{}/search", NOTION_API))
-        .header("Authorization", format!("Bearer {}", api_key))
-        .header("Notion-Version", NOTION_VERSION)
-        .header("Content-Type", "application/json")
-        .json(&body)
-        .send()
-        .await
-        .map_err(|e| format!("Notion search error: {}", e))?;
-
-    if resp.status() == 401 {
-        return Err("UNAUTHORIZED: Invalid Notion API key".to_string());
-    }
-    if !resp.status().is_success() {
-        let s = resp.status();
-        let t = resp.text().await.unwrap_or_default();
-        return Err(format!("Notion API error {}: {}", s, t));
-    }
-
-    let search: SearchResponse = resp.json().await.map_err(|e| e.to_string())?;
-
-    Ok(search.results.into_iter().map(|r| {
-        let title = extract_title(&r.properties).unwrap_or_else(|| "(Untitled)".to_string());
-        NotionPage {
-            notion_id: r.id,
-            title,
-            url: r.url,
-            parent_type: r.parent.as_ref().and_then(|p| p.parent_type.clone()),
-            parent_title: None,
-            last_edited: r.last_edited_time,
-            content_snippet: None,
+    for _ in 0..budget {
+        let mut body = serde_json::json!({ "page_size": 50, "filter": { "property": "object", "value": "page" } });
+        if let Some(q) = query {
+            body["query"] = serde_json::Value::String(q.to_string());
         }
-    }).collect())
+        if let Some(ref c) = cursor {
+            body["start_cursor"] = serde_json::Value::String(c.clone());
+        }
+
+        let resp = client
+            .post(&format!("{}/search", NOTION_API))
+            .header("Authorization", format!("Bearer {}", api_key))
+            .header("Notion-Version", NOTION_VERSION)
+            .header("Content-Type", "application/json")
+            .json(&body)
+            .send()
+            .await
+            .map_err(|e| format!("Notion search error: {}", e))?;
+
+        if resp.status() == 401 {
+            return Err("UNAUTHORIZED: Invalid Notion API key".to_string());
+        }
+        if !resp.status().is_success() {
+            let s = resp.status();
+            let t = resp.text().await.unwrap_or_default();
+            return Err(format!("Notion API error {}: {}", s, t));
+        }
+
+        let search: SearchResponse = resp.json().await.map_err(|e| e.to_string())?;
+
+        pages.extend(search.results.into_iter().map(|r| {
+            let title = extract_title(&r.properties).unwrap_or_else(|| "(Untitled)".to_string());
+            NotionPage {
+                notion_id: r.id,
+                title,
+                url: r.url,
+                parent_type: r.parent.as_ref().and_then(|p| p.parent_type.clone()),
+                parent_title: None,
+                last_edited: r.last_edited_time,
+                content_snippet: None,
+            }
+        }));
+
+        cursor = next_search_cursor(search.has_more, search.next_cursor);
+        if cursor.is_none() {
+            break;
+        }
+    }
+
+    if cursor.is_some() {
+        log::warn!(
+            "[notion] search stopped at the {}-page budget; {} pages indexed, workspace has more",
+            budget,
+            pages.len()
+        );
+    }
+
+    Ok(pages)
 }
 
 pub async fn create_page(
@@ -233,4 +302,60 @@ fn extract_title(properties: &Option<serde_json::Value>) -> Option<String> {
         }
     }
     None
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn search_response_models_the_pagination_fields() {
+        // Dropping has_more/next_cursor is what made a 300-page workspace look
+        // like a 50-page one, so the schema shape is the regression guard.
+        let raw = r#"{"results":[],"has_more":true,"next_cursor":"abc123"}"#;
+        let parsed: SearchResponse = serde_json::from_str(raw).unwrap();
+        assert!(parsed.results.is_empty());
+        assert_eq!(parsed.has_more, Some(true));
+        assert_eq!(parsed.next_cursor.as_deref(), Some("abc123"));
+    }
+
+    #[test]
+    fn final_page_stops_the_cursor_loop() {
+        let raw = r#"{"results":[],"has_more":false,"next_cursor":null}"#;
+        let parsed: SearchResponse = serde_json::from_str(raw).unwrap();
+        assert_eq!(next_search_cursor(parsed.has_more, parsed.next_cursor), None);
+        // A response that claims more pages but supplies no usable cursor must
+        // still terminate rather than repeat the same request forever.
+        assert_eq!(next_search_cursor(Some(true), None), None);
+        assert_eq!(next_search_cursor(Some(true), Some(String::new())), None);
+        assert_eq!(next_search_cursor(None, Some("abc".to_string())), None);
+    }
+
+    #[test]
+    fn an_interactive_search_costs_one_round_trip() {
+        // The tool result is truncated a few thousand bytes later, so paging the
+        // whole workspace inside a chat turn buys nothing and costs the user the
+        // wait plus Notion's 3-req/s budget.
+        assert_eq!(INTERACTIVE_SEARCH_PAGES, 1);
+        assert!(INTERACTIVE_SEARCH_PAGES < MAX_SEARCH_PAGES);
+        assert_eq!(effective_page_budget(INTERACTIVE_SEARCH_PAGES), 1);
+    }
+
+    #[test]
+    fn the_page_budget_is_clamped_at_both_ends() {
+        // A zero budget must still make one request rather than silently return
+        // an empty result set, and no caller may exceed the hard ceiling.
+        assert_eq!(effective_page_budget(0), 1);
+        assert_eq!(effective_page_budget(3), 3);
+        assert_eq!(effective_page_budget(MAX_SEARCH_PAGES), MAX_SEARCH_PAGES);
+        assert_eq!(effective_page_budget(1_000), MAX_SEARCH_PAGES);
+    }
+
+    #[test]
+    fn more_pages_continue_the_cursor_loop() {
+        assert_eq!(
+            next_search_cursor(Some(true), Some("cursor-2".to_string())),
+            Some("cursor-2".to_string())
+        );
+    }
 }

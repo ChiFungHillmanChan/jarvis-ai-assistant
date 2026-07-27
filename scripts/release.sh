@@ -23,10 +23,11 @@ NOTARYTOOL_PROFILE="${NOTARYTOOL_PROFILE:-jarvis-notarytool}"
 REPO_ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 cd "${REPO_ROOT}"
 
-# Source .env so option_env! macros (GOOGLE_CLIENT_ID etc.) get baked into the
-# release binary at compile time. dotenvy at runtime is enough for `tauri dev`,
-# but a packaged DMG has no .env to read — these values must be in the env when
-# `tauri build` runs.
+# Source .env so option_env! macros (GOOGLE_CLIENT_ID, GOOGLE_CLIENT_SECRET,
+# JARVIS_PAYMENT_API) get baked into the release binary at compile time. dotenvy
+# at runtime is enough for `tauri dev`, but a packaged DMG has no .env to read —
+# these values must be in the env when `tauri build` runs. `set -a` exports every
+# variable the file defines, which is what option_env! reads.
 if [ -f "${REPO_ROOT}/.env" ]; then
   set -a
   # shellcheck disable=SC1091
@@ -37,6 +38,28 @@ if [ -z "${GOOGLE_CLIENT_ID:-}" ]; then
   echo "WARNING: GOOGLE_CLIENT_ID not set — the shipped DMG will have no Google sign-in."
   read -r -p "Continue anyway? [y/N] " GO_ANYWAY
   if [[ "${GO_ANYWAY}" != "y" && "${GO_ANYWAY}" != "Y" ]]; then exit 1; fi
+fi
+if [ -z "${JARVIS_PAYMENT_API:-}" ]; then
+  echo "WARNING: JARVIS_PAYMENT_API not set — UPGRADE TO PRO in the shipped DMG will fail with"
+  echo "         'checkout backend not configured'. The build has no other way to learn the URL."
+  read -r -p "Continue anyway? [y/N] " GO_ANYWAY
+  if [[ "${GO_ANYWAY}" != "y" && "${GO_ANYWAY}" != "Y" ]]; then exit 1; fi
+else
+  export JARVIS_PAYMENT_API
+fi
+
+echo "==> 0/10 Running the test suite (same command CI runs)"
+# release.sh builds from the local working tree, so CI green on the last push
+# says nothing about what is about to be signed and notarized. Run the suite
+# here, before anything is built, uploaded or published. `npm test` is
+# `cargo test --manifest-path src-tauri/Cargo.toml` (package.json) — the same
+# command .github/workflows/ci.yml runs. Explicit `if !` rather than relying on
+# `set -e`: this must abort, and it must say why.
+if ! npm test; then
+  echo ""
+  echo "TESTS FAILED — release aborted. Nothing was built, signed, uploaded or published."
+  echo "Fix the suite (npm test) and re-run this script."
+  exit 1
 fi
 
 echo "==> 1/10 Bumping version to ${VERSION}"
@@ -114,6 +137,10 @@ DMG_PUBLIC_URL="https://${BUCKET}.s3.${REGION}.amazonaws.com/${DMG_NAME}"
 UPDATER_URL="https://${BUCKET}.s3.${REGION}.amazonaws.com/${TARBALL_NAME}"
 NOTES_FILE="${REPO_ROOT}/RELEASE_NOTES.md"
 NOTES="$([ -f "${NOTES_FILE}" ] && cat "${NOTES_FILE}" || echo "Routine update.")"
+# $(cat ...) already strips trailing newlines. Emit the JSON string with
+# `jq -n --arg` — a here-string (`jq -Rs . <<< "$SIG_CONTENT"`) would put the
+# newline back, and tauri-plugin-updater base64-decodes the signature without
+# trimming, so a single "\n" makes every update fail with InvalidByte.
 SIG_CONTENT="$(cat "${SIG_PATH}")"
 cat > /tmp/latest.json <<MANIFEST
 {
@@ -123,7 +150,7 @@ cat > /tmp/latest.json <<MANIFEST
   "dmg_url": "${DMG_PUBLIC_URL}",
   "platforms": {
     "darwin-aarch64": {
-      "signature": $(jq -Rs . <<< "${SIG_CONTENT}"),
+      "signature": $(jq -n --arg sig "${SIG_CONTENT}" '$sig'),
       "url": "${UPDATER_URL}"
     }
   }
@@ -172,8 +199,13 @@ for url in "${DMG_PUBLIC_URL}" "${UPDATER_URL}"; do
   fi
 done
 
-if grep -q '"signature"[[:space:]]*:[[:space:]]*""' /tmp/latest.json; then
-  echo "  FAIL latest.json has an empty signature; the in-app updater cannot verify this release"
+# The signature must be present AND free of whitespace: tauri-plugin-updater
+# feeds it straight into a base64 decode with no trim, so a trailing newline is
+# just as fatal as an empty value while looking fine to the eye. Checked inside
+# jq so the shell cannot silently strip the very newline being tested for.
+SIG_CHECK="$(jq -r 'if ((.platforms["darwin-aarch64"].signature? // "") | type == "string" and length > 0 and (test("[[:space:]]") | not)) then "ok" else "bad" end' /tmp/latest.json)"
+if [ "${SIG_CHECK}" != "ok" ]; then
+  echo "  FAIL latest.json signature is empty or contains whitespace; the in-app updater cannot verify this release"
   RELEASE_OK=0
 fi
 

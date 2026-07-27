@@ -391,6 +391,8 @@ pub async fn get_recommended_models(
                 |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?, row.get::<_, Option<String>>(2)?)),
             ).map_err(|e| format!("Endpoint not found: {}", e))?
         };
+        // The stored column is a Keychain marker, not the secret.
+        let api_key = crate::integration_keys::resolve_local_endpoint_key(eid, api_key.as_deref());
         let backend_type = BackendType::from_str(&backend_type_str);
         let backend = local::get_backend(&backend_type);
         if let Ok(models) = backend.list_models(&url, api_key.as_deref()).await {

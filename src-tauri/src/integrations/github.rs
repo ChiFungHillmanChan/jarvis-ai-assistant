@@ -59,7 +59,23 @@ fn issue_to_item(issue: IssueOrPR, item_type: &str, state_override: Option<&str>
     }
 }
 
+/// A fetch that got at least its required half. `warning` is set when the
+/// review-requested search failed: `items` still holds the assigned issues that
+/// were retrieved and are worth saving, but the PR-review half is missing.
+pub struct AssignedItemsFetch {
+    pub items: Vec<GitHubItem>,
+    pub warning: Option<String>,
+}
+
+/// Assigned issues plus review-requested PRs, discarding the partial-failure
+/// warning (which `fetch_assigned_items_detailed` has already logged). Callers
+/// that report a sync result to the user should use the detailed form instead,
+/// so a half-failed sync is not presented as a clean one.
 pub async fn fetch_assigned_items(token: &str) -> Result<Vec<GitHubItem>, String> {
+    Ok(fetch_assigned_items_detailed(token).await?.items)
+}
+
+pub async fn fetch_assigned_items_detailed(token: &str) -> Result<AssignedItemsFetch, String> {
     let client = crate::util::http_client();
     let mut items = Vec::new();
 
@@ -97,15 +113,98 @@ pub async fn fetch_assigned_items(token: &str) -> Result<Vec<GitHubItem>, String
         .await
         .map_err(|e| format!("GitHub PR review error: {}", e))?;
 
-    if resp.status().is_success() {
-        let search: SearchResponse = resp.json().await.map_err(|e| e.to_string())?;
-        for pr in search.items {
-            if items.iter().any(|i| i.github_id == pr.id) { continue; }
-            items.push(issue_to_item(pr, "pr_review", Some("review_requested")));
-        }
+    // The search API has its own budget (30 requests/minute) separate from the
+    // core API, so it is the flakier half. Its failure must not be swallowed --
+    // an empty review queue reported as a complete sync is a lie -- but it must
+    // not take the already-fetched assigned issues down with it either, so it
+    // becomes a warning carried alongside the results.
+    let status = resp.status();
+    if !status.is_success() {
+        let remaining = resp
+            .headers()
+            .get("x-ratelimit-remaining")
+            .and_then(|v| v.to_str().ok())
+            .map(String::from);
+        let retry_after = resp
+            .headers()
+            .get("retry-after")
+            .and_then(|v| v.to_str().ok())
+            .map(String::from);
+        let body = resp.text().await.unwrap_or_default();
+        log::warn!(
+            "[github] review-requested search failed: {} (x-ratelimit-remaining={}, retry-after={}) {}",
+            status,
+            remaining.as_deref().unwrap_or("unknown"),
+            retry_after.as_deref().unwrap_or("none"),
+            body
+        );
+        let warning = search_failure_warning(
+            status.as_u16(),
+            remaining.as_deref(),
+            retry_after.as_deref(),
+            &body,
+        );
+        return Ok(AssignedItemsFetch { items, warning: Some(warning) });
     }
 
-    Ok(items)
+    let search = match resp.json::<SearchResponse>().await {
+        Ok(search) => search,
+        Err(e) => {
+            log::warn!("[github] review-requested search body unreadable: {}", e);
+            return Ok(AssignedItemsFetch {
+                items,
+                warning: Some(format!(
+                    "the PR review list was not updated: GitHub search response was unreadable: {}",
+                    e
+                )),
+            });
+        }
+    };
+    for pr in search.items {
+        if items.iter().any(|i| i.github_id == pr.id) { continue; }
+        items.push(issue_to_item(pr, "pr_review", Some("review_requested")));
+    }
+
+    Ok(AssignedItemsFetch { items, warning: None })
+}
+
+/// The user-facing half of a review-search failure. The full status, headers and
+/// body go to the log; this string is what a sync surfaces, so it has to name
+/// what is missing as well as why, and it has to keep a rate limit ("wait")
+/// distinct from a permission or credential failure ("waiting will not help").
+fn search_failure_warning(
+    status: u16,
+    rate_limit_remaining: Option<&str>,
+    retry_after: Option<&str>,
+    body: &str,
+) -> String {
+    let cause = if status == 401 {
+        "the GitHub token was rejected (401)".to_string()
+    } else if is_rate_limited(status, rate_limit_remaining, retry_after) {
+        format!(
+            "GitHub search is rate limited ({}), retry after {}s",
+            status,
+            retry_after.unwrap_or("60")
+        )
+    } else {
+        format!("GitHub search failed ({}): {}", status, body)
+    };
+    format!("the PR review list was not updated: {}", cause)
+}
+
+/// GitHub answers 403 for both a permissions failure and a rate limit, so the
+/// two are indistinguishable without reading the headers: a primary limit sets
+/// `x-ratelimit-remaining: 0`, a secondary limit sets `retry-after`. A 429 is
+/// unconditionally a rate limit.
+fn is_rate_limited(
+    status: u16,
+    rate_limit_remaining: Option<&str>,
+    retry_after: Option<&str>,
+) -> bool {
+    if status == 429 {
+        return true;
+    }
+    status == 403 && (rate_limit_remaining == Some("0") || retry_after.is_some())
 }
 
 #[derive(Deserialize)]
@@ -186,4 +285,59 @@ pub fn save_to_db(db: &crate::db::Database, items: &[GitHubItem]) -> Result<(), 
         ).map_err(|e| e.to_string())?;
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn primary_and_secondary_search_limits_are_recognised() {
+        // Primary limit: 403 with the remaining budget exhausted.
+        assert!(is_rate_limited(403, Some("0"), None));
+        // Secondary (abuse) limit: 403 with a retry-after and budget left.
+        assert!(is_rate_limited(403, Some("27"), Some("60")));
+        // 429 needs no headers at all.
+        assert!(is_rate_limited(429, None, None));
+    }
+
+    #[test]
+    fn a_failed_review_search_says_what_is_missing_and_why() {
+        // The search half failing must stay visible -- the assigned issues are
+        // still returned, so nothing else would tell the user the review queue
+        // is stale rather than empty.
+        let limited = search_failure_warning(403, Some("0"), None, "");
+        assert!(limited.contains("PR review list was not updated"));
+        assert!(limited.contains("rate limited"));
+
+        // A scope failure is also a 403, but waiting does not fix it, so it must
+        // not be dressed up as a rate limit.
+        let forbidden = search_failure_warning(
+            403,
+            Some("29"),
+            None,
+            "Resource not accessible by personal access token",
+        );
+        assert!(forbidden.contains("PR review list was not updated"));
+        assert!(!forbidden.contains("rate limited"));
+        assert!(forbidden.contains("Resource not accessible"));
+
+        let rejected = search_failure_warning(401, None, None, "Bad credentials");
+        assert!(rejected.contains("PR review list was not updated"));
+        assert!(rejected.contains("401"));
+
+        let unavailable = search_failure_warning(503, None, None, "search backend unavailable");
+        assert!(unavailable.contains("PR review list was not updated"));
+        assert!(unavailable.contains("503"));
+    }
+
+    #[test]
+    fn permission_failures_are_not_reported_as_rate_limits() {
+        // A token without the right scope also gets 403, but with budget left
+        // and no retry-after. Telling the user to wait would be wrong.
+        assert!(!is_rate_limited(403, Some("29"), None));
+        assert!(!is_rate_limited(403, None, None));
+        assert!(!is_rate_limited(422, None, None));
+        assert!(!is_rate_limited(503, None, None));
+    }
 }

@@ -14,8 +14,16 @@ pub struct CalendarEvent {
     pub status: String,
 }
 
+/// Hard page budget for `fetch_events`. Google caps a page at `maxResults`, so
+/// without a ceiling a pathological account could page forever.
+const MAX_EVENT_PAGES: usize = 10;
+
 #[derive(Deserialize)]
-struct EventsResponse { items: Option<Vec<GoogleEvent>> }
+struct EventsResponse {
+    items: Option<Vec<GoogleEvent>>,
+    #[serde(rename = "nextPageToken")]
+    next_page_token: Option<String>,
+}
 
 #[derive(Deserialize)]
 struct GoogleEvent {
@@ -43,32 +51,55 @@ impl EventTime {
 pub async fn fetch_events(access_token: &str, time_min: &str, time_max: &str) -> Result<Vec<CalendarEvent>, String> {
     let client = crate::util::http_client();
     let url = format!("{}/calendars/primary/events", CALENDAR_API);
-    let resp = client.get(&url)
-        .bearer_auth(access_token)
-        .query(&[
+    let mut events: Vec<CalendarEvent> = Vec::new();
+    let mut next_token: Option<String> = None;
+
+    // Follow nextPageToken. Without this a busy week past maxResults silently
+    // truncated to the first page while still reporting success.
+    for _ in 0..MAX_EVENT_PAGES {
+        let page_token = next_token.take();
+        let mut query: Vec<(&str, &str)> = vec![
             ("timeMin", time_min),
             ("timeMax", time_max),
             ("singleEvents", "true"),
             ("orderBy", "startTime"),
             ("maxResults", "50"),
-        ])
-        .send().await.map_err(|e| format!("Calendar API error: {}", e))?;
-    if resp.status() == 401 { return Err("UNAUTHORIZED".to_string()); }
-    if !resp.status().is_success() { return Err(format!("Calendar API error: {}", resp.status())); }
-    let body: EventsResponse = resp.json().await.map_err(|e| e.to_string())?;
-    Ok(body.items.unwrap_or_default().into_iter().filter_map(|e| {
-        let start = e.start.as_ref()?.to_string_repr();
-        let end = e.end.as_ref()?.to_string_repr();
-        if start.is_empty() { return None; }
-        Some(CalendarEvent {
-            id: e.id.unwrap_or_default(), summary: e.summary.unwrap_or_else(|| "(No title)".to_string()),
-            description: e.description, location: e.location, start_time: start, end_time: end,
-            attendees: e.attendees.unwrap_or_default().into_iter().filter_map(|a| a.email).collect(),
-            status: e.status.unwrap_or_else(|| "confirmed".to_string()),
-        })
-    }).collect())
+        ];
+        if let Some(tok) = page_token.as_deref() {
+            query.push(("pageToken", tok));
+        }
+        let resp = client.get(&url)
+            .bearer_auth(access_token)
+            .query(&query)
+            .send().await.map_err(|e| format!("Calendar API error: {}", e))?;
+        if resp.status() == 401 { return Err("UNAUTHORIZED".to_string()); }
+        if !resp.status().is_success() { return Err(format!("Calendar API error: {}", resp.status())); }
+        let body: EventsResponse = resp.json().await.map_err(|e| e.to_string())?;
+        events.extend(body.items.unwrap_or_default().into_iter().filter_map(|e| {
+            let start = e.start.as_ref()?.to_string_repr();
+            let end = e.end.as_ref()?.to_string_repr();
+            if start.is_empty() { return None; }
+            Some(CalendarEvent {
+                id: e.id.unwrap_or_default(), summary: e.summary.unwrap_or_else(|| "(No title)".to_string()),
+                description: e.description, location: e.location, start_time: start, end_time: end,
+                attendees: e.attendees.unwrap_or_default().into_iter().filter_map(|a| a.email).collect(),
+                status: e.status.unwrap_or_else(|| "confirmed".to_string()),
+            })
+        }));
+        match body.next_page_token {
+            Some(tok) if !tok.is_empty() => next_token = Some(tok),
+            _ => break,
+        }
+    }
+
+    Ok(events)
 }
 
+/// `attendees` is for user-initiated callers only. It must never carry a
+/// model-chosen address: Google copies the event -- summary and description
+/// included -- onto every invited attendee's own calendar, which turns this into
+/// an outbound channel the attacker reads back with events.list. The tool
+/// dispatch in `ai/tools.rs` always passes None.
 pub async fn create_event(
     access_token: &str,
     summary: &str,
@@ -168,4 +199,28 @@ pub fn save_to_db(db: &crate::db::Database, events: &[CalendarEvent]) -> Result<
         ).map_err(|e| e.to_string())?;
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn events_response_captures_next_page_token() {
+        // A week past maxResults comes back with nextPageToken. Dropping it was
+        // a silent truncation reported as a successful full sync.
+        let json = r#"{"items": [], "nextPageToken": "CigKGjBqM3BhZ2U"}"#;
+        let parsed: EventsResponse = serde_json::from_str(json).unwrap();
+        assert_eq!(parsed.next_page_token.as_deref(), Some("CigKGjBqM3BhZ2U"));
+    }
+
+    #[test]
+    fn last_page_has_no_next_page_token() {
+        let json = r#"{"items": []}"#;
+        let parsed: EventsResponse = serde_json::from_str(json).unwrap();
+        assert!(
+            parsed.next_page_token.is_none(),
+            "absence of the token is what ends the paging loop"
+        );
+    }
 }

@@ -67,9 +67,10 @@ mod tests {
     use std::sync::Mutex;
 
     fn fresh_db_with_prefs() -> Arc<Database> {
-        let path = std::env::temp_dir()
-            .join(format!("jarvis-test-{}.db", uuid::Uuid::new_v4()));
-        let conn = Connection::open(&path).expect("open temp db");
+        // In memory, not $TMPDIR: nothing here exercises file-backed behaviour,
+        // and the on-disk fixture left an orphan .db (plus -wal/-shm) behind on
+        // every `cargo test` run because nothing ever removed them.
+        let conn = Connection::open_in_memory().expect("open in-memory db");
         conn.execute_batch(
             "CREATE TABLE IF NOT EXISTS user_preferences (
                 key TEXT PRIMARY KEY,

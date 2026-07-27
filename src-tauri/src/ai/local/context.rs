@@ -1,4 +1,4 @@
-use tiktoken_rs::cl100k_base;
+use tiktoken_rs::cl100k_base_singleton;
 
 pub struct ContextManager {
     max_tokens: u32,
@@ -15,15 +15,25 @@ impl ContextManager {
         }
     }
 
-    /// Count tokens in a string using tiktoken cl100k_base tokenizer
+    /// Count tokens in a string using tiktoken cl100k_base tokenizer.
+    ///
+    /// Uses the cached singleton: the plain `cl100k_base()` constructor rebuilds
+    /// the ~100k-entry vocabulary and recompiles the BPE regex on every call,
+    /// and this runs once per message inside `truncate_messages`'s walk-back
+    /// loop, so a single local turn paid for it 20+ times on a tokio worker
+    /// thread. `try_lock` keeps the existing char-based estimate as the fallback
+    /// (parking_lot has no poisoning, so contention is the only failure mode)
+    /// rather than blocking the async runtime on another counter.
     pub fn count_tokens(text: &str) -> u32 {
-        match cl100k_base() {
-            Ok(bpe) => bpe.encode_with_special_tokens(text).len() as u32,
-            Err(_) => {
+        let bpe = cl100k_base_singleton();
+        let count = match bpe.try_lock() {
+            Some(tokenizer) => tokenizer.encode_with_special_tokens(text).len() as u32,
+            None => {
                 // Fallback: chars / 3.5 (conservative estimate)
                 (text.len() as f64 / 3.5).ceil() as u32
             }
-        }
+        };
+        count
     }
 
     /// Available tokens for message content after reserves
@@ -99,5 +109,22 @@ impl ContextManager {
     /// Whether day context (tasks, calendar, emails) should be included
     pub fn should_include_day_context(context_length: u32) -> bool {
         context_length >= 8192
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn count_tokens_is_stable_across_calls_on_the_shared_tokenizer() {
+        // The walk-back loop calls this once per message, so repeated calls must
+        // agree; they used to each rebuild the tokenizer from scratch.
+        let text = "summarize my unread emails";
+        let first = ContextManager::count_tokens(text);
+        assert_eq!(first, ContextManager::count_tokens(text));
+        assert!(first > 0 && first < text.len() as u32);
+        assert!(ContextManager::count_tokens("總結我啲未讀郵件") > 0);
+        assert_eq!(ContextManager::count_tokens(""), 0);
     }
 }

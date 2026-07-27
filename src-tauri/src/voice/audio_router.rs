@@ -1,5 +1,5 @@
 use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
-use std::sync::atomic::{AtomicU8, AtomicU32, AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU8, AtomicU32, AtomicUsize, Ordering};
 use std::sync::Arc;
 
 // Audio routing modes (lock-free via atomic)
@@ -86,6 +86,18 @@ unsafe impl Sync for SpscRingBuffer {}
 pub struct AudioRouter {
     stream: Option<cpal::Stream>,
     mode: Arc<AtomicU8>,
+    /// Mode capture returns to when nothing is actively recording. Wake word
+    /// sets it while its loop runs; otherwise the resting state is inactive so
+    /// the device is not held after a push-to-talk press.
+    resting_mode: Arc<AtomicU8>,
+    /// Set by the cpal error callback. A `Stream` object stays alive after its
+    /// device disappears, so this is the only signal that capture has died.
+    stream_failed: Arc<AtomicBool>,
+    /// Identity of the device the open stream was built on. Nothing else
+    /// notices a *change* of default input: the old device stays perfectly
+    /// valid, so no error callback fires and capture silently keeps coming from
+    /// the built-in microphone after the user's AirPods take over.
+    device_id: Option<cpal::DeviceId>,
     /// Ring buffer for wake word detection (fixed 2-second window)
     ring: Arc<SpscRingBuffer>,
     /// Buffer for push-to-talk recording (max 30 seconds)
@@ -107,6 +119,9 @@ impl AudioRouter {
         AudioRouter {
             stream: None,
             mode: Arc::new(AtomicU8::new(MODE_INACTIVE)),
+            resting_mode: Arc::new(AtomicU8::new(MODE_INACTIVE)),
+            stream_failed: Arc::new(AtomicBool::new(false)),
+            device_id: None,
             ring,
             ptt_buf,
             sample_rate: 16000, // will be updated on start()
@@ -115,10 +130,16 @@ impl AudioRouter {
     }
 
     /// Open the cpal input stream using the device's native sample rate.
-    /// The stream stays open for the app's lifetime.
+    /// The stream stays open until `stop()` closes it, so the macOS recording
+    /// indicator goes out once nothing wants the microphone.
     pub fn start(&mut self) -> Result<(), String> {
         if self.stream.is_some() {
-            return Ok(()); // already running
+            if !self.stream_failed.load(Ordering::Relaxed) && !self.default_input_changed() {
+                return Ok(()); // already running on the current default device
+            }
+            // The error callback reported a dead device, or the system's
+            // default input moved to another device -- drop it and rebuild.
+            self.stream = None;
         }
 
         let host = cpal::default_host();
@@ -126,6 +147,7 @@ impl AudioRouter {
             .default_input_device()
             .ok_or("No input device available")?;
 
+        let device_id = device.id().ok();
         let device_name = device.description().map(|d| d.name().to_string()).unwrap_or_default();
         log::info!("AudioRouter: using input device: {}", device_name);
 
@@ -147,6 +169,11 @@ impl AudioRouter {
         let ring = Arc::clone(&self.ring);
         let ptt_buf = Arc::clone(&self.ptt_buf);
         let mic_amplitude = Arc::clone(&self.mic_amplitude);
+        let stream_failed = Arc::clone(&self.stream_failed);
+
+        // Cleared before the new stream exists so a failure it reports later
+        // cannot be overwritten by this reset.
+        self.stream_failed.store(false, Ordering::Relaxed);
 
         let stream = device
             .build_input_stream(
@@ -166,7 +193,10 @@ impl AudioRouter {
                         mic_amplitude.store(rms.to_bits(), Ordering::Relaxed);
                     }
                 },
-                |err| log::error!("AudioRouter stream error: {}", err),
+                move |err| {
+                    log::error!("AudioRouter stream error: {}", err);
+                    stream_failed.store(true, Ordering::Relaxed);
+                },
                 None,
             )
             .map_err(|e| format!("Failed to build input stream: {}", e))?;
@@ -176,8 +206,31 @@ impl AudioRouter {
             .map_err(|e| format!("Failed to start stream: {}", e))?;
 
         self.stream = Some(stream);
+        self.device_id = device_id;
         log::info!("AudioRouter: stream started");
         Ok(())
+    }
+
+    /// True when the system's default input is no longer the device the open
+    /// stream was built on.
+    ///
+    /// Deliberately conservative: if the identity of either the recorded device
+    /// or the current default cannot be read, this reports no change rather
+    /// than tearing down a working stream on a failed property read.
+    fn default_input_changed(&self) -> bool {
+        let opened_on = match self.device_id.as_ref() {
+            Some(id) => id,
+            None => return false,
+        };
+        let current = match cpal::default_host().default_input_device() {
+            Some(device) => device,
+            // No default input at all: the error callback owns that case.
+            None => return false,
+        };
+        match current.id() {
+            Ok(id) => &id != opened_on,
+            Err(_) => false,
+        }
     }
 
     /// Set the routing mode (atomic, instant).
@@ -192,9 +245,11 @@ impl AudioRouter {
     }
 
     /// Stop push-to-talk. Returns recorded samples (resampled to 16kHz if needed).
-    /// Switches mode back to wake word listening.
+    /// Switches mode back to the resting mode -- wake word listening only when
+    /// the wake-word service is actually running.
     pub fn stop_ptt(&self) -> Vec<f32> {
-        self.mode.store(MODE_WAKEWORD, Ordering::Relaxed);
+        self.mode
+            .store(self.resting_mode.load(Ordering::Relaxed), Ordering::Relaxed);
         let raw = self.ptt_buf.read_all();
         self.resample_to_16k(raw)
     }
@@ -218,9 +273,19 @@ impl AudioRouter {
         self.mode.store(MODE_INACTIVE, Ordering::Relaxed);
     }
 
-    /// Unmute capture (set mode back to wake word listening).
+    /// Unmute capture (set mode back to the resting mode).
     pub fn unmute(&self) {
-        self.mode.store(MODE_WAKEWORD, Ordering::Relaxed);
+        self.mode
+            .store(self.resting_mode.load(Ordering::Relaxed), Ordering::Relaxed);
+    }
+
+    /// Record whether the wake-word service wants the microphone at rest.
+    /// Everything that ends a capture session falls back to this.
+    pub fn set_wake_word_resting(&self, active: bool) {
+        self.resting_mode.store(
+            if active { MODE_WAKEWORD } else { MODE_INACTIVE },
+            Ordering::Relaxed,
+        );
     }
 
     /// Stop routing audio into either wake-word or push-to-talk buffers.
@@ -228,15 +293,45 @@ impl AudioRouter {
         self.mode.store(MODE_INACTIVE, Ordering::Relaxed);
     }
 
-    /// Check if the stream is alive.
-    pub fn is_alive(&self) -> bool {
-        self.stream.is_some()
+    /// Close the input stream and release the device. Without this the macOS
+    /// orange microphone indicator stays lit for the rest of the session after
+    /// a single push-to-talk press.
+    pub fn stop(&mut self) {
+        self.mode.store(MODE_INACTIVE, Ordering::Relaxed);
+        self.stream = None;
+        self.device_id = None;
+        self.stream_failed.store(false, Ordering::Relaxed);
     }
 
-    /// Reconnect: drop and re-open the cpal stream.
+    /// Return capture to its resting state after a session. When nothing wants
+    /// the microphone the stream is closed rather than left open and idle.
+    pub fn rest(&mut self) {
+        if self.resting_mode.load(Ordering::Relaxed) == MODE_INACTIVE {
+            self.stop();
+        } else {
+            self.unmute();
+        }
+    }
+
+    /// Check if the stream is alive and still on the right device.
+    ///
+    /// A `cpal::Stream` outlives its device, so the error callback's flag is
+    /// what reports a device that died. A device that is merely no longer the
+    /// default reports nothing at all -- the old one keeps delivering audio --
+    /// so capture health also means "opened on the device the system would
+    /// choose now". Every caller of this treats false as "reconnect".
+    pub fn is_alive(&self) -> bool {
+        self.stream.is_some()
+            && !self.stream_failed.load(Ordering::Relaxed)
+            && !self.default_input_changed()
+    }
+
+    /// Reconnect: drop and re-open the cpal stream on the current default
+    /// input device.
     pub fn reconnect(&mut self) -> Result<(), String> {
         log::info!("AudioRouter: reconnecting...");
         self.stream = None;
+        self.device_id = None;
         self.start()
     }
 
@@ -274,5 +369,67 @@ impl AudioRouter {
         }
 
         out
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // The stream half of is_alive() cannot be unit tested: building a
+    // cpal::Stream needs a real input device. Only the mode bookkeeping below
+    // is exercised here.
+
+    #[test]
+    fn a_router_with_no_stream_reports_no_device_change() {
+        // Also what keeps the whole test module off CoreAudio: with no
+        // recorded device there is nothing to compare against, so
+        // default_input_changed() returns before it queries the host.
+        let router = AudioRouter::new();
+        assert!(!router.default_input_changed());
+        assert!(!router.is_alive());
+    }
+
+    #[test]
+    fn stop_ptt_rests_inactive_unless_wake_word_is_running() {
+        let router = AudioRouter::new();
+        router.start_ptt();
+        assert_eq!(router.mode.load(Ordering::Relaxed), MODE_PTT);
+        router.stop_ptt();
+        assert_eq!(
+            router.mode.load(Ordering::Relaxed),
+            MODE_INACTIVE,
+            "push-to-talk must not leave capture routed to the wake-word buffer"
+        );
+
+        router.set_wake_word_resting(true);
+        router.start_ptt();
+        router.stop_ptt();
+        assert_eq!(router.mode.load(Ordering::Relaxed), MODE_WAKEWORD);
+    }
+
+    #[test]
+    fn unmute_follows_the_resting_mode() {
+        let router = AudioRouter::new();
+        router.mute();
+        router.unmute();
+        assert_eq!(router.mode.load(Ordering::Relaxed), MODE_INACTIVE);
+
+        router.set_wake_word_resting(true);
+        router.mute();
+        router.unmute();
+        assert_eq!(router.mode.load(Ordering::Relaxed), MODE_WAKEWORD);
+    }
+
+    #[test]
+    fn rest_deactivates_when_nothing_wants_the_microphone() {
+        let mut router = AudioRouter::new();
+        router.set_wake_word_resting(true);
+        router.rest();
+        assert_eq!(router.mode.load(Ordering::Relaxed), MODE_WAKEWORD);
+
+        router.set_wake_word_resting(false);
+        router.rest();
+        assert_eq!(router.mode.load(Ordering::Relaxed), MODE_INACTIVE);
     }
 }

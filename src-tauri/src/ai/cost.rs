@@ -35,7 +35,19 @@ pub fn price_for(model_id: &str) -> ModelPrice {
     } else if m.contains("gpt-5") {
         ModelPrice { input_per_million: 1.25, output_per_million: 10.0, cache_read_per_million: 0.125, cache_write_per_million: 1.25 }
     } else {
-        ModelPrice { input_per_million: 0.0, output_per_million: 0.0, cache_read_per_million: 0.0, cache_write_per_million: 0.0 }
+        // An unrecognised model must never price at zero. The match is
+        // substring-based and brittle by design -- "gemini-3.5-flash" and
+        // "gpt-5.1" match nothing here -- so the first symptom of a model-id
+        // bump would otherwise be a cost dashboard confidently reporting
+        // $0.00/mo, which is the exact failure 0d5e3b8 fixed for read errors.
+        // Fall back to the most expensive tier in the table so the number errs
+        // toward alarming rather than reassuring, and say so in the log.
+        log::error!(
+            "cost: no price entry for model '{model_id}' -- billing it at the \
+             frontier rate ($3/$15 per 1M). Add it to price_for() or the \
+             blended-cost report will overstate spend."
+        );
+        ModelPrice { input_per_million: 3.0, output_per_million: 15.0, cache_read_per_million: 0.30, cache_write_per_million: 3.75 }
     }
 }
 
@@ -75,13 +87,22 @@ pub fn record_inference(
     latency_ms: i64,
 ) {
     let now = chrono::Utc::now().timestamp();
-    let usd_micro = compute_usd_cost_micro(
-        model_id,
-        input_tokens,
-        output_tokens,
-        cache_read_tokens,
-        cache_write_tokens,
-    );
+    // Inference on the user's own hardware costs us nothing. State that from
+    // the provider, not from the model id missing out of the price table --
+    // otherwise "free" and "we forgot to price this" are the same value, and
+    // price_for's fallback (deliberately pessimistic) would bill every local
+    // turn at the frontier rate.
+    let usd_micro = if provider == "local" {
+        0
+    } else {
+        compute_usd_cost_micro(
+            model_id,
+            input_tokens,
+            output_tokens,
+            cache_read_tokens,
+            cache_write_tokens,
+        )
+    };
     let conn = match db.conn.lock() {
         Ok(c) => c,
         Err(e) => {
@@ -138,7 +159,7 @@ pub fn blended_cost_micro(db: &crate::db::Database, since_ts: i64) -> Result<(i6
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
 
     #[test]
@@ -156,19 +177,42 @@ mod tests {
         assert_eq!(micro, 840);
     }
 
+    /// A model we have no price for must cost something, and specifically must
+    /// cost more than the cheapest known tier -- a silent $0 would make the
+    /// blended-cost report read as free the moment a model id is bumped, and
+    /// that report is the evidence the Gold Badge unit-economics claim rests on.
     #[test]
-    fn unknown_model_returns_zero() {
-        assert_eq!(compute_usd_cost_micro("mystery-model", 1000, 1000, 0, 0), 0);
+    fn unknown_model_is_billed_at_the_frontier_rate_not_zero() {
+        let unknown = compute_usd_cost_micro("mystery-model", 1000, 1000, 0, 0);
+        let frontier = compute_usd_cost_micro("claude-sonnet-4-6", 1000, 1000, 0, 0);
+        assert_eq!(unknown, frontier, "unknown models price at the frontier rate");
+        assert!(unknown > 0, "an unknown model must never price at zero");
     }
 
-    /// Temp sqlite db seeded with rows_sql. Caller removes the file at test end.
+    /// The substring match is brittle on purpose (it has to catch vendor
+    /// suffixes like -preview), so pin the ids actually shipped in gemini.rs.
+    /// If either stops resolving, the fallback above starts firing.
+    #[test]
+    fn the_shipped_gemini_model_ids_resolve_to_real_prices() {
+        for id in [crate::ai::gemini::MODEL_PRO, crate::ai::gemini::MODEL_FLASH] {
+            let p = price_for(id);
+            assert!(
+                p.input_per_million > 0.0 && p.input_per_million < 3.0,
+                "{id} fell through to the frontier fallback -- add it to price_for()"
+            );
+        }
+    }
+
+    /// In-memory sqlite seeded with rows_sql. Nothing here needs a file on disk,
+    /// and a file-backed fixture leaks its .db/-wal/-shm into $TMPDIR whenever an
+    /// assertion fails before the cleanup line -- which is exactly the state the
+    /// fixture is in while someone is iterating on it.
     /// Mirrors V13 + V16 inference_metrics DDL (minus id/NOT NULL/CHECK) --
     /// update if that schema changes.
-    fn temp_metrics_db(rows_sql: &str) -> (crate::db::Database, std::path::PathBuf) {
+    pub(crate) fn temp_metrics_db(rows_sql: &str) -> crate::db::Database {
         use rusqlite::Connection;
         use std::sync::Mutex;
-        let path = std::env::temp_dir().join(format!("jarvis-cost-{}.db", uuid::Uuid::new_v4()));
-        let conn = Connection::open(&path).unwrap();
+        let conn = Connection::open_in_memory().unwrap();
         conn.execute_batch(&format!(
             "CREATE TABLE inference_metrics (
                 ts INTEGER, workload TEXT, model_id TEXT,
@@ -178,7 +222,7 @@ mod tests {
              {rows_sql}"
         ))
         .unwrap();
-        (crate::db::Database { conn: Mutex::new(conn) }, path)
+        crate::db::Database { conn: Mutex::new(conn) }
     }
 
     const SEED_ROWS: &str = "INSERT INTO inference_metrics (ts, usd_cost_micro) VALUES
@@ -188,31 +232,25 @@ mod tests {
 
     #[test]
     fn blended_sums_and_counts_active_days() {
-        let (db, path) = temp_metrics_db(SEED_ROWS);
+        let db = temp_metrics_db(SEED_ROWS);
         let (total, days) = blended_cost_micro(&db, 0).unwrap();
         assert_eq!(total, 1_750_000); // 1.75 USD
         assert_eq!(days, 2);          // 兩個唔同 UTC 日
-        drop(db);
-        let _ = std::fs::remove_file(path);
     }
 
     #[test]
     fn blended_since_ts_excludes_rows_before_window() {
-        let (db, path) = temp_metrics_db(SEED_ROWS);
+        let db = temp_metrics_db(SEED_ROWS);
         // Window opens after both day-A rows: only the 90000-ts row counts.
         let (total, days) = blended_cost_micro(&db, 50_000).unwrap();
         assert_eq!(total, 1_000_000);
         assert_eq!(days, 1);
-        drop(db);
-        let _ = std::fs::remove_file(path);
     }
 
     #[test]
     fn blended_empty_table_returns_zero_zero() {
-        let (db, path) = temp_metrics_db("");
+        let db = temp_metrics_db("");
         let (total, days) = blended_cost_micro(&db, 0).unwrap();
         assert_eq!((total, days), (0, 0));
-        drop(db);
-        let _ = std::fs::remove_file(path);
     }
 }

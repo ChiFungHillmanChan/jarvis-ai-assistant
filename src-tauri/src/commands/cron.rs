@@ -35,6 +35,7 @@ pub async fn create_custom_cron(
     db: State<'_, Arc<Database>>,
     router: State<'_, Mutex<AiRouter>>,
     google_auth: State<'_, Arc<crate::auth::google::GoogleAuth>>,
+    scheduler: State<'_, Arc<crate::scheduler::SchedulerHandle>>,
     description: String,
 ) -> Result<CronJobView, String> {
     // Ask AI to parse natural language into cron schedule + action
@@ -75,6 +76,31 @@ pub async fn create_custom_cron(
         conn.last_insert_rowid()
     };
 
+    // Register with the live scheduler now. The scheduler only reads the table
+    // at startup, so without this the job sits there reporting "active" and
+    // never fires until the app is relaunched.
+    match scheduler.get() {
+        Some(sched) => {
+            if let Err(err) = sched.register(job_id, &name, &schedule, &action_type).await {
+                // Never leave behind a row the dashboard calls active that
+                // nothing can run -- and that would fail scheduler init on the
+                // next launch.
+                {
+                    let conn = db.conn.lock().map_err(|e| e.to_string())?;
+                    let _ = conn.execute(
+                        "DELETE FROM cron_jobs WHERE id = ?1",
+                        rusqlite::params![job_id],
+                    );
+                }
+                return Err(format!("Could not schedule '{}': {}", name, err));
+            }
+        }
+        None => log::warn!(
+            "Scheduler not started yet; cron job {} will be registered on the next launch",
+            job_id
+        ),
+    }
+
     log::info!("Created custom cron job: {} ({}) -> {}", name, schedule, action_type);
 
     Ok(CronJobView {
@@ -90,35 +116,79 @@ pub async fn create_custom_cron(
 }
 
 #[tauri::command]
-pub fn delete_cron_job(db: State<Arc<Database>>, job_id: i64) -> Result<(), String> {
-    let conn = db.conn.lock().map_err(|e| e.to_string())?;
-    // Delete child run rows before the parent job: cron_runs.job_id has a
-    // foreign key to cron_jobs(id) (with foreign_keys=ON), so removing the
-    // parent first fails the constraint and the job can never be deleted. Wrap
-    // both in one transaction so a failure can't leave orphaned run rows.
-    let tx = conn.unchecked_transaction().map_err(|e| e.to_string())?;
-    tx.execute("DELETE FROM cron_runs WHERE job_id = ?1", rusqlite::params![job_id])
-        .map_err(|e| e.to_string())?;
-    tx.execute("DELETE FROM cron_jobs WHERE id = ?1", rusqlite::params![job_id])
-        .map_err(|e| e.to_string())?;
-    tx.commit().map_err(|e| e.to_string())?;
+pub async fn delete_cron_job(
+    db: State<'_, Arc<Database>>,
+    scheduler: State<'_, Arc<crate::scheduler::SchedulerHandle>>,
+    job_id: i64,
+) -> Result<(), String> {
+    {
+        let conn = db.conn.lock().map_err(|e| e.to_string())?;
+        // Delete child run rows before the parent job: cron_runs.job_id has a
+        // foreign key to cron_jobs(id) (with foreign_keys=ON), so removing the
+        // parent first fails the constraint and the job can never be deleted. Wrap
+        // both in one transaction so a failure can't leave orphaned run rows.
+        let tx = conn.unchecked_transaction().map_err(|e| e.to_string())?;
+        tx.execute("DELETE FROM cron_runs WHERE job_id = ?1", rusqlite::params![job_id])
+            .map_err(|e| e.to_string())?;
+        tx.execute("DELETE FROM cron_jobs WHERE id = ?1", rusqlite::params![job_id])
+            .map_err(|e| e.to_string())?;
+        tx.commit().map_err(|e| e.to_string())?;
+    }
+
+    // The row is gone; tear down its live registration too, otherwise the tick
+    // keeps firing for a job that no longer exists.
+    if let Some(sched) = scheduler.get() {
+        sched.unregister(job_id).await;
+    }
     Ok(())
 }
 
 #[tauri::command]
-pub fn toggle_cron_job(db: State<Arc<Database>>, job_id: i64) -> Result<String, String> {
-    let conn = db.conn.lock().map_err(|e| e.to_string())?;
-    let current: String = conn.query_row(
-        "SELECT status FROM cron_jobs WHERE id = ?1", rusqlite::params![job_id], |row| row.get(0)
-    ).map_err(|e| e.to_string())?;
+pub async fn toggle_cron_job(
+    db: State<'_, Arc<Database>>,
+    scheduler: State<'_, Arc<crate::scheduler::SchedulerHandle>>,
+    job_id: i64,
+) -> Result<String, String> {
+    let (new_status, name, schedule, action_type) = {
+        let conn = db.conn.lock().map_err(|e| e.to_string())?;
+        let (current, name, schedule, action_type): (String, String, String, String) = conn.query_row(
+            "SELECT status, name, schedule, action_type FROM cron_jobs WHERE id = ?1",
+            rusqlite::params![job_id],
+            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
+        ).map_err(|e| e.to_string())?;
 
-    let new_status = if current == "active" { "paused" } else { "active" };
-    conn.execute(
-        "UPDATE cron_jobs SET status = ?1 WHERE id = ?2",
-        rusqlite::params![new_status, job_id],
-    ).map_err(|e| e.to_string())?;
+        let new_status = if current == "active" { "paused" } else { "active" };
+        conn.execute(
+            "UPDATE cron_jobs SET status = ?1 WHERE id = ?2",
+            rusqlite::params![new_status, job_id],
+        ).map_err(|e| e.to_string())?;
 
-    Ok(new_status.to_string())
+        (new_status.to_string(), name, schedule, action_type)
+    };
+
+    // Keep the live scheduler in step with the row. Pausing used to leave the
+    // job registered (it still ticked, and only run_job's status re-check made
+    // it a no-op) and resuming left it dead until the next launch.
+    if let Some(sched) = scheduler.get() {
+        if new_status == "active" {
+            if let Err(e) = sched.register(job_id, &name, &schedule, &action_type).await {
+                // Put the row back where it was rather than report active for a
+                // job the scheduler refused.
+                {
+                    let conn = db.conn.lock().map_err(|le| le.to_string())?;
+                    let _ = conn.execute(
+                        "UPDATE cron_jobs SET status = 'paused' WHERE id = ?1",
+                        rusqlite::params![job_id],
+                    );
+                }
+                return Err(format!("Could not resume '{}': {}", name, e));
+            }
+        } else {
+            sched.unregister(job_id).await;
+        }
+    }
+
+    Ok(new_status)
 }
 
 #[tauri::command]

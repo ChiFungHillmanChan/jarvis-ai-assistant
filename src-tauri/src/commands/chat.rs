@@ -235,16 +235,9 @@ pub async fn send_message(
         "cover letter",
     ];
     if obsidian_keywords.iter().any(|kw| msg_lower.contains(kw)) {
-        let obs_key = {
-            let conn = db.conn.lock().map_err(|e| e.to_string())?;
-            conn.query_row(
-                "SELECT value FROM user_preferences WHERE key = 'obsidian_api_key'",
-                [],
-                |row| row.get::<_, String>(0),
-            )
-            .ok()
-        };
+        let obs_key = crate::integration_keys::resolve("obsidian_api_key");
         if let Some(key) = obs_key {
+            let base_url = crate::integrations::obsidian::resolve_base_url(&db);
             let search_term = message
                 .split_whitespace()
                 .filter(|w| w.len() > 3)
@@ -254,7 +247,7 @@ pub async fn send_message(
             // 3-second timeout so Obsidian search doesn't block the response
             if let Ok(Ok(notes)) = tokio::time::timeout(
                 std::time::Duration::from_secs(3),
-                crate::integrations::obsidian::search_vault(&key, &search_term),
+                crate::integrations::obsidian::search_vault(&base_url, &key, &search_term),
             )
             .await
             {
@@ -347,14 +340,35 @@ pub fn clear_conversations(db: State<Arc<Database>>) -> Result<(), String> {
     Ok(())
 }
 
+/// Nothing prunes `conversations` -- the only delete is the user pressing
+/// clear -- and the frontend reloads this on every mount, so an unbounded
+/// SELECT makes cold start cost grow with lifetime history. Walk the primary
+/// key backwards for the most recent window and reverse it back into the
+/// oldest-first order the UI appends to.
+const CONVERSATION_WINDOW_QUERY: &str =
+    "SELECT id, role, content, created_at FROM conversations ORDER BY id DESC LIMIT ?1";
+const DEFAULT_CONVERSATION_LIMIT: i64 = 200;
+const MAX_CONVERSATION_LIMIT: i64 = 1000;
+
+/// A missing limit means the default, and SQLite reads a negative LIMIT as "no
+/// limit", which is the exact thing being fixed -- so clamp rather than trust.
+fn conversation_limit(requested: Option<i64>) -> i64 {
+    requested
+        .unwrap_or(DEFAULT_CONVERSATION_LIMIT)
+        .clamp(1, MAX_CONVERSATION_LIMIT)
+}
+
 #[tauri::command]
-pub fn get_conversations(db: State<Arc<Database>>) -> Result<Vec<ChatMessage>, String> {
+pub fn get_conversations(
+    db: State<Arc<Database>>,
+    limit: Option<i64>,
+) -> Result<Vec<ChatMessage>, String> {
     let conn = db.conn.lock().map_err(|e| e.to_string())?;
     let mut stmt = conn
-        .prepare("SELECT id, role, content, created_at FROM conversations ORDER BY id ASC")
+        .prepare(CONVERSATION_WINDOW_QUERY)
         .map_err(|e| e.to_string())?;
-    let messages = stmt
-        .query_map([], |row| {
+    let mut messages = stmt
+        .query_map(rusqlite::params![conversation_limit(limit)], |row| {
             Ok(ChatMessage {
                 id: row.get(0)?,
                 role: row.get(1)?,
@@ -365,12 +379,14 @@ pub fn get_conversations(db: State<Arc<Database>>) -> Result<Vec<ChatMessage>, S
         .map_err(|e| e.to_string())?
         .collect::<Result<Vec<_>, _>>()
         .map_err(|e| e.to_string())?;
+    messages.reverse();
     Ok(messages)
 }
 
 #[cfg(test)]
 mod tests {
-    use super::needs_personal_context;
+    use super::*;
+    use rusqlite::Connection;
 
     fn asks(msg: &str) -> bool {
         needs_personal_context(&msg.to_lowercase(), msg)
@@ -389,5 +405,48 @@ mod tests {
         assert!(asks("what meetings do I have today"));
         assert!(asks("any urgent email"));
         assert!(!asks("write me a haiku about rust"));
+    }
+
+    #[test]
+    fn conversation_limit_is_bounded_in_both_directions() {
+        assert_eq!(conversation_limit(None), DEFAULT_CONVERSATION_LIMIT);
+        assert_eq!(conversation_limit(Some(50)), 50);
+        // A negative LIMIT is "no limit" in SQLite -- it must never reach the query.
+        assert_eq!(conversation_limit(Some(-1)), 1);
+        assert_eq!(conversation_limit(Some(0)), 1);
+        assert_eq!(conversation_limit(Some(10_000)), MAX_CONVERSATION_LIMIT);
+    }
+
+    /// The window must return the newest rows, but hand them back oldest-first:
+    /// the chat view appends new messages to the end of the list.
+    #[test]
+    fn conversation_window_returns_the_newest_rows_oldest_first() {
+        let conn = Connection::open_in_memory().unwrap();
+        conn.execute_batch(
+            "CREATE TABLE conversations (
+                 id INTEGER PRIMARY KEY AUTOINCREMENT,
+                 role TEXT NOT NULL,
+                 content TEXT NOT NULL,
+                 created_at TEXT DEFAULT CURRENT_TIMESTAMP);",
+        )
+        .unwrap();
+        for i in 1..=10 {
+            conn.execute(
+                "INSERT INTO conversations (role, content) VALUES ('user', ?1)",
+                rusqlite::params![format!("msg{}", i)],
+            )
+            .unwrap();
+        }
+
+        let mut stmt = conn.prepare(CONVERSATION_WINDOW_QUERY).unwrap();
+        let mut contents: Vec<String> = stmt
+            .query_map(rusqlite::params![conversation_limit(Some(3))], |r| {
+                r.get::<_, String>(2)
+            })
+            .unwrap()
+            .map(|r| r.unwrap())
+            .collect();
+        contents.reverse();
+        assert_eq!(contents, vec!["msg8", "msg9", "msg10"]);
     }
 }

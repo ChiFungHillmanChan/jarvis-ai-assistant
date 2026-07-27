@@ -1,9 +1,18 @@
 use base64::Engine;
+use futures_util::stream::StreamExt;
 use reqwest::Client;
 use serde::{Deserialize, Serialize};
 use std::sync::LazyLock;
 
 const GMAIL_API: &str = "https://gmail.googleapis.com/gmail/v1/users/me";
+
+/// Concurrent `messages.get` calls during an inbox fetch. Gmail bills a metadata
+/// get at 5 quota units against a per-user ceiling of 250 units/second, so an
+/// unbounded 50-wide burst sits exactly on the limit and starts drawing 429s.
+const MAX_CONCURRENT_DETAIL_FETCHES: usize = 8;
+
+/// Attempts, including the first, for a single `messages.get`.
+const DETAIL_MAX_ATTEMPTS: u32 = 3;
 
 /// Shared, connection-pooled Gmail HTTP client with timeouts so no request can
 /// hang a background sync or a chat turn indefinitely. Reused across all calls
@@ -79,10 +88,32 @@ struct Header {
     value: String,
 }
 
+/// An inbox fetch that may have lost messages. `messages` holds every message
+/// whose detail fetch succeeded; `warning` is set when at least one did not, so
+/// a sync that silently dropped mail cannot be reported as a complete one.
+/// Mirrors `github::AssignedItemsFetch`.
+pub struct InboxFetch {
+    pub messages: Vec<GmailMessage>,
+    pub warning: Option<String>,
+}
+
+/// Inbox messages, discarding the partial-failure warning (which
+/// `fetch_inbox_detailed` has already logged per message). Callers that report a
+/// sync result to the user should use the detailed form instead, so a sync that
+/// lost messages is not presented as a clean one.
 pub async fn fetch_inbox(
     access_token: &str,
     max_results: u32,
 ) -> Result<Vec<GmailMessage>, String> {
+    Ok(fetch_inbox_detailed(access_token, max_results)
+        .await?
+        .messages)
+}
+
+pub async fn fetch_inbox_detailed(
+    access_token: &str,
+    max_results: u32,
+) -> Result<InboxFetch, String> {
     let client = &*HTTP;
     let url = format!(
         "{}/messages?maxResults={}&labelIds=INBOX",
@@ -103,21 +134,142 @@ pub async fn fetch_inbox(
     let list: ListResponse = resp.json().await.map_err(|e| e.to_string())?;
     let refs = list.messages.unwrap_or_default();
 
-    // Fetch message details in parallel (up to max_results concurrently)
-    let futures: Vec<_> = refs
+    // Fetch message details with a bounded fan-out so a large inbox cannot burst
+    // past Gmail's per-user quota (see MAX_CONCURRENT_DETAIL_FETCHES). `buffered`
+    // preserves input order, so results still line up with `refs` by index.
+    let ids: Vec<String> = refs
         .iter()
         .take(max_results as usize)
-        .map(|msg_ref| fetch_message_detail(access_token, &msg_ref.id))
+        .map(|msg_ref| msg_ref.id.clone())
         .collect();
-    let results = futures_util::future::join_all(futures).await;
+    let results: Vec<Result<GmailMessage, String>> = futures_util::stream::iter(
+        ids.into_iter()
+            .map(|id| async move { fetch_message_detail(access_token, &id).await }),
+    )
+    .buffered(MAX_CONCURRENT_DETAIL_FETCHES)
+    .collect()
+    .await;
+    let total = results.len();
     let mut messages = Vec::new();
+    let mut failures: Vec<String> = Vec::new();
     for (i, result) in results.into_iter().enumerate() {
         match result {
             Ok(msg) => messages.push(msg),
-            Err(e) => log::warn!("Failed to fetch message {}: {}", refs[i].id, e),
+            Err(e) => {
+                log::warn!("Failed to fetch message {}: {}", refs[i].id, e);
+                failures.push(e);
+            }
         }
     }
-    Ok(messages)
+    let warning = detail_fetch_outcome(total, &failures)?;
+    Ok(InboxFetch { messages, warning })
+}
+
+/// What a fan-out of `messages.get` failures means for the batch as a whole.
+///
+/// Every message failing with the 401 sentinel is a credential problem, not a
+/// partial sync: it propagates as `UNAUTHORIZED` so the caller's existing
+/// refresh-and-retry runs, rather than reporting "Synced 0 emails" as a success
+/// on a token revoked between the list call and the gets. Anything else that
+/// lost messages becomes a warning carried alongside the ones that did arrive,
+/// because a sync that dropped mail must not be indistinguishable from a
+/// complete one.
+fn detail_fetch_outcome(total: usize, failures: &[String]) -> Result<Option<String>, String> {
+    if failures.is_empty() {
+        return Ok(None);
+    }
+    if failures.len() == total && failures.iter().all(|e| e == "UNAUTHORIZED") {
+        return Err("UNAUTHORIZED".to_string());
+    }
+    // Distinct reasons only: 20 messages failing the same way is one fact, and
+    // the full per-message detail is already in the log.
+    let mut reasons: Vec<&str> = Vec::new();
+    for failure in failures {
+        if !reasons.contains(&failure.as_str()) {
+            reasons.push(failure.as_str());
+        }
+    }
+    let shown = reasons.iter().take(2).copied().collect::<Vec<_>>().join("; ");
+    let more = if reasons.len() > 2 {
+        format!(" (+{} other reasons)", reasons.len() - 2)
+    } else {
+        String::new()
+    };
+    Ok(Some(format!(
+        "{} of {} messages could not be fetched and are missing from this sync: {}{}",
+        failures.len(),
+        total,
+        shown,
+        more
+    )))
+}
+
+/// Gmail error reasons that mean "you are being rate limited". Google's guidance
+/// for these is to back off and retry; `dailyLimitExceeded` is deliberately not
+/// here, because a 24-hour quota is not something a backoff clears.
+const RATE_LIMIT_REASONS: [&str; 2] = ["ratelimitexceeded", "userratelimitexceeded"];
+
+/// Whether a failed Gmail response is worth retrying. 429 and 5xx are transient
+/// on the status alone. A 403 is ambiguous: Gmail answers 403 both for a
+/// permission failure (permanent) and for rate limiting, where the error body
+/// carries reason `rateLimitExceeded` or `userRateLimitExceeded`. Rate limiting
+/// is how Gmail throttles a fan-out of `messages.get` in practice, so the body
+/// decides, and a permission 403 still fails fast. A 400 or 401 is permanent.
+fn is_retryable_status(status: u16, body: &str) -> bool {
+    if status == 429 || (500..600).contains(&status) {
+        return true;
+    }
+    status == 403 && is_rate_limit_body(body)
+}
+
+/// Whether a Google error envelope names a rate limit. Both the classic
+/// (`error.errors[].reason`) and the newer (`error.status`, `error.details[]`)
+/// shapes are checked; anything unparseable is treated as not a rate limit
+/// rather than guessed at.
+fn is_rate_limit_body(body: &str) -> bool {
+    let parsed: serde_json::Value = match serde_json::from_str(body) {
+        Ok(value) => value,
+        Err(_) => return false,
+    };
+    let error = &parsed["error"];
+    if error["status"].as_str() == Some("RESOURCE_EXHAUSTED") {
+        return true;
+    }
+    ["errors", "details"].iter().any(|field| {
+        error[*field]
+            .as_array()
+            .map(|entries| {
+                entries.iter().any(|entry| {
+                    entry["reason"]
+                        .as_str()
+                        .map(|reason| {
+                            RATE_LIMIT_REASONS.contains(&reason.to_ascii_lowercase().as_str())
+                        })
+                        .unwrap_or(false)
+                })
+            })
+            .unwrap_or(false)
+    })
+}
+
+/// Cheap jitter source. The retry schedule only needs to stop a fan-out of
+/// concurrent gets from retrying in lockstep, not cryptographic randomness, so
+/// the clock's sub-second component is enough and avoids a new dependency.
+fn jitter_ms(bound_ms: u64) -> u64 {
+    if bound_ms == 0 {
+        return 0;
+    }
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| u64::from(d.subsec_nanos()) % bound_ms)
+        .unwrap_or(0)
+}
+
+/// Backoff before retry `attempt` (1-based): 250ms, 500ms, 1s, 2s, capped there,
+/// plus up to 250ms of jitter.
+fn retry_delay(attempt: u32) -> std::time::Duration {
+    let base_ms = 250u64 << (attempt.clamp(1, 4) - 1);
+    std::time::Duration::from_millis(base_ms + jitter_ms(250))
 }
 
 pub async fn fetch_message_detail(
@@ -126,13 +278,36 @@ pub async fn fetch_message_detail(
 ) -> Result<GmailMessage, String> {
     let client = &*HTTP;
     let url = format!("{}/messages/{}?format=metadata&metadataHeaders=Subject&metadataHeaders=From&metadataHeaders=Date", GMAIL_API, message_id);
-    let resp = client
-        .get(&url)
-        .bearer_auth(access_token)
-        .send()
-        .await
-        .map_err(|e| e.to_string())?;
-    let detail: MessageDetail = resp.json().await.map_err(|e| e.to_string())?;
+    let mut attempt = 0;
+    let detail: MessageDetail = loop {
+        attempt += 1;
+        let resp = client
+            .get(&url)
+            .bearer_auth(access_token)
+            .send()
+            .await
+            .map_err(|e| e.to_string())?;
+        let status = resp.status();
+        // Check the status before parsing. A Google error envelope has no `id`
+        // field, so feeding it to serde yields "missing field `id`" and hides the
+        // real HTTP status, and a 401 here would never produce the UNAUTHORIZED
+        // sentinel the refresh-and-retry call sites match on.
+        if status == 401 {
+            return Err("UNAUTHORIZED".to_string());
+        }
+        if !status.is_success() {
+            // Read the body before deciding: a 403 is only distinguishable as a
+            // rate limit (retry) from a permission failure (fail fast) by the
+            // reason inside it.
+            let body_text = resp.text().await.unwrap_or_default();
+            if is_retryable_status(status.as_u16(), &body_text) && attempt < DETAIL_MAX_ATTEMPTS {
+                tokio::time::sleep(retry_delay(attempt)).await;
+                continue;
+            }
+            return Err(format!("Gmail API error: {}: {}", status, body_text));
+        }
+        break resp.json::<MessageDetail>().await.map_err(|e| e.to_string())?;
+    };
     let headers = detail.payload.and_then(|p| p.headers).unwrap_or_default();
     let subject = headers
         .iter()
@@ -171,6 +346,9 @@ pub async fn archive_message(access_token: &str, message_id: &str) -> Result<(),
         .send()
         .await
         .map_err(|e| format!("Gmail archive error: {}", e))?;
+    if resp.status() == 401 {
+        return Err("UNAUTHORIZED".to_string());
+    }
     if !resp.status().is_success() {
         return Err(format!("Gmail archive failed: {}", resp.status()));
     }
@@ -575,5 +753,109 @@ mod tests {
     #[test]
     fn strip_header_value_keeps_plain_text() {
         assert_eq!(strip_header_value("HKSTP invoice"), "HKSTP invoice");
+    }
+
+    #[test]
+    fn only_transient_statuses_are_retried() {
+        // Retrying a 401 would bypass the refresh-and-retry contract, and
+        // retrying a 400 just burns quota against a permanent failure.
+        assert!(is_retryable_status(429, ""));
+        assert!(is_retryable_status(500, ""));
+        assert!(is_retryable_status(503, ""));
+        assert!(!is_retryable_status(400, ""));
+        assert!(!is_retryable_status(401, ""));
+        assert!(!is_retryable_status(404, ""));
+        assert!(!is_retryable_status(200, ""));
+    }
+
+    #[test]
+    fn a_403_is_retried_only_when_the_body_says_rate_limit() {
+        // Gmail throttles a metadata fan-out with a 403 far more often than a
+        // 429, so treating every 403 as permanent means the retry never fires
+        // in the one scenario it was added for.
+        let user_rate_limit = r#"{"error":{"code":403,"message":"User-rate limit exceeded",
+            "errors":[{"domain":"usageLimits","reason":"userRateLimitExceeded"}]}}"#;
+        assert!(is_retryable_status(403, user_rate_limit));
+        let project_rate_limit =
+            r#"{"error":{"code":403,"errors":[{"domain":"usageLimits","reason":"rateLimitExceeded"}]}}"#;
+        assert!(is_retryable_status(403, project_rate_limit));
+        // The newer envelope carries the same signal in `status`.
+        let resource_exhausted = r#"{"error":{"code":403,"status":"RESOURCE_EXHAUSTED"}}"#;
+        assert!(is_retryable_status(403, resource_exhausted));
+
+        // A permission 403 must still fail fast: retrying cannot fix a missing
+        // scope, it only delays the real error by two backoffs.
+        let insufficient_scope = r#"{"error":{"code":403,"status":"PERMISSION_DENIED",
+            "message":"Request had insufficient authentication scopes.",
+            "errors":[{"domain":"global","reason":"forbidden"}]}}"#;
+        assert!(!is_retryable_status(403, insufficient_scope));
+        // A daily quota is not cleared by a sub-second backoff either.
+        let daily_quota = r#"{"error":{"code":403,"errors":[{"reason":"dailyLimitExceeded"}]}}"#;
+        assert!(!is_retryable_status(403, daily_quota));
+        // An empty or non-JSON body is not guessed at.
+        assert!(!is_retryable_status(403, ""));
+        assert!(!is_retryable_status(403, "<html>403 Forbidden</html>"));
+    }
+
+    #[test]
+    fn a_complete_fan_out_carries_no_warning() {
+        assert_eq!(detail_fetch_outcome(20, &[]), Ok(None));
+        assert_eq!(detail_fetch_outcome(0, &[]), Ok(None));
+    }
+
+    #[test]
+    fn dropped_messages_are_reported_rather_than_swallowed() {
+        // 20 listed, 4 permission failures: a sync that silently lost a fifth of
+        // the inbox used to be indistinguishable from a complete one, so the
+        // briefing and the "Synced 16 emails" toast both lied.
+        let denied = "Gmail API error: 403 Forbidden: PERMISSION_DENIED".to_string();
+        let failures = vec![denied.clone(), denied.clone(), denied.clone(), denied];
+        let warning = detail_fetch_outcome(20, &failures)
+            .expect("a partial loss is not a hard failure")
+            .expect("a partial loss must not be silent");
+        assert!(warning.contains("4 of 20"), "warning: {warning}");
+        assert!(warning.contains("PERMISSION_DENIED"), "warning: {warning}");
+    }
+
+    #[test]
+    fn distinct_failure_reasons_are_summarised_not_repeated() {
+        let failures = vec![
+            "reason A".to_string(),
+            "reason A".to_string(),
+            "reason B".to_string(),
+            "reason C".to_string(),
+            "reason D".to_string(),
+        ];
+        let warning = detail_fetch_outcome(10, &failures).unwrap().unwrap();
+        assert!(warning.contains("5 of 10"), "warning: {warning}");
+        assert!(warning.contains("reason A"), "warning: {warning}");
+        assert!(warning.contains("reason B"), "warning: {warning}");
+        assert!(warning.contains("+2 other reasons"), "warning: {warning}");
+    }
+
+    #[test]
+    fn a_token_revoked_mid_fan_out_propagates_instead_of_syncing_nothing() {
+        // Every detail get answering 401 means the token died between the list
+        // call and the gets. Reporting that as "Synced 0 emails" hides it; the
+        // sentinel is what the callers' refresh-and-retry matches on.
+        let all_401 = vec!["UNAUTHORIZED".to_string(), "UNAUTHORIZED".to_string()];
+        assert_eq!(
+            detail_fetch_outcome(2, &all_401),
+            Err("UNAUTHORIZED".to_string())
+        );
+
+        // A single 401 among successes is not a dead token -- the rest of the
+        // batch is real data, so it stays a warning.
+        let one_401 = vec!["UNAUTHORIZED".to_string()];
+        let warning = detail_fetch_outcome(5, &one_401).unwrap().unwrap();
+        assert!(warning.contains("1 of 5"), "warning: {warning}");
+    }
+
+    #[test]
+    fn retry_delay_grows_and_stays_bounded() {
+        assert!((250..500).contains(&retry_delay(1).as_millis()));
+        assert!((500..750).contains(&retry_delay(2).as_millis()));
+        // Capped, so a retrying fan-out can never stall a sync for many seconds.
+        assert!(retry_delay(9).as_millis() < 2250);
     }
 }

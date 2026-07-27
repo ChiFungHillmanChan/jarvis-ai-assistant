@@ -25,6 +25,20 @@ impl ModelPullState {
     }
 }
 
+/// Download percentage for one Ollama pull progress line.
+///
+/// Named so the tests can assert against the shipped expression instead of
+/// re-typing it: the obvious rearrangement `(completed / total) * 100`
+/// truncates to 0 for every in-progress chunk and pins the onboarding download
+/// bar at 0% through a multi-GB pull.
+fn pull_percent(completed: u64, total: u64) -> u64 {
+    if total > 0 {
+        (completed * 100) / total
+    } else {
+        0
+    }
+}
+
 #[derive(Deserialize)]
 struct PullProgressLine {
     status: Option<String>,
@@ -145,7 +159,7 @@ pub async fn pull_model(
                     let status_str = progress.status.as_deref().unwrap_or("downloading");
                     let completed = progress.completed.unwrap_or(0);
                     let total = progress.total.unwrap_or(0);
-                    let percent = if total > 0 { (completed * 100) / total } else { 0 };
+                    let percent = pull_percent(completed, total);
 
                     let mapped_status = if status_str.contains("verifying") || status_str.contains("writing") {
                         "verifying"
@@ -235,17 +249,16 @@ mod tests {
 
     #[test]
     fn test_percent_calculation() {
-        let completed: u64 = 2_350_000_000;
-        let total: u64 = 4_700_000_000;
-        let percent = if total > 0 { (completed * 100) / total } else { 0 };
-        assert_eq!(percent, 50);
+        assert_eq!(pull_percent(2_350_000_000, 4_700_000_000), 50);
+        // Multiply-then-divide: 1% of a multi-GB pull must not truncate to 0.
+        assert_eq!(pull_percent(47_000_000, 4_700_000_000), 1);
+        assert_eq!(pull_percent(4_700_000_000, 4_700_000_000), 100);
     }
 
     #[test]
     fn test_percent_zero_total() {
-        let total: u64 = 0;
-        let completed: u64 = 0;
-        let percent = if total > 0 { (completed * 100) / total } else { 0 };
-        assert_eq!(percent, 0);
+        // Ollama's first lines carry no total; dividing by it must not panic.
+        assert_eq!(pull_percent(0, 0), 0);
+        assert_eq!(pull_percent(1_234_567, 0), 0);
     }
 }

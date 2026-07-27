@@ -80,28 +80,24 @@ mod tests {
     use rusqlite::Connection;
     use std::sync::Mutex;
 
+    /// The shipped migration, not a copy of it. A hand-written mirror of the
+    /// V13 DDL and seed would make the test below tautological: it would assert
+    /// the fixture's own literals back at itself and could never notice the
+    /// migration and this module drifting apart.
+    const V13_SQL: &str = include_str!("../../migrations/V13__aws_credentials_and_routing.sql");
+
     fn fresh_db_with_routing() -> Arc<Database> {
-        let path = std::env::temp_dir()
-            .join(format!("jarvis-test-{}.db", uuid::Uuid::new_v4()));
-        let conn = Connection::open(&path).expect("open temp db");
-        // Mirrors V13 workload_routing DDL -- update if that table's schema changes.
-        conn.execute_batch(
-            "CREATE TABLE IF NOT EXISTS workload_routing (
-                workload TEXT PRIMARY KEY CHECK (workload IN ('volume', 'tools', 'premium')),
-                model_id TEXT NOT NULL,
-                enabled INTEGER NOT NULL DEFAULT 1
-            );
-             INSERT OR IGNORE INTO workload_routing (workload, model_id) VALUES
-               ('volume',  'apac.amazon.nova-micro-v1:0'),
-               ('tools',   'global.anthropic.claude-haiku-4-5-20251001-v1:0'),
-               ('premium', 'global.anthropic.claude-sonnet-4-6');",
-        )
-        .expect("seed routing");
+        let conn = Connection::open_in_memory().expect("open in-memory db");
+        conn.execute_batch(V13_SQL).expect("apply V13");
         Arc::new(Database {
             conn: Mutex::new(conn),
         })
     }
 
+    /// Fails if anyone edits the model ids in
+    /// `migrations/V13__aws_credentials_and_routing.sql` without updating the
+    /// values recorded here -- a silent premium-tier swap is a cost and
+    /// capability regression that nothing else in the suite would catch.
     #[tokio::test]
     async fn defaults_match_v13_seed() {
         let db = fresh_db_with_routing();
