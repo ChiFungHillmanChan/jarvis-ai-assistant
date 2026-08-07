@@ -1,14 +1,16 @@
-JARVIS v0.1.1
+JARVIS v0.1.2
 
-Reliability and safety update.
+Security and reliability release.
 
-- Fixed a crash when reading or searching Chinese/Cantonese email, notes, and
-  saved memory. The app no longer freezes on non-Latin text.
-- Faster email search, with timeouts so it can't hang.
-- More reliable background jobs: pausing or deleting a scheduled task now takes
-  effect immediately, and stalled network calls no longer stick.
-- Security hardening: system commands are now allow-listed, and your Google
-  sign-in token is stored in the macOS Keychain instead of the local database.
-- Assistant memory no longer stores duplicate facts.
-- New: a persistent update button in the title bar so you can install future
-  updates in one click.
+- Stronger protection against malicious email content: the assistant can no
+  longer be tricked into sending data out. Mail is always drafted for your
+  review, never sent automatically, and the same restrictions now apply to
+  local models.
+- Your GitHub, Notion, and Obsidian tokens moved from the local database into
+  the macOS Keychain.
+- Smarter model routing: routine tasks now run on faster, cheaper models
+  automatically; complex work still gets the most capable model.
+- Fixed onboarding losing API keys, the app addressing you by the wrong name,
+  and archived email reappearing in lists.
+- Startup is more resilient in the first minute after launch.
+- Download and automatic updates now work end to end.
