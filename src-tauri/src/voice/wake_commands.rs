@@ -50,13 +50,19 @@ pub fn is_model_downloaded() -> bool {
     model_manager::is_downloaded()
 }
 
+/// `force` re-downloads over a model that is already on disk, which is the only
+/// in-app recovery from a corrupt file. It is optional so that a caller that
+/// passes no arguments keeps the original behaviour; absent means "do not force".
 #[tauri::command]
-pub async fn download_model(engine: State<'_, Arc<VoiceEngine>>) -> Result<bool, String> {
+pub async fn download_model(
+    engine: State<'_, Arc<VoiceEngine>>,
+    force: Option<bool>,
+) -> Result<bool, String> {
     let app_handle = engine
         .app_handle
         .clone()
         .ok_or("Tauri app handle not available")?;
-    model_manager::download(app_handle).await?;
+    model_manager::download(app_handle, force.unwrap_or(false)).await?;
     Ok(true)
 }
 

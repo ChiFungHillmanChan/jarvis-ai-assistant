@@ -4,6 +4,7 @@ import {
   updateSetting,
   googleConnect,
   googleStatus,
+  googleDisconnect,
   saveNotionToken,
   saveGitHubToken,
   saveObsidianKey,
@@ -33,25 +34,58 @@ import {
   enableOfflineVoice,
   checkCosyvoiceBinary,
   paymentsStartCheckout,
+  setApiKey,
+  getApiKeyStatus,
 } from "../lib/commands";
 import { listen } from "@tauri-apps/api/event";
+import { invoke } from "@tauri-apps/api/core";
 import type { VoiceSettings, WakeWordStatus, VoiceState, LocalEndpoint, LocalModel, ProviderChainEntry, EndpointHealth } from "../lib/types";
+import { GOOGLE_ALREADY_CONNECTED } from "../lib/types";
 import { useVoiceState } from "../hooks/useVoiceState";
 import LocalAiSetup from "../components/LocalAiSetup";
 import { Cpu, Key, Globe, Gem, Mic, Bot, Palette, CreditCard, GithubMark, NotionMark } from "../components/icons";
 
+const API_KEY_PROVIDERS = [
+  { id: "gemini", label: "Google Gemini", help: "Recommended -- fastest replies" },
+  { id: "claude", label: "Anthropic Claude", help: "Optional fallback" },
+  { id: "openai", label: "OpenAI", help: "Optional fallback" },
+] as const;
+
+// Must match gemini::MODEL_PRO / MODEL_FLASH in src-tauri/src/ai/gemini.rs. A
+// chain entry's model_id is sent to the API verbatim, so a stale id here is a
+// 404 on every request that reaches the entry.
+const GEMINI_MODEL_PRO = "gemini-3.1-pro-preview";
+const GEMINI_MODEL_FLASH = "gemini-3-flash-preview";
+
+// Deleting a saved key is its own IPC call: set_api_key refuses a blank value
+// unless `remove` is set, so an accidental SAVE on the (permanently blank) key
+// field can no longer destroy a working credential. src/lib/commands.ts has no
+// wrapper for the removal form yet, hence the direct invoke -- the arg names
+// are single lowercase words, so its camelCase normalisation is a no-op here.
+function clearApiKey(provider: string): Promise<void> {
+  return invoke("set_api_key", { provider, value: "", remove: true });
+}
+
 export default function Settings() {
   const [aiProvider, setAiProvider] = useState("gemini_primary");
+  const [autoBriefing, setAutoBriefing] = useState(false);
+  const [apiKeyDrafts, setApiKeyDrafts] = useState<Record<string, string>>({});
+  const [apiKeyStatus, setApiKeyStatus] = useState<Record<string, boolean>>({});
+  const [apiKeyError, setApiKeyError] = useState<string | null>(null);
   const [loaded, setLoaded] = useState(false);
   const [googleConnected, setGoogleConnected] = useState(false);
+  const [googleAccount, setGoogleAccount] = useState<string | null>(null);
   const [connecting, setConnecting] = useState(false);
+  const [disconnecting, setDisconnecting] = useState(false);
   const [googleError, setGoogleError] = useState<string | null>(null);
+  const [googleNotice, setGoogleNotice] = useState<string | null>(null);
   const [notionToken, setNotionToken] = useState("");
   const [githubToken, setGithubToken] = useState("");
   const [notionSaved, setNotionSaved] = useState(false);
   const [githubSaved, setGithubSaved] = useState(false);
   const [obsidianKey, setObsidianKey] = useState("");
   const [obsidianSaved, setObsidianSaved] = useState(false);
+  const [obsidianBaseUrl, setObsidianBaseUrl] = useState("");
   const [voiceSettings, setVoiceSettingsState] = useState<VoiceSettings | null>(null);
   const [ttsVoices, setTtsVoices] = useState<string[]>([]);
   const [wakeStatus, setWakeStatus] = useState<WakeWordStatus | null>(null);
@@ -72,6 +106,47 @@ export default function Settings() {
       .catch(() => {});
   }, []);
 
+  useEffect(() => {
+    getApiKeyStatus().then(setApiKeyStatus).catch(() => {});
+  }, []);
+
+  // Absent row throws, which just means "still on the plugin default".
+  useEffect(() => {
+    getPreference("obsidian_base_url")
+      .then((v) => { if (v) setObsidianBaseUrl(v); })
+      .catch(() => {});
+  }, []);
+
+  async function handleSaveApiKey(provider: string) {
+    setApiKeyError(null);
+    // The field is blank by design for a configured provider -- a saved key is
+    // never read back. Saving that blank must do nothing at all; removal is the
+    // separate CLEAR button below.
+    const draft = (apiKeyDrafts[provider] ?? "").trim();
+    if (!draft) return;
+    try {
+      await setApiKey(provider, draft);
+      setApiKeyDrafts((d) => ({ ...d, [provider]: "" }));
+      setApiKeyStatus(await getApiKeyStatus());
+    } catch (e) {
+      setApiKeyError(String(e));
+    }
+  }
+
+  async function handleClearApiKey(provider: string, label: string) {
+    setApiKeyError(null);
+    if (!window.confirm(`Remove the saved ${label} key from your Keychain? This cannot be undone.`)) {
+      return;
+    }
+    try {
+      await clearApiKey(provider);
+      setApiKeyDrafts((d) => ({ ...d, [provider]: "" }));
+      setApiKeyStatus(await getApiKeyStatus());
+    } catch (e) {
+      setApiKeyError(String(e));
+    }
+  }
+
   // AWS Bedrock credentials state
   const [awsAccessKey, setAwsAccessKey] = useState("");
   const [awsSecret, setAwsSecret] = useState("");
@@ -84,7 +159,11 @@ export default function Settings() {
   const [language, setLanguage] = useState("en");
   const [sttLanguage, setSttLanguage] = useState("auto");
   const [ttsContentProvider, setTtsContentProvider] = useState("sin-ji");
-  const [minimaxKey, setMinimaxKey] = useState("");
+  // The MiniMax key lives in the Keychain like every other provider key, so the
+  // form holds a draft and a configured flag -- never the saved secret.
+  const [minimaxKeyDraft, setMinimaxKeyDraft] = useState("");
+  const [minimaxConfigured, setMinimaxConfigured] = useState(false);
+  const [minimaxError, setMinimaxError] = useState<string | null>(null);
 
   // CosyVoice 2 offline voice
   const [offlineEnabled, setOfflineEnabled] = useState(false);
@@ -105,12 +184,17 @@ export default function Settings() {
   useEffect(() => {
     getSettings().then((s) => {
       setAiProvider(s.values["ai_provider"] || "gemini_primary");
+      // Same rule as the startup reader in lib.rs: an absent row means off.
+      setAutoBriefing(s.values["auto_briefing"] === "true");
+      // get_settings redacts credential rows into a boolean flag; the key
+      // itself is in the Keychain and never comes back over IPC.
+      setMinimaxConfigured(s.values["minimax_api_key_configured"] === "true");
       setLoaded(true);
     });
   }, []);
 
   useEffect(() => {
-    googleStatus().then(setGoogleConnected);
+    void refreshGoogle();
   }, []);
 
   useEffect(() => {
@@ -133,7 +217,12 @@ export default function Settings() {
   }, []);
 
   useEffect(() => {
-    getAwsCredentialsStatus().then(setAwsStatus).catch(console.error);
+    getAwsCredentialsStatus().then((status) => {
+      setAwsStatus(status);
+      // Without this the select keeps its hardcoded default and disagrees with
+      // the region the saved credentials actually use.
+      if (status.region) setAwsRegion(status.region);
+    }).catch(console.error);
   }, []);
 
   useEffect(() => {
@@ -142,7 +231,6 @@ export default function Settings() {
         setLanguage(await getPreference("language"));
         setSttLanguage(await getPreference("stt_language"));
         setTtsContentProvider(await getPreference("tts_content_provider"));
-        setMinimaxKey(await getPreference("minimax_api_key"));
         setOfflineEnabled((await getPreference("tts_offline_mode")) === "1");
         setHasCosyBinary(await checkCosyvoiceBinary());
       } catch (e) {
@@ -292,16 +380,75 @@ export default function Settings() {
     void updateSetting("ai_provider", value);
   }
 
-  async function handleGoogleConnect() {
+  // Connection state is always read back from the backend rather than assumed,
+  // so DISCONNECT and SWITCH ACCOUNT settle on the truth without a relaunch.
+  // The account label is the Google profile name persisted at OAuth
+  // (user_preferences.user_name); disconnect deletes that row, so an absent row
+  // correctly reads as "no account".
+  async function refreshGoogle() {
+    let connected = false;
+    try {
+      connected = await googleStatus();
+    } catch (e) {
+      setGoogleError(String(e));
+    }
+    setGoogleConnected(connected);
+    if (!connected) {
+      setGoogleAccount(null);
+      return;
+    }
+    try {
+      const name = (await getPreference("user_name")).trim();
+      setGoogleAccount(name || null);
+    } catch {
+      setGoogleAccount(null);
+    }
+  }
+
+  async function handleGoogleConnect(force: boolean) {
+    // Switching revokes the current grant and wipes the cached mail before the
+    // new flow starts, so it gets the same confirm-then-act treatment as CLEAR.
+    if (force && !window.confirm(
+      "Switch Google account? This revokes JARVIS's access to the account linked now and deletes the mail, events and briefings cached on this Mac."
+    )) {
+      return;
+    }
     setConnecting(true);
     setGoogleError(null);
+    setGoogleNotice(null);
     try {
-      await googleConnect();
-      setGoogleConnected(true);
+      const result = await googleConnect(force);
+      setGoogleNotice(
+        result === GOOGLE_ALREADY_CONNECTED
+          ? "That account is already linked. Use SWITCH ACCOUNT to change it."
+          : result
+      );
     } catch (e) {
       setGoogleError(String(e));
     } finally {
+      await refreshGoogle();
       setConnecting(false);
+    }
+  }
+
+  async function handleGoogleDisconnect() {
+    if (!window.confirm(
+      "Disconnect Google? This revokes JARVIS's access at Google and deletes the mail, events and briefings cached on this Mac. You can reconnect at any time."
+    )) {
+      return;
+    }
+    setDisconnecting(true);
+    setGoogleError(null);
+    setGoogleNotice(null);
+    try {
+      setGoogleNotice(await googleDisconnect());
+    } catch (e) {
+      setGoogleError(String(e));
+    } finally {
+      // A failed disconnect can still have cleared part of the session, so the
+      // displayed state comes from the backend either way.
+      await refreshGoogle();
+      setDisconnecting(false);
     }
   }
 
@@ -335,6 +482,37 @@ export default function Settings() {
     if (!obsidianKey.trim()) return;
     await saveObsidianKey(obsidianKey);
     setObsidianSaved(true);
+  }
+
+  async function handleSaveMinimaxKey() {
+    setMinimaxError(null);
+    // Same rule as the provider keys: a blank draft saves nothing and, above
+    // all, removes nothing.
+    const draft = minimaxKeyDraft.trim();
+    if (!draft) return;
+    try {
+      await setApiKey("minimax", draft);
+      setMinimaxKeyDraft("");
+      const s = await getSettings();
+      setMinimaxConfigured(s.values["minimax_api_key_configured"] === "true");
+    } catch (e) {
+      setMinimaxError(String(e));
+    }
+  }
+
+  async function handleClearMinimaxKey() {
+    setMinimaxError(null);
+    if (!window.confirm("Remove the saved MiniMax key from your Keychain? This cannot be undone.")) {
+      return;
+    }
+    try {
+      await clearApiKey("minimax");
+      setMinimaxKeyDraft("");
+      const s = await getSettings();
+      setMinimaxConfigured(s.values["minimax_api_key_configured"] === "true");
+    } catch (e) {
+      setMinimaxError(String(e));
+    }
   }
 
   async function handleWakeToggle(enabled: boolean) {
@@ -371,17 +549,29 @@ export default function Settings() {
     }
   }
 
-  async function handleDownloadModel() {
+  async function handleDownloadModel(force = false) {
     setWakeError(null);
     setWakeBusy(true);
     try {
-      await downloadModel();
+      await downloadModel(force);
       await refreshWakeStatus();
     } catch (e) {
       setWakeError(String(e));
     } finally {
       setWakeBusy(false);
     }
+  }
+
+  // Mirrors VoiceEngine::is_available in src-tauri/src/voice/mod.rs: a Gemini
+  // key (env or Keychain, which is what get_api_key_status reports) or the
+  // downloaded local Whisper model. Without one of them push-to-talk errors out.
+  function getVoiceAvailabilityLine(): string {
+    const cloud = Boolean(apiKeyStatus["gemini"]);
+    const local = Boolean(wakeStatus?.model_downloaded);
+    if (cloud && local) return "Speech-to-text ready -- cloud Gemini, with the local Whisper model as fallback.";
+    if (cloud) return "Speech-to-text ready -- cloud Gemini.";
+    if (local) return "Speech-to-text ready -- local Whisper model.";
+    return "Speech-to-text needs one of two things: a Gemini API key saved under API Keys, or the local Whisper model downloaded under Wake Word.";
   }
 
   function getWakeStatusLine(state: VoiceState): string {
@@ -419,6 +609,7 @@ export default function Settings() {
       ? voiceState.ModelDownloading
       : null;
   const wakeCanEnable = Boolean(wakeStatus?.model_downloaded || wakeStatus?.enabled);
+  const voiceInputReady = Boolean(apiKeyStatus["gemini"] || wakeStatus?.model_downloaded);
 
   const SECTIONS = [
     { id: "ai", label: "AI Providers", Icon: () => <Cpu size={17} /> },
@@ -543,8 +734,8 @@ export default function Settings() {
             )}
 
             <div style={{ display: "flex", gap: 6, marginTop: 8, flexWrap: "wrap" }}>
-              <button onClick={() => handleAddToChain("gemini", undefined, "gemini-3-pro-preview")} style={styles.saveBtn}>+ Gemini Pro</button>
-              <button onClick={() => handleAddToChain("gemini", undefined, "gemini-3-flash")} style={styles.saveBtn}>+ Gemini Flash</button>
+              <button onClick={() => handleAddToChain("gemini", undefined, GEMINI_MODEL_PRO)} style={styles.saveBtn}>+ Gemini Pro</button>
+              <button onClick={() => handleAddToChain("gemini", undefined, GEMINI_MODEL_FLASH)} style={styles.saveBtn}>+ Gemini Flash</button>
               <button onClick={() => handleAddToChain("bedrock", undefined, "anthropic.claude-sonnet-4-6")} style={styles.saveBtn}>+ Bedrock Claude</button>
             </div>
           </div>
@@ -564,12 +755,40 @@ export default function Settings() {
         {section === "keys" && (
           <div className="panel" style={styles.panel}>
             <div className="label" style={styles.sectionTitle}>API KEYS</div>
-            <div style={styles.hint}>Set in .env file at project root:</div>
-            <code style={styles.code}>GEMINI_API_KEY</code>
-            <code style={styles.code}>AWS_ACCESS_KEY_ID</code>
-            <code style={styles.code}>AWS_SECRET_ACCESS_KEY</code>
-            <code style={styles.code}>AWS_BEDROCK_REGION</code>
-            <code style={styles.code}>AWS_BEDROCK_MODEL_ID</code>
+            <div style={styles.hint}>Stored in your macOS Keychain, never sent anywhere but the provider.</div>
+            {API_KEY_PROVIDERS.map(({ id, label, help }) => (
+              <div key={id} style={{ marginBottom: 12 }}>
+                <div style={styles.hint}>
+                  {label}
+                  {apiKeyStatus[id] ? <span style={{ color: "rgba(16, 185, 129, 0.7)" }}> -- configured</span> : null}
+                </div>
+                <div style={{ display: "flex", gap: 8 }}>
+                  <input
+                    type="password"
+                    style={styles.tokenInput}
+                    placeholder={apiKeyStatus[id] ? "Replace saved key" : help}
+                    value={apiKeyDrafts[id] ?? ""}
+                    onChange={(e) => setApiKeyDrafts((d) => ({ ...d, [id]: e.target.value }))}
+                  />
+                  <button
+                    onClick={() => { void handleSaveApiKey(id); }}
+                    disabled={!(apiKeyDrafts[id] ?? "").trim()}
+                    style={styles.saveBtn}
+                  >SAVE</button>
+                  {apiKeyStatus[id] && (
+                    <button
+                      onClick={() => { void handleClearApiKey(id, label); }}
+                      style={{ ...styles.saveBtn, borderColor: "rgba(255, 100, 100, 0.3)", color: "rgba(255, 100, 100, 0.7)" }}
+                    >CLEAR</button>
+                  )}
+                </div>
+              </div>
+            ))}
+            <div style={{ ...styles.hint, marginTop: 4, marginBottom: 0 }}>
+              A saved key cannot be read back, so these fields stay empty -- typing a new one
+              replaces it. CLEAR is the only way to remove one.
+            </div>
+            {apiKeyError && <div style={styles.errorText}>{apiKeyError}</div>}
           </div>
         )}
 
@@ -578,15 +797,38 @@ export default function Settings() {
             <div className="label" style={styles.sectionTitle}>GOOGLE SERVICES</div>
             <div style={styles.hint}>Connect Gmail and Google Calendar</div>
             {googleConnected ? (
-              <div style={{ color: "rgba(16, 185, 129, 0.7)", fontSize: 12 }}>Connected</div>
-            ) : (
               <>
-                <button onClick={handleGoogleConnect} disabled={connecting} style={styles.actionBtn}>
-                  {connecting ? "CONNECTING..." : "CONNECT GOOGLE"}
-                </button>
-                {googleError && <div style={styles.errorText}>{googleError}</div>}
+                <div style={{ color: "rgba(16, 185, 129, 0.7)", fontSize: 12, marginBottom: 10 }}>
+                  {googleAccount ? `Connected as ${googleAccount}` : "Connected"}
+                </div>
+                <div style={{ display: "flex", gap: 8 }}>
+                  <button
+                    onClick={() => { void handleGoogleConnect(true); }}
+                    disabled={connecting || disconnecting}
+                    style={styles.actionBtn}
+                  >
+                    {connecting ? "OPENING..." : "SWITCH ACCOUNT"}
+                  </button>
+                  <button
+                    onClick={() => { void handleGoogleDisconnect(); }}
+                    disabled={connecting || disconnecting}
+                    style={{ ...styles.actionBtn, borderColor: "rgba(255, 100, 100, 0.3)", color: "rgba(255, 100, 100, 0.7)" }}
+                  >
+                    {disconnecting ? "DISCONNECTING..." : "DISCONNECT"}
+                  </button>
+                </div>
+                <div style={{ ...styles.hint, marginTop: 8, marginBottom: 0 }}>
+                  Disconnecting revokes JARVIS's access at Google and deletes the mail, events and
+                  briefings cached on this Mac.
+                </div>
               </>
+            ) : (
+              <button onClick={() => { void handleGoogleConnect(false); }} disabled={connecting} style={styles.actionBtn}>
+                {connecting ? "CONNECTING..." : "CONNECT GOOGLE"}
+              </button>
             )}
+            {googleNotice && <div style={{ ...styles.hint, marginTop: 10, marginBottom: 0 }}>{googleNotice}</div>}
+            {googleError && <div style={styles.errorText}>{googleError}</div>}
           </div>
         )}
 
@@ -622,6 +864,20 @@ export default function Settings() {
             </div>
             <div style={{ color: "rgba(0, 180, 255, 0.3)", fontSize: 9, marginTop: 6 }}>
               Install "Local REST API" plugin in Obsidian, enable it, copy the API key
+            </div>
+            <div style={{ marginTop: 12 }}>
+              <div style={{ color: "rgba(0, 180, 255, 0.5)", fontSize: 10, marginBottom: 4 }}>Endpoint</div>
+              <input
+                value={obsidianBaseUrl}
+                onChange={(e) => setObsidianBaseUrl(e.target.value)}
+                onBlur={() => { void setPreference("obsidian_base_url", obsidianBaseUrl.trim()); }}
+                placeholder="https://127.0.0.1:27124"
+                style={styles.tokenInput}
+              />
+              <div style={{ color: "rgba(0, 180, 255, 0.3)", fontSize: 9, marginTop: 6 }}>
+                Leave blank for the plugin default (HTTPS on 27124). Set this only if you changed
+                the port, or enabled the plugin's non-encrypted server on http://127.0.0.1:27123.
+              </div>
             </div>
           </div>
         )}
@@ -715,18 +971,35 @@ export default function Settings() {
             </div>
 
             <div style={{ marginTop: 12 }}>
-              <div style={{ color: "rgba(0, 180, 255, 0.5)", fontSize: 10, marginBottom: 4 }}>MiniMax API key (for cloud Cantonese voice)</div>
-              <input
-                type="password"
-                value={minimaxKey}
-                style={styles.tokenInput}
-                onChange={async (e) => {
-                  const v = e.target.value;
-                  setMinimaxKey(v);
-                  await setPreference("minimax_api_key", v);
-                }}
-                placeholder="Required for tts_content_provider = minimax"
-              />
+              <div style={{ color: "rgba(0, 180, 255, 0.5)", fontSize: 10, marginBottom: 4 }}>
+                MiniMax API key (for cloud Cantonese voice)
+                {minimaxConfigured ? <span style={{ color: "rgba(16, 185, 129, 0.7)" }}> -- configured</span> : null}
+              </div>
+              <div style={{ display: "flex", gap: 8 }}>
+                <input
+                  type="password"
+                  value={minimaxKeyDraft}
+                  style={styles.tokenInput}
+                  onChange={(e) => setMinimaxKeyDraft(e.target.value)}
+                  placeholder={minimaxConfigured ? "Replace saved key" : "Required for tts_content_provider = minimax"}
+                />
+                <button
+                  onClick={() => { void handleSaveMinimaxKey(); }}
+                  disabled={!minimaxKeyDraft.trim()}
+                  style={styles.saveBtn}
+                >SAVE</button>
+                {minimaxConfigured && (
+                  <button
+                    onClick={() => { void handleClearMinimaxKey(); }}
+                    style={{ ...styles.saveBtn, borderColor: "rgba(255, 100, 100, 0.3)", color: "rgba(255, 100, 100, 0.7)" }}
+                  >CLEAR</button>
+                )}
+              </div>
+              <div style={{ ...styles.hint, marginTop: 4 }}>
+                Stored in your macOS Keychain. A saved key cannot be read back, so this field
+                stays empty -- entering a new one replaces it, and CLEAR removes it.
+              </div>
+              {minimaxError && <div style={styles.errorText}>{minimaxError}</div>}
             </div>
 
             <div style={{ marginTop: 12 }}>
@@ -775,6 +1048,7 @@ export default function Settings() {
           <div className="panel" style={styles.panel}>
             <div className="label" style={styles.sectionTitle}>VOICE</div>
             <div style={styles.hint}>Cmd+Shift+J to start/stop voice input</div>
+            <div style={voiceInputReady ? styles.hint : styles.statusText}>{getVoiceAvailabilityLine()}</div>
             <label style={styles.option}>
               <input type="checkbox" checked={voiceSettings?.tts_enabled ?? true} onChange={(e) => { void setVoiceSetting("tts_enabled", String(e.target.checked)); setVoiceSettingsState((prev) => prev ? { ...prev, tts_enabled: e.target.checked } : prev); }} style={styles.radio} />
               <span style={styles.optionLabel}>Enable text-to-speech</span>
@@ -797,16 +1071,29 @@ export default function Settings() {
               <span style={styles.optionLabel}>Enable wake word</span>
             </label>
             <div style={styles.statusText}>{getWakeStatusLine(voiceState)}</div>
-            <button onClick={() => { void handleDownloadModel(); }} disabled={wakeBusy || modelDownloading !== null || wakeStatus?.model_downloaded} style={styles.actionBtn}>
-              {modelDownloading !== null ? "DOWNLOADING..." : wakeStatus?.model_downloaded ? "MODEL READY" : "DOWNLOAD MODEL"}
-            </button>
+            <div style={{ display: "flex", gap: 8 }}>
+              <button onClick={() => { void handleDownloadModel(false); }} disabled={wakeBusy || modelDownloading !== null || wakeStatus?.model_downloaded} style={styles.actionBtn}>
+                {modelDownloading !== null ? "DOWNLOADING..." : wakeStatus?.model_downloaded ? "MODEL READY" : "DOWNLOAD MODEL"}
+              </button>
+              {wakeStatus?.model_downloaded && (
+                <button onClick={() => { void handleDownloadModel(true); }} disabled={wakeBusy || modelDownloading !== null} style={styles.actionBtn}>
+                  RE-DOWNLOAD MODEL
+                </button>
+              )}
+            </div>
             {modelDownloading !== null && (
               <div style={styles.progressShell}>
                 <div style={{ ...styles.progressFill, width: `${modelDownloading}%` }} />
               </div>
             )}
+            {wakeStatus?.model_downloaded && modelDownloading === null && (
+              <div style={{ ...styles.hint, marginTop: 8 }}>
+                Model file: ~/Library/Application Support/jarvis/models/ggml-base.bin. If transcription keeps
+                failing to load the model, that file is damaged: RE-DOWNLOAD MODEL replaces it in place.
+              </div>
+            )}
             <div style={styles.privacyText}>
-              Wake-word audio is processed locally for detection. After activation, full commands use cloud speech-to-text first when GEMINI_API_KEY is configured, then fall back to local Whisper.
+              Wake-word audio is processed locally for detection. After activation, full commands use cloud speech-to-text first when a Gemini API key is saved under API Keys, then fall back to local Whisper.
             </div>
             {wakeError && <div style={styles.errorText}>{wakeError}</div>}
           </div>
@@ -816,7 +1103,7 @@ export default function Settings() {
           <div className="panel" style={styles.panel}>
             <div className="label" style={styles.sectionTitle}>ASSISTANT</div>
             <label style={styles.option}>
-              <input type="checkbox" defaultChecked={true} onChange={(e) => void updateSetting("auto_briefing", String(e.target.checked))} style={styles.radio} />
+              <input type="checkbox" checked={autoBriefing} onChange={(e) => { setAutoBriefing(e.target.checked); void updateSetting("auto_briefing", String(e.target.checked)); }} style={styles.radio} />
               <span style={styles.optionLabel}>Speak morning briefing on startup (once per day)</span>
             </label>
           </div>

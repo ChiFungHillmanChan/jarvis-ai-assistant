@@ -9,6 +9,22 @@ pub struct AwsCredsStatus {
     pub region: Option<String>,
 }
 
+/// Bedrock cross-region inference profile ids are prefixed with the geography
+/// they run in (`apac.`, `us.`, `eu.`), and a profile from one geography is not
+/// valid against another geography's endpoint. Storing a hardcoded "apac" while
+/// the user picks us-east-1 in Settings records a combination that cannot work.
+/// Unrecognised regions keep "apac", which is the column default in V13 and the
+/// deployment this app targets.
+fn inference_profile_for_region(region: &str) -> &'static str {
+    if region.starts_with("us-") {
+        "us"
+    } else if region.starts_with("eu-") {
+        "eu"
+    } else {
+        "apac"
+    }
+}
+
 #[tauri::command]
 pub async fn set_aws_credentials(
     access_key_id: String,
@@ -16,11 +32,12 @@ pub async fn set_aws_credentials(
     region: String,
     db: State<'_, Arc<Database>>,
 ) -> Result<(), String> {
+    let inference_profile = inference_profile_for_region(&region).to_string();
     let creds = AwsCredentials {
         access_key_id,
         secret_access_key,
         region,
-        inference_profile: "apac".to_string(),
+        inference_profile,
     };
     AwsCredsRepo::new(db.inner().clone()).save(&creds).await
 }
@@ -47,4 +64,25 @@ pub async fn clear_aws_credentials(
     db: State<'_, Arc<Database>>,
 ) -> Result<(), String> {
     AwsCredsRepo::new(db.inner().clone()).clear().await
+}
+
+#[cfg(test)]
+mod tests {
+    use super::inference_profile_for_region;
+
+    /// Every region the Settings dropdown offers must store the profile that
+    /// matches it, not a fixed "apac".
+    #[test]
+    fn profile_follows_the_selected_region() {
+        assert_eq!(inference_profile_for_region("ap-southeast-1"), "apac");
+        assert_eq!(inference_profile_for_region("ap-northeast-1"), "apac");
+        assert_eq!(inference_profile_for_region("us-east-1"), "us");
+        assert_eq!(inference_profile_for_region("eu-west-1"), "eu");
+    }
+
+    #[test]
+    fn unknown_regions_keep_the_schema_default() {
+        assert_eq!(inference_profile_for_region("sa-east-1"), "apac");
+        assert_eq!(inference_profile_for_region(""), "apac");
+    }
 }

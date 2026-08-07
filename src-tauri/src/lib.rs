@@ -4,6 +4,7 @@ pub mod aws;
 pub mod auth;
 pub mod commands;
 pub mod db;
+pub mod integration_keys;
 pub mod integrations;
 pub mod payments;
 pub mod scheduler;
@@ -37,16 +38,40 @@ pub fn run() {
         .plugin(tauri_plugin_process::init())
         .plugin(tauri_plugin_global_shortcut::Builder::new().build())
         .setup(|app| {
-            let db = Database::new().expect("Failed to initialize database");
-            let gemini_key = std::env::var("GEMINI_API_KEY").ok();
+            // A failure here is total -- no database, no app -- and in a
+            // packaged .app the panic message goes to a stderr nobody reads, so
+            // JARVIS just fails to launch with no window and no explanation.
+            // Name the file and the error before giving up.
+            let db = match Database::new() {
+                Ok(db) => db,
+                Err(e) => {
+                    let db_path = dirs::data_dir()
+                        .map(|d| d.join("jarvis").join("jarvis.db").display().to_string())
+                        .unwrap_or_else(|| "~/Library/Application Support/jarvis/jarvis.db".to_string());
+                    let message = format!(
+                        "JARVIS cannot start: its database could not be opened.\n\n{}\n\nDatabase file: {}\n\nIf that file is damaged, move it aside and launch JARVIS again to start with an empty database.",
+                        e, db_path
+                    );
+                    log::error!("{}", message);
+                    show_fatal_error(&message);
+                    return Err(e);
+                }
+            };
+            // Older builds wrote the GitHub, Notion, Obsidian and MiniMax
+            // credentials into user_preferences in plaintext. Move anything
+            // still sitting there into the Keychain before the first read.
+            // Best effort: an unavailable Keychain must not block startup.
+            integration_keys::migrate_plaintext_to_keychain(&db);
+
             let ai_provider = {
                 let conn = db.conn.lock().unwrap();
                 conn.query_row("SELECT value FROM user_preferences WHERE key = 'ai_provider'", [], |row| row.get::<_, String>(0))
                     .unwrap_or_else(|_| "gemini_primary".to_string())
             };
             log::info!("AI provider: {}", ai_provider);
-            let mut router = AiRouter::new(gemini_key, &ai_provider);
+            let mut router = AiRouter::new(&ai_provider);
             router.load_from_db(&db);
+            router.load_keys_from_db(&db);
             log::info!("Provider chain: {} entries, {} local endpoints",
                 router.provider_chain().len(), router.local_endpoints().len());
 
@@ -72,14 +97,22 @@ pub fn run() {
                 });
             }
 
+            // The scheduler handle is published into Tauri state so cron
+            // commands can register and unregister jobs on the running
+            // scheduler. Without it a job created in the dashboard never fired
+            // until the next launch.
+            let scheduler_handle = std::sync::Arc::new(scheduler::SchedulerHandle::new());
             let db_for_scheduler = std::sync::Arc::clone(&db_arc);
             let auth_for_scheduler = std::sync::Arc::clone(&auth_arc);
+            let handle_for_scheduler = std::sync::Arc::clone(&scheduler_handle);
             tauri::async_runtime::spawn(async move {
                 match scheduler::Scheduler::new(db_for_scheduler, auth_for_scheduler).await {
                     Ok(sched) => {
+                        let sched = std::sync::Arc::new(sched);
                         if let Err(e) = sched.start().await {
                             log::error!("Scheduler start failed: {}", e);
                         }
+                        handle_for_scheduler.set(sched);
                     }
                     Err(e) => log::error!("Scheduler init failed: {}", e),
                 }
@@ -136,16 +169,23 @@ pub fn run() {
             // Auto-briefing on startup (only if enabled)
             let db_brief = std::sync::Arc::clone(&db_arc);
             let auth_brief = std::sync::Arc::clone(&auth_arc);
+            let voice_engine_brief = std::sync::Arc::clone(&voice_engine);
+            // Same provider the managed router was built from. This used to be
+            // the literal "gemini_primary", which quietly ignored the provider
+            // the user picked in Settings.
+            let provider_brief = ai_provider.clone();
             let app_handle_brief = app.handle().clone();
             tauri::async_runtime::spawn(async move {
                 tokio::time::sleep(std::time::Duration::from_secs(3)).await;
-                // Check if auto-briefing is enabled
+                // Check if auto-briefing is enabled. Defaults to off, matching
+                // the '0' seed in V15 -- an app that starts talking out loud
+                // three seconds after first launch is not a good introduction.
                 let enabled = {
                     let conn = db_brief.conn.lock().unwrap();
                     conn.query_row(
                         "SELECT value FROM user_preferences WHERE key = 'auto_briefing'",
                         [], |row| row.get::<_, String>(0)
-                    ).unwrap_or_else(|_| "true".to_string()) == "true"
+                    ).unwrap_or_else(|_| "false".to_string()) == "true"
                 };
                 if !enabled {
                     log::info!("Auto-briefing disabled");
@@ -164,10 +204,9 @@ pub fn run() {
                     return;
                 }
 
-                let router = crate::ai::AiRouter::new(
-                    std::env::var("GEMINI_API_KEY").ok(),
-                    "gemini_primary",
-                );
+                let mut router = crate::ai::AiRouter::new(&provider_brief);
+                router.load_from_db(&db_brief);
+                router.load_keys_from_db(&db_brief);
                 match crate::assistant::briefing::generate_briefing(&db_brief, &router, &auth_brief, &app_handle_brief).await {
                     Ok(result) => {
                         log::info!("Morning briefing: {}", result.briefing);
@@ -187,7 +226,18 @@ pub fn run() {
                                 rusqlite::params![result.briefing],
                             );
                         }
-                        let tts = crate::voice::tts::TextToSpeech::from_db(&db_brief);
+                        // Share VoiceEngine's TextToSpeech, and therefore its
+                        // cancel flag, rather than building a private one: the
+                        // briefing is the longest utterance the app ever
+                        // speaks, and a private flag is one nothing in the UI
+                        // can reach, so it was uninterruptible.
+                        let tts = match voice_engine_brief.tts.lock() {
+                            Ok(guard) => guard.clone(),
+                            Err(e) => {
+                                log::warn!("Briefing TTS unavailable: {}", e);
+                                return;
+                            }
+                        };
                         let speech = format!("{}. {}", result.greeting, result.briefing);
                         if let Err(e) = tts.speak(&speech).await {
                             log::warn!("Briefing TTS failed: {}", e);
@@ -214,7 +264,12 @@ pub fn run() {
             app.manage(voice_engine);
             app.manage(std::sync::Arc::clone(&wake_service));
             app.manage(commands::model_pull::ModelPullState::new());
-            tray::create_tray(app).expect("Failed to create system tray");
+            app.manage(std::sync::Arc::clone(&scheduler_handle));
+            // A tray that fails to build is a missing menu bar icon, not a
+            // reason to abort startup with an invisible panic.
+            if let Err(e) = tray::create_tray(app) {
+                log::error!("System tray unavailable: {}", e);
+            }
 
             if wake_word_enabled {
                 tauri::async_runtime::spawn(async move {
@@ -251,7 +306,7 @@ pub fn run() {
                 use tauri_plugin_global_shortcut::{GlobalShortcutExt, Shortcut, Code, Modifiers};
                 let shortcut = Shortcut::new(Some(Modifiers::SUPER | Modifiers::SHIFT), Code::KeyW);
                 let app_handle = app.handle().clone();
-                app.global_shortcut().on_shortcut(shortcut, move |_app, _shortcut, event| {
+                let registered = app.global_shortcut().on_shortcut(shortcut, move |_app, _shortcut, event| {
                     if event.state == tauri_plugin_global_shortcut::ShortcutState::Pressed {
                         if !wallpaper::is_active() {
                             return;
@@ -266,8 +321,15 @@ pub fn run() {
                             }
                         }
                     }
-                }).map_err(|e| format!("Failed to register global shortcut: {}", e))?;
-                log::info!("Global shortcut Cmd+Shift+W registered for wallpaper interaction");
+                });
+                // A conflict here used to abort setup() entirely, so JARVIS
+                // silently refused to launch on any Mac where another app
+                // already owned Cmd+Shift+W. The shortcut only toggles an
+                // optional wallpaper mode -- never worth failing startup.
+                match registered {
+                    Ok(()) => log::info!("Global shortcut Cmd+Shift+W registered for wallpaper interaction"),
+                    Err(e) => log::warn!("Cmd+Shift+W unavailable (another app owns it): {}", e),
+                }
             }
 
             log::info!("JARVIS started successfully");
@@ -294,6 +356,8 @@ pub fn run() {
             commands::settings::update_setting,
             commands::settings::get_user_preference,
             commands::settings::set_user_preference,
+            commands::settings::set_api_key,
+            commands::settings::get_api_key_status,
             commands::chat::send_message,
             commands::chat::get_conversations,
             commands::chat::clear_conversations,
@@ -320,6 +384,7 @@ pub fn run() {
             commands::cron::get_upcoming_runs,
             commands::google_auth::google_connect,
             commands::google_auth::google_status,
+            commands::google_auth::google_disconnect,
             commands::notion::get_notion_pages,
             commands::notion::sync_notion,
             commands::notion::save_notion_token,
@@ -393,4 +458,45 @@ pub fn run() {
         ])
         .run(tauri::generate_context!())
         .expect("error while running JARVIS");
+}
+
+/// Escape a message for use inside an AppleScript string literal. A literal
+/// cannot span lines, so newlines become the `\n` escape rather than real ones.
+fn applescript_escape(message: &str) -> String {
+    message
+        .replace('\\', "\\\\")
+        .replace('"', "\\\"")
+        .replace('\n', "\\n")
+}
+
+/// Show a blocking native alert for a failure that happens before any window
+/// exists. Nothing else on that path is visible to a user running a packaged
+/// .app, where stderr goes nowhere they will ever look.
+fn show_fatal_error(message: &str) {
+    let script = format!(
+        "display dialog \"{}\" with title \"JARVIS\" buttons {{\"Quit\"}} default button 1 with icon stop",
+        applescript_escape(message)
+    );
+    if let Err(e) = std::process::Command::new("osascript")
+        .arg("-e")
+        .arg(&script)
+        .status()
+    {
+        log::error!("Could not display the fatal error dialog: {}", e);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The fatal-error dialog is the only thing a user sees when the database
+    /// will not open. A quote or a newline in the sqlite error message must not
+    /// break the script and take the message down with it.
+    #[test]
+    fn fatal_error_messages_survive_applescript_quoting() {
+        let escaped = applescript_escape("file is not a \"database\"\nC:\\path");
+        assert_eq!(escaped, "file is not a \\\"database\\\"\\nC:\\\\path");
+        assert!(!escaped.contains('\n'), "a literal newline would break the script");
+    }
 }

@@ -1,5 +1,6 @@
 import { useEffect, useRef, useCallback, memo } from "react";
 import { invoke } from "@tauri-apps/api/core";
+import { getGitHubItems } from "../../lib/commands";
 
 /**
  * JARVIS Interactive Data Sphere
@@ -172,7 +173,7 @@ export default memo(function JarvisScene({ activityLevel = "idle", assistantPhas
         invoke<{ id: number; title: string; deadline: string | null; status: string; priority: number }[]>("get_tasks"),
         invoke<{ id: number; subject: string | null; sender: string }[]>("get_emails", { limit: 10 }),
         invoke<{ id: number; summary: string; start_time: string }[]>("get_todays_events"),
-        invoke<{ id: number; title: string; repo: string; item_type: string }[]>("get_github_items", { item_type: null }),
+        getGitHubItems(),
         invoke<{ id: number; name: string; status: string; last_run: string | null }[]>("get_cron_jobs"),
       ]);
 

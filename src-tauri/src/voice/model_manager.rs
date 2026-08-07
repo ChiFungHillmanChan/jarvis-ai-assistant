@@ -13,13 +13,38 @@ pub fn model_path() -> PathBuf {
     data_dir.join("jarvis").join("models").join("ggml-base.bin")
 }
 
+/// A floor for `ggml-base.bin`, which is roughly 148 MB. This is a floor and
+/// not a checksum -- a file this large can still be the wrong bytes -- but it
+/// stops a zero-byte or grossly truncated leftover from being reported as a
+/// usable model and then failing to load forever.
+const MIN_MODEL_BYTES: u64 = 100_000_000;
+
 pub fn is_downloaded() -> bool {
-    model_path().exists()
+    model_file_is_usable(std::fs::metadata(model_path()).ok().map(|m| m.len()))
 }
 
-pub async fn download(app_handle: JarvisAppHandle) -> Result<PathBuf, String> {
+/// `None` means the file is absent.
+fn model_file_is_usable(len: Option<u64>) -> bool {
+    matches!(len, Some(len) if len >= MIN_MODEL_BYTES)
+}
+
+/// `force` re-downloads over an existing file. It is the only way out when the
+/// model on disk is present but unusable, so it has to reach the UI.
+pub async fn download(app_handle: JarvisAppHandle, force: bool) -> Result<PathBuf, String> {
+    download_model(app_handle, force).await
+}
+
+/// A file that exists but is too short is not a download worth keeping, so the
+/// skip is on `is_downloaded`, not on mere existence. `force` bypasses the skip
+/// altogether -- a file that passes the length floor can still be the wrong
+/// bytes, and re-downloading is the only recovery.
+fn should_skip_download(force: bool, downloaded: bool) -> bool {
+    !force && downloaded
+}
+
+async fn download_model(app_handle: JarvisAppHandle, force: bool) -> Result<PathBuf, String> {
     let path = model_path();
-    if path.exists() {
+    if should_skip_download(force, is_downloaded()) {
         return Ok(path);
     }
 
@@ -68,6 +93,8 @@ pub async fn download(app_handle: JarvisAppHandle) -> Result<PathBuf, String> {
             }
         }
 
+        verify_download_size(downloaded_bytes, total_bytes)?;
+
         file.flush()
             .await
             .map_err(|e| format!("Failed to flush model file: {}", e))?;
@@ -84,6 +111,8 @@ pub async fn download(app_handle: JarvisAppHandle) -> Result<PathBuf, String> {
 
     match result {
         Ok(path) => {
+            // The cached whisper context, if any, points at the old file.
+            engine.invalidate_local_transcriber();
             engine.set_state_and_emit(match previous_state {
                 VoiceState::Disabled => VoiceState::Disabled,
                 _ => VoiceState::Idle,
@@ -94,5 +123,63 @@ pub async fn download(app_handle: JarvisAppHandle) -> Result<PathBuf, String> {
             engine.set_state_and_emit(VoiceState::Error(e.clone()));
             Err(e)
         }
+    }
+}
+
+/// Reject a truncated download before it is renamed into place.
+///
+/// A short file is renamed over the model path and then fails to load forever,
+/// with no in-app way to re-download it. This is a length check only -- there
+/// is no pinned checksum for the model yet, so a body that is the right length
+/// but the wrong content still passes.
+fn verify_download_size(downloaded: u64, expected: Option<u64>) -> Result<(), String> {
+    match expected {
+        Some(expected) if downloaded != expected => Err(format!(
+            "Model download incomplete: expected {} bytes, received {}",
+            expected, downloaded
+        )),
+        _ => Ok(()),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{
+        model_file_is_usable, should_skip_download, verify_download_size, MIN_MODEL_BYTES,
+    };
+
+    #[test]
+    fn force_re_downloads_a_model_that_is_already_on_disk() {
+        // Without force, a model that passes the length floor is left alone.
+        assert!(should_skip_download(false, true));
+        assert!(!should_skip_download(false, false));
+        // With force, an existing file is replaced -- this is the recovery path
+        // for a full-length but corrupt model.
+        assert!(!should_skip_download(true, true));
+        assert!(!should_skip_download(true, false));
+    }
+
+    #[test]
+    fn a_present_but_truncated_model_is_not_downloaded() {
+        assert!(!model_file_is_usable(None), "absent file");
+        assert!(!model_file_is_usable(Some(0)), "zero-byte leftover");
+        assert!(!model_file_is_usable(Some(4_096)), "truncated leftover");
+        assert!(!model_file_is_usable(Some(MIN_MODEL_BYTES - 1)));
+        assert!(model_file_is_usable(Some(147_951_465)), "full ggml-base.bin");
+    }
+
+    #[test]
+    fn truncated_download_is_rejected() {
+        assert!(verify_download_size(147_000_000, Some(147_951_465)).is_err());
+    }
+
+    #[test]
+    fn complete_download_is_accepted() {
+        assert!(verify_download_size(147_951_465, Some(147_951_465)).is_ok());
+    }
+
+    #[test]
+    fn unknown_content_length_cannot_be_checked() {
+        assert!(verify_download_size(147_951_465, None).is_ok());
     }
 }

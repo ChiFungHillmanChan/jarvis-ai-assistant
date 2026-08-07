@@ -7,6 +7,7 @@ import CommandBar from "./components/CommandBar";
 import Dashboard from "./pages/Dashboard";
 import OnboardingWizard from "./pages/OnboardingWizard";
 import UpdateButton from "./components/UpdateButton";
+import ErrorBoundary from "./components/ErrorBoundary";
 import { checkOnboardingStatus, stopSpeaking } from "./lib/commands";
 const Settings = lazy(() => import("./pages/Settings"));
 const CronDashboard = lazy(() => import("./pages/CronDashboard"));
@@ -363,9 +364,13 @@ export default function App() {
           <Sidebar activeView={activeView} onNavigate={setActiveView} onChatToggle={toggleChat} />
           <div style={styles.content}>
             <div style={styles.mainArea}>
-              <Suspense fallback={<div style={{ display: "flex", alignItems: "center", justifyContent: "center", height: "100%" }}><span className="system-text animate-glow">LOADING...</span></div>}>
-                {renderView()}
-              </Suspense>
+              {/* Keyed on the view so navigating away resets the boundary --
+                  without the key a crashed view latches the whole shell. */}
+              <ErrorBoundary key={activeView}>
+                <Suspense fallback={<div style={{ display: "flex", alignItems: "center", justifyContent: "center", height: "100%" }}><span className="system-text animate-glow">LOADING...</span></div>}>
+                  {renderView()}
+                </Suspense>
+              </ErrorBoundary>
             </div>
             <CommandBar onActivate={toggleChat} />
           </div>

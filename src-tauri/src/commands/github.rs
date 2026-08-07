@@ -45,28 +45,31 @@ pub fn get_github_items(db: State<Arc<Database>>, item_type: Option<String>) -> 
     Ok(items)
 }
 
+/// The sync result string. A sync where only the review-requested search failed
+/// still saved real data, so the items are reported -- but it is not a clean
+/// success, and the message has to say so rather than let a stale review queue
+/// pass for an empty one.
+fn sync_summary(count: usize, warning: Option<&str>) -> String {
+    match warning {
+        Some(w) => format!("Partial sync: {} items saved, but {}", count, w),
+        None => format!("Synced {} items", count),
+    }
+}
+
 #[tauri::command]
 pub async fn sync_github(db: State<'_, Arc<Database>>) -> Result<String, String> {
-    let token = {
-        let conn = db.conn.lock().map_err(|e| e.to_string())?;
-        conn.query_row("SELECT value FROM user_preferences WHERE key = 'github_token'", [], |row| row.get::<_, String>(0))
-            .map_err(|_| "GitHub token not configured".to_string())?
-    };
-    let items = github::fetch_assigned_items(&token).await?;
-    let count = items.len();
-    github::save_to_db(&db, &items)?;
-    Ok(format!("Synced {} items", count))
+    let token = crate::integration_keys::resolve("github_token")
+        .ok_or_else(|| "GitHub token not configured".to_string())?;
+    let fetched = github::fetch_assigned_items_detailed(&token).await?;
+    let count = fetched.items.len();
+    github::save_to_db(&db, &fetched.items)?;
+    Ok(sync_summary(count, fetched.warning.as_deref()))
 }
 
 #[tauri::command]
 pub fn save_github_token(db: State<Arc<Database>>, token: String) -> Result<(), String> {
-    let conn = db.conn.lock().map_err(|e| e.to_string())?;
-    conn.execute(
-        "INSERT INTO user_preferences (key, value, updated_at) VALUES ('github_token', ?1, datetime('now'))
-         ON CONFLICT(key) DO UPDATE SET value = ?1, updated_at = datetime('now')",
-        rusqlite::params![token],
-    ).map_err(|e| e.to_string())?;
-    Ok(())
+    // Keychain, not user_preferences -- the row keeps only a marker.
+    crate::integration_keys::store(&db, "github_token", &token)
 }
 
 #[tauri::command]
@@ -76,4 +79,28 @@ pub fn get_github_stats(db: State<Arc<Database>>) -> Result<GitHubStats, String>
     let assigned_issues: i64 = conn.query_row("SELECT COUNT(*) FROM github_items WHERE item_type = 'issue' AND state = 'open'", [], |r| r.get(0)).unwrap_or(0);
     let review_requested: i64 = conn.query_row("SELECT COUNT(*) FROM github_items WHERE item_type = 'pr_review'", [], |r| r.get(0)).unwrap_or(0);
     Ok(GitHubStats { open_prs, assigned_issues, review_requested })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_clean_sync_reports_only_the_count() {
+        assert_eq!(sync_summary(12, None), "Synced 12 items");
+    }
+
+    #[test]
+    fn a_half_failed_sync_is_never_reported_as_a_clean_one() {
+        // Keeping the 12 assigned issues is the point -- but the caller must be
+        // able to tell this apart from a sync where nothing failed.
+        let summary = sync_summary(
+            12,
+            Some("the PR review list was not updated: GitHub search is rate limited (403), retry after 60s"),
+        );
+        assert!(summary.contains("Partial sync"));
+        assert!(summary.contains("12 items saved"));
+        assert!(summary.contains("PR review list was not updated"));
+        assert_ne!(summary, sync_summary(12, None));
+    }
 }

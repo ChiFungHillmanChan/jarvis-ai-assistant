@@ -100,6 +100,7 @@ pub async fn send(
     app_handle: &tauri::AppHandle,
     tts_tx: Option<tokio::sync::mpsc::Sender<TtsCommand>>,
     workload: crate::ai::Workload,
+    ledger: &crate::ai::SideEffectLedger,
 ) -> Result<String, Box<dyn std::error::Error + Send + Sync>> {
     let client = Client::builder()
         .read_timeout(std::time::Duration::from_secs(60))
@@ -151,7 +152,7 @@ pub async fn send(
         }
 
         let mut stream = response.bytes_stream();
-        let mut buffer = String::new();
+        let mut buffer = super::SseByteBuffer::new();
         let mut text_parts: Vec<String> = Vec::new();
         let mut tool_map: HashMap<usize, (String, String, String)> = HashMap::new();
         let mut announced_tools: HashSet<usize> = HashSet::new();
@@ -167,13 +168,10 @@ pub async fn send(
                 }
             };
 
-            buffer.push_str(&String::from_utf8_lossy(&chunk));
+            buffer.extend(&chunk);
 
             // Process complete SSE events (separated by \n\n)
-            while let Some(pos) = buffer.find("\n\n") {
-                let event_block = buffer[..pos].to_string();
-                buffer = buffer[pos + 2..].to_string();
-
+            while let Some(event_block) = buffer.next_event() {
                 // Parse SSE lines
                 let mut event_type = String::new();
                 let mut data_str = String::new();
@@ -343,23 +341,26 @@ pub async fn send(
                 content: ClaudeContent::Blocks(assistant_blocks),
             });
 
-            // Execute tools -- deduplicate same-name calls (e.g. 4x open_url → run only the first)
+            // Execute tools -- deduplicate identical calls (e.g. 4x the same
+            // open_url), but let a fan-out with different arguments through.
             let mut result_blocks = Vec::new();
             let mut executed_tools: std::collections::HashSet<String> =
                 std::collections::HashSet::new();
             let mut narrated = false;
             for (id, name, input) in &tool_uses {
-                let is_duplicate = executed_tools.contains(name.as_str());
+                let args_str = serde_json::to_string(input).unwrap_or_default();
+                let call_key = crate::ai::tool_call_key(name, &args_str);
+                let is_duplicate = executed_tools.contains(&call_key);
                 if is_duplicate {
                     log::info!("JARVIS skipping duplicate tool call: {}", name);
                     result_blocks.push(ContentBlock::ToolResult {
                         tool_use_id: id.clone(),
-                        content: "Skipped: already executed this tool in this batch.".to_string(),
+                        content: "Skipped: already executed this tool with these arguments in this batch."
+                            .to_string(),
                     });
                     continue;
                 }
-                executed_tools.insert(name.clone());
-                let args_str = serde_json::to_string(input).unwrap_or_default();
+                executed_tools.insert(call_key);
                 log::info!("JARVIS tool call: {}({})", name, args_str);
                 let label = tools::tool_status_label(name);
                 let _ = app_handle.emit(
@@ -377,6 +378,7 @@ pub async fn send(
                         narrated = true;
                     }
                 }
+                ledger.note(name);
                 let result = tools::execute_tool(name, &args_str, db, google_auth).await;
                 log::info!("JARVIS tool result: {}", crate::util::truncate_bytes(&result, 200));
                 result_blocks.push(ContentBlock::ToolResult {

@@ -10,7 +10,7 @@ use tauri::{Emitter, State};
 pub async fn start_listening(engine: State<'_, Arc<VoiceEngine>>) -> Result<String, String> {
     if !engine.is_available() {
         let error =
-            "Voice not available. Configure GEMINI_API_KEY or download the local Whisper model."
+            "Voice not available. Add a Gemini API key in Settings or download the local Whisper model."
                 .to_string();
         engine.set_state_and_emit(VoiceState::Error(error.clone()));
         return Err(error);
@@ -74,11 +74,15 @@ pub async fn stop_listening(
         }),
     );
 
-    let samples = engine
-        .audio_router
-        .lock()
-        .map_err(|e| e.to_string())?
-        .stop_ptt();
+    let samples = {
+        let mut router = engine.audio_router.lock().map_err(|e| e.to_string())?;
+        let samples = router.stop_ptt();
+        // Release the device now. Every path below is either an early return or
+        // an AI turn -- none of them capture again -- and holding the stream
+        // open leaves the macOS recording indicator lit.
+        router.rest();
+        samples
+    };
 
     let duration_secs = samples.len() as f32 / 16000.0;
     let rms = if samples.is_empty() {
@@ -202,8 +206,9 @@ pub async fn stop_listening(
     {
         Ok(response) => response,
         Err(e) => {
-            // Always clean up on error -- unmute, reset state, signal frontend
-            let _ = engine.audio_router.lock().map(|r| r.unmute());
+            // Always clean up on error -- return the mic to rest, reset state,
+            // signal frontend
+            let _ = engine.audio_router.lock().map(|mut r| r.rest());
             let _ = app_handle.emit("chat-voice-active", json!({"active": false}));
             let _ = app_handle.emit("chat-state", json!({"state": "idle"}));
             engine.set_state_and_emit(VoiceState::Idle);
@@ -231,7 +236,7 @@ pub async fn stop_listening(
     streaming_tts.finish().await;
 
     // Clean up -- always restore audio and state
-    let _ = engine.audio_router.lock().map(|r| r.unmute());
+    let _ = engine.audio_router.lock().map(|mut r| r.rest());
     let _ = app_handle.emit("chat-voice-active", json!({"active": false}));
     let _ = app_handle.emit("chat-state", json!({"state": "idle"}));
     engine.set_state_and_emit(VoiceState::Idle);

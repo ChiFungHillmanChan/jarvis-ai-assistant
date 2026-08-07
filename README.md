@@ -19,14 +19,9 @@ Built with **Tauri v2** (Rust) + **React** + **TypeScript**. No Electron. No web
 
 ## The Problem
 
-Knowledge workers are drowning in tools. The data is clear:
-
-- **11.7 hours/week** spent on email alone (McKinsey)
-- **9.5 apps** used daily by the average knowledge worker (HBR 2024)
-- **23% of productive time** lost to context switching between siloed tools (Qatalog/Cornell 2022)
-- **Interrupted every 2 minutes** during core hours (Microsoft Work Trend 2025)
-
-For an indie developer billing HK$800/hr, that's **HK$1,600 of lost output every working day.**
+Knowledge workers run their day across a handful of tools that do not talk to
+each other. Reading an email, deciding what it means, and turning it into a
+calendar entry or a task is manual work repeated dozens of times a day.
 
 Existing AI tools are siloed: Notion AI stays in Notion, Copilot stays in code, Siri does not execute SaaS workflows. Nobody connects them.
 
@@ -47,7 +42,8 @@ JARVIS picks the right tools (Gmail, Notion, Calendar), chains the actions, and 
 | Target user | Indie devs & solo founders on macOS | Open-source devs | General consumers | Knowledge workers |
 | Cross-tool depth | 5+ native macOS integrations | DIY plugins | Limited connectors | Computer Use (beta) |
 | Setup | Voice-first, one-click install | Self-host manually | Browser-based | Manual prompts |
-| Privacy | **Local-first, cloud opt-in** | Self-host | Cloud-only | Cloud-only |
+| Data storage | **Local SQLite, no JARVIS server** | Self-host | Cloud | Cloud |
+| Inference | Cloud by default, local via Ollama opt-in | Self-host | Cloud | Cloud |
 | Pricing | Freemium -> HK$148/mo | Free / OSS | US$20/mo | US$20/mo |
 
 **Different layers of the stack.** Use OpenClaw for coding. Use JARVIS for everything else.
@@ -75,16 +71,23 @@ Mouse-drag rotation, click-to-zoom, idle auto-rotation. Voice activity modulates
 ### AI Chat with Tool Execution
 
 - **Cmd+K** opens floating chat panel
-- Dual-model: Claude (primary) + OpenAI fallback
+- Ordered provider chain with automatic fallback: Gemini (default), Claude, OpenAI, Amazon Bedrock, or a local Ollama endpoint
 - Streaming responses with real-time token display
-- **18 native tools** the AI can call: open apps, run commands, manage files, create tasks, search email, compose messages, query calendar, control system
+- **28 native tools** the AI can call: open apps and URLs, allowlisted read-only shell commands, find and open files, create tasks, search and read email, draft replies, archive, query and edit calendar, Notion, GitHub, Obsidian, and persistent memory
 - Conversation history persisted in local SQLite
+
+> **What the AI deliberately cannot do.** It has no access to arbitrary local files, the
+> clipboard, the screen, or your processes, and it cannot send email -- it writes Gmail drafts
+> for you to review. JARVIS reads email, which is attacker-controlled text; pairing that with
+> local-data access and an outbound channel would make a single crafted email an exfiltration
+> chain. See the tool surface section in `CLAUDE.md`.
 
 ### Voice I/O
 
 - **Cmd+Shift+J** for push-to-talk
-- Speech-to-text: OpenAI Whisper API (cloud) + local Whisper model (offline)
-- Text-to-speech: macOS `say` with configurable voice, rate, volume
+- Speech-to-text: Gemini (cloud) with a local whisper-rs model as offline fallback
+- Text-to-speech: `TtsRouter` picks by mode, language and offline preference (macOS `say`, MiniMax, CosyVoice)
+- The microphone stream opens on demand, never at launch
 - Visual indicator: cyan (listening), amber (processing), green (speaking)
 - Mic amplitude drives 3D sphere animations
 
@@ -103,7 +106,7 @@ Mouse-drag rotation, click-to-zoom, idle auto-rotation. Voice activity modulates
 - **Morning briefing** on launch using aggregated context
 - **Email learning** tracks archive patterns -- auto-suggests rules after 3 archives from same sender
 - **Context builder** gathers tasks, deadlines, unread counts, PRs into one AI snapshot
-- **Action parser** intercepts AI responses and executes commands
+- **Native tool calling** across every provider -- the model requests a tool, JARVIS executes it and feeds the result back
 
 ### Automation Engine
 
@@ -113,7 +116,13 @@ Mouse-drag rotation, click-to-zoom, idle auto-rotation. Voice activity modulates
 
 ### System Control
 
-The AI can execute directly on your Mac: open apps/URLs, run shell commands (with safety blocklist), search files, read/write clipboard, manage windows, control volume/brightness/dark mode, send notifications, take screenshots.
+The AI can open apps and URLs, find and open files, send notifications, and run a fixed
+allowlist of read-only informational commands (`ls`, `df`, `uptime`, `sw_vers` and similar).
+Commands are executed as argv, never through a shell, and any input containing shell
+metacharacters is refused.
+
+This is an allowlist, not a blocklist, and it is deliberately narrow. Tools that could read
+local data or push data outbound are not exposed to the model at all.
 
 ---
 
@@ -125,19 +134,27 @@ The AI can execute directly on your Mac: open apps/URLs, run shell commands (wit
 | **Backend** | Rust | Memory-safe, fast, async (tokio). All API calls, auth, scheduling, voice, system control. |
 | **Frontend** | React 18 + TypeScript + Vite | Minimal deps. No UI library. Just React hooks and custom CSS. |
 | **3D** | Canvas2D | Custom math for 3D projection. No Three.js needed. |
-| **Database** | SQLite (rusqlite + refinery) | Local-first. 11 tables, 6 migrations. All data on your machine. |
-| **AI (primary)** | Claude API | Streaming SSE, native tool calling, multi-step iterations. |
-| **AI (fallback)** | OpenAI API | Same 18 tools via function calling. Auto fallback. |
-| **Voice STT** | Whisper API + local whisper-rs | Cloud primary, offline fallback. |
-| **Voice TTS** | macOS `say` | Zero-dependency TTS. |
-| **Auth** | OAuth2 PKCE | Google sign-in. Tokens in SQLite, auto-refresh. |
+| **Database** | SQLite (rusqlite + refinery) | 20 tables, 17 migrations. All data on your machine. |
+| **AI (default)** | Gemini | Streaming, native tool calling, multi-step iterations. |
+| **AI (chain)** | Claude, OpenAI, Bedrock, local Ollama | Ordered chain with automatic fallback, configured in Settings. |
+| **Model routing** | `ai/routing.rs` + `ai/cost.rs` | Classifies each request to a workload tier and records real per-request cost into `inference_metrics`. |
+| **Voice STT** | Gemini + local whisper-rs | Cloud primary, offline fallback. |
+| **Voice TTS** | `TtsRouter` | macOS `say`, MiniMax, or CosyVoice by mode and language. |
+| **Secrets** | macOS Keychain | Provider API keys and OAuth refresh tokens. Never in SQLite, never in `.env` for shipped builds. |
+| **Auth** | OAuth2 PKCE | Google sign-in, auto-refresh. |
 | **Scheduling** | tokio-cron-scheduler | Background cron on tokio runtime, persisted across restarts. |
 
 ### Why These Choices
 
 **Tauri over Electron:** ~10MB native binary vs ~200MB Electron. Rust handles CPU-intensive work (audio, local inference, concurrent APIs) without blocking UI.
 
-**Local-first over cloud-first:** Privacy is the competitive moat. Emails, notes, code stay on-device. Cloud inference is opt-in only. This is why big players (Apple, Microsoft, Google) can't build JARVIS -- they need ecosystem lock-in.
+**Local storage, cloud inference (current state):** Conversations, tasks and
+synced context live in SQLite on the device and never reach a JARVIS server.
+Inference is a different matter and the distinction is worth stating plainly:
+the default provider chain is cloud Gemini (`src-tauri/src/lib.rs`), so message
+and email content is sent to Google's API. Local inference through Ollama is
+supported and opt-in via Settings, not the default. Do not describe JARVIS as
+"local-first inference" until the default chain resolves to a local endpoint.
 
 **Canvas2D over Three.js:** Simpler, no dependencies, performs well for this scale. One React component, one `<canvas>`.
 
@@ -155,8 +172,8 @@ The AI can execute directly on your Mac: open apps/URLs, run shell commands (wit
 |  |   React Frontend   |  |    Rust Backend      |  |
 |  |                    |  |                       |  |
 |  |  3D Data Sphere    |  |  AI Router            |  |
-|  |  Chat Panel        |  |    Claude + OpenAI    |  |
-|  |  Dashboard         |  |    18 callable tools  |  |
+|  |  Chat Panel        |  |    Provider chain     |  |
+|  |  Dashboard         |  |    28 callable tools  |  |
 |  |  Pages (7)         |  |                       |  |
 |  |  Voice Indicator   |  |  Integrations         |  |
 |  |                    |  |    Gmail, Calendar    |  |
@@ -164,19 +181,19 @@ The AI can execute directly on your Mac: open apps/URLs, run shell commands (wit
 |  |    useChat         |  |    Obsidian           |  |
 |  |    useVoiceState   |  |                       |  |
 |  |    useKeyboard     |  |  Voice Engine         |  |
-|  |                    |  |    Whisper STT        |  |
-|  +--------+-----------+  |    macOS TTS          |  |
+|  |                    |  |    Gemini/whisper STT |  |
+|  +--------+-----------+  |    TtsRouter          |  |
 |           |              |    Audio Capture       |  |
 |     Tauri invoke()       |                       |  |
 |           |              |  Scheduler             |  |
 |           +--------------+    7 cron jobs         |  |
 |                          |                       |  |
 |                          |  System Control        |  |
-|                          |    Apps, URLs, shell   |  |
-|                          |    Files, clipboard    |  |
-|                          |    Windows, volume     |  |
+|                          |    Apps, URLs, files   |  |
+|                          |    Allowlisted cmds    |  |
+|                          |    Notifications       |  |
 |                          |                       |  |
-|                          |  SQLite (11 tables)    |  |
+|                          |  SQLite (20 tables)    |  |
 |                          +---------------------+  |
 +--------------------------------------------------+
 ```
@@ -215,14 +232,9 @@ The AI can execute directly on your Mac: open apps/URLs, run shell commands (wit
 | **Pro** | HK$148/mo (~US$19) | All 5 integrations, unlimited voice, automation, wake word |
 | **Team** | HK$298/seat/mo (~US$39) | Pro + shared workspace, admin controls, RBAC, team digest |
 
-### Traction (v0.1.0 Beta)
-
-| Metric | Value |
-|--------|-------|
-| Beta testers | 12 (HK/GBA + international) |
-| Avg time saved/day | ~85 min per user |
-| WTP at HK$148/mo | 9 of 12 testers (75%) |
-| Codebase | 46+ Rust files, 41+ TypeScript files, 32 AI tools, 10 DB tables |
+> Pricing is not live. Stripe is in test mode and the app does not yet
+> enforce tier limits, so the table above describes the intended plans, not
+> what is currently sold.
 
 ### Programme Support
 
@@ -271,32 +283,40 @@ npm install
 
 ### Configure
 
-```bash
-cp .env.example .env
-```
+**If you installed the app:** paste your API key during onboarding, or in Settings -> API Keys.
+Keys are stored in your macOS Keychain and take effect immediately. You do not need a `.env`
+file, and you should not go looking for one -- a packaged `.app` has no project root.
 
-Add your API keys:
+**Minimum requirement:** one AI provider key. Gemini is the default and the cheapest starting
+point. Claude, OpenAI, Amazon Bedrock and a local Ollama endpoint can be added and reordered
+into a fallback chain in Settings.
+
+**If you are building from source,** a `.env` at the repo root is read at startup and takes
+precedence over the Keychain, which is convenient for development:
 
 ```env
-ANTHROPIC_API_KEY=sk-ant-...    # Claude API (primary AI)
-OPENAI_API_KEY=sk-...            # OpenAI (fallback AI + Whisper STT)
-GEMINI_API_KEY=...               # Gemini provider chain option
-AWS_ACCESS_KEY_ID=...            # Amazon Bedrock fallback provider
-AWS_SECRET_ACCESS_KEY=...
-AWS_BEDROCK_REGION=us-east-1
-AWS_BEDROCK_MODEL_ID=anthropic.claude-sonnet-4-6
-GOOGLE_CLIENT_ID=...             # Gmail + Calendar OAuth (optional)
-GOOGLE_CLIENT_SECRET=...         # Gmail + Calendar OAuth (optional)
+GEMINI_API_KEY=...               # default provider
+ANTHROPIC_API_KEY=sk-ant-...     # optional fallback
+OPENAI_API_KEY=sk-...            # optional fallback
+GOOGLE_CLIENT_ID=...             # Gmail + Calendar OAuth
+GOOGLE_CLIENT_SECRET=...         # Gmail + Calendar OAuth
 ```
 
-**Minimum requirement:** At least one AI provider configured in Settings. JARVIS supports local endpoints, Gemini, Claude, OpenAI, and Amazon Bedrock in a priority chain.
+`GOOGLE_CLIENT_ID` and `GOOGLE_CLIENT_SECRET` are compiled into release builds via
+`option_env!`, so they must be present in the environment when `tauri build` runs. AWS Bedrock
+credentials are entered in Settings and stored in the Keychain, not here.
 
 ### Google OAuth Setup
 
 1. [Google Cloud Console](https://console.cloud.google.com) -- create project, enable Gmail + Calendar APIs
 2. Configure OAuth consent, create Desktop app credentials
 3. Add your email as test user
-4. Put Client ID and Secret in `.env`
+4. Put Client ID and Secret in `.env` before building
+
+> **Distribution note.** JARVIS requests `gmail.modify`, a Google *restricted* scope. Until the
+> OAuth app completes verification and a CASA Tier 2 security assessment, it is capped at 100
+> new users for the lifetime of the project and users see an "unverified app" warning. Plan for
+> that lead time before any public launch.
 
 ### Run
 

@@ -19,11 +19,16 @@ pub struct EmailRule {
     pub rule_status: String,
 }
 
+/// Archived mail is excluded everywhere it is counted or listed, so archiving
+/// has a visible effect. Shared with the test below so the filter cannot drift.
+const EMAIL_LIST_QUERY: &str = "SELECT id, gmail_id, subject, sender, snippet, is_read, is_spam, received_at \
+     FROM emails WHERE is_archived = 0 ORDER BY received_at DESC LIMIT ?1";
+
 #[tauri::command]
 pub fn get_emails(db: State<Arc<Database>>, limit: Option<u32>) -> Result<Vec<EmailSummary>, String> {
     let limit = limit.unwrap_or(50);
     let conn = db.conn.lock().map_err(|e| e.to_string())?;
-    let mut stmt = conn.prepare("SELECT id, gmail_id, subject, sender, snippet, is_read, is_spam, received_at FROM emails ORDER BY received_at DESC LIMIT ?1").map_err(|e| e.to_string())?;
+    let mut stmt = conn.prepare(EMAIL_LIST_QUERY).map_err(|e| e.to_string())?;
     let emails = stmt.query_map(rusqlite::params![limit], |row| {
         Ok(EmailSummary { id: row.get(0)?, gmail_id: row.get(1)?, subject: row.get(2)?, sender: row.get(3)?, snippet: row.get(4)?, is_read: row.get::<_, i32>(5)? != 0, is_spam: row.get::<_, i32>(6)? != 0, received_at: row.get(7)? })
     }).map_err(|e| e.to_string())?.collect::<Result<Vec<_>, _>>().map_err(|e| e.to_string())?;
@@ -33,7 +38,19 @@ pub fn get_emails(db: State<Arc<Database>>, limit: Option<u32>) -> Result<Vec<Em
 #[tauri::command]
 pub async fn sync_emails(db: State<'_, Arc<Database>>, auth: State<'_, Arc<GoogleAuth>>) -> Result<String, String> {
     let token = auth.ensure_access_token().await?;
-    let messages = gmail::fetch_inbox(&token, 20).await?;
+    let messages = match gmail::fetch_inbox(&token, 20).await {
+        Ok(msgs) => msgs,
+        // Backstop, matching the scheduler's sync job: `ensure_access_token`
+        // now refreshes before the token expires, but a token Google
+        // invalidates early still has to be recovered rather than surfaced to
+        // the user as a bare "UNAUTHORIZED".
+        Err(ref e) if e == "UNAUTHORIZED" => {
+            auth.refresh_access_token().await?;
+            let refreshed = auth.get_access_token().ok_or("No token after refresh")?;
+            gmail::fetch_inbox(&refreshed, 20).await?
+        }
+        Err(e) => return Err(e),
+    };
     let count = messages.len();
     gmail::save_to_db(&db, &messages)?;
     Ok(format!("Synced {} emails", count))
@@ -73,6 +90,17 @@ pub async fn archive_email(
     let token = auth.ensure_access_token().await?;
     gmail::archive_message(&token, &gmail_id).await?;
 
+    // Mirror the archive locally, otherwise the message stays on screen and
+    // the wedge's primary action looks like it did nothing.
+    {
+        let conn = db.conn.lock().map_err(|e| e.to_string())?;
+        conn.execute(
+            "UPDATE emails SET is_archived = 1 WHERE gmail_id = ?1",
+            rusqlite::params![gmail_id],
+        )
+        .map_err(|e| e.to_string())?;
+    }
+
     // Track sender for rule learning
     let sender = {
         let conn = db.conn.lock().map_err(|e| e.to_string())?;
@@ -91,9 +119,9 @@ pub async fn archive_email(
 #[tauri::command]
 pub fn get_email_stats(db: State<Arc<Database>>) -> Result<EmailStats, String> {
     let conn = db.conn.lock().map_err(|e| e.to_string())?;
-    let unread: i64 = conn.query_row("SELECT COUNT(*) FROM emails WHERE is_read = 0", [], |r| r.get(0)).map_err(|e| e.to_string())?;
-    let total: i64 = conn.query_row("SELECT COUNT(*) FROM emails", [], |r| r.get(0)).map_err(|e| e.to_string())?;
-    let spam: i64 = conn.query_row("SELECT COUNT(*) FROM emails WHERE is_spam = 1", [], |r| r.get(0)).map_err(|e| e.to_string())?;
+    let unread: i64 = conn.query_row("SELECT COUNT(*) FROM emails WHERE is_read = 0 AND is_archived = 0", [], |r| r.get(0)).map_err(|e| e.to_string())?;
+    let total: i64 = conn.query_row("SELECT COUNT(*) FROM emails WHERE is_archived = 0", [], |r| r.get(0)).map_err(|e| e.to_string())?;
+    let spam: i64 = conn.query_row("SELECT COUNT(*) FROM emails WHERE is_spam = 1 AND is_archived = 0", [], |r| r.get(0)).map_err(|e| e.to_string())?;
     Ok(EmailStats { unread, total, spam })
 }
 
@@ -145,4 +173,42 @@ pub fn get_active_rules(db: State<Arc<Database>>) -> Result<Vec<EmailRule>, Stri
     }).map_err(|e| e.to_string())?.collect::<Result<Vec<_>, _>>().map_err(|e| e.to_string())?;
 
     Ok(rules)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use rusqlite::Connection;
+
+    /// The list query must exclude archived rows. Without this the wedge's
+    /// primary action -- archiving -- has no visible effect at all.
+    #[test]
+    fn archived_mail_leaves_the_list() {
+        let conn = Connection::open_in_memory().unwrap();
+        conn.execute_batch(
+            "CREATE TABLE emails (
+                 id INTEGER PRIMARY KEY AUTOINCREMENT,
+                 gmail_id TEXT UNIQUE NOT NULL,
+                 subject TEXT,
+                 sender TEXT NOT NULL,
+                 snippet TEXT,
+                 is_read INTEGER DEFAULT 0,
+                 is_spam INTEGER DEFAULT 0,
+                 received_at TEXT NOT NULL,
+                 is_archived INTEGER NOT NULL DEFAULT 0);
+             INSERT INTO emails (gmail_id, sender, received_at, is_archived)
+                 VALUES ('kept', 'a@b.c', '2026-07-26', 0),
+                        ('archived', 'a@b.c', '2026-07-26', 1);",
+        )
+        .unwrap();
+
+        let mut stmt = conn.prepare(EMAIL_LIST_QUERY).unwrap();
+        let ids: Vec<String> = stmt
+            .query_map(rusqlite::params![50], |r| r.get::<_, String>(1))
+            .unwrap()
+            .map(|r| r.unwrap())
+            .collect();
+
+        assert_eq!(ids, vec!["kept".to_string()], "archived mail must not be listed");
+    }
 }

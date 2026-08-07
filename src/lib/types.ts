@@ -167,6 +167,9 @@ export type AssistantPhase =
 export interface ChatTokenPayload {
   token: string;
   done: boolean;
+  // Set by the router when a provider failed mid-stream: everything streamed so far
+  // belongs to the failed provider and must be thrown away before the next one starts.
+  discard?: boolean;
 }
 
 export interface ChatStatusPayload {
@@ -325,3 +328,10 @@ export interface AwsCredsStatus {
   configured: boolean;
   region: string | null;
 }
+
+// google_connect and google_disconnect both return a plain status string. This
+// is the one value the UI has to recognise: google_connect returns it verbatim
+// when an account is already linked and the caller did not ask to switch, so it
+// means "nothing happened", not "connected". Must match the value of
+// ALREADY_CONNECTED in src-tauri/src/commands/google_auth.rs.
+export const GOOGLE_ALREADY_CONNECTED = "Already connected to Google";

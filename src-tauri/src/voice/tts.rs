@@ -1,9 +1,11 @@
 use serde_json::json;
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::Arc;
+use std::sync::{Arc, OnceLock};
 use tauri::Emitter;
+use tokio::io::AsyncWriteExt;
 use tokio::process::Command;
 use tokio::sync::mpsc;
+use tokio::sync::Mutex as AsyncMutex;
 
 // ---------------------------------------------------------------------------
 // Streaming TTS -- speaks sentences as AI tokens arrive
@@ -22,6 +24,146 @@ pub enum TtsCommand {
 enum DelimiterStrength {
     Hard,
     Soft,
+}
+
+/// Characters after a hard delimiter before a chunk is spoken.
+const HARD_MIN_CHARS: usize = 10;
+/// Characters after a soft delimiter before a chunk is spoken.
+const SOFT_MIN_CHARS: usize = 28;
+/// Characters after which a chunk is spoken with no delimiter at all.
+const FORCE_SPLIT_CHARS: usize = 90;
+
+/// Process-wide playback lock.
+///
+/// Push-to-talk, wake word and the daily briefing each build their own
+/// `TextToSpeech` and spawn `say` independently. Without this they talk over
+/// each other. It is a tokio mutex because it is held across the `.await` on
+/// the child process; acquire it only around playback, only ever after
+/// `utterance_lock` and never while holding a std mutex.
+pub fn playback_lock() -> &'static AsyncMutex<()> {
+    static LOCK: OnceLock<AsyncMutex<()>> = OnceLock::new();
+    LOCK.get_or_init(|| AsyncMutex::new(()))
+}
+
+/// Process-wide utterance lock.
+///
+/// `playback_lock` is taken per `say` child so a cancel can land between
+/// sentences. On its own that also means two live utterances *alternate*:
+/// tokio's mutex is FIFO-fair, so a second speaker waiting while sentence N
+/// plays gets the lock ahead of the first speaker's sentence N+1, and the user
+/// hears briefing / reply / briefing / reply. Two voices swapping sentences is
+/// worse than one waiting for the other.
+///
+/// So an utterance holds this for its whole length and a second speaker waits
+/// for the first to finish or be cancelled. Cancellation is unaffected: it is
+/// still checked between sentences and still kills the running child, so the
+/// wait is bounded by one sentence rather than by the whole utterance.
+///
+/// Lock order is always utterance_lock -> playback_lock. Nothing takes them the
+/// other way round, and no caller of the public methods holds either.
+fn utterance_lock() -> &'static AsyncMutex<()> {
+    static LOCK: OnceLock<AsyncMutex<()>> = OnceLock::new();
+    LOCK.get_or_init(|| AsyncMutex::new(()))
+}
+
+/// Incremental sentence segmenter for the streaming TTS consumer.
+///
+/// Handles ASCII punctuation (delimiter followed by a space) and CJK
+/// punctuation, which has no trailing space -- there the delimiter itself ends
+/// the chunk. Thresholds count characters, not bytes: a Han character is three
+/// bytes, so byte counts fire at a third of the intended length.
+struct SentenceBuffer {
+    buffer: String,
+    chars: usize,
+    pending: Option<DelimiterStrength>,
+}
+
+impl SentenceBuffer {
+    fn new() -> Self {
+        SentenceBuffer {
+            buffer: String::new(),
+            chars: 0,
+            pending: None,
+        }
+    }
+
+    /// Feed one character. Returns a chunk once a sentence boundary is reached.
+    fn push(&mut self, ch: char) -> Option<String> {
+        self.buffer.push(ch);
+        self.chars += 1;
+
+        let should_flush = match cjk_delimiter(ch) {
+            Some(DelimiterStrength::Hard) => self.chars >= HARD_MIN_CHARS,
+            Some(DelimiterStrength::Soft) => self.chars >= SOFT_MIN_CHARS,
+            None if ch == ' ' => match self.pending {
+                Some(DelimiterStrength::Hard) => self.chars >= HARD_MIN_CHARS,
+                Some(DelimiterStrength::Soft) => self.chars >= SOFT_MIN_CHARS,
+                None => false,
+            },
+            None => false,
+        };
+
+        if should_flush {
+            return self.take();
+        }
+
+        self.pending = match ch {
+            '.' | '!' | '?' | ':' => Some(DelimiterStrength::Hard),
+            ',' | ';' => Some(DelimiterStrength::Soft),
+            _ => None,
+        };
+
+        // Force-split earlier so the first spoken chunk starts faster.
+        if self.chars >= FORCE_SPLIT_CHARS {
+            return self.force_split();
+        }
+
+        None
+    }
+
+    /// Take everything buffered so far, if it is not blank.
+    fn take(&mut self) -> Option<String> {
+        let sentence = self.buffer.trim().to_string();
+        self.buffer.clear();
+        self.chars = 0;
+        self.pending = None;
+        if sentence.is_empty() {
+            None
+        } else {
+            Some(sentence)
+        }
+    }
+
+    fn force_split(&mut self) -> Option<String> {
+        let sentence = if let Some(last_space) = self.buffer.rfind(' ') {
+            let (s, remainder) = self.buffer.split_at(last_space);
+            let sentence = s.trim().to_string();
+            self.buffer = remainder.trim().to_string();
+            sentence
+        } else {
+            // Spaceless run (CJK): the whole buffer is one chunk.
+            let sentence = self.buffer.trim().to_string();
+            self.buffer.clear();
+            sentence
+        };
+        self.chars = self.buffer.chars().count();
+        self.pending = None;
+        if sentence.is_empty() {
+            None
+        } else {
+            Some(sentence)
+        }
+    }
+}
+
+/// Full-width and ideographic punctuation. Written Chinese puts no space after
+/// these, so they end a chunk on their own.
+fn cjk_delimiter(ch: char) -> Option<DelimiterStrength> {
+    match ch {
+        '\u{3002}' | '\u{FF01}' | '\u{FF1F}' => Some(DelimiterStrength::Hard),
+        '\u{FF0C}' | '\u{3001}' | '\u{FF1B}' => Some(DelimiterStrength::Soft),
+        _ => None,
+    }
 }
 
 /// Streaming TTS consumer that speaks sentences in real-time as tokens arrive.
@@ -63,9 +205,8 @@ async fn streaming_tts_consumer(
 
     tts.cancel_flag.store(false, Ordering::SeqCst);
 
-    let mut buffer = String::new();
+    let mut buffer = SentenceBuffer::new();
     let mut sentence_count: usize = 0;
-    let mut pending_delimiter: Option<DelimiterStrength> = None;
 
     loop {
         let cmd = match rx.recv().await {
@@ -83,68 +224,23 @@ async fn streaming_tts_consumer(
         match cmd {
             TtsCommand::TextChunk(text) => {
                 for ch in text.chars() {
-                    buffer.push(ch);
-
-                    let should_flush = match (pending_delimiter, ch) {
-                        (Some(DelimiterStrength::Hard), ' ') if buffer.len() >= 10 => true,
-                        (Some(DelimiterStrength::Soft), ' ') if buffer.len() >= 28 => true,
-                        _ => false,
-                    };
-
-                    if should_flush {
-                        let sentence = buffer.trim().to_string();
-                        if !sentence.is_empty() {
-                            if sentence_count == 0 {
-                                let _ = app_handle.emit("chat-state", json!({"state": "speaking"}));
-                            }
-                            let _ = tts.speak_sentence(&sentence, 1, &app_handle).await;
-                            sentence_count += 1;
+                    if let Some(sentence) = buffer.push(ch) {
+                        if sentence_count == 0 {
+                            let _ = app_handle.emit("chat-state", json!({"state": "speaking"}));
                         }
-                        buffer.clear();
-                        pending_delimiter = None;
-                        continue;
-                    }
-
-                    pending_delimiter = match ch {
-                        '.' | '!' | '?' | ':' => Some(DelimiterStrength::Hard),
-                        ',' | ';' => Some(DelimiterStrength::Soft),
-                        _ => None,
-                    };
-
-                    // Force-split earlier so the first spoken chunk starts faster.
-                    if buffer.len() >= 90 {
-                        let sentence = if let Some(last_space) = buffer.rfind(' ') {
-                            let (s, remainder) = buffer.split_at(last_space);
-                            let sentence = s.trim().to_string();
-                            buffer = remainder.trim().to_string();
-                            sentence
-                        } else {
-                            let sentence = buffer.trim().to_string();
-                            buffer.clear();
-                            sentence
-                        };
-                        if !sentence.is_empty() {
-                            if sentence_count == 0 {
-                                let _ = app_handle.emit("chat-state", json!({"state": "speaking"}));
-                            }
-                            let _ = tts.speak_sentence(&sentence, 1, &app_handle).await;
-                            sentence_count += 1;
-                        }
-                        pending_delimiter = None;
+                        let _ = tts.speak_sentence(&sentence, 1, &app_handle).await;
+                        sentence_count += 1;
                     }
                 }
             }
             TtsCommand::Narrate(text) => {
                 // Flush any buffered text FIRST so it's spoken before the narration
-                let pending = buffer.trim().to_string();
-                if !pending.is_empty() {
+                if let Some(pending) = buffer.take() {
                     if sentence_count == 0 {
                         let _ = app_handle.emit("chat-state", json!({"state": "speaking"}));
                     }
                     let _ = tts.speak_sentence(&pending, 1, &app_handle).await;
                     sentence_count += 1;
-                    buffer.clear();
-                    pending_delimiter = None;
                 }
                 // Then speak the narration (e.g. "Checking calendar...")
                 if !text.is_empty() {
@@ -157,8 +253,7 @@ async fn streaming_tts_consumer(
             }
             TtsCommand::Done => {
                 // Speak any remaining buffered text
-                let remaining = buffer.trim().to_string();
-                if !remaining.is_empty() {
+                if let Some(remaining) = buffer.take() {
                     if sentence_count == 0 {
                         let _ = app_handle.emit("chat-state", json!({"state": "speaking"}));
                     }
@@ -171,8 +266,7 @@ async fn streaming_tts_consumer(
     }
 
     // Channel closed without Done -- speak remaining buffer and clean up
-    let remaining = buffer.trim().to_string();
-    if !remaining.is_empty() {
+    if let Some(remaining) = buffer.take() {
         if sentence_count == 0 {
             let _ = app_handle.emit("chat-state", json!({"state": "speaking"}));
         }
@@ -236,21 +330,42 @@ impl TextToSpeech {
         self.cancel_flag.load(Ordering::SeqCst)
     }
 
+    /// Speak a whole utterance, one `say` per sentence.
+    ///
+    /// Split rather than handed to `say` in one piece because the daily
+    /// briefing is a single 30-60 s utterance: spoken as one child, a cancel
+    /// had nothing to take effect between and the briefing ran to the end
+    /// regardless. Per sentence, `cancel()` lands between sentences as well as
+    /// during them (`wait_with_cancel` kills the running child), so another
+    /// speaker queued behind this utterance waits at most one sentence past the
+    /// moment this one is cancelled.
     pub async fn speak(&self, text: &str) -> Result<(), String> {
         if !self.enabled || text.is_empty() {
             return Ok(());
         }
-        let status = Command::new("say")
-            .arg("-v")
-            .arg(&self.voice)
-            .arg("-r")
-            .arg(self.rate.to_string())
-            .arg(text)
-            .status()
-            .await
-            .map_err(|e| format!("TTS error: {}", e))?;
-        if !status.success() {
-            return Err("TTS command failed".to_string());
+        // A cancel belongs to the utterance that was playing when it was
+        // raised, not to this new one. Same convention as speak_queued.
+        self.cancel_flag.store(false, Ordering::SeqCst);
+        // Held for the whole utterance: the sentences of one briefing must not
+        // have another speaker's sentences threaded between them.
+        let _utterance = utterance_lock().lock().await;
+        for sentence in split_sentences(text) {
+            if self.is_cancelled() {
+                return Ok(());
+            }
+            let _playback = playback_lock().lock().await;
+            // Waiting for the lock can take as long as somebody else's
+            // sentence; the cancel may have arrived while we were queued.
+            if self.is_cancelled() {
+                return Ok(());
+            }
+            let status = spawn_say(&self.voice, self.rate, &sentence, &self.cancel_flag).await?;
+            if self.is_cancelled() {
+                return Ok(());
+            }
+            if !status.success() {
+                return Err("TTS command failed".to_string());
+            }
         }
         Ok(())
     }
@@ -266,6 +381,8 @@ impl TextToSpeech {
         self.cancel_flag.store(false, Ordering::SeqCst);
         let sentences = split_sentences(text);
         let total = sentences.len();
+        // One utterance, so it is not interleaved with somebody else's.
+        let _utterance = utterance_lock().lock().await;
         for (i, sentence) in sentences.iter().enumerate() {
             if self.cancel_flag.load(Ordering::SeqCst) {
                 let _ = app_handle.emit("chat-state", json!({"state": "idle"}));
@@ -275,7 +392,7 @@ impl TextToSpeech {
             if i == 0 {
                 let _ = app_handle.emit("chat-state", json!({"state": "speaking"}));
             }
-            self.speak_sentence(sentence, remaining, app_handle).await?;
+            self.speak_one(sentence, remaining, app_handle).await?;
             if remaining == 0 {
                 let _ = app_handle.emit("chat-state", json!({"state": "idle"}));
             }
@@ -283,7 +400,29 @@ impl TextToSpeech {
         Ok(())
     }
 
+    /// Speak one sentence as a complete utterance.
+    ///
+    /// The streaming consumer only ever holds one sentence at a time -- the
+    /// rest of the reply has not been generated yet -- so a sentence is the
+    /// whole utterance it can claim. Checking the cancel flag before queueing
+    /// matters: once a reply is cancelled its remaining sentences must not sit
+    /// waiting behind somebody else's utterance just to be discarded.
     pub async fn speak_sentence(
+        &self,
+        sentence: &str,
+        remaining: usize,
+        app_handle: &tauri::AppHandle,
+    ) -> Result<(), String> {
+        if !self.enabled || sentence.is_empty() || self.cancel_flag.load(Ordering::SeqCst) {
+            return Ok(());
+        }
+        let _utterance = utterance_lock().lock().await;
+        self.speak_one(sentence, remaining, app_handle).await
+    }
+
+    /// Body of `speak_sentence`, for callers that already hold the utterance
+    /// lock for a run of sentences.
+    async fn speak_one(
         &self,
         sentence: &str,
         remaining: usize,
@@ -303,11 +442,17 @@ impl TextToSpeech {
                 "sentence": &clean, "remaining": remaining
             }),
         );
+        // Serialise playback so two `say` children never speak at once.
+        let _playback = playback_lock().lock().await;
+        // Acquiring that lock can take as long as another utterance, so the
+        // pre-lock check above is stale by the time we get here.
+        if self.cancel_flag.load(Ordering::SeqCst) {
+            return Ok(());
+        }
         // Amplitude simulation in background
         let cancel = self.cancel_flag.clone();
         let ah = app_handle.clone();
-        let word_count = clean.split_whitespace().count();
-        let est_duration_ms = (word_count as u64) * 300;
+        let est_duration_ms = estimate_speech_ms(&clean);
         let amp_handle = tokio::spawn(async move {
             let start = std::time::Instant::now();
             let interval = std::time::Duration::from_millis(66);
@@ -327,18 +472,10 @@ impl TextToSpeech {
                 tokio::time::sleep(interval).await;
             }
         });
-        let status = Command::new("say")
-            .arg("-v")
-            .arg(&self.voice)
-            .arg("-r")
-            .arg(self.rate.to_string())
-            .arg(&clean)
-            .status()
-            .await
-            .map_err(|e| format!("TTS error: {}", e))?;
+        let status = spawn_say(&self.voice, self.rate, &clean, &self.cancel_flag).await?;
         amp_handle.abort();
         let _ = app_handle.emit("tts-amplitude", json!({"amplitude": 0.0}));
-        if !status.success() {
+        if !status.success() && !self.cancel_flag.load(Ordering::SeqCst) {
             log::warn!("TTS sentence failed: {}", crate::util::truncate_bytes(&clean, 50));
         }
         let _ = app_handle.emit("tts-sentence-done", json!({"remaining": remaining}));
@@ -358,6 +495,88 @@ impl TextToSpeech {
             .filter_map(|line| line.split_whitespace().next().map(|s| s.to_string()))
             .collect())
     }
+}
+
+/// How often an in-flight `say` child is re-checked against the cancel flag.
+const CANCEL_POLL_MS: u64 = 60;
+
+/// Spawn macOS `say` with the utterance on stdin.
+///
+/// `say` parses its arguments with getopt, so text passed positionally is
+/// consumed as an option the moment it starts with '-' -- and model output
+/// summarising email routinely starts with a markdown bullet. With no
+/// positional argument `say` reads the utterance from stdin, which keeps
+/// untrusted text out of argv entirely.
+async fn spawn_say(
+    voice: &str,
+    rate: u32,
+    text: &str,
+    cancel: &AtomicBool,
+) -> Result<std::process::ExitStatus, String> {
+    let mut child = Command::new("say")
+        .arg("-v")
+        .arg(voice)
+        .arg("-r")
+        .arg(rate.to_string())
+        .stdin(std::process::Stdio::piped())
+        .spawn()
+        .map_err(|e| format!("TTS error: {}", e))?;
+
+    if let Some(mut stdin) = child.stdin.take() {
+        stdin
+            .write_all(text.as_bytes())
+            .await
+            .map_err(|e| format!("TTS error: {}", e))?;
+        // Dropped here so `say` sees EOF and starts speaking.
+    }
+
+    wait_with_cancel(child, cancel).await
+}
+
+/// Wait for a `say` child, killing it as soon as `cancel` is raised.
+///
+/// A plain `child.wait()` makes cancellation advisory at best: the briefing is
+/// a multi-second utterance, and until the child exits it also holds the
+/// process-wide playback lock, so a cancel that cannot reach the child stalls
+/// every other TTS consumer for the rest of the sentence.
+async fn wait_with_cancel(
+    mut child: tokio::process::Child,
+    cancel: &AtomicBool,
+) -> Result<std::process::ExitStatus, String> {
+    loop {
+        if let Some(status) = child.try_wait().map_err(|e| format!("TTS error: {}", e))? {
+            return Ok(status);
+        }
+        if cancel.load(Ordering::SeqCst) {
+            let _ = child.start_kill();
+            return child.wait().await.map_err(|e| format!("TTS error: {}", e));
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(CANCEL_POLL_MS)).await;
+    }
+}
+
+/// Rough spoken duration, used only to drive the amplitude animation.
+///
+/// Latin text is counted in whitespace-separated words. CJK has no
+/// inter-word spaces, so a whole Chinese sentence would otherwise count as one
+/// word and the animation would stop seconds before `say` does.
+fn estimate_speech_ms(text: &str) -> u64 {
+    let cjk_chars = text.chars().filter(|c| is_cjk(*c)).count();
+    let latin_words = text
+        .split_whitespace()
+        .filter(|word| word.chars().any(|c| !is_cjk(c)))
+        .count();
+    (latin_words as u64) * 300 + (cjk_chars as u64) * 220
+}
+
+fn is_cjk(ch: char) -> bool {
+    matches!(ch,
+        '\u{3000}'..='\u{303F}'   // CJK punctuation
+        | '\u{3040}'..='\u{30FF}' // kana
+        | '\u{3400}'..='\u{4DBF}' // CJK unified ideographs extension A
+        | '\u{4E00}'..='\u{9FFF}' // CJK unified ideographs
+        | '\u{FF01}'..='\u{FF5E}' // fullwidth forms
+    )
 }
 
 /// Strip markdown, URLs, and formatting so macOS `say` reads clean natural speech.
@@ -448,20 +667,27 @@ fn sanitize_for_speech(text: &str) -> String {
 fn split_sentences(text: &str) -> Vec<String> {
     let mut sentences = Vec::new();
     let mut buffer = String::new();
+    let mut chars = 0usize;
     let mut prev_was_delimiter = false;
     for ch in text.chars() {
         buffer.push(ch);
-        if prev_was_delimiter && ch == ' ' && buffer.len() >= 20 {
+        chars += 1;
+        // CJK punctuation carries no trailing space, so it ends a sentence on
+        // its own. Thresholds count characters, not bytes.
+        let boundary = matches!(cjk_delimiter(ch), Some(DelimiterStrength::Hard))
+            || (prev_was_delimiter && ch == ' ');
+        if boundary && chars >= 20 {
             let trimmed = buffer.trim().to_string();
             if !trimmed.is_empty() {
                 sentences.push(trimmed);
             }
             buffer.clear();
+            chars = 0;
             prev_was_delimiter = false;
             continue;
         }
         prev_was_delimiter = matches!(ch, '.' | '!' | '?');
-        if buffer.len() >= 200 {
+        if chars >= 200 {
             if let Some(last_space) = buffer.rfind(' ') {
                 let (sentence, remainder) = buffer.split_at(last_space);
                 let trimmed = sentence.trim().to_string();
@@ -477,6 +703,7 @@ fn split_sentences(text: &str) -> Vec<String> {
                 }
                 buffer.clear();
             }
+            chars = buffer.chars().count();
         }
     }
     let trimmed = buffer.trim().to_string();
@@ -484,4 +711,160 @@ fn split_sentences(text: &str) -> Vec<String> {
         sentences.push(trimmed);
     }
     sentences
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn segment(text: &str) -> Vec<String> {
+        let mut buffer = SentenceBuffer::new();
+        let mut out = Vec::new();
+        for ch in text.chars() {
+            if let Some(sentence) = buffer.push(ch) {
+                out.push(sentence);
+            }
+        }
+        if let Some(sentence) = buffer.take() {
+            out.push(sentence);
+        }
+        out
+    }
+
+    #[test]
+    fn segments_cantonese_on_full_width_punctuation() {
+        // Before the fix this cut every 30 characters (90 bytes) and ignored
+        // every sentence boundary.
+        assert_eq!(
+            segment("今日有三封重要郵件需要你處理，其中兩封來自客戶。下午三點有個會議，記得預先準備資料。"),
+            vec![
+                "今日有三封重要郵件需要你處理，其中兩封來自客戶。".to_string(),
+                "下午三點有個會議，記得預先準備資料。".to_string(),
+            ]
+        );
+    }
+
+    #[test]
+    fn segments_english_on_a_space_after_the_delimiter() {
+        assert_eq!(
+            segment("Hello there. This is a test."),
+            vec!["Hello there.".to_string(), "This is a test.".to_string()]
+        );
+    }
+
+    #[test]
+    fn split_sentences_breaks_cantonese_at_full_stops() {
+        let sentences = split_sentences(
+            "今日有三封重要郵件需要你處理，其中兩封來自客戶。下午三點有個會議，記得預先準備資料。",
+        );
+        assert_eq!(
+            sentences,
+            vec![
+                "今日有三封重要郵件需要你處理，其中兩封來自客戶。".to_string(),
+                "下午三點有個會議，記得預先準備資料。".to_string(),
+            ]
+        );
+    }
+
+    #[test]
+    fn split_sentences_still_splits_english() {
+        assert_eq!(
+            split_sentences("Here is the first sentence. And here is the second one."),
+            vec![
+                "Here is the first sentence.".to_string(),
+                "And here is the second one.".to_string()
+            ]
+        );
+    }
+
+    #[test]
+    fn clones_share_one_cancel_flag() {
+        // lib.rs takes the briefing's TextToSpeech from VoiceEngine and chat.rs
+        // cancels VoiceEngine's copy. Both only work because a clone shares the
+        // flag -- with a privately constructed instance the briefing was
+        // uncancellable and blocked the playback lock until it finished.
+        let engine_tts = TextToSpeech::new();
+        let briefing_tts = engine_tts.clone();
+        assert!(!briefing_tts.is_cancelled());
+        engine_tts.cancel();
+        assert!(
+            briefing_tts.is_cancelled(),
+            "a cancel on one handle must reach the utterance actually playing"
+        );
+    }
+
+    #[tokio::test]
+    async fn wait_with_cancel_kills_a_running_child() {
+        // The regression this guards: a briefing spoken as one `say` child ran
+        // to completion no matter what, because nothing ever killed it.
+        let cancel = Arc::new(AtomicBool::new(false));
+        let child = Command::new("sleep")
+            .arg("30")
+            .spawn()
+            .expect("spawn a stand-in child");
+
+        let flag = Arc::clone(&cancel);
+        tokio::spawn(async move {
+            tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+            flag.store(true, Ordering::SeqCst);
+        });
+
+        let started = std::time::Instant::now();
+        let status = wait_with_cancel(child, &cancel).await.expect("wait");
+        assert!(!status.success(), "a killed child does not exit successfully");
+        assert!(
+            started.elapsed() < std::time::Duration::from_secs(5),
+            "cancel must not have to wait for the utterance to finish"
+        );
+    }
+
+    #[tokio::test]
+    async fn an_utterance_waits_for_the_one_in_progress_instead_of_interleaving() {
+        // R2-05: with only the per-sentence playback lock, a second speaker got
+        // the lock between the first speaker's sentences -- tokio's mutex is
+        // FIFO-fair -- and the user heard briefing / reply / briefing / reply.
+        let tts = TextToSpeech::new();
+        let in_progress = utterance_lock().lock().await;
+
+        // Whitespace only: split_sentences yields nothing, so no `say` child is
+        // spawned and what this measures is purely whether the second utterance
+        // waits for the first.
+        let second = tokio::spawn(async move { tts.speak("   ").await });
+        tokio::time::sleep(std::time::Duration::from_millis(150)).await;
+        assert!(
+            !second.is_finished(),
+            "a second utterance must wait for the one already speaking"
+        );
+
+        drop(in_progress);
+        tokio::time::timeout(std::time::Duration::from_secs(5), second)
+            .await
+            .expect("the waiting utterance must run once the first one releases")
+            .expect("join")
+            .expect("speak");
+    }
+
+    #[tokio::test]
+    async fn speak_rearms_the_cancel_flag_for_a_new_utterance() {
+        // Otherwise one cancelled chat reply silences every later wake-word
+        // acknowledgement, since nothing else clears the shared flag.
+        let tts = TextToSpeech::new();
+        tts.cancel();
+        assert!(tts.is_cancelled());
+        // Whitespace only: split_sentences yields nothing, so no `say` runs,
+        // but the utterance is still armed.
+        tts.speak("   ").await.expect("speak");
+        assert!(!tts.is_cancelled());
+    }
+
+    #[test]
+    fn estimates_duration_from_characters_for_cjk() {
+        // Three Latin words plus nine Han characters.
+        assert_eq!(
+            estimate_speech_ms("Checking your inbox 我幫你睇一睇封郵件"),
+            3 * 300 + 9 * 220
+        );
+        // A spaceless Chinese sentence used to be counted as a single word.
+        assert!(estimate_speech_ms("你好世界我係賈維斯") > 300);
+    }
 }

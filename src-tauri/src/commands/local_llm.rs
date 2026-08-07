@@ -23,7 +23,11 @@ pub async fn list_local_endpoints(db: State<'_, Arc<Database>>) -> Result<Vec<Lo
                 name: row.get(1)?,
                 url: row.get(2)?,
                 backend_type: BackendType::from_str(&row.get::<_, String>(3).unwrap_or_default()),
-                api_key: row.get(4)?,
+                // This result is serialized straight into the webview, which
+                // never needs the bearer token -- and any script running there
+                // could read it. The runtime copy the router uses comes from
+                // `AiRouter::load_from_db`, not from here.
+                api_key: None,
                 use_tls: row.get::<_, i32>(5).unwrap_or(0) != 0,
                 connection_timeout_ms: row.get::<_, u32>(6).unwrap_or(5000),
                 keep_alive_minutes: row.get::<_, u32>(7).unwrap_or(30),
@@ -64,21 +68,32 @@ pub async fn add_local_endpoint(
     let id = uuid::Uuid::new_v4().to_string();
     let now = chrono::Utc::now().format("%Y-%m-%d %H:%M:%S").to_string();
 
-    let conn = db.conn.lock().map_err(|e| e.to_string())?;
-    conn.execute(
-        "INSERT INTO local_endpoints (id, name, url, backend_type, api_key, last_health_check, last_health_status) \
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
-        rusqlite::params![
-            id,
-            name,
-            url,
-            detected.as_str(),
-            api_key,
-            now,
-            healthy as i32,
-        ],
-    )
-    .map_err(|e| e.to_string())?;
+    // The bearer token goes to the Keychain; the column keeps only the marker.
+    // Keychain FFI first, and never while the DB lock is held.
+    let stored_column =
+        crate::integration_keys::store_local_endpoint_key(&id, api_key.as_deref())?;
+
+    let insert = {
+        let conn = db.conn.lock().map_err(|e| e.to_string())?;
+        conn.execute(
+            "INSERT INTO local_endpoints (id, name, url, backend_type, api_key, last_health_check, last_health_status) \
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+            rusqlite::params![
+                id,
+                name,
+                url,
+                detected.as_str(),
+                stored_column,
+                now,
+                healthy as i32,
+            ],
+        )
+    };
+    if let Err(e) = insert {
+        // No row references this id, so the Keychain item would be orphaned.
+        crate::integration_keys::delete_local_endpoint_key(&id);
+        return Err(e.to_string());
+    }
 
     let endpoint = LocalEndpoint {
         id,
@@ -94,7 +109,8 @@ pub async fn add_local_endpoint(
         last_health_status: Some(healthy),
     };
 
-    // Sync in-memory router
+    // Sync in-memory router -- this copy keeps the live key, it is what
+    // dispatch authenticates with.
     {
         let mut r = router.lock().map_err(|e| e.to_string())?;
         let mut eps = r.local_endpoints().to_vec();
@@ -102,7 +118,8 @@ pub async fn add_local_endpoint(
         r.set_local_endpoints(eps);
     }
 
-    Ok(endpoint)
+    // The webview copy does not: it only needs the row's identity.
+    Ok(LocalEndpoint { api_key: None, ..endpoint })
 }
 
 #[tauri::command]
@@ -117,6 +134,16 @@ pub async fn update_local_endpoint(
     keep_alive_minutes: Option<u32>,
     is_active: Option<bool>,
 ) -> Result<(), String> {
+    // Keychain FFI before the DB lock, same as `add_local_endpoint`. `Some("")`
+    // is an explicit clear; `None` means the caller did not touch the key.
+    let stored_column = match api_key {
+        Some(ref key) => Some(crate::integration_keys::store_local_endpoint_key(
+            &id,
+            Some(key.as_str()),
+        )?),
+        None => None,
+    };
+
     let conn = db.conn.lock().map_err(|e| e.to_string())?;
 
     if let Some(name) = name {
@@ -133,10 +160,12 @@ pub async fn update_local_endpoint(
         )
         .map_err(|e| e.to_string())?;
     }
-    if let Some(key) = api_key {
+    // Outer Some: the caller sent an api_key argument at all. Inner value: the
+    // marker, or NULL when the key was cleared.
+    if let Some(column) = stored_column {
         conn.execute(
             "UPDATE local_endpoints SET api_key = ?1 WHERE id = ?2",
-            rusqlite::params![key, id],
+            rusqlite::params![column, id],
         )
         .map_err(|e| e.to_string())?;
     }
@@ -178,10 +207,13 @@ pub async fn remove_local_endpoint(
     router: State<'_, Mutex<AiRouter>>,
     id: String,
 ) -> Result<(), String> {
-    let conn = db.conn.lock().map_err(|e| e.to_string())?;
-    conn.execute("DELETE FROM local_endpoints WHERE id = ?1", rusqlite::params![id])
-        .map_err(|e| e.to_string())?;
-    drop(conn);
+    {
+        let conn = db.conn.lock().map_err(|e| e.to_string())?;
+        conn.execute("DELETE FROM local_endpoints WHERE id = ?1", rusqlite::params![id])
+            .map_err(|e| e.to_string())?;
+    }
+    // The row is gone, so nothing would ever reference this Keychain item again.
+    crate::integration_keys::delete_local_endpoint_key(&id);
 
     // Sync in-memory router
     {
@@ -213,6 +245,8 @@ pub async fn test_endpoint_connection(
         )
         .map_err(|e| format!("Endpoint not found: {}", e))?
     };
+    let api_key =
+        crate::integration_keys::resolve_local_endpoint_key(&endpoint_id, api_key.as_deref());
 
     let backend_type = BackendType::from_str(&backend_type_str);
     let backend = local::get_backend(&backend_type);
@@ -272,6 +306,8 @@ pub async fn list_endpoint_models(
         )
         .map_err(|e| format!("Endpoint not found: {}", e))?
     };
+    let api_key =
+        crate::integration_keys::resolve_local_endpoint_key(&endpoint_id, api_key.as_deref());
 
     let backend_type = BackendType::from_str(&backend_type_str);
     let backend = local::get_backend(&backend_type);
@@ -325,6 +361,33 @@ pub async fn list_endpoint_models(
     Ok(result)
 }
 
+/// The chain to show when `provider_chain` is empty. It has to be exactly the
+/// chain `AiRouter::new` is already running, because Settings loads this array
+/// into React state on mount and writes it back verbatim on the first chain
+/// edit -- a model pinned here becomes a persisted pin the user never chose.
+/// Position 0 of the default is therefore unpinned so the workload tier keeps
+/// choosing (Flash for volume and tool turns, Pro for premium); the named
+/// presets stay pinned because their names promise a specific model.
+/// `default_chain_matches_the_router_default` holds the two in step.
+fn default_chain_for(ai_provider: &str) -> Vec<ProviderChainEntry> {
+    match ai_provider {
+        "gemini_flash" => vec![
+            ProviderChainEntry { position: 0, provider_type: "gemini".into(), endpoint_id: None, model_id: Some(crate::ai::gemini::MODEL_FLASH.into()), enabled: true },
+            ProviderChainEntry { position: 1, provider_type: "gemini".into(), endpoint_id: None, model_id: Some(crate::ai::gemini::MODEL_PRO.into()), enabled: true },
+        ],
+        "gemini_pro_only" => vec![
+            ProviderChainEntry { position: 0, provider_type: "gemini".into(), endpoint_id: None, model_id: Some(crate::ai::gemini::MODEL_PRO.into()), enabled: true },
+        ],
+        "gemini_flash_only" => vec![
+            ProviderChainEntry { position: 0, provider_type: "gemini".into(), endpoint_id: None, model_id: Some(crate::ai::gemini::MODEL_FLASH.into()), enabled: true },
+        ],
+        _ => vec![
+            ProviderChainEntry { position: 0, provider_type: "gemini".into(), endpoint_id: None, model_id: None, enabled: true },
+            ProviderChainEntry { position: 1, provider_type: "gemini".into(), endpoint_id: None, model_id: Some(crate::ai::gemini::MODEL_FLASH.into()), enabled: true },
+        ],
+    }
+}
+
 #[tauri::command]
 pub async fn get_provider_chain(db: State<'_, Arc<Database>>) -> Result<Vec<ProviderChainEntry>, String> {
     let conn = db.conn.lock().map_err(|e| e.to_string())?;
@@ -359,23 +422,7 @@ pub async fn get_provider_chain(db: State<'_, Arc<Database>>) -> Result<Vec<Prov
             )
             .unwrap_or_else(|_| "gemini_primary".to_string());
 
-        let defaults = match ai_provider.as_str() {
-            "gemini_flash" => vec![
-                ProviderChainEntry { position: 0, provider_type: "gemini".into(), endpoint_id: None, model_id: Some(crate::ai::gemini::MODEL_FLASH.into()), enabled: true },
-                ProviderChainEntry { position: 1, provider_type: "gemini".into(), endpoint_id: None, model_id: Some(crate::ai::gemini::MODEL_PRO.into()), enabled: true },
-            ],
-            "gemini_pro_only" => vec![
-                ProviderChainEntry { position: 0, provider_type: "gemini".into(), endpoint_id: None, model_id: Some(crate::ai::gemini::MODEL_PRO.into()), enabled: true },
-            ],
-            "gemini_flash_only" => vec![
-                ProviderChainEntry { position: 0, provider_type: "gemini".into(), endpoint_id: None, model_id: Some(crate::ai::gemini::MODEL_FLASH.into()), enabled: true },
-            ],
-            _ => vec![
-                ProviderChainEntry { position: 0, provider_type: "gemini".into(), endpoint_id: None, model_id: Some(crate::ai::gemini::MODEL_PRO.into()), enabled: true },
-                ProviderChainEntry { position: 1, provider_type: "gemini".into(), endpoint_id: None, model_id: Some(crate::ai::gemini::MODEL_FLASH.into()), enabled: true },
-            ],
-        };
-        return Ok(defaults);
+        return Ok(default_chain_for(&ai_provider));
     }
 
     Ok(chain)
@@ -467,4 +514,57 @@ pub async fn update_model_override(
     .map_err(|e| e.to_string())?;
 
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn shape(chain: &[ProviderChainEntry]) -> Vec<(i32, String, Option<String>, Option<String>, bool)> {
+        chain
+            .iter()
+            .map(|e| {
+                (
+                    e.position,
+                    e.provider_type.clone(),
+                    e.endpoint_id.clone(),
+                    e.model_id.clone(),
+                    e.enabled,
+                )
+            })
+            .collect()
+    }
+
+    /// F046: Settings loads `get_provider_chain` into React state and writes it
+    /// straight back on the first chain edit, so any disagreement with
+    /// `AiRouter::new` is persisted as a chain the user never chose. The
+    /// concrete regression was position 0 of the default pinning Gemini Pro,
+    /// which re-pinned the premium model for volume-tier work.
+    #[test]
+    fn default_chain_matches_the_router_default() {
+        for provider in [
+            "gemini_primary",
+            "gemini_flash",
+            "gemini_pro_only",
+            "gemini_flash_only",
+            "something_unrecognised",
+        ] {
+            assert_eq!(
+                shape(&default_chain_for(provider)),
+                shape(AiRouter::new(provider).provider_chain()),
+                "default chain for '{provider}' disagrees with AiRouter::new"
+            );
+        }
+    }
+
+    /// The specific pin that caused the cost regression.
+    #[test]
+    fn the_default_chain_leaves_position_zero_unpinned() {
+        let chain = default_chain_for("gemini_primary");
+        assert_eq!(chain[0].model_id, None, "position 0 must let the workload tier pick");
+        assert_eq!(
+            chain[1].model_id.as_deref(),
+            Some(crate::ai::gemini::MODEL_FLASH)
+        );
+    }
 }

@@ -1,0 +1,58 @@
+name: CI
+
+on:
+  push:
+  pull_request:
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  verify:
+    name: Verify (type-check, build, cargo test)
+    # macOS only, and not a preference: this crate depends on cocoa,
+    # security-framework and whisper-rs, none of which build on ubuntu.
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v5
+
+      - uses: actions/setup-node@v5
+        with:
+          node-version: "22"
+          cache: npm
+
+      # Cargo registry, git checkouts and build artifacts. Keyed on the lockfile
+      # so a dependency change invalidates it; the restore-key still gives a
+      # warm target/ dir when only source changed.
+      - name: Cache cargo
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            src-tauri/target
+          key: ${{ runner.os }}-cargo-${{ hashFiles('src-tauri/Cargo.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-cargo-
+
+      - run: npm ci
+
+      # `tsc && vite build`. Two jobs in one: it is the frontend type-check, and
+      # it produces ../dist, which tauri::generate_context!() embeds at compile
+      # time -- without it the Rust build fails before a single test runs.
+      - name: Type-check and build the frontend
+        run: npm run build
+
+      # Same command a developer runs locally: see package.json "test".
+      - name: Rust tests
+        run: npm test
+
+      # Advisory only. The existing warnings have never been triaged, so gating
+      # on clippy would make CI red on day one and teach everyone to ignore it.
+      # Turn `continue-on-error` off once `cargo clippy -- -D warnings` is clean.
+      # `cargo fmt --check` is deliberately absent for the same reason: the tree
+      # is not rustfmt-clean today (verified against src-tauri/src/ai/routing.rs).
+      - name: Clippy (advisory)
+        continue-on-error: true
+        run: cargo clippy --manifest-path src-tauri/Cargo.toml --all-targets

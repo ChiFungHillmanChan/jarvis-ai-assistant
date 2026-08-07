@@ -17,6 +17,32 @@ const PRICE_LOOKUP: Record<'pro' | 'team', string> = {
 
 const APP_DOMAIN = process.env.APP_DOMAIN || 'jarvis-automation.com';
 
+// Every subscription status in which Stripe still holds a subscription that can
+// bill this customer. Only `canceled` and `incomplete_expired` are terminal.
+//
+// Filtering on 'active' alone was the hole: a card that fails at renewal moves
+// the subscription to `past_due` and dunning runs for weeks. An 'active'-only
+// guard sees nothing, mints a second Checkout Session, and when the first
+// subscription recovers the customer has two live subscriptions -- the exact
+// double-billing this guard exists to prevent. `unpaid`, `paused`, `trialing`
+// and `incomplete` have the same shape.
+//
+// `incomplete` is deliberately included even though it self-expires after 23h:
+// a subscription awaiting 3DS confirmation is still a subscription, and the
+// billing portal's invoice history is where an unpaid first invoice gets paid.
+const LIVE_SUBSCRIPTION_STATUSES: ReadonlySet<Stripe.Subscription.Status> = new Set([
+  'active',
+  'trialing',
+  'past_due',
+  'unpaid',
+  'incomplete',
+  'paused',
+]);
+
+export function isLiveSubscriptionStatus(status: Stripe.Subscription.Status): boolean {
+  return LIVE_SUBSCRIPTION_STATUSES.has(status);
+}
+
 async function loadStripe() {
   if (cachedStripe) return cachedStripe;
   const out = await sm.send(new GetSecretValueCommand({ SecretId: process.env.STRIPE_SECRET_NAME! }));
@@ -80,6 +106,49 @@ export async function handler(event: APIGatewayProxyEventV2): Promise<APIGateway
   try {
     const customerId = await getOrCreateCustomer(stripe, body.user_id, body.email);
 
+    // The customer is stable per install, and Stripe will happily attach a second
+    // subscription to the same customer. Nothing downstream detects that: the
+    // webhook just rewrites the same DynamoDB item, so the user is billed twice
+    // every month in silence. Send an existing subscriber to the billing portal
+    // instead of into another checkout.
+    //
+    // The list filter takes one status at a time, so ask without it -- Stripe
+    // then returns everything that has not been canceled -- and decide here.
+    // A customer with more than 100 non-canceled subscriptions is already a
+    // billing incident, and this guard is what stops that happening.
+    const existing = await stripe.subscriptions.list({
+      customer: customerId,
+      limit: 100,
+    });
+    const live = existing.data.find((s) => isLiveSubscriptionStatus(s.status));
+    if (live) {
+      try {
+        const portal = await stripe.billingPortal.sessions.create({
+          customer: customerId,
+          return_url: `https://${APP_DOMAIN}/`,
+        });
+        return {
+          statusCode: 200,
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            url: portal.url,
+            session_id: portal.id,
+            already_subscribed: true,
+            subscription_status: live.status,
+          }),
+        };
+      } catch (err) {
+        console.error(
+          `Live subscription ${live.id} (${live.status}) exists but the billing portal is unavailable`,
+          err,
+        );
+        return {
+          statusCode: 409,
+          body: `Already subscribed (status: ${live.status}). Manage or repair your plan from the Stripe billing portal.`,
+        };
+      }
+    }
+
     const session = await stripe.checkout.sessions.create({
       mode: 'subscription',
       customer: customerId,
@@ -92,6 +161,11 @@ export async function handler(event: APIGatewayProxyEventV2): Promise<APIGateway
       cancel_url: `https://${APP_DOMAIN}/payment/cancel`,
       automatic_tax: { enabled: false },
       allow_promotion_codes: true,
+    }, {
+      // A double click, a retry, or a second tab must reuse one session rather
+      // than mint another. Stripe holds the key for 24h; a Checkout Session
+      // expires in 24h too, so the window matches.
+      idempotencyKey: `checkout:${body.user_id}:${body.tier}`,
     });
 
     return {

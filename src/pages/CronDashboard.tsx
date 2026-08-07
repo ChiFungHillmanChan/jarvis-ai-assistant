@@ -4,6 +4,7 @@ import { getCronJobs, toggleCronJob, deleteCronJob } from "../lib/commands";
 import ConversionFlow from "../components/cron/ConversionFlow";
 import CronJobCard from "../components/cron/CronJobCard";
 import CronTimeline from "../components/cron/CronTimeline";
+import { showToast } from "../components/Toast";
 
 export default function CronDashboard() {
   const [jobs, setJobs] = useState<CronJobView[]>([]);
@@ -26,7 +27,13 @@ export default function CronDashboard() {
 
   const handleToggle = useCallback(
     async (id: number) => {
-      await toggleCronJob(id);
+      try {
+        await toggleCronJob(id);
+      } catch (e) {
+        showToast(`Could not update job: ${String(e)}`, "error");
+      }
+      // Refetch on both paths -- on failure the card must snap back to whatever
+      // the backend actually holds rather than sitting on a stale state.
       fetchJobs();
     },
     [fetchJobs]
@@ -34,8 +41,12 @@ export default function CronDashboard() {
 
   const handleDelete = useCallback(
     async (id: number) => {
-      await deleteCronJob(id);
-      if (selectedJobId === id) setSelectedJobId(null);
+      try {
+        await deleteCronJob(id);
+        if (selectedJobId === id) setSelectedJobId(null);
+      } catch (e) {
+        showToast(`Could not delete job: ${String(e)}`, "error");
+      }
       fetchJobs();
     },
     [selectedJobId, fetchJobs]

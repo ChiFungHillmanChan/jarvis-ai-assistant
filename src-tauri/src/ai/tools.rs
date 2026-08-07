@@ -25,15 +25,13 @@ pub fn get_tool_definitions() -> Vec<Tool> {
                 "required": ["name"]
             }),
         },
-        Tool {
-            name: "open_url".into(),
-            description: "Open a URL in the default browser. Construct full URLs with search queries when needed.".into(),
-            parameters: json!({
-                "type": "object",
-                "properties": { "url": { "type": "string", "description": "Full URL to open" } },
-                "required": ["url"]
-            }),
-        },
+        // `open_url` is deliberately absent (removed 2026-07-27). It handed a
+        // fully model-controlled string to macOS `open`, and a URL query string
+        // is a raw outbound channel -- with `read_email` in the same turn, one
+        // crafted email was a complete exfiltration chain. It only comes back
+        // behind a real user approval round-trip, never behind a system-prompt
+        // sentence. `crate::system::control::open_url` still serves non-model
+        // callers.
         Tool {
             name: "run_command".into(),
             description: "Run a shell command on macOS and return the output. Use for system info, file operations, git commands, etc. Do NOT run destructive commands.".into(),
@@ -76,76 +74,9 @@ pub fn get_tool_definitions() -> Vec<Tool> {
             }),
         },
         Tool {
-            name: "write_note".into(),
-            description: "Write or append to a text file (for notes, logs, etc)".into(),
-            parameters: json!({
-                "type": "object",
-                "properties": {
-                    "path": { "type": "string", "description": "File path (use ~ for home)" },
-                    "content": { "type": "string" },
-                    "append": { "type": "boolean", "description": "true to append, false to overwrite" }
-                },
-                "required": ["path", "content"]
-            }),
-        },
-        Tool {
             name: "system_info".into(),
             description: "Get system information: hostname, uptime, disk usage, memory".into(),
             parameters: json!({ "type": "object", "properties": {} }),
-        },
-        Tool {
-            name: "clipboard_read".into(),
-            description: "Read the current contents of the macOS clipboard".into(),
-            parameters: json!({ "type": "object", "properties": {} }),
-        },
-        Tool {
-            name: "clipboard_write".into(),
-            description: "Write text content to the macOS clipboard".into(),
-            parameters: json!({
-                "type": "object",
-                "properties": {
-                    "content": { "type": "string", "description": "Text to copy to clipboard" }
-                },
-                "required": ["content"]
-            }),
-        },
-        Tool {
-            name: "screenshot".into(),
-            description: "Take a screenshot on macOS. Region can be 'fullscreen', 'selection', or 'window'.".into(),
-            parameters: json!({
-                "type": "object",
-                "properties": {
-                    "region": { "type": "string", "description": "Screenshot region: fullscreen (default), selection, or window" }
-                }
-            }),
-        },
-        Tool {
-            name: "manage_window".into(),
-            description: "Manage application windows: list all visible windows, focus an app, resize or move a window.".into(),
-            parameters: json!({
-                "type": "object",
-                "properties": {
-                    "action": { "type": "string", "description": "Action: list, focus, resize, move" },
-                    "app_name": { "type": "string", "description": "Application name (required for focus/resize/move)" },
-                    "width": { "type": "integer", "description": "Window width in pixels (for resize)" },
-                    "height": { "type": "integer", "description": "Window height in pixels (for resize)" },
-                    "x": { "type": "integer", "description": "X position in pixels (for move)" },
-                    "y": { "type": "integer", "description": "Y position in pixels (for move)" }
-                },
-                "required": ["action"]
-            }),
-        },
-        Tool {
-            name: "system_controls".into(),
-            description: "Control system settings: volume_set, volume_get, volume_mute, volume_unmute, brightness_set, dark_mode_on, dark_mode_off, dark_mode_toggle".into(),
-            parameters: json!({
-                "type": "object",
-                "properties": {
-                    "action": { "type": "string", "description": "Control action: volume_set, volume_get, volume_mute, volume_unmute, brightness_set, dark_mode_on, dark_mode_off, dark_mode_toggle" },
-                    "value": { "type": "integer", "description": "Value for volume_set (0-100) or brightness_set (0-100)" }
-                },
-                "required": ["action"]
-            }),
         },
         Tool {
             name: "send_notification".into(),
@@ -158,39 +89,6 @@ pub fn get_tool_definitions() -> Vec<Tool> {
                     "sound": { "type": "boolean", "description": "Play notification sound (default false)" }
                 },
                 "required": ["title", "message"]
-            }),
-        },
-        Tool {
-            name: "list_processes".into(),
-            description: "List running processes on the system with optional name filter".into(),
-            parameters: json!({
-                "type": "object",
-                "properties": {
-                    "filter": { "type": "string", "description": "Optional process name filter" }
-                }
-            }),
-        },
-        Tool {
-            name: "kill_process".into(),
-            description: "Kill a running process by PID. Refuses to kill system-critical processes.".into(),
-            parameters: json!({
-                "type": "object",
-                "properties": {
-                    "pid": { "type": "integer", "description": "Process ID to kill" }
-                },
-                "required": ["pid"]
-            }),
-        },
-        Tool {
-            name: "read_file".into(),
-            description: "Read a text file and return its contents. Max 100KB, refuses binary files.".into(),
-            parameters: json!({
-                "type": "object",
-                "properties": {
-                    "path": { "type": "string", "description": "File path (use ~ for home directory)" },
-                    "max_lines": { "type": "integer", "description": "Maximum lines to return (default 200)" }
-                },
-                "required": ["path"]
             }),
         },
         Tool {
@@ -216,8 +114,8 @@ pub fn get_tool_definitions() -> Vec<Tool> {
             }),
         },
         Tool {
-            name: "send_email".into(),
-            description: "Send an email via Gmail. Composes and sends immediately.".into(),
+            name: "draft_email".into(),
+            description: "Create a Gmail draft for the user to review and send. JARVIS never sends mail on its own -- always tell the user the draft is waiting in Gmail.".into(),
             parameters: json!({
                 "type": "object",
                 "properties": {
@@ -251,6 +149,11 @@ pub fn get_tool_definitions() -> Vec<Tool> {
                 }
             }),
         },
+        // No `attendees` property (removed 2026-07-27). Google copies the event
+        // -- title and description included -- onto every invited attendee's own
+        // calendar, so a model-chosen address was a silent outbound channel that
+        // an attacker reads back with events.list on their own account. The user
+        // adds invitees in Google Calendar.
         Tool {
             name: "create_event".into(),
             description: "Create a new Google Calendar event. Times should be in ISO 8601 / RFC 3339 format (e.g. 2026-03-25T10:00:00+00:00).".into(),
@@ -261,8 +164,7 @@ pub fn get_tool_definitions() -> Vec<Tool> {
                     "start": { "type": "string", "description": "Start time in RFC 3339 format" },
                     "end": { "type": "string", "description": "End time in RFC 3339 format" },
                     "location": { "type": "string", "description": "Event location (optional)" },
-                    "description": { "type": "string", "description": "Event description (optional)" },
-                    "attendees": { "type": "string", "description": "Comma-separated email addresses of attendees (optional)" }
+                    "description": { "type": "string", "description": "Event description (optional)" }
                 },
                 "required": ["title", "start", "end"]
             }),
@@ -343,11 +245,11 @@ pub fn get_tool_definitions() -> Vec<Tool> {
         },
         Tool {
             name: "create_github_issue".into(),
-            description: "Create a new GitHub issue in a repository.".into(),
+            description: "Create a new GitHub issue. Only repositories the user already works with are accepted -- the ones list_github_items returns.".into(),
             parameters: json!({
                 "type": "object",
                 "properties": {
-                    "repo": { "type": "string", "description": "Repository in 'owner/repo' format" },
+                    "repo": { "type": "string", "description": "Repository in 'owner/repo' format. Must be one the user already works with." },
                     "title": { "type": "string", "description": "Issue title" },
                     "body": { "type": "string", "description": "Issue body/description (optional)" },
                     "labels": { "type": "string", "description": "Comma-separated labels (optional)" }
@@ -417,7 +319,7 @@ pub fn get_tool_definitions() -> Vec<Tool> {
         },
         Tool {
             name: "remember".into(),
-            description: "Save a durable fact about Hillman to persistent memory. Use when he tells you who he is, what he prefers, what he's working on, or anything worth recalling next time. Keep entries short and atomic (one fact each).".into(),
+            description: "Save a durable fact about the user to persistent memory. Use when they tell you who they are, what they prefer, what they are working on, or anything worth recalling next time. Keep entries short and atomic (one fact each).".into(),
             parameters: json!({
                 "type": "object",
                 "properties": {
@@ -433,7 +335,7 @@ pub fn get_tool_definitions() -> Vec<Tool> {
         },
         Tool {
             name: "forget".into(),
-            description: "Remove a fact from persistent memory. Use when Hillman says to forget something, or when a stored fact is no longer true. Pass either the exact id from list_memories OR a keyword that uniquely matches the entry.".into(),
+            description: "Remove a fact from persistent memory. Use when the user says to forget something, or when a stored fact is no longer true. Pass either the exact id from list_memories OR a keyword that uniquely matches the entry.".into(),
             parameters: json!({
                 "type": "object",
                 "properties": {
@@ -444,7 +346,7 @@ pub fn get_tool_definitions() -> Vec<Tool> {
         },
         Tool {
             name: "list_memories".into(),
-            description: "List all stored persistent memory entries about Hillman. Use sparingly -- most facts are already in your system prompt. Only call when Hillman explicitly asks 'what do you remember about me'.".into(),
+            description: "List all stored persistent memory entries about the user. Use sparingly -- most facts are already in your system prompt. Only call when the user explicitly asks 'what do you remember about me'.".into(),
             parameters: json!({
                 "type": "object",
                 "properties": {}
@@ -511,7 +413,7 @@ pub fn tool_status_label(name: &str) -> &'static str {
     match name {
         "search_emails" => "Searching emails...",
         "read_email" => "Reading email...",
-        "send_email" => "Sending email...",
+        "draft_email" => "Drafting email...",
         "archive_email" => "Archiving email...",
         "list_events" => "Checking calendar...",
         "create_event" => "Creating event...",
@@ -525,22 +427,12 @@ pub fn tool_status_label(name: &str) -> &'static str {
         "search_notes" => "Searching notes...",
         "read_note" => "Reading note...",
         "open_app" => "Opening app...",
-        "open_url" => "Opening URL...",
         "run_command" => "Running command...",
         "find_files" => "Finding files...",
         "open_file" => "Opening file...",
         "create_task" => "Creating task...",
-        "write_note" => "Writing note...",
         "system_info" => "Checking system...",
-        "clipboard_read" => "Reading clipboard...",
-        "clipboard_write" => "Copying to clipboard...",
-        "screenshot" => "Taking screenshot...",
-        "manage_window" => "Managing windows...",
-        "system_controls" => "Adjusting system...",
         "send_notification" => "Sending notification...",
-        "list_processes" => "Listing processes...",
-        "kill_process" => "Stopping process...",
-        "read_file" => "Reading file...",
         "render_chart" => "Rendering chart...",
         "render_status" => "Showing result...",
         "remember" => "Saving to memory...",
@@ -555,7 +447,7 @@ pub fn tool_voice_narration(name: &str) -> &'static str {
     match name {
         "search_emails" => "Searching through your emails now.",
         "read_email" => "Pulling up that email.",
-        "send_email" => "Sending that off for you.",
+        "draft_email" => "Putting a draft together for you.",
         "archive_email" => "Archiving that email.",
         "list_events" => "Let me check your calendar.",
         "create_event" => "Setting that up on your calendar.",
@@ -569,22 +461,12 @@ pub fn tool_voice_narration(name: &str) -> &'static str {
         "search_notes" => "Looking through your notes.",
         "read_note" => "Reading that note.",
         "open_app" => "Opening that up for you.",
-        "open_url" => "Opening that link now.",
         "run_command" => "Running that command.",
         "find_files" => "Looking for those files.",
         "open_file" => "Opening that file.",
         "create_task" => "Creating that task for you.",
-        "write_note" => "Writing that down.",
         "system_info" => "Checking your system.",
-        "clipboard_read" => "Reading your clipboard.",
-        "clipboard_write" => "Copied to your clipboard.",
-        "screenshot" => "Taking a screenshot.",
-        "manage_window" => "Adjusting your windows.",
-        "system_controls" => "Adjusting system settings.",
         "send_notification" => "Sending a notification.",
-        "list_processes" => "Checking running processes.",
-        "kill_process" => "Stopping that process.",
-        "read_file" => "Reading that file.",
         "render_chart" => "Putting together a chart for you.",
         "render_status" => "Here are the results.",
         "remember" => "Noting that down.",
@@ -702,7 +584,6 @@ async fn execute_gmail_tool(
     name: &str,
     args: &serde_json::Value,
     token: &str,
-    db: &crate::db::Database,
 ) -> Result<String, String> {
     use crate::integrations::gmail;
     match name {
@@ -731,25 +612,17 @@ async fn execute_gmail_tool(
             let (_msg, full_text) = gmail::get_message_full(token, email_id).await?;
             Ok(full_text)
         }
-        "send_email" => {
+        "draft_email" => {
             let to = args["to"].as_str().unwrap_or("");
             let subject = args["subject"].as_str().unwrap_or("");
             let body = args["body"].as_str().unwrap_or("");
             let cc = args["cc"].as_str();
 
-            // Log outgoing email to DB before sending
-            let now = chrono::Local::now().to_rfc3339();
-            let outgoing_id = format!("outgoing_{}", now);
-            let snippet = crate::util::truncate_bytes(body, 100);
-            if let Ok(conn) = db.conn.lock() {
-                let _ = conn.execute(
-                    "INSERT INTO emails (gmail_id, subject, sender, snippet, labels, is_read, received_at) VALUES (?1, ?2, 'me (outgoing)', ?3, 'SENT', 1, ?4)",
-                    rusqlite::params![outgoing_id, subject, snippet, now],
-                );
-            }
-
-            let msg_id = gmail::send_message(token, to, subject, body, cc).await?;
-            Ok(format!("Email sent successfully (ID: {})", msg_id))
+            let draft_id = gmail::create_draft(token, to, subject, body, cc).await?;
+            Ok(format!(
+                "Draft saved to Gmail for {} (ID: {}). Review and send it from Gmail.",
+                to, draft_id
+            ))
         }
         "archive_email" => {
             let email_id = args["email_id"].as_str().unwrap_or("");
@@ -806,9 +679,10 @@ async fn execute_calendar_tool(
             let end = args["end"].as_str().unwrap_or("");
             let location = args["location"].as_str();
             let description = args["description"].as_str();
-            let attendees = args["attendees"].as_str();
+            // Attendees are never model-chosen -- inviting an address copies the
+            // event body onto that person's calendar. Always None from here.
             let result =
-                calendar::create_event(token, title, start, end, description, location, attendees)
+                calendar::create_event(token, title, start, end, description, location, None)
                     .await?;
             Ok(format!("Event created: {}", result))
         }
@@ -836,12 +710,13 @@ async fn execute_obsidian_tool(
     name: &str,
     args: &serde_json::Value,
     api_key: &str,
+    base_url: &str,
 ) -> Result<String, String> {
     use crate::integrations::obsidian;
     match name {
         "search_notes" => {
             let query = args["query"].as_str().unwrap_or("");
-            let notes = obsidian::search_vault(api_key, query).await?;
+            let notes = obsidian::search_vault(base_url, api_key, query).await?;
             if notes.is_empty() {
                 return Ok("No notes found matching that query.".to_string());
             }
@@ -857,7 +732,7 @@ async fn execute_obsidian_tool(
         }
         "read_note" => {
             let path = args["path"].as_str().unwrap_or("");
-            obsidian::get_note(api_key, path).await
+            obsidian::get_note(base_url, api_key, path).await
         }
         _ => Err(format!("Unknown Obsidian tool: {}", name)),
     }
@@ -917,7 +792,14 @@ async fn execute_notion_tool(
     match name {
         "search_notion" => {
             let query = args["query"].as_str().unwrap_or("");
-            let pages = notion::search_pages(token, Some(query)).await?;
+            // Inside a chat turn the user waits through every round-trip, and the
+            // result is truncated to a few thousand bytes anyway, so take one page.
+            let pages = notion::search_pages_bounded(
+                token,
+                Some(query),
+                notion::INTERACTIVE_SEARCH_PAGES,
+            )
+            .await?;
             if pages.is_empty() {
                 return Ok("No Notion pages found matching that query.".to_string());
             }
@@ -976,16 +858,32 @@ async fn refresh_google_token(
         .ok_or_else(|| "Token refresh succeeded but no token available.".to_string())
 }
 
-fn get_preference(db: &crate::db::Database, key: &str) -> Option<String> {
-    db.conn
-        .lock()
-        .ok()?
-        .query_row(
-            "SELECT value FROM user_preferences WHERE key = ?1",
-            rusqlite::params![key],
-            |row| row.get::<_, String>(0),
-        )
-        .ok()
+/// macOS `open` dispatches its argument by URL scheme, so an unconstrained
+/// `open_file` path is the same outbound channel `open_url` was removed for.
+/// Only accept something that is unambiguously a local filesystem path.
+fn is_local_file_path(path: &str) -> bool {
+    path.starts_with('/') || path.starts_with("~/")
+}
+
+/// True when the repository already appears in the local `github_items` table,
+/// i.e. the user actually works with it. The model picks `repo` for
+/// `create_github_issue` while attacker-authored email text sits in the same
+/// context, and the issue is posted with the user's personal token -- an
+/// unconstrained destination would be a publish-anywhere outbound channel.
+fn github_repo_is_known(db: &crate::db::Database, repo: &str) -> bool {
+    if repo.trim().is_empty() {
+        return false;
+    }
+    let conn = match db.conn.lock() {
+        Ok(c) => c,
+        Err(_) => return false,
+    };
+    conn.query_row(
+        "SELECT 1 FROM github_items WHERE repo = ?1 COLLATE NOCASE LIMIT 1",
+        rusqlite::params![repo.trim()],
+        |row| row.get::<_, i64>(0),
+    )
+    .is_ok()
 }
 
 /// Execute a tool by name with JSON arguments. Shared by both APIs.
@@ -1002,10 +900,7 @@ pub async fn execute_tool(
             let app = args["name"].as_str().unwrap_or("");
             crate::system::control::open_app(app).await.unwrap_or_else(|e| format!("Error: {}", e))
         }
-        "open_url" => {
-            let url = args["url"].as_str().unwrap_or("");
-            crate::system::control::open_url(url).await.unwrap_or_else(|e| format!("Error: {}", e))
-        }
+        // No "open_url" arm: see the removal note in get_tool_definitions().
         "run_command" => {
             let cmd = args["command"].as_str().unwrap_or("");
             crate::system::control::run_command(cmd).await.unwrap_or_else(|e| format!("Error: {}", e))
@@ -1019,6 +914,9 @@ pub async fn execute_tool(
         }
         "open_file" => {
             let path = args["path"].as_str().unwrap_or("");
+            if !is_local_file_path(path) {
+                return "Error: open_file takes a full file path starting with / or ~/.".to_string();
+            }
             crate::system::control::open_file(path).await.unwrap_or_else(|e| format!("Error: {}", e))
         }
         "create_task" => {
@@ -1039,39 +937,8 @@ pub async fn execute_tool(
                 Err(e) => format!("Failed to lock database: {}", e),
             }
         }
-        "write_note" => {
-            let path = args["path"].as_str().unwrap_or("~/jarvis-notes.md");
-            let content = args["content"].as_str().unwrap_or("");
-            let append = args["append"].as_bool().unwrap_or(true);
-            crate::system::control::write_note(path, content, append).await.unwrap_or_else(|e| format!("Error: {}", e))
-        }
         "system_info" => {
             crate::system::control::system_info().await.unwrap_or_else(|e| format!("Error: {}", e))
-        }
-        "clipboard_read" => {
-            crate::system::control::clipboard_read().await.unwrap_or_else(|e| format!("Error: {}", e))
-        }
-        "clipboard_write" => {
-            let content = args["content"].as_str().unwrap_or("");
-            crate::system::control::clipboard_write(content).await.unwrap_or_else(|e| format!("Error: {}", e))
-        }
-        "screenshot" => {
-            let region = args["region"].as_str().unwrap_or("fullscreen");
-            crate::system::control::screenshot(region).await.unwrap_or_else(|e| format!("Error: {}", e))
-        }
-        "manage_window" => {
-            let action = args["action"].as_str().unwrap_or("list");
-            let app_name = args["app_name"].as_str();
-            let width = args["width"].as_i64();
-            let height = args["height"].as_i64();
-            let x = args["x"].as_i64();
-            let y = args["y"].as_i64();
-            crate::system::control::manage_window(action, app_name, width, height, x, y).await.unwrap_or_else(|e| format!("Error: {}", e))
-        }
-        "system_controls" => {
-            let action = args["action"].as_str().unwrap_or("");
-            let value = args["value"].as_i64();
-            crate::system::control::system_controls(action, value).await.unwrap_or_else(|e| format!("Error: {}", e))
         }
         "send_notification" => {
             let title = args["title"].as_str().unwrap_or("JARVIS");
@@ -1079,28 +946,15 @@ pub async fn execute_tool(
             let sound = args["sound"].as_bool().unwrap_or(false);
             crate::system::control::send_notification(title, message, sound).await.unwrap_or_else(|e| format!("Error: {}", e))
         }
-        "list_processes" => {
-            let filter = args["filter"].as_str();
-            crate::system::control::list_processes(filter).await.unwrap_or_else(|e| format!("Error: {}", e))
-        }
-        "kill_process" => {
-            let pid = args["pid"].as_i64().unwrap_or(0);
-            crate::system::control::kill_process(pid).await.unwrap_or_else(|e| format!("Error: {}", e))
-        }
-        "read_file" => {
-            let path = args["path"].as_str().unwrap_or("");
-            let max_lines = args["max_lines"].as_i64().map(|v| v as usize);
-            crate::system::control::read_file(path, max_lines).await.unwrap_or_else(|e| format!("Error: {}", e))
-        }
-        "search_emails" | "read_email" | "send_email" | "archive_email" => {
+        "search_emails" | "read_email" | "draft_email" | "archive_email" => {
             let token = match google_token_or_err(google_auth, "Gmail").await {
                 Ok(t) => t,
                 Err(msg) => return msg,
             };
-            match execute_gmail_tool(name, &args, &token, db).await {
+            match execute_gmail_tool(name, &args, &token).await {
                 Ok(r) => r,
                 Err(e) if e.contains("UNAUTHORIZED") => match refresh_google_token(google_auth).await {
-                    Ok(t) => execute_gmail_tool(name, &args, &t, db).await.unwrap_or_else(|e| format!("Gmail error: {}", e)),
+                    Ok(t) => execute_gmail_tool(name, &args, &t).await.unwrap_or_else(|e| format!("Gmail error: {}", e)),
                     Err(e) => e,
                 },
                 Err(e) => format!("Gmail error: {}", e),
@@ -1121,23 +975,34 @@ pub async fn execute_tool(
             }
         }
         "list_github_items" | "create_github_issue" => {
-            match get_preference(db, "github_token") {
+            match crate::integration_keys::resolve("github_token") {
+                // The model picks the destination repo and the body, and the
+                // issue is posted with the user's personal token -- so the
+                // destination is constrained to repos already in github_items.
+                Some(_) if name == "create_github_issue"
+                    && !github_repo_is_known(db, args["repo"].as_str().unwrap_or("")) =>
+                {
+                    "I can only file issues in repositories you already work with. That one hasn't come up in your GitHub activity, so open it yourself if it really is yours.".to_string()
+                }
                 Some(t) => execute_github_tool(name, &args, &t).await
                     .unwrap_or_else(|e| format!("GitHub error: {}", e)),
                 None => "GitHub token not configured. Please add your GitHub token in Settings.".to_string(),
             }
         }
         "search_notion" | "read_notion_page" | "create_notion_page" => {
-            match get_preference(db, "notion_api_key") {
+            match crate::integration_keys::resolve("notion_api_key") {
                 Some(t) => execute_notion_tool(name, &args, &t).await
                     .unwrap_or_else(|e| format!("Notion error: {}", e)),
                 None => "Notion API key not configured. Please add your Notion API key in Settings.".to_string(),
             }
         }
         "search_notes" | "read_note" => {
-            match get_preference(db, "obsidian_api_key") {
-                Some(k) => execute_obsidian_tool(name, &args, &k).await
-                    .unwrap_or_else(|e| format!("Obsidian error: {}", e)),
+            match crate::integration_keys::resolve("obsidian_api_key") {
+                Some(k) => {
+                    let base_url = crate::integrations::obsidian::resolve_base_url(db);
+                    execute_obsidian_tool(name, &args, &k, &base_url).await
+                        .unwrap_or_else(|e| format!("Obsidian error: {}", e))
+                }
                 None => "Obsidian API key not configured. Please add your Obsidian REST API key in Settings.".to_string(),
             }
         }
@@ -1159,12 +1024,12 @@ pub async fn execute_tool(
     truncate_result(result)
 }
 
-pub const SYSTEM_PROMPT_BASE: &str = "You are JARVIS, a personal AI assistant on macOS for Hillman Chan (GitHub: ChiFungHillmanChan). You speak exactly like JARVIS from Iron Man -- polished, witty, and effortlessly conversational.
+pub const SYSTEM_PROMPT_TEMPLATE: &str = "You are JARVIS, a personal AI assistant on macOS for {user}. You speak exactly like JARVIS from Iron Man -- polished, witty, and effortlessly conversational.
 
 CRITICAL -- YOUR OUTPUT IS SPOKEN ALOUD:
 Everything you write is read by text-to-speech. You are having a live voice conversation. Write EXACTLY as you would speak. Follow these rules strictly:
 
-Address Hillman by his first name when it feels natural (\"Right away, Hillman\", \"Of course, Hillman\"), never as \"sir\" or \"Mr. Chan\".
+Address the user as {user} when it feels natural (\"Right away, {user}\", \"Of course, {user}\"), never as \"sir\" or \"madam\".
 
 Speech style:
 - Short, flowing sentences. Never more than one or two clauses per sentence.
@@ -1177,7 +1042,7 @@ Speech style:
 - Keep responses concise. Two to four sentences for simple answers. A short paragraph for complex ones.
 
 Before tool calls:
-- ALWAYS say something before calling a tool. One short sentence: \"On it.\", \"Let me check.\", \"Right away, Hillman.\"
+- ALWAYS say something before calling a tool. One short sentence: \"On it.\", \"Let me check.\", \"Right away, {user}.\"
 - NEVER call a tool silently.
 - When chaining tools, bridge naturally: \"Got it. Now let me also check your calendar.\"
 
@@ -1188,20 +1053,19 @@ After tool calls:
 
 When a tool fails:
 - Respond conversationally and apologetically. Briefly name what failed, without quoting raw error text.
-- Examples: \"Apologies, Hillman -- I can't reach Gmail right now.\" / \"That one's not going through, Hillman. Looks like Notion isn't connected.\" / \"Hmm, the calendar's unreachable at the moment.\"
+- Examples: \"Apologies, {user} -- I can't reach Gmail right now.\" / \"That one's not going through, {user}. Looks like Notion isn't connected.\" / \"Hmm, the calendar's unreachable at the moment.\"
 - Do NOT dump raw error messages, stack traces, or technical details.
 
-You have 37 tools to control the computer, manage integrations, and maintain your own memory of Hillman. Use them proactively.
+You have tools to open things, read the user's connected accounts, and maintain your own memory of {user}. Use them proactively. You cannot read arbitrary local files, the clipboard, or the screen, and you cannot send mail -- you draft it.
 
 IMPORTANT -- be minimal with tool calls:
-- Open ONE URL per request, not multiple. If the user says \"play happy music\", open one good link, not four search pages.
 - Never call the same tool more than once in a single response unless the user explicitly asked for multiple items.
 - Prefer quality over quantity. One precise action beats four scattered ones.
 
 MEMORY:
-You have persistent memory about Hillman. When he tells you durable facts about himself (his role, preferences, projects, people he works with, things he always/never wants), call the `remember` tool so you recall next time. When he explicitly says \"forget X\" or a stored fact becomes wrong, call `forget`. Use memory naturally -- do not recite all stored facts unprompted. Typical categories: identity (who he is), preference (how he likes things done), project (what he's working on), fact (anything else worth remembering).
+You have persistent memory about {user}. When they tell you durable facts about themselves (their role, preferences, projects, people they work with, things they always/never want), call the `remember` tool so you recall next time. When they explicitly say \"forget X\" or a stored fact becomes wrong, call `forget`. Use memory naturally -- do not recite all stored facts unprompted. Typical categories: identity (who they are), preference (how they like things done), project (what they are working on), fact (anything else worth remembering).
 
-Capabilities: system control (apps, URLs, files, commands, clipboard, screenshots, windows, volume, notifications, processes), Gmail, Google Calendar, Notion, GitHub, Obsidian, tasks, file I/O, persistent memory (remember/forget/list_memories), and data visualization (render inline charts and status cards in chat using render_chart and render_status tools -- use these when presenting data, stats, or confirming completed actions).
+Capabilities: opening apps, read-only system commands, finding and opening files, notifications, Gmail (search, read, draft, archive), Google Calendar, Notion, GitHub, Obsidian, tasks, persistent memory (remember/forget/list_memories), and data visualization (render inline charts and status cards in chat using render_chart and render_status tools -- use these when presenting data, stats, or confirming completed actions).
 
 You can chain different tools in sequence. Think step by step -- gather information first, then act. Always confirm destructive actions before executing them.
 
@@ -1209,12 +1073,19 @@ Always attempt tool calls when the user asks about their data. Do not preemptive
 
 /// Build system prompt with current user_memory injected. Called per request.
 pub fn build_system_prompt(db: &crate::db::Database) -> String {
+    let base = system_prompt_for(&crate::util::display_name(db));
     let memory_block = load_memory_block(db);
     if memory_block.is_empty() {
-        SYSTEM_PROMPT_BASE.to_string()
+        base
     } else {
-        format!("{}\n\n{}", SYSTEM_PROMPT_BASE, memory_block)
+        format!("{}\n\n{}", base, memory_block)
     }
+}
+
+/// Render the base system prompt for a specific user. Kept separate from
+/// `build_system_prompt` so it is testable without a database.
+pub fn system_prompt_for(name: &str) -> String {
+    SYSTEM_PROMPT_TEMPLATE.replace("{user}", name)
 }
 
 fn load_memory_block(db: &crate::db::Database) -> String {
@@ -1237,15 +1108,12 @@ fn load_memory_block(db: &crate::db::Database) -> String {
     if entries.is_empty() {
         return String::new();
     }
-    let mut out = String::from("KNOWN FACTS ABOUT HILLMAN (your persistent memory):\n");
+    let mut out = String::from("KNOWN FACTS ABOUT THE USER (your persistent memory):\n");
     for (cat, content) in entries {
         out.push_str(&format!("- [{}] {}\n", cat, content));
     }
     out
 }
-
-/// Back-compat alias used elsewhere in the codebase.
-pub const SYSTEM_PROMPT: &str = SYSTEM_PROMPT_BASE;
 
 /// Returns the static portion of the system prompt that should be cached.
 /// Must be byte-stable across requests for cache hits.
@@ -1274,8 +1142,235 @@ pub fn build_dynamic_suffix(
 }
 
 #[cfg(test)]
+mod injection_tests {
+    use super::*;
+
+    // The model reads attacker-controlled text (`read_email`). If it also holds
+    // a way to read local secrets or to send data out, one crafted email is a
+    // complete exfiltration chain -- and a sentence in the system prompt is not
+    // an access control. A name denylist cannot enforce that on its own: it
+    // stayed green while `open_url` sat in the registry next to `read_email`.
+    // So the surface is checked as a property over the live registry, with
+    // every tool classified by capability below.
+
+    /// Capability classification for one live tool: `(reads_private, emits_outbound)`.
+    ///
+    /// - `reads_private`: returns local or private user data into the model's context.
+    /// - `emits_outbound`: hands model-authored content to a destination off this device.
+    ///
+    /// Exhaustive by name on purpose. `None` means "this test has never heard of
+    /// that tool", which fails the test -- adding a tool to
+    /// `get_tool_definitions` without classifying it here is not allowed to pass
+    /// silently.
+    fn capabilities(name: &str) -> Option<(bool, bool)> {
+        Some(match name {
+            // Local actions: no private data in, nothing off-device out.
+            "open_app" => (false, false),
+            // `open` dispatches by URL scheme, so the dispatch arm rejects
+            // anything that is not a local path (see `is_local_file_path`).
+            "open_file" => (false, false),
+            "create_task" => (false, false),
+            "send_notification" => (false, false),
+            "render_chart" => (false, false),
+            "render_status" => (false, false),
+            "remember" => (false, false),
+            "forget" => (false, false),
+            "archive_email" => (false, false),
+            "delete_event" => (false, false),
+
+            // Reads private or local data into context.
+            // `run_command` is shell-shaped but argv-only against a read-only
+            // allowlist in system/control.rs -- no network client is on it.
+            "run_command" => (true, false),
+            "find_files" => (true, false),
+            "system_info" => (true, false),
+            "search_emails" => (true, false),
+            "read_email" => (true, false),
+            "list_events" => (true, false),
+            "search_notion" => (true, false),
+            "read_notion_page" => (true, false),
+            "list_github_items" => (true, false),
+            "search_notes" => (true, false),
+            "read_note" => (true, false),
+            "list_memories" => (true, false),
+
+            // Emits outbound. Every one of these must be justified in
+            // ALLOWED_OUTBOUND below.
+            "draft_email" => (false, true),
+            "create_event" => (false, true),
+            "update_event" => (false, true),
+            "create_notion_page" => (false, true),
+            "create_github_issue" => (false, true),
+
+            _ => return None,
+        })
+    }
+
+    /// Outbound tools that are allowed to ship, each with the constraint that
+    /// makes it safe. Anything classified `emits_outbound` and missing from
+    /// this list fails the test, which forces the constraint to be written down
+    /// before the tool ships.
+    const ALLOWED_OUTBOUND: &[(&str, &str)] = &[
+        // Writes a Gmail draft the user reviews and sends by hand. Nothing
+        // leaves the account on its own -- gmail::send_message has no callers.
+        ("draft_email", "draft only, never sent"),
+        // Fixed destination: the user's own primary calendar. The `attendees`
+        // property was removed so the model cannot copy the event body onto
+        // anyone else's calendar.
+        ("create_event", "no attendees, lands only on the user's own calendar"),
+        // Same fixed destination, and it can only touch an event that already
+        // exists on that calendar.
+        ("update_event", "edits an existing event on the user's own calendar"),
+        // The Notion token only reaches pages the user explicitly shared with
+        // the integration, so the destination stays inside their workspace.
+        ("create_notion_page", "confined to the user's own Notion workspace"),
+        // The destination repo is validated against the local github_items
+        // table, so it must be one the user already works with.
+        ("create_github_issue", "repo must already appear in github_items"),
+    ];
+
+    /// The named tools that were removed on 2026-07-26 must stay removed. This
+    /// is the narrow half of the guard -- it catches a re-add under the same
+    /// name, and nothing else.
+    #[test]
+    fn no_tool_can_read_local_data_or_send_mail() {
+        let names: Vec<String> = get_tool_definitions()
+            .iter()
+            .map(|t| t.name.clone())
+            .collect();
+
+        for banned in [
+            "read_file",
+            "clipboard_read",
+            "clipboard_write",
+            "write_note",
+            "screenshot",
+            "kill_process",
+            "list_processes",
+            "manage_window",
+            "system_controls",
+            "send_email",
+        ] {
+            assert!(
+                !names.iter().any(|n| n == banned),
+                "{banned} re-opens the prompt-injection exfiltration chain"
+            );
+        }
+
+        assert!(
+            names.iter().any(|n| n == "draft_email"),
+            "the compose path must still exist, as a draft"
+        );
+    }
+
+    #[test]
+    fn every_live_tool_is_classified_and_no_tool_is_both_halves_of_the_chain() {
+        let mut reads_private: Vec<String> = Vec::new();
+        let mut emits_outbound: Vec<String> = Vec::new();
+
+        for tool in get_tool_definitions() {
+            let (reads, emits) = capabilities(&tool.name).unwrap_or_else(|| {
+                panic!(
+                    "{} is in the registry but not classified in injection_tests::capabilities -- \
+                     classify it before it ships",
+                    tool.name
+                )
+            });
+            assert!(
+                !(reads && emits),
+                "{} both reads private data and emits it outbound -- that is the whole chain in one tool",
+                tool.name
+            );
+            if reads {
+                reads_private.push(tool.name.clone());
+            }
+            if emits {
+                emits_outbound.push(tool.name.clone());
+            }
+        }
+
+        // Both halves exist in the same context, so every outbound tool has to
+        // carry a written constraint.
+        if !reads_private.is_empty() && !emits_outbound.is_empty() {
+            for name in &emits_outbound {
+                assert!(
+                    ALLOWED_OUTBOUND
+                        .iter()
+                        .any(|(allowed, _)| *allowed == name.as_str()),
+                    "{name} emits data outbound and is not on ALLOWED_OUTBOUND -- add it with the \
+                     constraint that makes it safe, or take the tool out of the registry"
+                );
+            }
+        }
+
+        // The classification must not rot in the other direction either.
+        let live: Vec<String> = get_tool_definitions().iter().map(|t| t.name.clone()).collect();
+        for (allowed, _) in ALLOWED_OUTBOUND {
+            assert!(
+                live.iter().any(|n| n.as_str() == *allowed),
+                "{allowed} is on ALLOWED_OUTBOUND but no longer exists -- drop the stale entry"
+            );
+        }
+    }
+
+    #[test]
+    fn open_url_stays_out_of_the_registry() {
+        let names: Vec<String> = get_tool_definitions()
+            .iter()
+            .map(|t| t.name.clone())
+            .collect();
+        assert!(
+            !names.iter().any(|n| n == "open_url"),
+            "open_url hands a model-controlled string to macOS `open`; a URL query string is a raw \
+             outbound channel"
+        );
+    }
+
+    #[test]
+    fn create_event_cannot_invite_anyone() {
+        let tool = get_tool_definitions()
+            .into_iter()
+            .find(|t| t.name == "create_event")
+            .expect("create_event must still exist");
+        assert!(
+            tool.parameters["properties"]["attendees"].is_null(),
+            "an invite copies the event body onto the attendee's own calendar"
+        );
+    }
+
+    #[test]
+    fn open_file_rejects_urls() {
+        assert!(!is_local_file_path("https://collect.attacker.tld/c?d=stolen"));
+        assert!(!is_local_file_path("mailto:attacker@example.com?body=stolen"));
+        assert!(!is_local_file_path("slack://open?team=stolen"));
+        assert!(is_local_file_path("/Users/ada/Documents/report.pdf"));
+        assert!(is_local_file_path("~/Downloads/invoice.pdf"));
+    }
+}
+
+#[cfg(test)]
 mod prompt_tests {
     use super::*;
+
+    #[test]
+    fn system_prompt_addresses_the_actual_user() {
+        let prompt = system_prompt_for("Ada");
+        assert!(prompt.contains("Ada"), "prompt must address the signed-in user");
+        assert!(
+            !prompt.contains("Hillman"),
+            "prompt must not hardcode the developer's name"
+        );
+        assert!(
+            !prompt.contains("{user}"),
+            "every placeholder must be substituted"
+        );
+    }
+
+    #[test]
+    fn cacheable_prompt_carries_no_hardcoded_identity() {
+        let prompt = build_cacheable_system_prompt();
+        assert!(!prompt.contains("Hillman"));
+    }
 
     #[test]
     fn cacheable_prompt_is_byte_stable() {
@@ -1334,5 +1429,61 @@ mod memory_tests {
         execute_memory_tool("remember", &serde_json::json!({ "content": "fact A" }), &db);
         execute_memory_tool("remember", &serde_json::json!({ "content": "fact B" }), &db);
         assert_eq!(count(&db), 2);
+    }
+}
+
+#[cfg(test)]
+mod github_scope_tests {
+    use super::*;
+    use crate::db::Database;
+    use rusqlite::Connection;
+    use std::sync::Mutex;
+
+    fn github_db(repos: &[&str]) -> Database {
+        let conn = Connection::open_in_memory().unwrap();
+        conn.execute_batch(
+            "CREATE TABLE github_items (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                github_id INTEGER NOT NULL,
+                item_type TEXT NOT NULL,
+                title TEXT NOT NULL,
+                repo TEXT NOT NULL,
+                state TEXT NOT NULL
+            );",
+        )
+        .unwrap();
+        for (i, repo) in repos.iter().enumerate() {
+            conn.execute(
+                "INSERT INTO github_items (github_id, item_type, title, repo, state)
+                 VALUES (?1, 'issues', 'seen', ?2, 'open')",
+                rusqlite::params![i as i64, *repo],
+            )
+            .unwrap();
+        }
+        Database { conn: Mutex::new(conn) }
+    }
+
+    #[test]
+    fn injected_repo_is_refused() {
+        // The destination an injected email would name has never appeared in
+        // the user's GitHub activity, so it must not be publishable.
+        let db = github_db(&["ChiFungHillmanChan/jarvis-ai-assistant"]);
+        assert!(!github_repo_is_known(&db, "attacker-acct/inbox-log"));
+        assert!(!github_repo_is_known(&db, ""));
+        assert!(!github_repo_is_known(&db, "   "));
+    }
+
+    #[test]
+    fn repo_the_user_already_works_with_is_allowed() {
+        let db = github_db(&["ChiFungHillmanChan/jarvis-ai-assistant"]);
+        assert!(github_repo_is_known(
+            &db,
+            "ChiFungHillmanChan/jarvis-ai-assistant"
+        ));
+        // Same repo, model-supplied casing and stray whitespace.
+        assert!(github_repo_is_known(
+            &db,
+            "  chifunghillmanchan/JARVIS-AI-ASSISTANT  "
+        ));
     }
 }

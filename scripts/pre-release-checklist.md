@@ -34,7 +34,14 @@ If any item fails, block the release, fix the bug, then restart from item 1.
       mid-sentence, press Escape. Speech must stop within one sentence boundary.
       Repeat with Cmd+Shift+J (voice toggle) — should not interfere.
 
-All 15 must pass before running `release.sh`.
+- [ ] 16. **The test suite is green on the tree you are about to ship.** `npm test`
+      (`cargo test --manifest-path src-tauri/Cargo.toml`) exits 0. `release.sh` runs
+      this itself as step 0/10 and aborts on failure, so a red suite blocks the DMG
+      either way — run it here first to fail fast instead of after a 10-minute smoke.
+      CI green on the last push is not a substitute: `release.sh` builds from the
+      local working tree, which may hold changes no CI run has ever seen.
+
+All 16 must pass before running `release.sh`.
 
 ## Notes
 

@@ -94,6 +94,7 @@ pub async fn send(
     google_auth: &std::sync::Arc<crate::auth::google::GoogleAuth>,
     app_handle: &tauri::AppHandle,
     tts_tx: Option<tokio::sync::mpsc::Sender<TtsCommand>>,
+    ledger: &crate::ai::SideEffectLedger,
 ) -> Result<String, Box<dyn std::error::Error + Send + Sync>> {
     let client = client_for(creds).await;
     let tool_config = build_tool_config()?;
@@ -104,20 +105,7 @@ pub async fn send(
     // static prefix is served from cache while the dynamic suffix (user name,
     // date, memory) is sent fresh each call without invalidating the cache.
     let static_prompt = tools::build_cacheable_system_prompt();
-    let user_name = {
-        db.conn
-            .lock()
-            .ok()
-            .and_then(|conn| {
-                conn.query_row(
-                    "SELECT value FROM user_preferences WHERE key = 'user_name'",
-                    [],
-                    |row| row.get::<_, String>(0),
-                )
-                .ok()
-            })
-            .unwrap_or_else(|| "User".to_string())
-    };
+    let user_name = crate::util::display_name(db);
     let today_iso = chrono::Local::now().format("%Y-%m-%d").to_string();
     let language = tools::read_language_pref(db);
     let dynamic = tools::build_dynamic_suffix(&user_name, &today_iso, &language, db);
@@ -164,13 +152,15 @@ pub async fn send(
 
             for tool_use in &tool_uses {
                 let name = tool_use.name();
-                let content = if executed_tools.contains(name) {
+                let args_value = document_to_json(tool_use.input());
+                let args_str = serde_json::to_string(&args_value).unwrap_or_default();
+                let call_key = crate::ai::tool_call_key(name, &args_str);
+                let content = if executed_tools.contains(&call_key) {
                     log::info!("JARVIS skipping duplicate tool call: {}", name);
-                    "Skipped: already executed this tool in this batch.".to_string()
+                    "Skipped: already executed this tool with these arguments in this batch."
+                        .to_string()
                 } else {
-                    executed_tools.insert(name.to_string());
-                    let args_value = document_to_json(tool_use.input());
-                    let args_str = serde_json::to_string(&args_value).unwrap_or_default();
+                    executed_tools.insert(call_key);
                     log::info!("JARVIS tool call: {}({})", name, args_str);
 
                     let label = tools::tool_status_label(name);
@@ -191,6 +181,7 @@ pub async fn send(
                         }
                     }
 
+                    ledger.note(name);
                     let result = tools::execute_tool(name, &args_str, db, google_auth).await;
                     log::info!("JARVIS tool result: {}", crate::util::truncate_bytes(&result, 200));
                     result

@@ -10,7 +10,7 @@ interface Series {
 }
 
 interface LineChartData {
-  labels: string[];
+  labels?: string[];
   series: Series[];
 }
 
@@ -29,6 +29,61 @@ type BarChartData = LineChartData;
 interface InlineChartProps {
   chartType: string;
   data: Record<string, unknown>;
+}
+
+// ---------------------------------------------------------------------------
+// Payload validation
+//
+// Chart payloads come from JSON the model wrote, so nothing about their shape
+// is guaranteed. Validate here and fall back to plain text -- a bad payload
+// must not throw inside render.
+// ---------------------------------------------------------------------------
+
+function isFiniteNumberArray(value: unknown): value is number[] {
+  return (
+    Array.isArray(value) &&
+    value.every((v) => typeof v === "number" && Number.isFinite(v))
+  );
+}
+
+function isStringArray(value: unknown): value is string[] {
+  return Array.isArray(value) && value.every((v) => typeof v === "string");
+}
+
+function isSeries(value: unknown): value is Series {
+  if (typeof value !== "object" || value === null) return false;
+  const s = value as { name?: unknown; data?: unknown };
+  return typeof s.name === "string" && isFiniteNumberArray(s.data);
+}
+
+function isPieSegment(value: unknown): value is PieSegment {
+  if (typeof value !== "object" || value === null) return false;
+  const s = value as { label?: unknown; value?: unknown };
+  return (
+    typeof s.label === "string" &&
+    typeof s.value === "number" &&
+    Number.isFinite(s.value)
+  );
+}
+
+// Line and bar charts share this shape. Returns null when nothing renderable
+// survives validation.
+function toSeriesChartData(data: Record<string, unknown>): LineChartData | null {
+  const { labels, series } = data;
+  if (!Array.isArray(series)) return null;
+  const valid = series.filter(isSeries);
+  if (valid.length === 0) return null;
+  if (isStringArray(labels)) return { labels, series: valid };
+  if (labels === undefined || labels === null) return { series: valid };
+  return null;
+}
+
+function toPieChartData(data: Record<string, unknown>): PieChartData | null {
+  const { segments } = data;
+  if (!Array.isArray(segments)) return null;
+  const valid = segments.filter(isPieSegment);
+  if (valid.length === 0) return null;
+  return { segments: valid };
 }
 
 // ---------------------------------------------------------------------------
@@ -323,12 +378,16 @@ function BarChart({ data }: { data: BarChartData }) {
 function InlineChartInner({ chartType, data }: InlineChartProps) {
   const type = chartType.toLowerCase();
 
+  const seriesData =
+    type === "line" || type === "bar" ? toSeriesChartData(data) : null;
+  const pieData = type === "pie" ? toPieChartData(data) : null;
+
   return (
     <div style={wrapperStyle}>
-      {type === "line" && <LineChart data={data as unknown as LineChartData} />}
-      {type === "pie" && <PieChart data={data as unknown as PieChartData} />}
-      {type === "bar" && <BarChart data={data as unknown as BarChartData} />}
-      {type !== "line" && type !== "pie" && type !== "bar" && (
+      {type === "line" && seriesData && <LineChart data={seriesData} />}
+      {type === "pie" && pieData && <PieChart data={pieData} />}
+      {type === "bar" && seriesData && <BarChart data={seriesData} />}
+      {!seriesData && !pieData && (
         <div style={unknownStyle}>[Chart: {chartType}]</div>
       )}
     </div>
