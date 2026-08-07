@@ -71,7 +71,7 @@ pub fn run() {
             log::info!("AI provider: {}", ai_provider);
             let mut router = AiRouter::new(&ai_provider);
             router.load_from_db(&db);
-            router.load_keys_from_db(&db);
+            router.reload_keys();
             log::info!("Provider chain: {} entries, {} local endpoints",
                 router.provider_chain().len(), router.local_endpoints().len());
 
@@ -206,7 +206,7 @@ pub fn run() {
 
                 let mut router = crate::ai::AiRouter::new(&provider_brief);
                 router.load_from_db(&db_brief);
-                router.load_keys_from_db(&db_brief);
+                router.reload_keys();
                 match crate::assistant::briefing::generate_briefing(&db_brief, &router, &auth_brief, &app_handle_brief).await {
                     Ok(result) => {
                         log::info!("Morning briefing: {}", result.briefing);
@@ -397,7 +397,6 @@ pub fn run() {
             commands::launch::save_beta_tester,
             commands::launch::submit_beta_feedback,
             commands::payments::payments_start_checkout,
-            commands::payments::payments_open_portal,
             voice::commands::start_listening,
             voice::commands::stop_listening,
             voice::commands::get_voice_state,

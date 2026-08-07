@@ -75,30 +75,10 @@ pub async fn create_checkout_session(req: CheckoutRequest<'_>) -> Result<Checkou
     Ok(parsed)
 }
 
-pub async fn open_billing_portal(user_id: &str) -> Result<String, PaymentError> {
-    let base = payment_api_base()?;
-    let url = format!("{}/portal", base.trim_end_matches('/'));
-
-    #[derive(Serialize)]
-    struct PortalReq<'a> { user_id: &'a str }
-    #[derive(Deserialize)]
-    struct PortalResp { url: String }
-
-    let client = crate::util::http_client();
-    let resp = client
-        .post(&url)
-        .json(&PortalReq { user_id })
-        .send()
-        .await?;
-
-    if !resp.status().is_success() {
-        let status = resp.status();
-        let body = resp.text().await.unwrap_or_default();
-        return Err(PaymentError::Checkout(format!("{}: {}", status, body)));
-    }
-    let parsed: PortalResp = resp.json().await?;
-    Ok(parsed.url)
-}
+// The billing-portal client was removed 2026-08-07: it POSTed to a /portal
+// route the payment stack has never registered, and no UI called it -- a
+// guaranteed 404 masquerading as a feature. Rebuild it together with the
+// entitlement layer, backend route first.
 
 #[cfg(test)]
 mod tests {

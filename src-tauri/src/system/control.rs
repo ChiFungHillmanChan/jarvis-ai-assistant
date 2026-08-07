@@ -583,6 +583,30 @@ pub async fn read_file(path: &str, max_lines: Option<usize>) -> Result<String, S
 mod tests {
     use super::*;
 
+    /// The tool-surface guard in ai/tools.rs classifies `run_command` as
+    /// (reads_private, !emits_outbound) on the strength of this allowlist
+    /// being network-incapable. That classification is hand-written in the
+    /// guard's own table, so adding `curl` here would silently make
+    /// `run_command` both halves of the exfiltration chain while every guard
+    /// test stayed green. Pin the load-bearing property at its source.
+    #[test]
+    fn allowlist_contains_no_network_capable_binary() {
+        const NETWORK_CAPABLE: &[&str] = &[
+            "curl", "wget", "nc", "ncat", "netcat", "ssh", "scp", "sftp",
+            "rsync", "ftp", "telnet", "ping", "dig", "nslookup", "host",
+            "osascript", "python", "python3", "perl", "ruby", "node", "php",
+            "git", "brew", "npm", "pip", "pip3", "open",
+        ];
+        for cmd in ALLOWED_COMMANDS {
+            assert!(
+                !NETWORK_CAPABLE.contains(cmd),
+                "'{cmd}' can reach the network or execute code; adding it to \
+                 ALLOWED_COMMANDS reopens the read-private + emit-outbound \
+                 chain that ai/tools.rs::injection_tests assumes is closed"
+            );
+        }
+    }
+
     #[test]
     fn allows_read_only_commands() {
         assert!(parse_allowed_command("df -h").is_ok());
