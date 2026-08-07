@@ -22,7 +22,22 @@ pub fn price_for(model_id: &str) -> ModelPrice {
         ModelPrice { input_per_million: 0.80, output_per_million: 3.20, cache_read_per_million: 0.20, cache_write_per_million: 1.00 }
     } else if m.contains("gemini-3.1-pro") {
         ModelPrice { input_per_million: 2.0, output_per_million: 12.0, cache_read_per_million: 0.50, cache_write_per_million: 2.0 }
+    } else if m.contains("gemini-3.5-flash-lite") {
+        // Prices below for the 3.x Flash family read off Google's pricing page
+        // 2026-08-07. Order matters: the -lite ids contain their non-lite
+        // prefix, so they must match first.
+        ModelPrice { input_per_million: 0.30, output_per_million: 2.50, cache_read_per_million: 0.075, cache_write_per_million: 0.30 }
+    } else if m.contains("gemini-3.5-flash") {
+        ModelPrice { input_per_million: 1.50, output_per_million: 9.0, cache_read_per_million: 0.375, cache_write_per_million: 1.50 }
+    } else if m.contains("gemini-3.6-flash") {
+        ModelPrice { input_per_million: 1.50, output_per_million: 7.50, cache_read_per_million: 0.375, cache_write_per_million: 1.50 }
+    } else if m.contains("gemini-3.1-flash-lite") {
+        ModelPrice { input_per_million: 0.25, output_per_million: 1.50, cache_read_per_million: 0.0625, cache_write_per_million: 0.25 }
     } else if m.contains("gemini-3-flash") {
+        // gemini-3-flash-preview is the configured MODEL_FLASH, but it no
+        // longer appears on Google's public pricing page (checked 2026-08-07).
+        // $0.50/$3.00 is the last known preview rate; verify the model id is
+        // still served before relying on this number for a business claim.
         ModelPrice { input_per_million: 0.50, output_per_million: 3.0, cache_read_per_million: 0.125, cache_write_per_million: 0.50 }
     } else if m.contains("gemini-2.5-pro") || m.contains("gemini-pro") {
         ModelPrice { input_per_million: 1.25, output_per_million: 10.0, cache_read_per_million: 0.31, cache_write_per_million: 1.25 }
@@ -51,6 +66,27 @@ pub fn price_for(model_id: &str) -> ModelPrice {
     }
 }
 
+/// Requests whose prompt exceeds this are billed at the long-context rate by
+/// providers that have one. "Triage 500 emails" lands here routinely, so
+/// pricing it at the base rate understated exactly the workloads the
+/// blended-cost report exists to measure.
+const LONG_CONTEXT_THRESHOLD_TOKENS: i64 = 200_000;
+
+/// The >200K-input price, for the models that publish one. Google's pricing
+/// page (read 2026-08-07) doubles Gemini 3.1 Pro to $4/$18 and Gemini 2.5 Pro
+/// to $2.50/$15 above 200K; current Anthropic models advertise no long-context
+/// premium, and the Flash tiers publish a single rate.
+fn long_context_price_for(model_id: &str) -> Option<ModelPrice> {
+    let m = model_id.to_lowercase();
+    if m.contains("gemini-3.1-pro") {
+        Some(ModelPrice { input_per_million: 4.0, output_per_million: 18.0, cache_read_per_million: 1.0, cache_write_per_million: 4.0 })
+    } else if m.contains("gemini-2.5-pro") {
+        Some(ModelPrice { input_per_million: 2.50, output_per_million: 15.0, cache_read_per_million: 0.625, cache_write_per_million: 2.50 })
+    } else {
+        None
+    }
+}
+
 pub fn compute_usd_cost_micro(
     model_id: &str,
     input_tokens: i64,
@@ -58,7 +94,11 @@ pub fn compute_usd_cost_micro(
     cache_read_tokens: i64,
     cache_write_tokens: i64,
 ) -> i64 {
-    let p = price_for(model_id);
+    let p = if input_tokens > LONG_CONTEXT_THRESHOLD_TOKENS {
+        long_context_price_for(model_id).unwrap_or_else(|| price_for(model_id))
+    } else {
+        price_for(model_id)
+    };
     let billable_input = (input_tokens - cache_read_tokens - cache_write_tokens).max(0);
     let usd = (billable_input as f64) * p.input_per_million / 1_000_000.0
         + (output_tokens as f64) * p.output_per_million / 1_000_000.0
@@ -199,6 +239,41 @@ pub(crate) mod tests {
             assert!(
                 p.input_per_million > 0.0 && p.input_per_million < 3.0,
                 "{id} fell through to the frontier fallback -- add it to price_for()"
+            );
+        }
+    }
+
+    /// Google bills Gemini 3.1 Pro at $4/$18 above 200K input tokens (pricing
+    /// page, 2026-08-07). A 250K-token triage priced at the base rate would
+    /// understate cost by half on the exact workload ("summarise my whole
+    /// inbox") most likely to produce it.
+    #[test]
+    fn gemini_pro_long_context_requests_bill_at_the_higher_tier() {
+        let base = compute_usd_cost_micro("gemini-3.1-pro-preview", 100_000, 1_000, 0, 0);
+        let long = compute_usd_cost_micro("gemini-3.1-pro-preview", 250_000, 1_000, 0, 0);
+        // 100K @ $2/1M = $0.20; 250K @ $4/1M = $1.00 (plus identical output).
+        assert!(long > base * 2, "long-context input must use the $4 tier, got {long} vs {base}");
+        // Models without a published long-context tier keep their base rate.
+        let flash_long = compute_usd_cost_micro("gemini-3.5-flash", 250_000, 0, 0, 0);
+        assert_eq!(flash_long, (250_000f64 * 1.50 / 1_000_000.0 * 1_000_000.0).round() as i64);
+    }
+
+    /// A model-id bump to any current Flash-family id must not fall through to
+    /// the frontier fallback -- that failure mode is exactly what the audit
+    /// flagged: upgrade the id, and the dashboard silently overstates cost 6x.
+    #[test]
+    fn current_flash_family_ids_resolve_and_lite_orders_before_non_lite() {
+        for (id, expected_input) in [
+            ("gemini-3.6-flash", 1.50),
+            ("gemini-3.5-flash", 1.50),
+            ("gemini-3.5-flash-lite", 0.30),
+            ("gemini-3.1-flash-lite", 0.25),
+        ] {
+            let p = price_for(id);
+            assert!(
+                (p.input_per_million - expected_input).abs() < f64::EPSILON,
+                "{id}: expected ${expected_input}/1M input, got ${}",
+                p.input_per_million
             );
         }
     }

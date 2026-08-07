@@ -48,10 +48,6 @@ export async function submitBetaFeedback(input: BetaFeedbackInput): Promise<void
 export async function paymentsStartCheckout(tier: "pro" | "team", email: string): Promise<{ url: string; session_id: string }> {
   return invoke("payments_start_checkout", { tier, email });
 }
-export async function paymentsOpenPortal(): Promise<string> {
-  return invoke("payments_open_portal");
-}
-
 export async function getSettings(): Promise<Settings> {
   return invoke("get_settings");
 }

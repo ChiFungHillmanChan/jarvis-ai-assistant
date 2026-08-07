@@ -50,8 +50,10 @@ pub async fn google_connect(
         ConnectPlan::Fresh => {}
     }
 
+    // gmail.modify is a superset of gmail.readonly, and both are restricted
+    // scopes. Requesting only modify halves the restricted-scope surface the
+    // Google OAuth verification / CASA assessment has to cover.
     let scopes = vec![
-        "https://www.googleapis.com/auth/gmail.readonly".to_string(),
         "https://www.googleapis.com/auth/gmail.modify".to_string(),
         "https://www.googleapis.com/auth/calendar".to_string(),
     ];

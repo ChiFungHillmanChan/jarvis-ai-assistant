@@ -1,3 +1,3 @@
 pub mod stripe;
 
-pub use stripe::{create_checkout_session, open_billing_portal, CheckoutRequest, Tier};
+pub use stripe::{create_checkout_session, CheckoutRequest, Tier};

@@ -259,7 +259,7 @@ pub struct AiRouter {
 
 impl AiRouter {
     pub fn new(provider_setting: &str) -> Self {
-        // Keys start env-only; `load_keys_from_db` layers the Keychain in
+        // Keys start env-only; `reload_keys` layers the Keychain in
         // afterwards, because construction has no database handle.
         let gemini_key = resolve_key("GEMINI_API_KEY", None);
         let claude_key = resolve_key("ANTHROPIC_API_KEY", None);
@@ -423,7 +423,7 @@ impl AiRouter {
     /// Layer Keychain-stored provider keys under the env vars. Called at
     /// startup and again whenever a key is saved in Settings, so a freshly
     /// pasted key takes effect without restarting the app.
-    pub fn load_keys_from_db(&mut self, _db: &crate::db::Database) {
+    pub fn reload_keys(&mut self) {
         let from_keychain = |account: &str| {
             crate::security::keychain::KeychainStore::get(KEY_SERVICE, account).ok()
         };
