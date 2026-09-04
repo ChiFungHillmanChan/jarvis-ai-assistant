@@ -210,6 +210,17 @@ pub(crate) fn classify_provider_error(err: &str) -> ErrorDisposition {
         Some(400) => {
             if lower.contains("api_key_invalid") || lower.contains("api key not valid") {
                 ErrorDisposition::SkipSameProvider
+            } else if lower.contains("not found") || lower.contains("not supported") {
+                // A retired or unknown model id. Google has been observed
+                // reporting this as 400 INVALID_ARGUMENT (e.g. "models/x is
+                // not found for API version v1beta") rather than 404 -- if
+                // that fell to StopChain, the default chain's position-1
+                // fallback (default_chain_fallback_is_a_different_model_than_
+                // the_volume_tier_uses) would never be reached for a dead
+                // model id reported this way, making that fix inert. Every
+                // other 400 is a malformed or oversized request and still
+                // stops the chain below.
+                ErrorDisposition::Retry
             } else {
                 ErrorDisposition::StopChain
             }
@@ -298,9 +309,11 @@ impl AiRouter {
             _ => vec![
                 // gemini_primary (default): position 0 is left unpinned so the
                 // workload tier picks the model -- Pro for premium work, Flash
-                // for read-only volume and tool turns -- with Flash pinned as
-                // the fallback. The named presets above stay pinned because
-                // their names promise a specific model.
+                // for read-only volume and tool turns. Position 1 is pinned to
+                // Pro so a Flash outage degrades to a *different* model; pinning
+                // Flash here made the fallback a retry of the failing call.
+                // Pro is the id with a confirmed public price (cost.rs), so the
+                // chain degrades from the doubtful id to the confirmed one.
                 ProviderChainEntry {
                     position: 0,
                     provider_type: "gemini".into(),
@@ -312,7 +325,7 @@ impl AiRouter {
                     position: 1,
                     provider_type: "gemini".into(),
                     endpoint_id: None,
-                    model_id: Some(gemini::MODEL_FLASH.into()),
+                    model_id: Some(gemini::MODEL_PRO.into()),
                     enabled: true,
                 },
             ],
@@ -821,6 +834,7 @@ impl AiRouter {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use rusqlite::Connection;
 
     #[test]
     fn resolve_key_prefers_env_then_falls_back() {
@@ -939,6 +953,14 @@ mod tests {
             classify_provider_error("No Gemini API key configured"),
             ErrorDisposition::Retry
         );
+        // A retired or unknown model id reported as 404 is retryable: a later
+        // chain entry pointing at a different, live model can still succeed.
+        assert_eq!(
+            classify_provider_error(
+                "Gemini API error 404 Not Found: models/gemini-3-flash-preview is not found for API version v1beta"
+            ),
+            ErrorDisposition::Retry
+        );
 
         // Rejected credential: every later entry of the same provider type
         // reads the same key.
@@ -964,6 +986,27 @@ mod tests {
         );
         assert_eq!(
             classify_provider_error("Claude API error 413 Payload Too Large: "),
+            ErrorDisposition::StopChain
+        );
+    }
+
+    /// A 400 whose body says the model id itself is unrecognised must stay
+    /// retryable -- see the comment on the `Some(400)` arm of
+    /// `classify_provider_error`. Everything else at 400 is a malformed or
+    /// oversized request and must keep stopping the chain, or a client bug
+    /// turns into a retry loop across every remaining entry.
+    #[test]
+    fn classify_provider_error_retries_a_400_reported_dead_model_id() {
+        assert_eq!(
+            classify_provider_error(
+                "Gemini API error 400 Bad Request: {\"error\":{\"status\":\"INVALID_ARGUMENT\",\"message\":\"models/gemini-3-flash-preview is not found for API version v1beta, or is not supported for content generation\"}}"
+            ),
+            ErrorDisposition::Retry
+        );
+        assert_eq!(
+            classify_provider_error(
+                "Gemini API error 400 Bad Request: {\"error\":{\"status\":\"INVALID_ARGUMENT\",\"message\":\"Request contains an invalid argument\"}}"
+            ),
             ErrorDisposition::StopChain
         );
     }
@@ -1018,17 +1061,121 @@ mod tests {
             gemini_model_for(chain[0].model_id.as_deref(), Workload::Premium),
             gemini::MODEL_PRO
         );
-        // The pinned fallback and the named presets keep their explicit model.
-        assert_eq!(chain[1].model_id.as_deref(), Some(gemini::MODEL_FLASH));
-        assert_eq!(
-            gemini_model_for(chain[1].model_id.as_deref(), Workload::Premium),
-            gemini::MODEL_FLASH
-        );
+        // The pinned fallback keeps its explicit model, as the named presets do.
+        assert_eq!(chain[1].model_id.as_deref(), Some(gemini::MODEL_PRO));
         let pro_only = AiRouter::new("gemini_pro_only");
         assert_eq!(
             gemini_model_for(pro_only.provider_chain()[0].model_id.as_deref(), Workload::Volume),
             gemini::MODEL_PRO
         );
+    }
+
+    /// Position 1 exists to survive position 0's model being unavailable. If both
+    /// positions resolve to the same id with the same key, a retired model id is a
+    /// total outage rather than a degraded one -- which is exactly what shipped
+    /// while `gemini-3-flash-preview` was pinned in both slots.
+    #[test]
+    fn default_chain_fallback_is_a_different_model_than_the_volume_tier_uses() {
+        let router = AiRouter::new("gemini_primary");
+        let chain = router.provider_chain();
+        let first = gemini_model_for(chain[0].model_id.as_deref(), Workload::Volume);
+        let second = gemini_model_for(chain[1].model_id.as_deref(), Workload::Volume);
+        assert_ne!(
+            first, second,
+            "the default chain must degrade to a different model, not retry the same one"
+        );
+    }
+
+    /// The shipped migration, not a copy of it -- a hand-written mirror of the
+    /// V20 SQL could drift from what refinery actually runs and this test would
+    /// never notice.
+    const V20_SQL: &str = include_str!("../../migrations/V20__default_chain_fallback.sql");
+
+    /// `provider_chain` as of V10 (the current shape): a hand-written subset
+    /// with the columns and CHECK constraint V20 runs against, like the
+    /// `aws_credentials` fixture in `aws/credentials.rs` uses, rather than
+    /// replaying V7/V8/V10 in order.
+    fn fresh_provider_chain_conn() -> Connection {
+        let conn = Connection::open_in_memory().expect("open in-memory db");
+        conn.execute_batch(
+            "CREATE TABLE provider_chain (
+                position INTEGER NOT NULL PRIMARY KEY,
+                provider_type TEXT NOT NULL
+                    CHECK(provider_type IN ('claude', 'openai', 'local', 'gemini', 'bedrock')),
+                endpoint_id TEXT,
+                model_id TEXT,
+                enabled INTEGER NOT NULL DEFAULT 1
+            );",
+        )
+        .expect("create provider_chain table");
+        conn
+    }
+
+    fn seed_chain_row(conn: &Connection, position: i32, provider_type: &str, model_id: Option<&str>) {
+        conn.execute(
+            "INSERT INTO provider_chain (position, provider_type, endpoint_id, model_id, enabled)
+             VALUES (?1, ?2, NULL, ?3, 1)",
+            rusqlite::params![position, provider_type, model_id],
+        )
+        .expect("seed chain row");
+    }
+
+    fn model_id_at(conn: &Connection, position: i32) -> Option<String> {
+        conn.query_row(
+            "SELECT model_id FROM provider_chain WHERE position = ?1",
+            rusqlite::params![position],
+            |r| r.get(0),
+        )
+        .expect("read back position")
+    }
+
+    /// V20 exists because Settings.tsx loads `get_provider_chain`'s response
+    /// into React state and writes the whole array back verbatim on the first
+    /// edit -- add/remove/reorder/toggle an entry, or remove a local endpoint.
+    /// Anyone who touched their chain before this fix shipped has the pre-fix
+    /// default persisted, with position 1 pinned to the same Flash id position
+    /// 0 resolves to; `load_from_db` then replaces the corrected
+    /// `AiRouter::new` default with those stale rows, so the fix never reaches
+    /// them without this migration.
+    ///
+    /// The guards must stay exact: Settings.tsx has a literal "+ Gemini Flash"
+    /// button (`handleAddToChain`) that appends at `position: chain.length`. A
+    /// user who trimmed their chain down and clicked it has that row as a
+    /// DELIBERATE cheap choice -- rewriting it to Pro would quadruple the cost
+    /// of the model they picked for being cheap.
+    #[test]
+    fn v20_rewrites_only_the_byte_for_byte_pre_fix_default() {
+        // The stale pre-fix default: position 0 unpinned (gemini, no
+        // model_id), position 1 pinned to Flash. This IS rewritten to Pro.
+        let conn = fresh_provider_chain_conn();
+        seed_chain_row(&conn, 0, "gemini", None);
+        seed_chain_row(&conn, 1, "gemini", Some(gemini::MODEL_FLASH));
+        conn.execute_batch(V20_SQL).expect("run V20");
+        assert_eq!(model_id_at(&conn, 1).as_deref(), Some(gemini::MODEL_PRO));
+
+        // [claude, gemini flash]: position 0 is not the unpinned-gemini
+        // marker, so the EXISTS guard fails. NOT rewritten.
+        let conn = fresh_provider_chain_conn();
+        seed_chain_row(&conn, 0, "claude", None);
+        seed_chain_row(&conn, 1, "gemini", Some(gemini::MODEL_FLASH));
+        conn.execute_batch(V20_SQL).expect("run V20");
+        assert_eq!(model_id_at(&conn, 1).as_deref(), Some(gemini::MODEL_FLASH));
+
+        // A 3-entry chain: the COUNT(*) = 2 guard fails. NOT rewritten.
+        let conn = fresh_provider_chain_conn();
+        seed_chain_row(&conn, 0, "gemini", None);
+        seed_chain_row(&conn, 1, "gemini", Some(gemini::MODEL_FLASH));
+        seed_chain_row(&conn, 2, "claude", None);
+        conn.execute_batch(V20_SQL).expect("run V20");
+        assert_eq!(model_id_at(&conn, 1).as_deref(), Some(gemini::MODEL_FLASH));
+
+        // An empty table: no rows match, no-op, does not error.
+        let conn = fresh_provider_chain_conn();
+        conn.execute_batch(V20_SQL).expect("run V20 on an empty table");
+        let rows: i64 = conn
+            .query_row("SELECT COUNT(*) FROM provider_chain", [], |r| r.get(0))
+            .expect("count");
+        assert_eq!(rows, 0);
     }
 
     fn entry(position: i32, provider_type: &str, endpoint_id: Option<&str>) -> ProviderChainEntry {

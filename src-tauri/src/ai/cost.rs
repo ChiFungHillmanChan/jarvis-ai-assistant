@@ -328,4 +328,65 @@ pub(crate) mod tests {
         let (total, days) = blended_cost_micro(&db, 0).unwrap();
         assert_eq!((total, days), (0, 0));
     }
+
+    /// The shipped model ids must still be served by Google, not merely priced by
+    /// us. `gemini-3-flash-preview` left the public pricing page on 2026-08-07 and
+    /// nothing in CI would notice if it stopped resolving -- the failure would
+    /// surface as every default user's first message erroring out.
+    ///
+    /// Network-dependent, so ignored by default like the real Keychain round trip.
+    /// Run deliberately:
+    ///   GEMINI_API_KEY=... cargo test --manifest-path src-tauri/Cargo.toml \
+    ///     shipped_gemini_model_ids_are_still_served -- --ignored --nocapture
+    #[tokio::test]
+    #[ignore]
+    async fn shipped_gemini_model_ids_are_still_served() {
+        let key = std::env::var("GEMINI_API_KEY")
+            .expect("set GEMINI_API_KEY to run this test");
+
+        // pageSize=200 is not paginated further; a miss here fails safe.
+        let url = format!("{}/models?pageSize=200", crate::ai::gemini::API_BASE);
+        let response = reqwest::Client::new()
+            .get(url)
+            .header("x-goog-api-key", &key)
+            .send()
+            .await
+            .expect("models.list request failed");
+
+        let status = response.status();
+        let body = response
+            .text()
+            .await
+            .expect("models.list body was not readable");
+
+        assert!(status.is_success(), "models.list returned {status}: {body}");
+
+        let parsed: serde_json::Value =
+            serde_json::from_str(&body).expect("models.list body was not JSON");
+        let served: Vec<String> = parsed["models"]
+            .as_array()
+            .expect("models.list had no models array")
+            .iter()
+            .filter_map(|m| m["name"].as_str())
+            .map(|n| n.strip_prefix("models/").unwrap_or(n).to_string())
+            .collect();
+
+        // Collected across both ids and asserted once: MODEL_PRO is checked
+        // first, and an assert! inside the loop would panic on a Pro miss
+        // before MODEL_FLASH is ever checked -- hiding the Flash answer, which
+        // is the whole reason this test exists.
+        let missing: Vec<&str> = [crate::ai::gemini::MODEL_PRO, crate::ai::gemini::MODEL_FLASH]
+            .into_iter()
+            .filter(|id| !served.iter().any(|s| s == id))
+            .collect();
+        assert!(
+            missing.is_empty(),
+            "{missing:?} are pinned in gemini.rs but Google no longer serves them. \
+             Served ids containing 'flash' or 'pro': {:?}",
+            served
+                .iter()
+                .filter(|s| s.contains("flash") || s.contains("pro"))
+                .collect::<Vec<_>>()
+        );
+    }
 }
