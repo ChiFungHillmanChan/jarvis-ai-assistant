@@ -383,7 +383,7 @@ fn default_chain_for(ai_provider: &str) -> Vec<ProviderChainEntry> {
         ],
         _ => vec![
             ProviderChainEntry { position: 0, provider_type: "gemini".into(), endpoint_id: None, model_id: None, enabled: true },
-            ProviderChainEntry { position: 1, provider_type: "gemini".into(), endpoint_id: None, model_id: Some(crate::ai::gemini::MODEL_FLASH.into()), enabled: true },
+            ProviderChainEntry { position: 1, provider_type: "gemini".into(), endpoint_id: None, model_id: Some(crate::ai::gemini::MODEL_PRO.into()), enabled: true },
         ],
     }
 }
@@ -557,14 +557,15 @@ mod tests {
         }
     }
 
-    /// The specific pin that caused the cost regression.
+    /// Position 0 is unpinned to let the workload tier pick the model, while
+    /// position 1 is pinned to Pro to ensure the fallback is a different model.
     #[test]
     fn the_default_chain_leaves_position_zero_unpinned() {
         let chain = default_chain_for("gemini_primary");
         assert_eq!(chain[0].model_id, None, "position 0 must let the workload tier pick");
         assert_eq!(
             chain[1].model_id.as_deref(),
-            Some(crate::ai::gemini::MODEL_FLASH)
+            Some(crate::ai::gemini::MODEL_PRO)
         );
     }
 }

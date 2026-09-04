@@ -298,9 +298,11 @@ impl AiRouter {
             _ => vec![
                 // gemini_primary (default): position 0 is left unpinned so the
                 // workload tier picks the model -- Pro for premium work, Flash
-                // for read-only volume and tool turns -- with Flash pinned as
-                // the fallback. The named presets above stay pinned because
-                // their names promise a specific model.
+                // for read-only volume and tool turns. Position 1 is pinned to
+                // Pro so a Flash outage degrades to a *different* model; pinning
+                // Flash here made the fallback a retry of the failing call.
+                // Pro is the id with a confirmed public price (cost.rs), so the
+                // chain degrades from the doubtful id to the confirmed one.
                 ProviderChainEntry {
                     position: 0,
                     provider_type: "gemini".into(),
@@ -312,7 +314,7 @@ impl AiRouter {
                     position: 1,
                     provider_type: "gemini".into(),
                     endpoint_id: None,
-                    model_id: Some(gemini::MODEL_FLASH.into()),
+                    model_id: Some(gemini::MODEL_PRO.into()),
                     enabled: true,
                 },
             ],
@@ -1018,16 +1020,28 @@ mod tests {
             gemini_model_for(chain[0].model_id.as_deref(), Workload::Premium),
             gemini::MODEL_PRO
         );
-        // The pinned fallback and the named presets keep their explicit model.
-        assert_eq!(chain[1].model_id.as_deref(), Some(gemini::MODEL_FLASH));
-        assert_eq!(
-            gemini_model_for(chain[1].model_id.as_deref(), Workload::Premium),
-            gemini::MODEL_FLASH
-        );
+        // The pinned fallback keeps its explicit model, as the named presets do.
+        assert_eq!(chain[1].model_id.as_deref(), Some(gemini::MODEL_PRO));
         let pro_only = AiRouter::new("gemini_pro_only");
         assert_eq!(
             gemini_model_for(pro_only.provider_chain()[0].model_id.as_deref(), Workload::Volume),
             gemini::MODEL_PRO
+        );
+    }
+
+    /// Position 1 exists to survive position 0's model being unavailable. If both
+    /// positions resolve to the same id with the same key, a retired model id is a
+    /// total outage rather than a degraded one -- which is exactly what shipped
+    /// while `gemini-3-flash-preview` was pinned in both slots.
+    #[test]
+    fn default_chain_fallback_is_a_different_model_than_the_volume_tier_uses() {
+        let router = AiRouter::new("gemini_primary");
+        let chain = router.provider_chain();
+        let first = gemini_model_for(chain[0].model_id.as_deref(), Workload::Volume);
+        let second = gemini_model_for(chain[1].model_id.as_deref(), Workload::Volume);
+        assert_ne!(
+            first, second,
+            "the default chain must degrade to a different model, not retry the same one"
         );
     }
 
