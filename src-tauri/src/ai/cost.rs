@@ -344,6 +344,7 @@ pub(crate) mod tests {
         let key = std::env::var("GEMINI_API_KEY")
             .expect("set GEMINI_API_KEY to run this test");
 
+        // pageSize=200 is not paginated further; a miss here fails safe.
         let url = format!("{}/models?pageSize=200", crate::ai::gemini::API_BASE);
         let response = reqwest::Client::new()
             .get(url)
@@ -367,19 +368,25 @@ pub(crate) mod tests {
             .expect("models.list had no models array")
             .iter()
             .filter_map(|m| m["name"].as_str())
-            .map(|n| n.trim_start_matches("models/").to_string())
+            .map(|n| n.strip_prefix("models/").unwrap_or(n).to_string())
             .collect();
 
-        for id in [crate::ai::gemini::MODEL_PRO, crate::ai::gemini::MODEL_FLASH] {
-            assert!(
-                served.iter().any(|s| s == id),
-                "{id} is pinned in gemini.rs but Google no longer serves it. \
-                 Served ids containing 'flash' or 'pro': {:?}",
-                served
-                    .iter()
-                    .filter(|s| s.contains("flash") || s.contains("pro"))
-                    .collect::<Vec<_>>()
-            );
-        }
+        // Collected across both ids and asserted once: MODEL_PRO is checked
+        // first, and an assert! inside the loop would panic on a Pro miss
+        // before MODEL_FLASH is ever checked -- hiding the Flash answer, which
+        // is the whole reason this test exists.
+        let missing: Vec<&str> = [crate::ai::gemini::MODEL_PRO, crate::ai::gemini::MODEL_FLASH]
+            .into_iter()
+            .filter(|id| !served.iter().any(|s| s == id))
+            .collect();
+        assert!(
+            missing.is_empty(),
+            "{missing:?} are pinned in gemini.rs but Google no longer serves them. \
+             Served ids containing 'flash' or 'pro': {:?}",
+            served
+                .iter()
+                .filter(|s| s.contains("flash") || s.contains("pro"))
+                .collect::<Vec<_>>()
+        );
     }
 }
