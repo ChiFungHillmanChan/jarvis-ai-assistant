@@ -328,4 +328,55 @@ pub(crate) mod tests {
         let (total, days) = blended_cost_micro(&db, 0).unwrap();
         assert_eq!((total, days), (0, 0));
     }
+
+    /// The shipped model ids must still be served by Google, not merely priced by
+    /// us. `gemini-3-flash-preview` left the public pricing page on 2026-08-07 and
+    /// nothing in CI would notice if it stopped resolving -- the failure would
+    /// surface as every default user's first message erroring out.
+    ///
+    /// Network-dependent, so ignored by default like the real Keychain round trip.
+    /// Run deliberately:
+    ///   GEMINI_API_KEY=... cargo test --manifest-path src-tauri/Cargo.toml \
+    ///     shipped_gemini_model_ids_are_still_served -- --ignored --nocapture
+    #[tokio::test]
+    #[ignore]
+    async fn shipped_gemini_model_ids_are_still_served() {
+        let key = std::env::var("GEMINI_API_KEY")
+            .expect("set GEMINI_API_KEY to run this test");
+
+        let url = format!("{}/models?pageSize=200", crate::ai::gemini::API_BASE);
+        let body = reqwest::Client::new()
+            .get(url)
+            .header("x-goog-api-key", &key)
+            .send()
+            .await
+            .expect("models.list request failed")
+            .error_for_status()
+            .expect("models.list returned an error status")
+            .text()
+            .await
+            .expect("models.list body was not readable");
+
+        let parsed: serde_json::Value =
+            serde_json::from_str(&body).expect("models.list body was not JSON");
+        let served: Vec<String> = parsed["models"]
+            .as_array()
+            .expect("models.list had no models array")
+            .iter()
+            .filter_map(|m| m["name"].as_str())
+            .map(|n| n.trim_start_matches("models/").to_string())
+            .collect();
+
+        for id in [crate::ai::gemini::MODEL_PRO, crate::ai::gemini::MODEL_FLASH] {
+            assert!(
+                served.iter().any(|s| s == id),
+                "{id} is pinned in gemini.rs but Google no longer serves it. \
+                 Served ids containing 'flash' or 'pro': {:?}",
+                served
+                    .iter()
+                    .filter(|s| s.contains("flash") || s.contains("pro"))
+                    .collect::<Vec<_>>()
+            );
+        }
+    }
 }
