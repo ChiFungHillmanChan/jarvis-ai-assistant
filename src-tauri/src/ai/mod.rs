@@ -823,6 +823,7 @@ impl AiRouter {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use rusqlite::Connection;
 
     #[test]
     fn resolve_key_prefers_env_then_falls_back() {
@@ -1043,6 +1044,98 @@ mod tests {
             first, second,
             "the default chain must degrade to a different model, not retry the same one"
         );
+    }
+
+    /// The shipped migration, not a copy of it -- a hand-written mirror of the
+    /// V20 SQL could drift from what refinery actually runs and this test would
+    /// never notice.
+    const V20_SQL: &str = include_str!("../../migrations/V20__default_chain_fallback.sql");
+
+    /// `provider_chain` as of V10 (the current shape): a hand-written subset
+    /// with the columns and CHECK constraint V20 runs against, like the
+    /// `aws_credentials` fixture in `aws/credentials.rs` uses, rather than
+    /// replaying V7/V8/V10 in order.
+    fn fresh_provider_chain_conn() -> Connection {
+        let conn = Connection::open_in_memory().expect("open in-memory db");
+        conn.execute_batch(
+            "CREATE TABLE provider_chain (
+                position INTEGER NOT NULL PRIMARY KEY,
+                provider_type TEXT NOT NULL
+                    CHECK(provider_type IN ('claude', 'openai', 'local', 'gemini', 'bedrock')),
+                endpoint_id TEXT,
+                model_id TEXT,
+                enabled INTEGER NOT NULL DEFAULT 1
+            );",
+        )
+        .expect("create provider_chain table");
+        conn
+    }
+
+    fn seed_chain_row(conn: &Connection, position: i32, provider_type: &str, model_id: Option<&str>) {
+        conn.execute(
+            "INSERT INTO provider_chain (position, provider_type, endpoint_id, model_id, enabled)
+             VALUES (?1, ?2, NULL, ?3, 1)",
+            rusqlite::params![position, provider_type, model_id],
+        )
+        .expect("seed chain row");
+    }
+
+    fn model_id_at(conn: &Connection, position: i32) -> Option<String> {
+        conn.query_row(
+            "SELECT model_id FROM provider_chain WHERE position = ?1",
+            rusqlite::params![position],
+            |r| r.get(0),
+        )
+        .expect("read back position")
+    }
+
+    /// V20 exists because Settings.tsx loads `get_provider_chain`'s response
+    /// into React state and writes the whole array back verbatim on the first
+    /// edit -- add/remove/reorder/toggle an entry, or remove a local endpoint.
+    /// Anyone who touched their chain before this fix shipped has the pre-fix
+    /// default persisted, with position 1 pinned to the same Flash id position
+    /// 0 resolves to; `load_from_db` then replaces the corrected
+    /// `AiRouter::new` default with those stale rows, so the fix never reaches
+    /// them without this migration.
+    ///
+    /// The guards must stay exact: Settings.tsx has a literal "+ Gemini Flash"
+    /// button (`handleAddToChain`) that appends at `position: chain.length`. A
+    /// user who trimmed their chain down and clicked it has that row as a
+    /// DELIBERATE cheap choice -- rewriting it to Pro would quadruple the cost
+    /// of the model they picked for being cheap.
+    #[test]
+    fn v20_rewrites_only_the_byte_for_byte_pre_fix_default() {
+        // The stale pre-fix default: position 0 unpinned (gemini, no
+        // model_id), position 1 pinned to Flash. This IS rewritten to Pro.
+        let conn = fresh_provider_chain_conn();
+        seed_chain_row(&conn, 0, "gemini", None);
+        seed_chain_row(&conn, 1, "gemini", Some(gemini::MODEL_FLASH));
+        conn.execute_batch(V20_SQL).expect("run V20");
+        assert_eq!(model_id_at(&conn, 1).as_deref(), Some(gemini::MODEL_PRO));
+
+        // [claude, gemini flash]: position 0 is not the unpinned-gemini
+        // marker, so the EXISTS guard fails. NOT rewritten.
+        let conn = fresh_provider_chain_conn();
+        seed_chain_row(&conn, 0, "claude", None);
+        seed_chain_row(&conn, 1, "gemini", Some(gemini::MODEL_FLASH));
+        conn.execute_batch(V20_SQL).expect("run V20");
+        assert_eq!(model_id_at(&conn, 1).as_deref(), Some(gemini::MODEL_FLASH));
+
+        // A 3-entry chain: the COUNT(*) = 2 guard fails. NOT rewritten.
+        let conn = fresh_provider_chain_conn();
+        seed_chain_row(&conn, 0, "gemini", None);
+        seed_chain_row(&conn, 1, "gemini", Some(gemini::MODEL_FLASH));
+        seed_chain_row(&conn, 2, "claude", None);
+        conn.execute_batch(V20_SQL).expect("run V20");
+        assert_eq!(model_id_at(&conn, 1).as_deref(), Some(gemini::MODEL_FLASH));
+
+        // An empty table: no rows match, no-op, does not error.
+        let conn = fresh_provider_chain_conn();
+        conn.execute_batch(V20_SQL).expect("run V20 on an empty table");
+        let rows: i64 = conn
+            .query_row("SELECT COUNT(*) FROM provider_chain", [], |r| r.get(0))
+            .expect("count");
+        assert_eq!(rows, 0);
     }
 
     fn entry(position: i32, provider_type: &str, endpoint_id: Option<&str>) -> ProviderChainEntry {
