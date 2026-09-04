@@ -31,6 +31,16 @@ pub fn price_for(model_id: &str) -> ModelPrice {
         ModelPrice { input_per_million: 1.50, output_per_million: 9.0, cache_read_per_million: 0.375, cache_write_per_million: 1.50 }
     } else if m.contains("gemini-3.6-flash") {
         ModelPrice { input_per_million: 1.50, output_per_million: 7.50, cache_read_per_million: 0.375, cache_write_per_million: 1.50 }
+    } else if m.contains("gemini-3.7-flash") {
+        // Read off ai.google.dev/gemini-api/docs/pricing on 2026-09-04.
+        // WARNING -- these are INTRODUCTORY rates that expire. Google lists
+        // "$0.75 through December 31, 2026. $1.50 starting January 1, 2027."
+        // for input and "$3.75 ... $7.50" for output: the rate DOUBLES on
+        // 2027-01-01. Cache read goes $0.075 -> $0.15 and cached-content
+        // storage $0.50 -> $1.00 per 1M tokens per hour on the same date.
+        // Update these four numbers on that date or every blended-cost figure
+        // for the default chain silently reads half of what it costs.
+        ModelPrice { input_per_million: 0.75, output_per_million: 3.75, cache_read_per_million: 0.075, cache_write_per_million: 0.75 }
     } else if m.contains("gemini-3.1-flash-lite") {
         ModelPrice { input_per_million: 0.25, output_per_million: 1.50, cache_read_per_million: 0.0625, cache_write_per_million: 0.25 }
     } else if m.contains("gemini-3-flash") {
@@ -47,6 +57,21 @@ pub fn price_for(model_id: &str) -> ModelPrice {
         ModelPrice { input_per_million: 0.15, output_per_million: 0.60, cache_read_per_million: 0.075, cache_write_per_million: 0.15 }
     } else if m.contains("gpt-4o") {
         ModelPrice { input_per_million: 2.50, output_per_million: 10.0, cache_read_per_million: 1.25, cache_write_per_million: 2.50 }
+    } else if m.contains("gpt-5.6-luna") {
+        // Read off developers.openai.com/api/docs/models/gpt-5.6-luna on
+        // 2026-09-04: $0.20 input, $0.02 cached input, $1.20 output, and cache
+        // writes at 1.25x uncached input ($0.25).
+        //
+        // This arm MUST stay above the `gpt-5` arm below: "gpt-5.6-luna"
+        // contains "gpt-5", so ordering it after would silently bill Luna at
+        // GPT-5's $1.25/$10.00 -- roughly 6x input and 8x output over the real
+        // rate, with no test to catch it.
+        //
+        // Not modelled: Luna's long-context tier (2x input / 1.5x output above
+        // 272K input tokens). `long_context_price_for` keys off a single
+        // 200K threshold, which is the wrong boundary for this model, so a
+        // >272K Luna request is currently billed at the base rate.
+        ModelPrice { input_per_million: 0.20, output_per_million: 1.20, cache_read_per_million: 0.02, cache_write_per_million: 0.25 }
     } else if m.contains("gpt-5") {
         ModelPrice { input_per_million: 1.25, output_per_million: 10.0, cache_read_per_million: 0.125, cache_write_per_million: 1.25 }
     } else {
@@ -232,6 +257,43 @@ pub(crate) mod tests {
     /// The substring match is brittle on purpose (it has to catch vendor
     /// suffixes like -preview), so pin the ids actually shipped in gemini.rs.
     /// If either stops resolving, the fallback above starts firing.
+    /// `price_for` is an ordered substring ladder, so a specific id that
+    /// contains a more general one is only priced correctly while its arm sits
+    /// above the general arm. "gpt-5.6-luna" contains "gpt-5"; move the Luna
+    /// arm below the GPT-5 arm and every Luna call silently bills at
+    /// $1.25/$10.00 instead of $0.20/$1.20 -- 6x input, 8x output, no error, no
+    /// log, just a cost dashboard that is quietly wrong. A comment cannot catch
+    /// that reordering; this test can.
+    #[test]
+    fn gpt_5_6_luna_is_priced_as_luna_and_not_as_generic_gpt_5() {
+        let luna = price_for("gpt-5.6-luna");
+        assert_eq!(luna.input_per_million, 0.20, "Luna input rate");
+        assert_eq!(luna.output_per_million, 1.20, "Luna output rate");
+
+        let generic = price_for("gpt-5");
+        assert_ne!(
+            luna.input_per_million, generic.input_per_million,
+            "gpt-5.6-luna resolved to the generic gpt-5 price -- its arm in \
+             price_for() has fallen below the `contains(\"gpt-5\")` arm"
+        );
+    }
+
+    /// Same ladder hazard on the Gemini side: the shipped MODEL_FLASH must
+    /// resolve to its own entry, not to a neighbouring Flash tier and not to
+    /// the frontier fallback.
+    #[test]
+    fn the_shipped_flash_id_resolves_to_its_own_price_entry() {
+        let p = price_for(crate::ai::gemini::MODEL_FLASH);
+        assert_eq!(
+            (p.input_per_million, p.output_per_million),
+            (0.75, 3.75),
+            "MODEL_FLASH ({}) did not resolve to the gemini-3.7-flash entry. \
+             If the id was bumped, add its rate to price_for() -- note the \
+             3.7 rate doubles to $1.50/$7.50 on 2027-01-01.",
+            crate::ai::gemini::MODEL_FLASH
+        );
+    }
+
     #[test]
     fn the_shipped_gemini_model_ids_resolve_to_real_prices() {
         for id in [crate::ai::gemini::MODEL_PRO, crate::ai::gemini::MODEL_FLASH] {

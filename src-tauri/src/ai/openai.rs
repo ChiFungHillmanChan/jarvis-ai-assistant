@@ -100,7 +100,7 @@ pub async fn send(
     let started_at = std::time::Instant::now();
     let mut total_prompt_tokens: i64 = 0;
     let mut total_completion_tokens: i64 = 0;
-    let model_id = "gpt-5".to_string();
+    let model_id = "gpt-5.6-luna".to_string();
     let client = Client::builder()
         .read_timeout(std::time::Duration::from_secs(60))
         .build()?;

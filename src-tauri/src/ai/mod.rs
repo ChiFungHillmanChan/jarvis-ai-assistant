@@ -1145,29 +1145,39 @@ mod tests {
     /// of the model they picked for being cheap.
     #[test]
     fn v20_rewrites_only_the_byte_for_byte_pre_fix_default() {
+        // These are HISTORICAL literals, deliberately not gemini::MODEL_FLASH
+        // and gemini::MODEL_PRO. V20 repairs rows that were written when
+        // MODEL_FLASH held this exact value; the constant is free to move to
+        // a newer id afterwards and the migration must keep targeting the old
+        // one. Binding this test to the constants made it fail the moment
+        // MODEL_FLASH was bumped, and the tempting "fix" -- editing the
+        // migration to match -- would silently stop repairing real installs.
+        const STALE_FLASH: &str = "gemini-3-flash-preview";
+        const REPAIRED_PRO: &str = "gemini-3.1-pro-preview";
+
         // The stale pre-fix default: position 0 unpinned (gemini, no
         // model_id), position 1 pinned to Flash. This IS rewritten to Pro.
         let conn = fresh_provider_chain_conn();
         seed_chain_row(&conn, 0, "gemini", None);
-        seed_chain_row(&conn, 1, "gemini", Some(gemini::MODEL_FLASH));
+        seed_chain_row(&conn, 1, "gemini", Some(STALE_FLASH));
         conn.execute_batch(V20_SQL).expect("run V20");
-        assert_eq!(model_id_at(&conn, 1).as_deref(), Some(gemini::MODEL_PRO));
+        assert_eq!(model_id_at(&conn, 1).as_deref(), Some(REPAIRED_PRO));
 
         // [claude, gemini flash]: position 0 is not the unpinned-gemini
         // marker, so the EXISTS guard fails. NOT rewritten.
         let conn = fresh_provider_chain_conn();
         seed_chain_row(&conn, 0, "claude", None);
-        seed_chain_row(&conn, 1, "gemini", Some(gemini::MODEL_FLASH));
+        seed_chain_row(&conn, 1, "gemini", Some(STALE_FLASH));
         conn.execute_batch(V20_SQL).expect("run V20");
-        assert_eq!(model_id_at(&conn, 1).as_deref(), Some(gemini::MODEL_FLASH));
+        assert_eq!(model_id_at(&conn, 1).as_deref(), Some(STALE_FLASH));
 
         // A 3-entry chain: the COUNT(*) = 2 guard fails. NOT rewritten.
         let conn = fresh_provider_chain_conn();
         seed_chain_row(&conn, 0, "gemini", None);
-        seed_chain_row(&conn, 1, "gemini", Some(gemini::MODEL_FLASH));
+        seed_chain_row(&conn, 1, "gemini", Some(STALE_FLASH));
         seed_chain_row(&conn, 2, "claude", None);
         conn.execute_batch(V20_SQL).expect("run V20");
-        assert_eq!(model_id_at(&conn, 1).as_deref(), Some(gemini::MODEL_FLASH));
+        assert_eq!(model_id_at(&conn, 1).as_deref(), Some(STALE_FLASH));
 
         // An empty table: no rows match, no-op, does not error.
         let conn = fresh_provider_chain_conn();

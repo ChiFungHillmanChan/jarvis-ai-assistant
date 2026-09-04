@@ -55,7 +55,7 @@ const API_KEY_PROVIDERS = [
 // chain entry's model_id is sent to the API verbatim, so a stale id here is a
 // 404 on every request that reaches the entry.
 const GEMINI_MODEL_PRO = "gemini-3.1-pro-preview";
-const GEMINI_MODEL_FLASH = "gemini-3-flash-preview";
+const GEMINI_MODEL_FLASH = "gemini-3.7-flash";
 
 // Deleting a saved key is its own IPC call: set_api_key refuses a blank value
 // unless `remove` is set, so an accidental SAVE on the (permanently blank) key

@@ -9,7 +9,7 @@ use tauri::Emitter;
 
 pub const API_BASE: &str = "https://generativelanguage.googleapis.com/v1beta";
 pub const MODEL_PRO: &str = "gemini-3.1-pro-preview";
-pub const MODEL_FLASH: &str = "gemini-3-flash-preview";
+pub const MODEL_FLASH: &str = "gemini-3.7-flash";
 
 #[derive(Serialize, Deserialize, Clone, Debug)]
 struct GeminiContent {
