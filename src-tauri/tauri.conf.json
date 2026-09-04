@@ -41,6 +41,7 @@
     ],
     "macOS": {
       "infoPlist": "Info.plist",
+      "entitlements": "Entitlements.plist",
       "minimumSystemVersion": "11.0",
       "signingIdentity": "Developer ID Application: Hillman Chan (22K6G3HH9G)"
     }

@@ -75,12 +75,8 @@ DMG_PATH="$(ls src-tauri/target/aarch64-apple-darwin/release/bundle/dmg/JARVIS_$
 APP_PATH="src-tauri/target/aarch64-apple-darwin/release/bundle/macos/JARVIS.app"
 [ -f "${DMG_PATH}" ] || { echo "DMG not found at ${DMG_PATH}"; exit 1; }
 
-echo "==> 3/10 Codesigning ${APP_PATH}"
-SIGNING_IDENTITY="$(security find-identity -v -p codesigning | grep "Developer ID Application" | head -1 | awk -F\" '{print $2}')"
-codesign --deep --force --options runtime --timestamp \
-  --sign "${SIGNING_IDENTITY}" \
-  "${APP_PATH}"
-codesign --verify --verbose "${APP_PATH}"
+echo "==> 3/10 Verifying entitlements on the signed bundle"
+codesign -d --entitlements :- "${APP_PATH}" 2>/dev/null | grep -q "com.apple.security.device.audio-input" || { echo "ERROR: built app has no microphone entitlement"; exit 1; }
 
 echo "==> 4/10 Submitting to Apple notarytool (5-15 min) using keychain profile ${NOTARYTOOL_PROFILE}"
 xcrun notarytool submit "${DMG_PATH}" \

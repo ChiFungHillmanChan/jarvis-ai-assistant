@@ -498,4 +498,36 @@ mod tests {
         assert_eq!(escaped, "file is not a \\\"database\\\"\\nC:\\\\path");
         assert!(!escaped.contains('\n'), "a literal newline would break the script");
     }
+
+    /// The shipped .app is hardened-runtime, so an empty entitlement set means
+    /// macOS never shows the microphone prompt and voice captures silence. The
+    /// bundle must point at the entitlements file, and that file must carry the
+    /// microphone and Apple Events entitlements; Info.plist must explain the
+    /// Apple Events use or the automation prompt is denied without being shown.
+    #[test]
+    fn release_bundle_carries_the_microphone_entitlement() {
+        let conf: serde_json::Value = serde_json::from_str(include_str!("../tauri.conf.json"))
+            .expect("tauri.conf.json is valid JSON");
+        assert_eq!(
+            conf["bundle"]["macOS"]["entitlements"],
+            "Entitlements.plist",
+            "bundle.macOS.entitlements must point at the entitlements file"
+        );
+
+        let entitlements = include_str!("../Entitlements.plist");
+        assert!(
+            entitlements.contains("com.apple.security.device.audio-input"),
+            "Entitlements.plist must carry the microphone entitlement"
+        );
+        assert!(
+            entitlements.contains("com.apple.security.automation.apple-events"),
+            "Entitlements.plist must carry the Apple Events entitlement"
+        );
+
+        let info_plist = include_str!("../Info.plist");
+        assert!(
+            info_plist.contains("NSAppleEventsUsageDescription"),
+            "Info.plist must declare why JARVIS sends Apple Events"
+        );
+    }
 }

@@ -4,5 +4,7 @@
 <dict>
   <key>NSMicrophoneUsageDescription</key>
   <string>JARVIS needs microphone access for push-to-talk and always-on wake word listening</string>
+  <key>NSAppleEventsUsageDescription</key>
+  <string>JARVIS uses System Events to show notifications and toggle dark mode.</string>
 </dict>
 </plist>
