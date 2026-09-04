@@ -210,6 +210,17 @@ pub(crate) fn classify_provider_error(err: &str) -> ErrorDisposition {
         Some(400) => {
             if lower.contains("api_key_invalid") || lower.contains("api key not valid") {
                 ErrorDisposition::SkipSameProvider
+            } else if lower.contains("not found") || lower.contains("not supported") {
+                // A retired or unknown model id. Google has been observed
+                // reporting this as 400 INVALID_ARGUMENT (e.g. "models/x is
+                // not found for API version v1beta") rather than 404 -- if
+                // that fell to StopChain, the default chain's position-1
+                // fallback (default_chain_fallback_is_a_different_model_than_
+                // the_volume_tier_uses) would never be reached for a dead
+                // model id reported this way, making that fix inert. Every
+                // other 400 is a malformed or oversized request and still
+                // stops the chain below.
+                ErrorDisposition::Retry
             } else {
                 ErrorDisposition::StopChain
             }
@@ -942,6 +953,14 @@ mod tests {
             classify_provider_error("No Gemini API key configured"),
             ErrorDisposition::Retry
         );
+        // A retired or unknown model id reported as 404 is retryable: a later
+        // chain entry pointing at a different, live model can still succeed.
+        assert_eq!(
+            classify_provider_error(
+                "Gemini API error 404 Not Found: models/gemini-3-flash-preview is not found for API version v1beta"
+            ),
+            ErrorDisposition::Retry
+        );
 
         // Rejected credential: every later entry of the same provider type
         // reads the same key.
@@ -967,6 +986,27 @@ mod tests {
         );
         assert_eq!(
             classify_provider_error("Claude API error 413 Payload Too Large: "),
+            ErrorDisposition::StopChain
+        );
+    }
+
+    /// A 400 whose body says the model id itself is unrecognised must stay
+    /// retryable -- see the comment on the `Some(400)` arm of
+    /// `classify_provider_error`. Everything else at 400 is a malformed or
+    /// oversized request and must keep stopping the chain, or a client bug
+    /// turns into a retry loop across every remaining entry.
+    #[test]
+    fn classify_provider_error_retries_a_400_reported_dead_model_id() {
+        assert_eq!(
+            classify_provider_error(
+                "Gemini API error 400 Bad Request: {\"error\":{\"status\":\"INVALID_ARGUMENT\",\"message\":\"models/gemini-3-flash-preview is not found for API version v1beta, or is not supported for content generation\"}}"
+            ),
+            ErrorDisposition::Retry
+        );
+        assert_eq!(
+            classify_provider_error(
+                "Gemini API error 400 Bad Request: {\"error\":{\"status\":\"INVALID_ARGUMENT\",\"message\":\"Request contains an invalid argument\"}}"
+            ),
             ErrorDisposition::StopChain
         );
     }
