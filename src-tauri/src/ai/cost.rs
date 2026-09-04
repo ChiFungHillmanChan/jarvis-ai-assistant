@@ -345,17 +345,20 @@ pub(crate) mod tests {
             .expect("set GEMINI_API_KEY to run this test");
 
         let url = format!("{}/models?pageSize=200", crate::ai::gemini::API_BASE);
-        let body = reqwest::Client::new()
+        let response = reqwest::Client::new()
             .get(url)
             .header("x-goog-api-key", &key)
             .send()
             .await
-            .expect("models.list request failed")
-            .error_for_status()
-            .expect("models.list returned an error status")
+            .expect("models.list request failed");
+
+        let status = response.status();
+        let body = response
             .text()
             .await
             .expect("models.list body was not readable");
+
+        assert!(status.is_success(), "models.list returned {status}: {body}");
 
         let parsed: serde_json::Value =
             serde_json::from_str(&body).expect("models.list body was not JSON");
