@@ -14,7 +14,7 @@ async function loadSecrets() {
   if (cachedSecrets) return cachedSecrets;
   const out = await sm.send(new GetSecretValueCommand({ SecretId: process.env.STRIPE_SECRET_NAME! }));
   cachedSecrets = JSON.parse(out.SecretString!);
-  cachedStripe = new Stripe(cachedSecrets!.apiKey, { apiVersion: '2024-12-18.acacia' });
+  cachedStripe = new Stripe(cachedSecrets!.apiKey, { apiVersion: '2025-02-24.acacia' });
   return cachedSecrets!;
 }
 
@@ -29,6 +29,28 @@ const PRICE_TIER_MAP: Record<string, 'pro' | 'team'> = {
 function tierForPriceId(priceId: string | null | undefined): 'pro' | 'team' | 'free' {
   if (!priceId) return 'free';
   return PRICE_TIER_MAP[priceId] ?? 'free';
+}
+
+// A price ID says what the customer bought; the subscription status says whether
+// they are still paying for it. Writing the paid tier on status alone was the
+// hole: `unpaid` (Stripe has given up after every dunning retry), `paused` and
+// `incomplete` (first payment never confirmed) all kept full Pro access.
+//
+// `past_due` is deliberately still entitled -- that is the dunning grace period,
+// and cutting a paying customer off on the first failed retry is worse than
+// carrying them for the days Stripe spends retrying. `canceled` arrives as
+// customer.subscription.deleted and is handled there.
+const ENTITLING_STATUSES: ReadonlySet<Stripe.Subscription.Status> = new Set([
+  'active',
+  'trialing',
+  'past_due',
+]);
+
+export function entitledTier(
+  priceId: string | null | undefined,
+  status: Stripe.Subscription.Status,
+): 'free' | 'pro' | 'team' {
+  return ENTITLING_STATUSES.has(status) ? tierForPriceId(priceId) : 'free';
 }
 
 async function setUserTier(userId: string, tier: 'free' | 'pro' | 'team', stripeCustomerId: string | null, status: string) {
@@ -86,7 +108,7 @@ export async function handler(event: APIGatewayProxyEventV2): Promise<APIGateway
         }
         const subscription = await cachedStripe!.subscriptions.retrieve(session.subscription as string);
         const priceId = subscription.items.data[0]?.price.id;
-        await setUserTier(userId, tierForPriceId(priceId), session.customer as string, subscription.status);
+        await setUserTier(userId, entitledTier(priceId, subscription.status), session.customer as string, subscription.status);
         break;
       }
       case 'customer.subscription.updated':
@@ -95,7 +117,7 @@ export async function handler(event: APIGatewayProxyEventV2): Promise<APIGateway
         const userId = (sub.metadata && sub.metadata.userId) || null;
         if (!userId) break;
         const priceId = sub.items.data[0]?.price.id;
-        await setUserTier(userId, tierForPriceId(priceId), sub.customer as string, sub.status);
+        await setUserTier(userId, entitledTier(priceId, sub.status), sub.customer as string, sub.status);
         break;
       }
       case 'customer.subscription.deleted': {
