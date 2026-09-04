@@ -557,8 +557,11 @@ mod tests {
         }
     }
 
-    /// Position 0 is unpinned to let the workload tier pick the model, while
-    /// position 1 is pinned to Pro to ensure the fallback is a different model.
+    /// F046: position 0 stays unpinned so the workload tier keeps choosing the
+    /// model -- pinning it (to Gemini Pro) was F046's regression, re-pinning
+    /// the premium model for volume-tier work (see the comment above). Position
+    /// 1 stays pinned to Pro so the fallback degrades to a different model
+    /// instead of retrying position 0's.
     #[test]
     fn the_default_chain_leaves_position_zero_unpinned() {
         let chain = default_chain_for("gemini_primary");
