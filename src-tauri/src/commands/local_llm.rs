@@ -383,7 +383,7 @@ fn default_chain_for(ai_provider: &str) -> Vec<ProviderChainEntry> {
         ],
         _ => vec![
             ProviderChainEntry { position: 0, provider_type: "gemini".into(), endpoint_id: None, model_id: None, enabled: true },
-            ProviderChainEntry { position: 1, provider_type: "gemini".into(), endpoint_id: None, model_id: Some(crate::ai::gemini::MODEL_FLASH.into()), enabled: true },
+            ProviderChainEntry { position: 1, provider_type: "gemini".into(), endpoint_id: None, model_id: Some(crate::ai::gemini::MODEL_PRO.into()), enabled: true },
         ],
     }
 }
@@ -557,14 +557,18 @@ mod tests {
         }
     }
 
-    /// The specific pin that caused the cost regression.
+    /// F046: position 0 stays unpinned so the workload tier keeps choosing the
+    /// model -- pinning it (to Gemini Pro) was F046's regression, re-pinning
+    /// the premium model for volume-tier work (see the comment above). Position
+    /// 1 stays pinned to Pro so the fallback degrades to a different model
+    /// instead of retrying position 0's.
     #[test]
     fn the_default_chain_leaves_position_zero_unpinned() {
         let chain = default_chain_for("gemini_primary");
         assert_eq!(chain[0].model_id, None, "position 0 must let the workload tier pick");
         assert_eq!(
             chain[1].model_id.as_deref(),
-            Some(crate::ai::gemini::MODEL_FLASH)
+            Some(crate::ai::gemini::MODEL_PRO)
         );
     }
 }

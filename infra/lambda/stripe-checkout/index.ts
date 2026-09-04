@@ -47,7 +47,7 @@ async function loadStripe() {
   if (cachedStripe) return cachedStripe;
   const out = await sm.send(new GetSecretValueCommand({ SecretId: process.env.STRIPE_SECRET_NAME! }));
   cachedSecrets = JSON.parse(out.SecretString!);
-  cachedStripe = new Stripe(cachedSecrets!.apiKey, { apiVersion: '2024-12-18.acacia' });
+  cachedStripe = new Stripe(cachedSecrets!.apiKey, { apiVersion: '2025-02-24.acacia' });
   return cachedStripe;
 }
 

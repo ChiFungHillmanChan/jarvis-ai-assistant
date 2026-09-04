@@ -5,7 +5,7 @@ use serde::Serialize;
 use tauri::State;
 
 use crate::db::Database;
-use crate::payments::{create_checkout_session, open_billing_portal, CheckoutRequest, Tier};
+use crate::payments::{create_checkout_session, CheckoutRequest, Tier};
 
 #[derive(Debug, Serialize)]
 pub struct CheckoutPayload {
@@ -69,21 +69,6 @@ pub async fn payments_start_checkout(
         url: resp.url,
         session_id: resp.session_id,
     })
-}
-
-#[tauri::command]
-pub async fn payments_open_portal(db: State<'_, Arc<Database>>) -> Result<String, String> {
-    let user_id = {
-        let conn = db.conn.lock().map_err(|e| e.to_string())?;
-        resolve_install_id(&conn)?
-    };
-    let url = open_billing_portal(&user_id)
-        .await
-        .map_err(|e| e.to_string())?;
-    if let Err(e) = open::that(&url) {
-        log::warn!("failed to open browser for portal: {}", e);
-    }
-    Ok(url)
 }
 
 #[cfg(test)]
