@@ -219,11 +219,8 @@ pub async fn stop_listening(
     // Save assistant response and notify chat panel
     {
         let conn = db.conn.lock().map_err(|e| e.to_string())?;
-        conn.execute(
-            "INSERT INTO conversations (role, content) VALUES ('assistant', ?1)",
-            rusqlite::params![response],
-        )
-        .map_err(|e| e.to_string())?;
+        crate::commands::chat::persist_assistant_reply(&conn, &response)
+            .map_err(|e| e.to_string())?;
     }
     let _ = app_handle.emit(
         "chat-new-message",

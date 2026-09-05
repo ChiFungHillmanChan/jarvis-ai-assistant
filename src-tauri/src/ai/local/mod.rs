@@ -204,12 +204,17 @@ pub async fn send_local(
         tool_calls: None,
         tool_call_id: None,
     }];
-    local_messages.extend(truncated.into_iter().map(|(role, content)| LocalMessage {
-        role,
-        content: Some(content),
-        tool_calls: None,
-        tool_call_id: None,
-    }));
+    local_messages.extend(
+        truncated
+            .into_iter()
+            .filter(|(_, content)| !content.trim().is_empty())
+            .map(|(role, content)| LocalMessage {
+                role,
+                content: Some(content),
+                tool_calls: None,
+                tool_call_id: None,
+            }),
+    );
 
     // Build base URL for OpenAI-compatible endpoint
     let base_url = endpoint.url.trim_end_matches('/');

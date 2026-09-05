@@ -107,19 +107,7 @@ pub async fn send(
     let tool_defs = tools::get_tool_definitions();
     let gemini_tools = tools::to_gemini_format(&tool_defs);
 
-    let mut contents: Vec<GeminiContent> = messages
-        .into_iter()
-        .map(|(role, content)| {
-            let gemini_role = if role == "assistant" { "model" } else { &role };
-            GeminiContent {
-                role: gemini_role.to_string(),
-                parts: vec![GeminiPart {
-                    text: Some(content),
-                    ..Default::default()
-                }],
-            }
-        })
-        .collect();
+    let mut contents = history_contents(messages);
 
     let system_prompt = tools::build_system_prompt(db);
     let system_instruction = json!({
@@ -408,7 +396,7 @@ pub async fn send(
             0,
             started_at.elapsed().as_millis() as i64,
         );
-        return Ok(String::new());
+        return Err(format!("Gemini returned no text (finish_reason={:?})", finish_reason).into());
     }
 
     let _ = app_handle.emit("chat-token", json!({"token": "", "done": true}));
@@ -421,6 +409,26 @@ pub async fn send(
         started_at.elapsed().as_millis() as i64,
     );
     Ok("I've completed the actions.".into())
+}
+
+/// Map persisted `(role, content)` rows to Gemini contents. Rows whose content
+/// is empty or whitespace are dropped: Gemini rejects an empty text part with
+/// 400, so one such row would fail every later turn until "New chat".
+fn history_contents(messages: Vec<(String, String)>) -> Vec<GeminiContent> {
+    messages
+        .into_iter()
+        .filter(|(_, content)| !content.trim().is_empty())
+        .map(|(role, content)| {
+            let gemini_role = if role == "assistant" { "model" } else { &role };
+            GeminiContent {
+                role: gemini_role.to_string(),
+                parts: vec![GeminiPart {
+                    text: Some(content),
+                    ..Default::default()
+                }],
+            }
+        })
+        .collect()
 }
 
 /// Record usage accumulated so far when a turn ends abnormally, so tokens
@@ -461,6 +469,24 @@ mod tests {
     fn stream_chunk_tolerates_missing_usage_metadata() {
         let sse: StreamChunk = serde_json::from_str(r#"{"candidates":[]}"#).unwrap();
         assert!(sse.usage_metadata.is_none());
+    }
+
+    /// A persisted assistant row with no text must not reach the model:
+    /// Gemini rejects an empty text part with 400, and one such row would
+    /// fail every later turn until "New chat".
+    #[test]
+    fn empty_history_rows_are_dropped() {
+        let contents = history_contents(vec![
+            ("user".to_string(), "hello".to_string()),
+            ("assistant".to_string(), String::new()),
+            ("user".to_string(), "  \n\t".to_string()),
+            ("assistant".to_string(), "hi".to_string()),
+        ]);
+        assert_eq!(contents.len(), 2);
+        assert_eq!(contents[0].role, "user");
+        assert_eq!(contents[0].parts[0].text.as_deref(), Some("hello"));
+        assert_eq!(contents[1].role, "model");
+        assert_eq!(contents[1].parts[0].text.as_deref(), Some("hi"));
     }
 
     /// `MODEL_PRO` / `MODEL_FLASH` are also hardcoded as TypeScript literals in

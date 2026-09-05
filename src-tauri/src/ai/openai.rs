@@ -113,12 +113,17 @@ pub async fn send(
         tool_calls: None,
         tool_call_id: None,
     }];
-    openai_messages.extend(messages.into_iter().map(|(role, content)| OpenAIMessage {
-        role,
-        content: Some(content),
-        tool_calls: None,
-        tool_call_id: None,
-    }));
+    openai_messages.extend(
+        messages
+            .into_iter()
+            .filter(|(_, content)| !content.trim().is_empty())
+            .map(|(role, content)| OpenAIMessage {
+                role,
+                content: Some(content),
+                tool_calls: None,
+                tool_call_id: None,
+            }),
+    );
 
     let max_iterations = 5;
     for _ in 0..max_iterations {

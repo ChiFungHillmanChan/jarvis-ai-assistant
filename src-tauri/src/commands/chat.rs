@@ -194,11 +194,7 @@ pub async fn send_message(
 
                 {
                     let conn3 = db.conn.lock().map_err(|e| e.to_string())?;
-                    conn3
-                        .execute(
-                            "INSERT INTO conversations (role, content) VALUES ('assistant', ?1)",
-                            rusqlite::params![search_response],
-                        )
+                    persist_assistant_reply(&conn3, &search_response)
                         .map_err(|e| e.to_string())?;
                 }
 
@@ -312,11 +308,7 @@ pub async fn send_message(
     let final_response = response_text;
     {
         let conn = db.conn.lock().map_err(|e| e.to_string())?;
-        conn.execute(
-            "INSERT INTO conversations (role, content) VALUES ('assistant', ?1)",
-            rusqlite::params![final_response],
-        )
-        .map_err(|e| e.to_string())?;
+        persist_assistant_reply(&conn, &final_response).map_err(|e| e.to_string())?;
     }
 
     // Finish streaming TTS -- speaks any remaining buffered text
@@ -329,6 +321,23 @@ pub async fn send_message(
         content: final_response,
         created_at: None,
     })
+}
+
+/// Persist the assistant's turn. A blank reply is not stored: the next turn
+/// would replay it as an empty message part, which Gemini rejects with 400,
+/// and every message after that fails until "New chat".
+pub(crate) fn persist_assistant_reply(
+    conn: &rusqlite::Connection,
+    content: &str,
+) -> rusqlite::Result<()> {
+    if content.trim().is_empty() {
+        return Ok(());
+    }
+    conn.execute(
+        "INSERT INTO conversations (role, content) VALUES ('assistant', ?1)",
+        rusqlite::params![content],
+    )?;
+    Ok(())
 }
 
 #[tauri::command]
@@ -448,5 +457,33 @@ mod tests {
             .collect();
         contents.reverse();
         assert_eq!(contents, vec!["msg8", "msg9", "msg10"]);
+    }
+
+    /// A blank reply must never be stored: the next turn's history builder
+    /// would hand Gemini an empty text part and every later message would
+    /// fail with 400 until "New chat".
+    #[test]
+    fn blank_assistant_reply_is_not_persisted() {
+        let conn = Connection::open_in_memory().unwrap();
+        conn.execute_batch(
+            "CREATE TABLE conversations (
+                 id INTEGER PRIMARY KEY AUTOINCREMENT,
+                 role TEXT NOT NULL,
+                 content TEXT NOT NULL,
+                 created_at TEXT DEFAULT CURRENT_TIMESTAMP);",
+        )
+        .unwrap();
+        persist_assistant_reply(&conn, "").unwrap();
+        persist_assistant_reply(&conn, " \n\t").unwrap();
+        persist_assistant_reply(&conn, "hello").unwrap();
+
+        let rows: Vec<(String, String)> = conn
+            .prepare("SELECT role, content FROM conversations ORDER BY id")
+            .unwrap()
+            .query_map([], |r| Ok((r.get(0)?, r.get(1)?)))
+            .unwrap()
+            .map(|r| r.unwrap())
+            .collect();
+        assert_eq!(rows, vec![("assistant".to_string(), "hello".to_string())]);
     }
 }

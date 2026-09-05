@@ -113,6 +113,7 @@ pub async fn send(
 
     let mut claude_messages: Vec<ClaudeMessage> = messages
         .into_iter()
+        .filter(|(_, content)| !content.trim().is_empty())
         .map(|(role, content)| ClaudeMessage {
             role,
             content: ClaudeContent::Text(content),

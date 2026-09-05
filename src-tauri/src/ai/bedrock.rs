@@ -258,6 +258,7 @@ fn build_messages(
 ) -> Result<Vec<Message>, Box<dyn std::error::Error + Send + Sync>> {
     messages
         .into_iter()
+        .filter(|(_, content)| !content.trim().is_empty())
         .map(|(role, content)| {
             let role = if role == "assistant" {
                 ConversationRole::Assistant
@@ -394,6 +395,26 @@ fn document_to_json(document: &Document) -> serde_json::Value {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A persisted assistant row with no text must not reach the model: the
+    /// Converse API rejects an empty text block, and one such row would fail
+    /// every later turn of the conversation.
+    #[test]
+    fn empty_history_rows_are_dropped() {
+        let built = build_messages(vec![
+            ("user".to_string(), "hello".to_string()),
+            ("assistant".to_string(), String::new()),
+            ("user".to_string(), "  \n\t".to_string()),
+            ("assistant".to_string(), "hi".to_string()),
+        ])
+        .unwrap();
+        assert_eq!(built.len(), 2);
+        assert_eq!(*built[0].role(), ConversationRole::User);
+        assert_eq!(built[0].content()[0].as_text().unwrap(), "hello");
+        assert_eq!(*built[1].role(), ConversationRole::Assistant);
+        assert_eq!(built[1].content()[0].as_text().unwrap(), "hi");
+    }
+
     // Requires AWS_ACCESS_KEY_ID + AWS_SECRET_ACCESS_KEY in env, region ap-southeast-1
     #[tokio::test]
     #[ignore] // run manually: cargo test --lib ai::bedrock::tests::haiku_singapore_round_trip -- --ignored --nocapture

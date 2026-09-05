@@ -204,6 +204,11 @@ fn http_status_in(err: &str) -> Option<u16> {
 /// behaviour and the safe direction.
 pub(crate) fn classify_provider_error(err: &str) -> ErrorDisposition {
     let lower = err.to_lowercase();
+    // An empty final candidate (`gemini.rs`) carries no HTTP status. It is a
+    // provider fault, not a request fault, so the next entry is worth trying.
+    if lower.contains("returned no text") {
+        return ErrorDisposition::Retry;
+    }
     match http_status_in(err) {
         // Gemini reports a revoked or mistyped key as 400 API_KEY_INVALID;
         // any other 400 is a malformed or oversized request.
@@ -1008,6 +1013,17 @@ mod tests {
                 "Gemini API error 400 Bad Request: {\"error\":{\"status\":\"INVALID_ARGUMENT\",\"message\":\"Request contains an invalid argument\"}}"
             ),
             ErrorDisposition::StopChain
+        );
+    }
+
+    /// An empty final candidate is a provider fault, not a request fault:
+    /// the next chain entry is worth trying. Retry is also what makes the
+    /// router emit `discard` and move on instead of leaving a blank bubble.
+    #[test]
+    fn classify_provider_error_retries_an_empty_gemini_reply() {
+        assert_eq!(
+            classify_provider_error("Gemini returned no text (finish_reason=Some(\"STOP\"))"),
+            ErrorDisposition::Retry
         );
     }
 
