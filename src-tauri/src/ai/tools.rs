@@ -156,13 +156,13 @@ pub fn get_tool_definitions() -> Vec<Tool> {
         // adds invitees in Google Calendar.
         Tool {
             name: "create_event".into(),
-            description: "Create a new Google Calendar event. Times should be in ISO 8601 / RFC 3339 format (e.g. 2026-03-25T10:00:00+00:00).".into(),
+            description: "Create a new Google Calendar event. Times must be in RFC 3339 format using the UTC offset given in the system prompt (e.g. 2026-09-05T10:00:00+08:00 using the offset from the system prompt).".into(),
             parameters: json!({
                 "type": "object",
                 "properties": {
                     "title": { "type": "string", "description": "Event title/summary" },
-                    "start": { "type": "string", "description": "Start time in RFC 3339 format" },
-                    "end": { "type": "string", "description": "End time in RFC 3339 format" },
+                    "start": { "type": "string", "description": "Start time in RFC 3339 format with the UTC offset from the system prompt" },
+                    "end": { "type": "string", "description": "End time in RFC 3339 format with the UTC offset from the system prompt" },
                     "location": { "type": "string", "description": "Event location (optional)" },
                     "description": { "type": "string", "description": "Event description (optional)" }
                 },
@@ -171,14 +171,14 @@ pub fn get_tool_definitions() -> Vec<Tool> {
         },
         Tool {
             name: "update_event".into(),
-            description: "Update an existing Google Calendar event. Only provided fields will be changed.".into(),
+            description: "Update an existing Google Calendar event. Only provided fields will be changed. Times must be in RFC 3339 format using the UTC offset given in the system prompt (e.g. 2026-09-05T10:00:00+08:00 using the offset from the system prompt).".into(),
             parameters: json!({
                 "type": "object",
                 "properties": {
                     "event_id": { "type": "string", "description": "Google Calendar event ID" },
                     "title": { "type": "string", "description": "New event title/summary" },
-                    "start": { "type": "string", "description": "New start time in RFC 3339 format" },
-                    "end": { "type": "string", "description": "New end time in RFC 3339 format" },
+                    "start": { "type": "string", "description": "New start time in RFC 3339 format with the UTC offset from the system prompt" },
+                    "end": { "type": "string", "description": "New end time in RFC 3339 format with the UTC offset from the system prompt" },
                     "location": { "type": "string", "description": "New event location" },
                     "description": { "type": "string", "description": "New event description" }
                 },
@@ -675,27 +675,36 @@ async fn execute_calendar_tool(
         }
         "create_event" => {
             let title = args["title"].as_str().unwrap_or("");
-            let start = args["start"].as_str().unwrap_or("");
-            let end = args["end"].as_str().unwrap_or("");
+            let offset = *chrono::Local::now().offset();
+            let start = with_local_offset(args["start"].as_str().unwrap_or(""), offset);
+            let end = with_local_offset(args["end"].as_str().unwrap_or(""), offset);
             let location = args["location"].as_str();
             let description = args["description"].as_str();
             // Attendees are never model-chosen -- inviting an address copies the
             // event body onto that person's calendar. Always None from here.
             let result =
-                calendar::create_event(token, title, start, end, description, location, None)
+                calendar::create_event(token, title, &start, &end, description, location, None)
                     .await?;
             Ok(format!("Event created: {}", result))
         }
         "update_event" => {
             let event_id = args["event_id"].as_str().unwrap_or("");
             let title = args["title"].as_str();
-            let start = args["start"].as_str();
-            let end = args["end"].as_str();
+            let offset = *chrono::Local::now().offset();
+            let start = args["start"].as_str().map(|s| with_local_offset(s, offset));
+            let end = args["end"].as_str().map(|s| with_local_offset(s, offset));
             let location = args["location"].as_str();
             let description = args["description"].as_str();
-            let result =
-                calendar::update_event(token, event_id, title, start, end, location, description)
-                    .await?;
+            let result = calendar::update_event(
+                token,
+                event_id,
+                title,
+                start.as_deref(),
+                end.as_deref(),
+                location,
+                description,
+            )
+            .await?;
             Ok(format!("Event updated: {}", result))
         }
         "delete_event" => {
@@ -1071,14 +1080,16 @@ You can chain different tools in sequence. Think step by step -- gather informat
 
 Always attempt tool calls when the user asks about their data. Do not preemptively refuse -- if authentication is missing, the tool will return a clear error. Never say \"I don't have access\" without trying first.";
 
-/// Build system prompt with current user_memory injected. Called per request.
+/// Build system prompt with current user_memory and the current local time
+/// injected. Called per request.
 pub fn build_system_prompt(db: &crate::db::Database) -> String {
     let base = system_prompt_for(&crate::util::display_name(db));
     let memory_block = load_memory_block(db);
+    let time_line = current_time_line(chrono::Local::now());
     if memory_block.is_empty() {
-        base
+        format!("{}\n\n{}", base, time_line)
     } else {
-        format!("{}\n\n{}", base, memory_block)
+        format!("{}\n\n{}\n{}", base, memory_block, time_line)
     }
 }
 
@@ -1086,6 +1097,33 @@ pub fn build_system_prompt(db: &crate::db::Database) -> String {
 /// `build_system_prompt` so it is testable without a database.
 pub fn system_prompt_for(name: &str) -> String {
     SYSTEM_PROMPT_TEMPLATE.replace("{user}", name)
+}
+
+/// One line telling the model the wall-clock time and UTC offset to resolve
+/// relative dates against. Changes every request, so it must never be part
+/// of the cacheable static prompt.
+pub fn current_time_line(now: chrono::DateTime<chrono::Local>) -> String {
+    format!(
+        "Current local time: {} ({}, UTC offset {}). Resolve relative dates such as today, \
+         tomorrow and next week against this, and always send RFC 3339 times with this \
+         offset to create_event and update_event.",
+        now.to_rfc3339_opts(chrono::SecondsFormat::Secs, false),
+        now.format("%A"),
+        now.format("%:z"),
+    )
+}
+
+/// Attach `offset` to a naive `YYYY-MM-DDTHH:MM[:SS]` value so Google does not
+/// read it as UTC. A value that already carries `Z` or an `+hh:mm`/`-hh:mm`
+/// offset, a date-only value, or anything else is returned unchanged.
+pub fn with_local_offset(value: &str, offset: chrono::FixedOffset) -> String {
+    use chrono::TimeZone;
+    let naive = chrono::NaiveDateTime::parse_from_str(value, "%Y-%m-%dT%H:%M:%S")
+        .or_else(|_| chrono::NaiveDateTime::parse_from_str(value, "%Y-%m-%dT%H:%M"));
+    match naive.ok().and_then(|n| offset.from_local_datetime(&n).single()) {
+        Some(dt) => dt.to_rfc3339_opts(chrono::SecondsFormat::Secs, false),
+        None => value.to_string(),
+    }
 }
 
 fn load_memory_block(db: &crate::db::Database) -> String {
@@ -1123,15 +1161,17 @@ pub fn build_cacheable_system_prompt() -> String {
 
 /// Returns the per-request dynamic suffix appended (as a separate SystemContentBlock
 /// AFTER the cachePoint) so it doesn't break the cached prefix.
-/// Includes user_name, today's date, language preference, and any persisted memory.
+/// Includes user_name, the current local time and offset, language preference,
+/// and any persisted memory.
 pub fn build_dynamic_suffix(
     user_name: &str,
-    today_iso: &str,
+    now: chrono::DateTime<chrono::Local>,
     language: &str, // "en" | "yue" | "bilingual" -- used by B4
     db: &crate::db::Database,
 ) -> String {
     let header = format!(
-        "Current user: {user_name}\nToday: {today_iso}\nResponse language: {language}\n",
+        "Current user: {user_name}\n{time_line}\nResponse language: {language}\n",
+        time_line = current_time_line(now),
     );
     let memory_block = load_memory_block(db);
     if memory_block.is_empty() {
@@ -1485,5 +1525,94 @@ mod github_scope_tests {
             &db,
             "  chifunghillmanchan/JARVIS-AI-ASSISTANT  "
         ));
+    }
+}
+
+#[cfg(test)]
+mod local_time_tests {
+    use super::*;
+    use crate::db::Database;
+    use chrono::{DateTime, FixedOffset, Local, NaiveDate};
+    use rusqlite::Connection;
+    use std::sync::Mutex;
+
+    fn empty_db() -> Database {
+        Database { conn: Mutex::new(Connection::open_in_memory().unwrap()) }
+    }
+
+    fn hong_kong() -> FixedOffset {
+        FixedOffset::east_opt(8 * 3600).unwrap()
+    }
+
+    /// 2026-09-05T00:30:12+08:00, a Saturday in Hong Kong while it is still
+    /// Friday in UTC -- so the weekday only matches if it is taken from local time.
+    fn fixed_now() -> DateTime<Local> {
+        let naive_utc = NaiveDate::from_ymd_opt(2026, 9, 4)
+            .unwrap()
+            .and_hms_opt(16, 30, 12)
+            .unwrap();
+        DateTime::<Local>::from_naive_utc_and_offset(naive_utc, hong_kong())
+    }
+
+    #[test]
+    fn current_time_line_carries_offset_and_weekday() {
+        let line = current_time_line(fixed_now());
+        assert!(
+            line.starts_with("Current local time: 2026-09-05T00:30:12+08:00"),
+            "got: {line}"
+        );
+        assert!(line.contains("Saturday"), "weekday must be the local one, got: {line}");
+        assert!(line.contains("UTC offset +08:00"), "got: {line}");
+        assert!(line.contains("create_event"), "got: {line}");
+        assert!(line.contains("update_event"), "got: {line}");
+        assert!(!line.contains('\n'), "must stay a single line, got: {line}");
+    }
+
+    #[test]
+    fn with_local_offset_appends_only_when_missing() {
+        let hk = hong_kong();
+        assert_eq!(
+            with_local_offset("2026-09-05T10:00:00", hk),
+            "2026-09-05T10:00:00+08:00"
+        );
+        assert_eq!(
+            with_local_offset("2026-09-05T10:00", hk),
+            "2026-09-05T10:00:00+08:00"
+        );
+        assert_eq!(
+            with_local_offset("2026-09-05T02:00:00Z", hk),
+            "2026-09-05T02:00:00Z"
+        );
+        assert_eq!(
+            with_local_offset("2026-09-05T10:00:00+01:00", hk),
+            "2026-09-05T10:00:00+01:00"
+        );
+        assert_eq!(
+            with_local_offset("2026-09-05T10:00:00-05:00", hk),
+            "2026-09-05T10:00:00-05:00"
+        );
+        assert_eq!(with_local_offset("2026-09-05", hk), "2026-09-05");
+        assert_eq!(with_local_offset("", hk), "");
+    }
+
+    #[test]
+    fn system_prompt_includes_current_time() {
+        let prompt = build_system_prompt(&empty_db());
+        assert!(
+            prompt.contains("Current local time:"),
+            "every non-Bedrock provider reads this prompt, so the time must be in it"
+        );
+        assert!(prompt.contains("UTC offset "), "got tail: {}", &prompt[prompt.len() - 200..]);
+    }
+
+    #[test]
+    fn dynamic_suffix_carries_current_time_line() {
+        let suffix = build_dynamic_suffix("Ada", fixed_now(), "en", &empty_db());
+        assert!(suffix.contains("Current user: Ada"), "got: {suffix}");
+        assert!(
+            suffix.contains("Current local time: 2026-09-05T00:30:12+08:00"),
+            "got: {suffix}"
+        );
+        assert!(!suffix.contains("Today:"), "the bare date line is replaced, got: {suffix}");
     }
 }

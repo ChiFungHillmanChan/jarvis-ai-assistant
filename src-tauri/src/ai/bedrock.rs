@@ -106,9 +106,8 @@ pub async fn send(
     // date, memory) is sent fresh each call without invalidating the cache.
     let static_prompt = tools::build_cacheable_system_prompt();
     let user_name = crate::util::display_name(db);
-    let today_iso = chrono::Local::now().format("%Y-%m-%d").to_string();
     let language = tools::read_language_pref(db);
-    let dynamic = tools::build_dynamic_suffix(&user_name, &today_iso, &language, db);
+    let dynamic = tools::build_dynamic_suffix(&user_name, chrono::Local::now(), &language, db);
     let system_blocks = build_system_blocks(static_prompt, dynamic)?;
     let inference_config = InferenceConfiguration::builder()
         .max_tokens(4096)
