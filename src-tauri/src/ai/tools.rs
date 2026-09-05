@@ -34,7 +34,7 @@ pub fn get_tool_definitions() -> Vec<Tool> {
         // callers.
         Tool {
             name: "run_command".into(),
-            description: "Run a shell command on macOS and return the output. Use for system info, file operations, git commands, etc. Do NOT run destructive commands.".into(),
+            description: "Run one read-only allowlisted macOS command for system information, disk and memory usage, process listing, or directory listing (for example uname, sw_vers, df, ps, ls) and return its output, refusing anything else.".into(),
             parameters: json!({
                 "type": "object",
                 "properties": { "command": { "type": "string", "description": "Shell command to execute" } },

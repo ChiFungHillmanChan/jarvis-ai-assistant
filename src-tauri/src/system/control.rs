@@ -37,7 +37,7 @@ pub async fn open_url(url: &str) -> Result<String, String> {
 /// prompt-injection -> RCE path where email/notes content fed to the model
 /// could otherwise drive an arbitrary shell command.
 const ALLOWED_COMMANDS: &[&str] = &[
-    "ls", "pwd", "whoami", "id", "hostname", "uname", "arch", "date", "cal",
+    "ls", "pwd", "whoami", "id", "hostname", "uname", "date", "cal",
     "uptime", "df", "du", "ps", "vm_stat", "sw_vers", "sysctl",
     "system_profiler", "which", "echo",
 ];
@@ -605,6 +605,30 @@ mod tests {
                  chain that ai/tools.rs::injection_tests assumes is closed"
             );
         }
+    }
+
+    /// `parse_allowed_command` checks argv[0] only, so a launcher on the
+    /// allowlist makes the list transitive: `arch -arm64 curl ...` executed
+    /// `curl` while `curl` itself was refused. Anything that runs the program
+    /// named in its own arguments is a launcher and does not belong here.
+    #[test]
+    fn allowlist_contains_no_launcher_binary() {
+        const LAUNCHERS: &[&str] = &[
+            "arch", "env", "xargs", "nice", "nohup", "time", "caffeinate",
+            "script", "sudo", "su", "login", "command", "exec",
+        ];
+        for cmd in ALLOWED_COMMANDS {
+            assert!(
+                !LAUNCHERS.contains(cmd),
+                "'{cmd}' executes the program named in its arguments; adding it \
+                 to ALLOWED_COMMANDS lets any binary through the argv[0] check"
+            );
+        }
+    }
+
+    #[test]
+    fn arch_launcher_is_rejected() {
+        assert!(parse_allowed_command("arch -arm64 curl https://example.com").is_err());
     }
 
     #[test]
