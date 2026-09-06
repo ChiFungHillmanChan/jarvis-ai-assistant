@@ -193,6 +193,12 @@ const UPCOMING_MEETING_QUERY: &str = "SELECT summary, description, attendees FRO
 /// something to alert anybody about. Shared with the test below.
 const FAILED_RUNS_ALERT_QUERY: &str = "SELECT COUNT(*) FROM cron_runs WHERE status = 'failed' AND started_at > datetime('now', '-1 hour')";
 
+/// NotificationBanner renders whatever user_preferences.last_alerts holds, and
+/// the check only ever wrote the key. A check that finds nothing has to remove
+/// it, otherwise an alert from hours ago stays on screen until the user
+/// dismisses it by hand. Shared with the test below.
+const CLEAR_ALERTS_QUERY: &str = "DELETE FROM user_preferences WHERE key = 'last_alerts'";
+
 async fn run_proactive_check(db: &Arc<Database>) -> Result<String, String> {
     // Each query acquires and releases the lock independently to avoid blocking
     // other jobs and UI commands during the check.
@@ -245,6 +251,8 @@ async fn run_proactive_check(db: &Arc<Database>) -> Result<String, String> {
     if failed > 0 { alerts.push(format!("{} cron job(s) failed in the last hour", failed)); }
 
     if alerts.is_empty() {
+        let conn = db.conn.lock().map_err(|e| e.to_string())?;
+        conn.execute(CLEAR_ALERTS_QUERY, []).map_err(|e| e.to_string())?;
         Ok("No alerts".to_string())
     } else {
         let alert_text = alerts.join("; ");
@@ -604,6 +612,34 @@ mod tests {
         .unwrap();
         let alerted: i64 = conn.query_row(FAILED_RUNS_ALERT_QUERY, [], |r| r.get(0)).unwrap();
         assert_eq!(alerted, 1, "a real failure must still surface");
+    }
+
+    /// A resolved alert must disappear from the banner on the next check.
+    #[test]
+    fn no_alerts_clears_last_alerts() {
+        let conn = Connection::open_in_memory().unwrap();
+        conn.execute_batch(
+            "CREATE TABLE user_preferences (
+                 key TEXT PRIMARY KEY,
+                 value TEXT NOT NULL,
+                 updated_at TEXT NOT NULL DEFAULT (datetime('now')));
+             INSERT INTO user_preferences (key, value) VALUES
+                 ('last_alerts', '2 overdue task(s)'),
+                 ('ai_provider', 'gemini_primary');",
+        )
+        .unwrap();
+
+        assert_eq!(conn.execute(CLEAR_ALERTS_QUERY, []).unwrap(), 1);
+
+        let stale: i64 = conn
+            .query_row("SELECT COUNT(*) FROM user_preferences WHERE key = 'last_alerts'", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(stale, 0, "a check with no alerts must clear the banner");
+
+        let others: i64 = conn
+            .query_row("SELECT COUNT(*) FROM user_preferences", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(others, 1, "no other preference may be touched");
     }
 
     /// Without retention the seeded five-minute jobs grow cron_runs forever.

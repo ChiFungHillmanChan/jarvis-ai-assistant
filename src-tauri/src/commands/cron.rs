@@ -1,8 +1,41 @@
 use crate::ai::{AiRouter, Workload};
 use crate::db::Database;
+use croner::Cron;
 use serde::Serialize;
 use std::sync::{Arc, Mutex};
 use tauri::State;
+
+/// The one parser. `tokio-cron-scheduler` reads every registration with croner
+/// in exactly this configuration, so validating or previewing with a different
+/// one (the `cron` crate numbers weekdays from Sunday = 1, croner from
+/// Sunday = 0) showed the user a schedule other than the one that runs.
+fn parse_schedule(schedule: &str) -> Result<Cron, String> {
+    Cron::new(schedule)
+        .with_seconds_required()
+        .with_dom_and_dow()
+        .parse()
+        .map_err(|e| format!("Invalid cron expression: {}", e))
+}
+
+/// Parse before touching the table. The insert used to happen first, so an
+/// expression the scheduler cannot read reached `cron_jobs` and was only
+/// undone by the registration failure path below -- and while the scheduler
+/// was still booting there was no such path, leaving a permanently dead row
+/// the dashboard called active.
+fn insert_cron_job(
+    conn: &rusqlite::Connection,
+    name: &str,
+    schedule: &str,
+    action_type: &str,
+    description: &str,
+) -> Result<i64, String> {
+    parse_schedule(schedule)?;
+    conn.execute(
+        "INSERT INTO cron_jobs (name, schedule, action_type, status, description) VALUES (?1, ?2, ?3, 'active', ?4)",
+        rusqlite::params![name, schedule, action_type, description],
+    ).map_err(|e| e.to_string())?;
+    Ok(conn.last_insert_rowid())
+}
 
 #[derive(Serialize)]
 pub struct CronJobView { pub id: i64, pub name: String, pub schedule: String, pub action_type: String, pub status: String, pub last_run: Option<String>, pub next_run: Option<String>, pub description: Option<String> }
@@ -66,14 +99,10 @@ pub async fn create_custom_cron(
         return Err(format!("Invalid action_type '{}'. Must be one of: {}", action_type, valid_actions.join(", ")));
     }
 
-    // Insert into database
+    // Validate the model-produced schedule, then insert
     let job_id = {
         let conn = db.conn.lock().map_err(|e| e.to_string())?;
-        conn.execute(
-            "INSERT INTO cron_jobs (name, schedule, action_type, status, description) VALUES (?1, ?2, ?3, 'active', ?4)",
-            rusqlite::params![name, schedule, action_type, desc],
-        ).map_err(|e| e.to_string())?;
-        conn.last_insert_rowid()
+        insert_cron_job(&conn, &name, &schedule, &action_type, &desc)?
     };
 
     // Register with the live scheduler now. The scheduler only reads the table
@@ -193,22 +222,62 @@ pub async fn toggle_cron_job(
 
 #[tauri::command]
 pub fn get_upcoming_runs(schedule: String, count: Option<usize>) -> Result<Vec<String>, String> {
-    use cron::Schedule;
-    use std::str::FromStr;
-    use chrono::Local;
-
     let n = count.unwrap_or(3);
 
-    // Try parsing as-is first (6-field), then try prepending seconds
-    let sched = Schedule::from_str(&schedule)
-        .or_else(|_| Schedule::from_str(&format!("0 {}", schedule)))
-        .map_err(|e| format!("Invalid cron expression: {}", e))?;
+    let cron = parse_schedule(&schedule)?;
 
-    let runs: Vec<String> = sched
-        .upcoming(Local)
+    let runs: Vec<String> = cron
+        .iter_from(chrono::Local::now())
         .take(n)
         .map(|dt| dt.format("%Y-%m-%d %H:%M").to_string())
         .collect();
 
     Ok(runs)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use chrono::{Datelike, NaiveDateTime, Weekday};
+
+    /// An expression the scheduler cannot read must never reach `cron_jobs`.
+    #[test]
+    fn bad_schedule_is_rejected_before_insert() {
+        let conn = rusqlite::Connection::open_in_memory().unwrap();
+        conn.execute_batch(
+            "CREATE TABLE cron_jobs (
+                 id INTEGER PRIMARY KEY AUTOINCREMENT,
+                 name TEXT NOT NULL,
+                 schedule TEXT NOT NULL,
+                 action_type TEXT NOT NULL,
+                 status TEXT DEFAULT 'active',
+                 description TEXT);",
+        )
+        .unwrap();
+
+        let err = insert_cron_job(&conn, "Friday digest", "every friday", "email_sync", "Every Friday")
+            .unwrap_err();
+        assert!(err.contains("Invalid cron expression"), "the parse error must reach the caller: {}", err);
+
+        let rows: i64 = conn.query_row("SELECT COUNT(*) FROM cron_jobs", [], |r| r.get(0)).unwrap();
+        assert_eq!(rows, 0, "a job the scheduler would refuse must not be inserted");
+
+        let id = insert_cron_job(&conn, "Friday digest", "0 0 9 * * 5", "email_sync", "Fridays at 9am").unwrap();
+        assert_eq!(id, 1, "a schedule the scheduler accepts is still inserted");
+    }
+
+    /// The preview and the scheduler must agree on which day fires. The `cron`
+    /// crate numbered weekdays Sunday = 1, so '0 0 9 * * 1' previewed as Sunday
+    /// while tokio-cron-scheduler (croner, Sunday = 0) ran it on Monday.
+    #[test]
+    fn upcoming_runs_use_croner_weekdays() {
+        let runs = get_upcoming_runs("0 0 9 * * 1".to_string(), Some(3)).unwrap();
+        assert_eq!(runs.len(), 3);
+        for run in &runs {
+            let dt = NaiveDateTime::parse_from_str(run, "%Y-%m-%d %H:%M")
+                .unwrap_or_else(|e| panic!("unexpected format '{}': {}", run, e));
+            assert_eq!(dt.weekday(), Weekday::Mon, "weekday 1 is Monday: {}", run);
+            assert_eq!(dt.format("%H:%M").to_string(), "09:00", "hour field must be honoured: {}", run);
+        }
+    }
 }
