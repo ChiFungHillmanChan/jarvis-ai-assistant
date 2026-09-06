@@ -430,6 +430,9 @@ async fn handle_wake_word_detection(
 
     // Finish streaming TTS -- speaks any remaining buffered text
     streaming_tts.finish().await;
+    // Unconditional: the HUD must return to idle here regardless of whether
+    // the streaming consumer's own "idle" emit ran.
+    let _ = app_handle.emit("chat-state", json!({"state": "idle"}));
 
     voice_engine
         .audio_router

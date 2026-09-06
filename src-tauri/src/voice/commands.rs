@@ -240,6 +240,24 @@ pub async fn stop_listening(
     Ok(response)
 }
 
+/// Cancel whatever is currently speaking and return the HUD to idle.
+///
+/// The frontend's Escape handler has called `invoke("stop_speaking")`
+/// (`src/lib/commands.ts`) since it was written, but no Rust command of that
+/// name was ever registered -- it existed only in an old git stash -- so
+/// Escape silently did nothing.
+#[tauri::command]
+pub fn stop_speaking(
+    engine: State<Arc<VoiceEngine>>,
+    app_handle: tauri::AppHandle,
+) -> Result<(), String> {
+    let tts = engine.tts.lock().map_err(|e| e.to_string())?.clone();
+    tts.cancel();
+    let _ = app_handle.emit("chat-state", json!({"state": "idle"}));
+    let _ = app_handle.emit("tts-amplitude", json!({"amplitude": 0.0}));
+    Ok(())
+}
+
 #[tauri::command]
 pub fn get_voice_state(engine: State<Arc<VoiceEngine>>) -> VoiceState {
     engine.get_state()

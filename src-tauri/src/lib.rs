@@ -399,6 +399,7 @@ pub fn run() {
             commands::payments::payments_start_checkout,
             voice::commands::start_listening,
             voice::commands::stop_listening,
+            voice::commands::stop_speaking,
             voice::commands::get_voice_state,
             voice::commands::toggle_mute,
             voice::commands::get_voice_settings,
@@ -528,6 +529,28 @@ mod tests {
         assert!(
             info_plist.contains("NSAppleEventsUsageDescription"),
             "Info.plist must declare why JARVIS sends Apple Events"
+        );
+    }
+
+    /// `stop_speaking` used to exist only in an old git stash: the frontend
+    /// called `invoke("stop_speaking")` (`src/lib/commands.ts`) against a
+    /// command that was neither implemented nor registered, so Escape did
+    /// nothing. A `pub fn` left out of `generate_handler!` still compiles
+    /// clean -- it is public API surface on this lib crate, not dead code --
+    /// so the compiler cannot catch a dropped registration; this checks the
+    /// wiring as a property of the source text instead, the same way
+    /// `settings_page_offers_the_same_model_ids_as_gemini_rs` in
+    /// `ai/gemini.rs` guards a fact the compiler has no way to see.
+    #[test]
+    fn stop_speaking_is_registered() {
+        let lib_rs = include_str!("lib.rs");
+        let handler_start = lib_rs
+            .find("tauri::generate_handler![")
+            .expect("generate_handler! block must exist in lib.rs");
+        let handler_block = &lib_rs[handler_start..];
+        assert!(
+            handler_block.contains("voice::commands::stop_speaking"),
+            "voice::commands::stop_speaking must be registered in generate_handler!"
         );
     }
 }

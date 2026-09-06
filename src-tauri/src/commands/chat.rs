@@ -202,9 +202,12 @@ pub async fn send_message(
                     let tts = engine.tts.lock().map_err(|e| e.to_string())?.clone();
                     if let Err(e) = tts.speak_queued(&search_response, &app_handle).await {
                         log::warn!("Chat TTS failed: {}", e);
-                        let _ = app_handle.emit("chat-state", json!({"state": "idle"}));
                     }
                 }
+                // Unconditional: speak_queued only emits "idle" itself when TTS
+                // is enabled and produced at least one sentence, so with TTS
+                // off the "Composing response..." HUD never dismissed.
+                let _ = app_handle.emit("chat-state", json!({"state": "idle"}));
 
                 return Ok(crate::commands::chat::ChatMessage {
                     id: None,
@@ -314,6 +317,9 @@ pub async fn send_message(
     // Finish streaming TTS -- speaks any remaining buffered text
     log::debug!("[chat] TTS finish, len={}", final_response.len());
     streaming_tts.finish().await;
+    // Unconditional: the HUD must return to idle here regardless of whether
+    // the streaming consumer's own "idle" emit ran.
+    let _ = app_handle.emit("chat-state", json!({"state": "idle"}));
 
     Ok(ChatMessage {
         id: None,

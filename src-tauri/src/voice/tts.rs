@@ -198,7 +198,10 @@ async fn streaming_tts_consumer(
     mut rx: mpsc::Receiver<TtsCommand>,
 ) {
     if !tts.enabled {
-        // Drain channel without speaking
+        // Drain channel without speaking. Nothing else on this path emits
+        // "idle" -- callers rely on the consumer for it -- so without this
+        // the "Composing response..." HUD never dismisses with TTS off.
+        let _ = app_handle.emit("chat-state", json!({"state": "idle"}));
         while rx.recv().await.is_some() {}
         return;
     }
