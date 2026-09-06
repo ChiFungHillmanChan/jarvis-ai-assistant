@@ -736,23 +736,29 @@ async fn execute_calendar_tool(
         "delete_event" => {
             let event_id = args["event_id"].as_str().unwrap_or("");
             let result = calendar::delete_event(token, event_id).await?;
-            // Google has confirmed the deletion, so drop the local mirror row
-            // too. Without this the event stayed on the Calendar page and in the
-            // briefing until a sync whose window still covered it ran.
-            match db.conn.lock() {
-                Ok(conn) => {
-                    if let Err(e) = conn.execute(
-                        "DELETE FROM calendar_events WHERE google_id = ?1",
-                        rusqlite::params![event_id],
-                    ) {
-                        log::warn!("[calendar] local row for deleted event {} not removed: {}", event_id, e);
-                    }
-                }
-                Err(e) => log::warn!("[calendar] could not lock db to remove deleted event {}: {}", event_id, e),
-            }
+            forget_local_event(db, event_id);
             Ok(result)
         }
         _ => Err(format!("Unknown Calendar tool: {}", name)),
+    }
+}
+
+/// Drop the local mirror row for an event Google has confirmed deleted.
+/// Without this the event stayed on the Calendar page and in the briefing until
+/// a sync whose window still covered it ran. Failures are logged, never
+/// returned: Google has already deleted the event, and telling the user the
+/// deletion failed would be worse than a stale row.
+fn forget_local_event(db: &crate::db::Database, event_id: &str) {
+    match db.conn.lock() {
+        Ok(conn) => {
+            if let Err(e) = conn.execute(
+                "DELETE FROM calendar_events WHERE google_id = ?1",
+                rusqlite::params![event_id],
+            ) {
+                log::warn!("[calendar] local row for deleted event {} not removed: {}", event_id, e);
+            }
+        }
+        Err(e) => log::warn!("[calendar] could not lock db to remove deleted event {}: {}", event_id, e),
     }
 }
 
@@ -1819,6 +1825,41 @@ mod calendar_scope_tests {
         assert!(event_content_is_editable(&db, "solo_evt"));
         assert!(!event_content_is_editable(&db, "shared_evt"));
         assert!(!event_content_is_editable(&db, "never_synced"));
+    }
+
+    /// The delete_event arm drops the local mirror row once Google confirms the
+    /// deletion, and it reports nothing when that fails -- a table or column
+    /// typo here would leave the event on the Calendar page and in the briefing
+    /// with only a log line to show for it.
+    #[test]
+    fn deleting_an_event_drops_only_that_local_row() {
+        let db = calendar_db(&[("gone_evt", None), ("kept_evt", None)]);
+
+        forget_local_event(&db, "gone_evt");
+
+        let remaining: Vec<String> = {
+            let conn = db.conn.lock().unwrap();
+            let mut stmt = conn
+                .prepare("SELECT google_id FROM calendar_events ORDER BY google_id")
+                .unwrap();
+            let rows = stmt
+                .query_map([], |r| r.get::<_, String>(0))
+                .unwrap()
+                .map(|r| r.unwrap())
+                .collect();
+            rows
+        };
+        assert_eq!(remaining, vec!["kept_evt".to_string()]);
+
+        // An id that was never synced is not an error: Google still deleted it.
+        forget_local_event(&db, "never_synced");
+        let count: i64 = db
+            .conn
+            .lock()
+            .unwrap()
+            .query_row("SELECT COUNT(*) FROM calendar_events", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(count, 1);
     }
 
     #[test]
