@@ -121,13 +121,15 @@ pub(crate) async fn run_calendar_sync(db: &Arc<Database>, auth: &Arc<GoogleAuth>
     let now = chrono::Utc::now();
     let time_min = now.to_rfc3339();
     let time_max = (now + chrono::TimeDelta::days(7)).to_rfc3339();
-    match calendar::fetch_events(&token, &time_min, &time_max).await {
-        Ok(evts) => { let c = evts.len(); calendar::save_to_db(db, &evts, &time_min, &time_max)?; Ok(format!("Synced {} events", c)) }
+    // The detailed form: `save_to_db` reconciles the local mirror against the
+    // window, so it has to know whether the fetch actually reached the end.
+    match calendar::fetch_events_detailed(&token, &time_min, &time_max).await {
+        Ok(f) => { let c = f.events.len(); calendar::save_to_db(db, &f, &time_min, &time_max)?; Ok(format!("Synced {} events", c)) }
         Err(ref e) if e == "UNAUTHORIZED" => {
             auth.refresh_access_token().await?;
             let t = auth.get_access_token().ok_or("No token after refresh")?;
-            let evts = calendar::fetch_events(&t, &time_min, &time_max).await?;
-            let c = evts.len(); calendar::save_to_db(db, &evts, &time_min, &time_max)?;
+            let f = calendar::fetch_events_detailed(&t, &time_min, &time_max).await?;
+            let c = f.events.len(); calendar::save_to_db(db, &f, &time_min, &time_max)?;
             Ok(format!("Synced {} events (refreshed)", c))
         }
         Err(e) => Err(e),

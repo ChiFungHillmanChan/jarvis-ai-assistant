@@ -19,6 +19,17 @@ pub struct CalendarEvent {
 /// without a ceiling a pathological account could page forever.
 const MAX_EVENT_PAGES: usize = 10;
 
+/// A window's events plus whether the paging loop actually reached the end.
+/// `complete` is false when the page budget ran out with a `nextPageToken`
+/// still outstanding, which matters because `save_to_db` deletes covered rows
+/// that did not come back: reconciling against a truncated view would drop
+/// real events from the local mirror. Mirrors `gmail::InboxFetch` and
+/// `github::AssignedItemsFetch`.
+pub struct EventsFetch {
+    pub events: Vec<CalendarEvent>,
+    pub complete: bool,
+}
+
 #[derive(Deserialize)]
 struct EventsResponse {
     items: Option<Vec<GoogleEvent>>,
@@ -49,7 +60,14 @@ impl EventTime {
     }
 }
 
+/// Events for the window, discarding the completeness flag. For read-only
+/// callers that never reconcile; anything that calls `save_to_db` must use
+/// `fetch_events_detailed` so a truncated fetch does not delete live rows.
 pub async fn fetch_events(access_token: &str, time_min: &str, time_max: &str) -> Result<Vec<CalendarEvent>, String> {
+    Ok(fetch_events_detailed(access_token, time_min, time_max).await?.events)
+}
+
+pub async fn fetch_events_detailed(access_token: &str, time_min: &str, time_max: &str) -> Result<EventsFetch, String> {
     let client = crate::util::http_client();
     let url = format!("{}/calendars/primary/events", CALENDAR_API);
     let mut events: Vec<CalendarEvent> = Vec::new();
@@ -93,7 +111,9 @@ pub async fn fetch_events(access_token: &str, time_min: &str, time_max: &str) ->
         }
     }
 
-    Ok(events)
+    // A token still outstanding means the budget ran out mid-window, not that
+    // the window ended.
+    Ok(EventsFetch { complete: next_token.is_none(), events })
 }
 
 /// `attendees` is for user-initiated callers only. It must never carry a
@@ -210,15 +230,17 @@ fn covered_events_query() -> String {
     )
 }
 
-/// `time_min` and `time_max` must be the window `fetch_events` was called with:
+/// `time_min` and `time_max` must be the window `fetch_events_detailed` was
+/// called with:
 /// the reconciliation below reads them as the range Google was asked about, and
 /// a wider one would delete events that were never requested.
 pub fn save_to_db(
     db: &crate::db::Database,
-    events: &[CalendarEvent],
+    fetched: &EventsFetch,
     time_min: &str,
     time_max: &str,
 ) -> Result<(), String> {
+    let events = &fetched.events;
     let mut conn = db.conn.lock().map_err(|e| e.to_string())?;
     let tx = conn.transaction().map_err(|e| e.to_string())?;
     for event in events {
@@ -233,8 +255,13 @@ pub fn save_to_db(
     // Google returns every event overlapping the window, so a covered row that
     // did not come back was cancelled or deleted at the source. Upserting alone
     // kept it on the Calendar page and in the briefing forever.
-    let fetched: HashSet<&str> = events.iter().map(|e| e.id.as_str()).collect();
-    let gone: Vec<String> = {
+    // A truncated fetch is not evidence of absence: the events past the page
+    // budget are missing from this batch but alive at the source. Upsert them
+    // and leave the mirror alone until a complete fetch can reconcile it.
+    let seen: HashSet<&str> = events.iter().map(|e| e.id.as_str()).collect();
+    let gone: Vec<String> = if !fetched.complete {
+        Vec::new()
+    } else {
         let mut stmt = tx
             .prepare(&covered_events_query())
             .map_err(|e| e.to_string())?;
@@ -247,7 +274,7 @@ pub fn save_to_db(
             .map_err(|e| e.to_string())?;
         covered
             .into_iter()
-            .filter(|google_id| !fetched.contains(google_id.as_str()))
+            .filter(|google_id| !seen.contains(google_id.as_str()))
             .collect()
     };
     for google_id in gone {
@@ -342,6 +369,17 @@ mod sync_tests {
         ids
     }
 
+    /// A fetch that reached the end of the window, which is what every
+    /// reconciliation test below assumes unless it says otherwise.
+    fn complete(events: Vec<CalendarEvent>) -> EventsFetch {
+        EventsFetch { events, complete: true }
+    }
+
+    /// A fetch that ran out of page budget with more events outstanding.
+    fn truncated(events: Vec<CalendarEvent>) -> EventsFetch {
+        EventsFetch { events, complete: false }
+    }
+
     fn event(id: &str, start_time: &str) -> CalendarEvent {
         CalendarEvent {
             id: id.to_string(),
@@ -363,7 +401,7 @@ mod sync_tests {
         seed(&db, "next-month", "2026-10-02T09:00:00Z");
         save_to_db(
             &db,
-            &[event("in-window", "2026-09-05T09:00:00Z")],
+            &complete(vec![event("in-window", "2026-09-05T09:00:00Z")]),
             TIME_MIN,
             TIME_MAX,
         )
@@ -379,7 +417,7 @@ mod sync_tests {
         seed(&db, "cancelled", "2026-09-05T09:00:00Z");
         save_to_db(
             &db,
-            &[event("still-on", "2026-09-06T09:00:00Z")],
+            &complete(vec![event("still-on", "2026-09-06T09:00:00Z")]),
             TIME_MIN,
             TIME_MAX,
         )
@@ -388,20 +426,42 @@ mod sync_tests {
     }
 
     #[test]
-    fn a_re_created_event_comes_back() {
+    fn a_partial_fetch_deletes_nothing() {
+        // Ten pages of 50 is the budget; a window busier than that came back
+        // truncated. Reconciling against it would delete every event past the
+        // cutoff from the mirror even though all of them are alive at the
+        // source. Mirrors gmail's `a_partial_fetch_archives_nothing`.
         let db = events_db();
+        seed(&db, "past-the-page-budget", "2026-09-05T09:00:00Z");
         save_to_db(
             &db,
-            &[event("meeting", "2026-09-05T09:00:00Z")],
+            &truncated(vec![event("on-page-one", "2026-09-06T09:00:00Z")]),
             TIME_MIN,
             TIME_MAX,
         )
         .unwrap();
-        save_to_db(&db, &[], TIME_MIN, TIME_MAX).unwrap();
+        assert_eq!(
+            stored_ids(&db),
+            vec!["on-page-one", "past-the-page-budget"],
+            "a truncated fetch is not evidence that the missing events are gone"
+        );
+    }
+
+    #[test]
+    fn a_re_created_event_comes_back() {
+        let db = events_db();
+        save_to_db(
+            &db,
+            &complete(vec![event("meeting", "2026-09-05T09:00:00Z")]),
+            TIME_MIN,
+            TIME_MAX,
+        )
+        .unwrap();
+        save_to_db(&db, &complete(vec![]), TIME_MIN, TIME_MAX).unwrap();
         assert!(stored_ids(&db).is_empty(), "an empty window clears it");
         save_to_db(
             &db,
-            &[event("meeting", "2026-09-05T09:00:00Z")],
+            &complete(vec![event("meeting", "2026-09-05T09:00:00Z")]),
             TIME_MIN,
             TIME_MAX,
         )
@@ -418,7 +478,7 @@ mod sync_tests {
         let db = events_db();
         seed(&db, "edge-day", "2026-09-11");
         seed(&db, "inside-day", "2026-09-05");
-        save_to_db(&db, &[], TIME_MIN, TIME_MAX).unwrap();
+        save_to_db(&db, &complete(vec![]), TIME_MIN, TIME_MAX).unwrap();
         assert_eq!(stored_ids(&db), vec!["edge-day"]);
     }
 }
