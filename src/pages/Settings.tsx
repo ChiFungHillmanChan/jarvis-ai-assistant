@@ -738,6 +738,8 @@ export default function Settings() {
             <div style={{ display: "flex", gap: 6, marginTop: 8, flexWrap: "wrap" }}>
               <button onClick={() => handleAddToChain("gemini", undefined, GEMINI_MODEL_PRO)} style={styles.saveBtn}>+ Gemini Pro</button>
               <button onClick={() => handleAddToChain("gemini", undefined, GEMINI_MODEL_FLASH)} style={styles.saveBtn}>+ Gemini Flash</button>
+              <button onClick={() => handleAddToChain("claude")} style={styles.saveBtn}>+ Claude</button>
+              <button onClick={() => handleAddToChain("openai")} style={styles.saveBtn}>+ OpenAI</button>
               <button onClick={() => handleAddToChain("bedrock", undefined, "anthropic.claude-sonnet-4-6")} style={styles.saveBtn}>+ Bedrock Claude</button>
             </div>
           </div>

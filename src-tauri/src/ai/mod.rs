@@ -271,6 +271,11 @@ pub struct AiRouter {
     openai_key: Option<String>,
     provider_chain: Vec<ProviderChainEntry>,
     local_endpoints: Vec<LocalEndpoint>,
+    /// True once `load_from_db` has replaced `provider_chain` with rows the
+    /// user actually persisted. `append_default_fallbacks` only touches the
+    /// built-in default, so a chain the user deliberately edited (even down
+    /// to zero rows re-added by hand) is never appended to behind their back.
+    chain_loaded_from_db: bool,
 }
 
 impl AiRouter {
@@ -342,6 +347,7 @@ impl AiRouter {
             openai_key,
             provider_chain: chain,
             local_endpoints: Vec::new(),
+            chain_loaded_from_db: false,
         }
     }
 
@@ -419,6 +425,7 @@ impl AiRouter {
 
                 if !chain.is_empty() {
                     self.provider_chain = chain;
+                    self.chain_loaded_from_db = true;
                 }
             }
         }
@@ -448,6 +455,50 @@ impl AiRouter {
         self.gemini_key = resolve_key("GEMINI_API_KEY", from_keychain("gemini_api_key"));
         self.claude_key = resolve_key("ANTHROPIC_API_KEY", from_keychain("claude_api_key"));
         self.openai_key = resolve_key("OPENAI_API_KEY", from_keychain("openai_api_key"));
+    }
+
+    /// Add Claude and/or OpenAI to the built-in default chain when the user
+    /// has a key for them but has never persisted a provider chain of their
+    /// own. Onboarding and Settings both promise "JARVIS uses whichever is
+    /// available, falling back automatically", but every default chain is
+    /// Gemini-only -- a tester who only pastes an OpenAI or Claude key gets
+    /// "No Gemini API key configured" on every message instead of the
+    /// fallback the copy describes. Only ever touches the built-in default
+    /// (`chain_loaded_from_db == false`); a chain the user persisted, even one
+    /// with zero rows, is left exactly as they made it. Safe to call more than
+    /// once -- an entry already present for a provider is never duplicated.
+    pub fn append_default_fallbacks(&mut self) {
+        if self.chain_loaded_from_db {
+            return;
+        }
+        if self.claude_key.is_some()
+            && !self
+                .provider_chain
+                .iter()
+                .any(|entry| entry.provider_type == "claude")
+        {
+            self.provider_chain.push(ProviderChainEntry {
+                position: self.provider_chain.len() as i32,
+                provider_type: "claude".into(),
+                endpoint_id: None,
+                model_id: None,
+                enabled: true,
+            });
+        }
+        if self.openai_key.is_some()
+            && !self
+                .provider_chain
+                .iter()
+                .any(|entry| entry.provider_type == "openai")
+        {
+            self.provider_chain.push(ProviderChainEntry {
+                position: self.provider_chain.len() as i32,
+                provider_type: "openai".into(),
+                endpoint_id: None,
+                model_id: None,
+                enabled: true,
+            });
+        }
     }
 
     pub fn provider_chain(&self) -> &[ProviderChainEntry] {
@@ -1100,6 +1151,50 @@ mod tests {
             first, second,
             "the default chain must degrade to a different model, not retry the same one"
         );
+    }
+
+    /// Onboarding and Settings both promise "JARVIS uses whichever is
+    /// available, falling back automatically", but the built-in default chain
+    /// is Gemini-only. A tester who pastes only a Claude or an OpenAI key must
+    /// still get a working fallback instead of "No Gemini API key configured"
+    /// on every message.
+    #[test]
+    fn default_chain_gains_claude_and_openai_when_keys_exist() {
+        let mut router = AiRouter::new("gemini_primary");
+        router.claude_key = Some("sk-ant-test".to_string());
+        router.openai_key = Some("sk-oai-test".to_string());
+
+        router.append_default_fallbacks();
+        // Idempotent: a second call (e.g. from a second reload_keys() site)
+        // must not duplicate the entries it already appended.
+        router.append_default_fallbacks();
+
+        let chain = router.provider_chain();
+        let types: Vec<&str> = chain.iter().map(|e| e.provider_type.as_str()).collect();
+        assert_eq!(types, vec!["gemini", "gemini", "claude", "openai"]);
+        assert!(chain[2].enabled);
+        assert!(chain[2].model_id.is_none());
+        assert!(chain[3].enabled);
+        assert!(chain[3].model_id.is_none());
+    }
+
+    /// A chain the user actually persisted -- even one they trimmed down
+    /// themselves -- must never be appended to behind their back.
+    #[test]
+    fn persisted_chain_is_left_alone() {
+        let mut router = AiRouter::new("gemini_primary");
+        router.claude_key = Some("sk-ant-test".to_string());
+        router.openai_key = Some("sk-oai-test".to_string());
+        // Simulate what `load_from_db` sets once real provider_chain rows
+        // were found, without needing a live Database handle.
+        router.chain_loaded_from_db = true;
+
+        router.append_default_fallbacks();
+
+        let chain = router.provider_chain();
+        assert_eq!(chain.len(), 2, "persisted chain must not gain new entries");
+        let types: Vec<&str> = chain.iter().map(|e| e.provider_type.as_str()).collect();
+        assert_eq!(types, vec!["gemini", "gemini"]);
     }
 
     /// The shipped migration, not a copy of it -- a hand-written mirror of the

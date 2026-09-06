@@ -100,8 +100,9 @@ export default function OnboardingWizard({ onComplete }: Props) {
       {step === 1 && (
         <div>
           <p style={styles.body}>
-            Paste any cloud provider keys you already have. JARVIS uses whichever is
-            available, falling back automatically. All optional — you can skip and add
+            Paste any cloud provider keys you already have. A Gemini key is the
+            default. Claude or OpenAI keys also work, and JARVIS falls back
+            between whichever you provide. All optional — you can skip and add
             them later in Settings.
           </p>
           <input

@@ -79,6 +79,7 @@ pub fn update_setting(
         let mut rebuilt = crate::ai::AiRouter::new(&value);
         rebuilt.load_from_db(&db);
         rebuilt.reload_keys();
+        rebuilt.append_default_fallbacks();
         *router.lock().map_err(|e| e.to_string())? = rebuilt;
         log::info!("AI provider changed to {}, router rebuilt", value);
     }
@@ -191,6 +192,7 @@ pub fn set_api_key(
     }
     let mut router = router.lock().map_err(|e| e.to_string())?;
     router.reload_keys();
+    router.append_default_fallbacks();
     Ok(())
 }
 

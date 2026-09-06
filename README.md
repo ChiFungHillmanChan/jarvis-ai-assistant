@@ -287,9 +287,9 @@ npm install
 Keys are stored in your macOS Keychain and take effect immediately. You do not need a `.env`
 file, and you should not go looking for one -- a packaged `.app` has no project root.
 
-**Minimum requirement:** one AI provider key. Gemini is the default and the cheapest starting
-point. Claude, OpenAI, Amazon Bedrock and a local Ollama endpoint can be added and reordered
-into a fallback chain in Settings.
+**Minimum requirement:** one AI provider key. A Gemini key is the default. Claude or OpenAI
+keys also work, and JARVIS falls back between whichever you provide; Amazon Bedrock and a
+local Ollama endpoint can also be added and reordered into the fallback chain in Settings.
 
 **If you are building from source,** a `.env` at the repo root is read at startup and takes
 precedence over the Keychain, which is convenient for development:
