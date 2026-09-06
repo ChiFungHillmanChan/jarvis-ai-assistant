@@ -86,6 +86,47 @@ function easeInOut(t: number): number {
   return t < 0.5 ? 2 * t * t : 1 - Math.pow(-2 * t + 2, 2) / 2;
 }
 
+/** Controls, panels and anything else the pointer is meant to act on. */
+const UI_HIT_SELECTOR = "button, a, input, select, textarea, nav, form, .panel, .no-drag";
+
+/**
+ * True when `el` sits inside something the user can scroll. A wheel event
+ * there belongs to that region, never to the sphere behind it.
+ */
+function insideScrollable(el: Element): boolean {
+  for (let node: Element | null = el; node && node !== document.body; node = node.parentElement) {
+    const overflowY = window.getComputedStyle(node).overflowY;
+    if ((overflowY === "auto" || overflowY === "scroll") && node.scrollHeight > node.clientHeight) return true;
+  }
+  return false;
+}
+
+/**
+ * True when `el` holds text of its own -- a label, a chat line, a heading.
+ * Pressing there is the start of a selection, not the start of a drag.
+ */
+function holdsOwnText(el: Element): boolean {
+  return Array.from(el.childNodes).some(
+    (n) => n.nodeType === Node.TEXT_NODE && (n.textContent ?? "").trim() !== "",
+  );
+}
+
+/**
+ * The canvas is painted underneath a full-viewport UI layer (`styles.uiLayer`
+ * in App.tsx, zIndex 2), so hit testing never reports the canvas node itself:
+ * testing `e.target === canvas` disabled drag, node focus and zoom outright.
+ * Decide from the element actually hit instead. Controls, panels, scrollable
+ * regions and text belong to the UI; the transparent layout shells in between
+ * are the scene showing through, and only there may the scene take the event.
+ */
+function isSceneSurface(target: EventTarget | null, canvas: HTMLCanvasElement): boolean {
+  if (target === canvas) return true;
+  if (!(target instanceof Element)) return false;
+  if (target.closest(UI_HIT_SELECTOR)) return false;
+  if (holdsOwnText(target)) return false;
+  return !insideScrollable(target);
+}
+
 interface JarvisSceneProps {
   activityLevel?: "idle" | "listening" | "processing" | "active";
   assistantPhase?: string;
@@ -347,9 +388,9 @@ export default memo(function JarvisScene({ activityLevel = "idle", assistantPhas
 
     // Mouse controls
     function onDown(e: MouseEvent) {
-      // Only the scene's own canvas may start a drag. Anything else is UI, and
-      // preventDefault there kills text selection across the whole app.
-      if (e.target !== canvas) return;
+      // Only a press on the scene surface may start a drag. Anywhere else is
+      // UI, and preventDefault there kills text selection across the whole app.
+      if (!canvas || !isSceneSurface(e.target, canvas)) return;
       e.preventDefault();
       document.body.style.userSelect = "none";
       document.body.style.webkitUserSelect = "none";
@@ -383,9 +424,9 @@ export default memo(function JarvisScene({ activityLevel = "idle", assistantPhas
       setTimeout(() => { if (!dragging.current && !focusTarget.current) autoRot.current = true; }, 2000);
     }
     function onWheel(e: WheelEvent) {
-      // Same rule as onDown: swallowing wheel events outside the canvas stops
-      // every scrollable panel in the app from scrolling.
-      if (e.target !== canvas) return;
+      // Same rule as onDown: swallowing wheel events over a panel stops every
+      // scrollable region in the app from scrolling.
+      if (!canvas || !isSceneSurface(e.target, canvas)) return;
       e.preventDefault();
       targetZoom.current += e.deltaY * 0.8;
       targetZoom.current = Math.max(50, Math.min(2000, targetZoom.current));
