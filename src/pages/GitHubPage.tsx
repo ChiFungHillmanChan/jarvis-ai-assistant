@@ -2,14 +2,16 @@ import { useState } from "react";
 import { useTauriCommand } from "../hooks/useTauriCommand";
 import type { GitHubItemView } from "../lib/types";
 import { syncGitHub } from "../lib/commands";
+import { showToast } from "../components/Toast";
 
 export default function GitHubPage() {
-  const { data: items, refetch } = useTauriCommand<GitHubItemView[]>("get_github_items");
+  const { data: items, error, refetch } = useTauriCommand<GitHubItemView[]>("get_github_items");
   const [syncing, setSyncing] = useState(false);
 
   async function handleSync() {
     setSyncing(true);
-    try { await syncGitHub(); refetch(); } catch (e) { console.error(e); }
+    try { const result = await syncGitHub(); showToast(result, "success"); refetch(); }
+    catch (e) { showToast(String(e), "error"); }
     finally { setSyncing(false); }
   }
 
@@ -25,7 +27,7 @@ export default function GitHubPage() {
         </button>
       </div>
       {(!items || items.length === 0) ? (
-        <div style={styles.empty}>No GitHub items. Add your token in Settings, then sync.</div>
+        <div style={{ ...styles.empty, ...(error ? styles.errorText : {}) }}>{error ?? "No GitHub items. Add your token in Settings, then sync."}</div>
       ) : (
         <div style={styles.list}>
           {prs.length > 0 && (
@@ -67,6 +69,7 @@ const styles: Record<string, React.CSSProperties> = {
   syncBtn: { background: "rgba(0, 180, 255, 0.08)", border: "1px solid rgba(0, 180, 255, 0.3)", borderRadius: 6, padding: "6px 12px", color: "rgba(0, 180, 255, 0.8)", cursor: "pointer", fontFamily: "var(--font-mono)", fontSize: 10 },
   list: { flex: 1, overflowY: "auto" },
   empty: { color: "rgba(0, 180, 255, 0.3)", fontSize: 12, fontStyle: "italic", padding: 20 },
+  errorText: { color: "rgba(255, 100, 100, 0.85)", fontStyle: "normal" },
   item: { padding: "10px 0", borderBottom: "1px solid rgba(0, 180, 255, 0.08)" },
   itemHeader: { display: "flex", justifyContent: "space-between", alignItems: "center" },
   itemTitle: { color: "rgba(0, 180, 255, 0.8)", fontSize: 12 },

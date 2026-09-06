@@ -19,7 +19,7 @@ const LaunchPage = lazy(() => import("./pages/LaunchPage"));
 import { useKeyboard } from "./hooks/useKeyboard";
 import VoiceIndicator from "./components/VoiceIndicator";
 import { useVoiceState } from "./hooks/useVoiceState";
-import ToastContainer from "./components/Toast";
+import ToastContainer, { showToast } from "./components/Toast";
 import WindowControls from "./components/WindowControls";
 import { Minimize2 } from "./components/icons";
 import JarvisScene from "./components/3d/JarvisScene";
@@ -50,7 +50,7 @@ function ChatFullView() {
         <button onClick={clearChat} style={{ background: "transparent", border: "none", color: "rgba(0, 180, 255, 0.5)", fontFamily: "var(--font-mono)", fontSize: 11, cursor: "pointer" }}>NEW</button>
       </div>
       <div style={{ flex: 1, overflowY: "auto", maxWidth: 700 }}>
-        {messages.map((msg, i) => <ChatMessageComponent key={msg.id ?? i} message={msg} />)}
+        {messages.map((msg, i) => <ChatMessageComponent key={msg.id != null ? `db-${msg.id}` : `local-${i}`} message={msg} />)}
         {loading && streamingText && (
           <div style={{ padding: "12px 14px", color: "rgba(0, 180, 255, 0.85)", fontSize: 13, lineHeight: 1.6, whiteSpace: "pre-wrap" as const }}>
             {streamingText}<span style={{ color: "rgba(0, 180, 255, 0.5)", animation: "blink 1s step-end infinite" }}>|</span>
@@ -109,7 +109,11 @@ export default function App() {
   const closeChat = useCallback(() => { setChatOpen(false); }, []);
   const handleToolCallConsumed = useCallback(() => setPendingToolCall(null), []);
 
-  const { state: voiceState, startVoice, stopVoice } = useVoiceState();
+  const { state: voiceState, error: voiceError, startVoice, stopVoice } = useVoiceState();
+
+  useEffect(() => {
+    if (voiceError) showToast(voiceError, "error");
+  }, [voiceError]);
 
   useEffect(() => {
     aiStateRef.current = aiState;

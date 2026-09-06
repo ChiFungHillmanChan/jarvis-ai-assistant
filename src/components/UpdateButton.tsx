@@ -16,6 +16,7 @@ export default function UpdateButton() {
   const [update, setUpdate] = useState<Update | null>(null);
   const [phase, setPhase] = useState<Phase>("idle");
   const [progress, setProgress] = useState(0);
+  const [message, setMessage] = useState<string | null>(null);
 
   const runCheck = useCallback(async () => {
     try {
@@ -40,6 +41,7 @@ export default function UpdateButton() {
     if (!update || phase === "downloading") return;
     setPhase("downloading");
     setProgress(0);
+    setMessage(null);
     try {
       let downloaded = 0;
       let total = 0;
@@ -56,6 +58,7 @@ export default function UpdateButton() {
       await relaunch();
     } catch (e) {
       console.error("update install failed", e);
+      setMessage(String(e));
       setPhase("error");
     }
   }, [update, phase]);
@@ -70,22 +73,40 @@ export default function UpdateButton() {
         : `Update to v${update.version}`;
 
   return (
-    <button
-      onClick={install}
-      disabled={phase === "downloading"}
-      title={update.body?.trim() || `Install JARVIS v${update.version}`}
-      style={{ ...styles.btn, ...(phase === "error" ? styles.errBtn : {}) }}
-    >
-      <span
-        className={phase === "downloading" ? undefined : "animate-glow"}
-        style={{ ...styles.dot, ...(phase === "error" ? styles.errDot : {}) }}
-      />
-      {label}
-    </button>
+    <div style={styles.wrap}>
+      <button
+        onClick={install}
+        disabled={phase === "downloading"}
+        title={phase === "error" && message ? message : update.body?.trim() || `Install JARVIS v${update.version}`}
+        style={{ ...styles.btn, ...(phase === "error" ? styles.errBtn : {}) }}
+      >
+        <span
+          className={phase === "downloading" ? undefined : "animate-glow"}
+          style={{ ...styles.dot, ...(phase === "error" ? styles.errDot : {}) }}
+        />
+        {label}
+      </button>
+      {phase === "error" && message && <span style={styles.errMsg}>{message}</span>}
+    </div>
   );
 }
 
 const styles: Record<string, React.CSSProperties> = {
+  wrap: {
+    display: "flex",
+    flexDirection: "column",
+    alignItems: "flex-end",
+    gap: 2,
+  },
+  errMsg: {
+    maxWidth: 260,
+    color: "rgba(255,180,180,0.8)",
+    fontFamily: "var(--font-mono)",
+    fontSize: 9,
+    lineHeight: 1.3,
+    textAlign: "right",
+    overflowWrap: "anywhere",
+  },
   btn: {
     display: "flex",
     alignItems: "center",

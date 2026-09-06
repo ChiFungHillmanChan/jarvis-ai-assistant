@@ -3,12 +3,16 @@ import type { VoiceState } from "../lib/types";
 
 interface Props { state: VoiceState; onStop: () => void; }
 
+function truncate(text: string, max: number): string {
+  return text.length > max ? `${text.slice(0, max - 3)}...` : text;
+}
+
 function getStateInfo(state: VoiceState): { label: string; color: string } | null {
   if (state === "Listening" || state === "WakeWordListening") return { label: "LISTENING", color: "rgba(0, 180, 255, 0.9)" };
   if (state === "Processing" || state === "WakeWordDetected" || state === "WakeWordProcessing") return { label: "PROCESSING", color: "rgba(255, 180, 0, 0.85)" };
   if (state === "Speaking" || state === "WakeWordSpeaking") return { label: "SPEAKING", color: "rgba(16, 185, 129, 0.85)" };
   if (typeof state === "object" && "ModelDownloading" in state) return { label: "DOWNLOADING", color: "rgba(96, 165, 250, 0.85)" };
-  if (typeof state === "object" && "Error" in state) return { label: "ERROR", color: "rgba(255, 100, 100, 0.8)" };
+  if (typeof state === "object" && "Error" in state) return { label: truncate(state.Error, 80), color: "rgba(255, 100, 100, 0.8)" };
   return null;
 }
 

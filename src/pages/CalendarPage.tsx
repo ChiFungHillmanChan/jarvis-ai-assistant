@@ -2,14 +2,16 @@ import { useState } from "react";
 import { useTauriCommand } from "../hooks/useTauriCommand";
 import type { CalendarEventView } from "../lib/types";
 import { syncCalendar } from "../lib/commands";
+import { showToast } from "../components/Toast";
 
 export default function CalendarPage() {
-  const { data: events, refetch } = useTauriCommand<CalendarEventView[]>("get_events", { days: 7 });
+  const { data: events, error, refetch } = useTauriCommand<CalendarEventView[]>("get_events", { days: 7 });
   const [syncing, setSyncing] = useState(false);
 
   async function handleSync() {
     setSyncing(true);
-    try { await syncCalendar(); refetch(); } catch (e) { console.error(e); }
+    try { const result = await syncCalendar(); showToast(result, "success"); refetch(); }
+    catch (e) { showToast(String(e), "error"); }
     finally { setSyncing(false); }
   }
 
@@ -23,7 +25,7 @@ export default function CalendarPage() {
       </div>
       <div style={styles.list}>
         {!events || events.length === 0 ? (
-          <div style={styles.empty}>No events synced. Connect Google in Settings, then sync.</div>
+          <div style={{ ...styles.empty, ...(error ? styles.errorText : {}) }}>{error ?? "No events synced. Connect Google in Settings, then sync."}</div>
         ) : events.map((event) => (
           <div key={event.id} style={styles.eventItem}>
             <div style={styles.timeBlock}>
@@ -48,6 +50,7 @@ const styles: Record<string, React.CSSProperties> = {
   syncBtn: { background: "rgba(0, 180, 255, 0.08)", border: "1px solid rgba(0, 180, 255, 0.3)", borderRadius: 6, padding: "6px 12px", color: "rgba(0, 180, 255, 0.8)", cursor: "pointer", fontFamily: "var(--font-mono)", fontSize: 10 },
   list: { flex: 1, overflowY: "auto" },
   empty: { color: "rgba(0, 180, 255, 0.3)", fontSize: 12, fontStyle: "italic", padding: 20 },
+  errorText: { color: "rgba(255, 100, 100, 0.85)", fontStyle: "normal" },
   eventItem: { display: "flex", gap: 16, padding: "12px 0", borderBottom: "1px solid rgba(0, 180, 255, 0.08)" },
   timeBlock: { width: 100, flexShrink: 0 },
   time: { color: "rgba(0, 180, 255, 0.5)", fontSize: 10, fontFamily: "var(--font-mono)" },

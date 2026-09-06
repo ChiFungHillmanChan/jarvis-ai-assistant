@@ -2,19 +2,21 @@ import { useState } from "react";
 import { useTauriCommand } from "../hooks/useTauriCommand";
 import type { EmailSummary } from "../lib/types";
 import { archiveEmail, syncEmails } from "../lib/commands";
+import { showToast } from "../components/Toast";
 
 export default function EmailPage() {
-  const { data: emails, refetch } = useTauriCommand<EmailSummary[]>("get_emails", { limit: 50 });
+  const { data: emails, error, refetch } = useTauriCommand<EmailSummary[]>("get_emails", { limit: 50 });
   const [syncing, setSyncing] = useState(false);
 
   async function handleSync() {
     setSyncing(true);
-    try { await syncEmails(); refetch(); } catch (e) { console.error(e); }
+    try { const result = await syncEmails(); showToast(result, "success"); refetch(); }
+    catch (e) { showToast(String(e), "error"); }
     finally { setSyncing(false); }
   }
 
   async function handleArchive(gmailId: string) {
-    try { await archiveEmail(gmailId); refetch(); } catch (e) { console.error(e); }
+    try { await archiveEmail(gmailId); refetch(); } catch (e) { showToast(String(e), "error"); }
   }
 
   return (
@@ -27,7 +29,7 @@ export default function EmailPage() {
       </div>
       <div style={styles.list}>
         {!emails || emails.length === 0 ? (
-          <div style={styles.empty}>No emails synced. Connect Google in Settings, then sync.</div>
+          <div style={{ ...styles.empty, ...(error ? styles.errorText : {}) }}>{error ?? "No emails synced. Connect Google in Settings, then sync."}</div>
         ) : emails.map((email) => (
           <div key={email.id} style={styles.emailItem}>
             <div style={styles.emailHeader}>
@@ -53,6 +55,7 @@ const styles: Record<string, React.CSSProperties> = {
   syncBtn: { background: "rgba(0, 180, 255, 0.08)", border: "1px solid rgba(0, 180, 255, 0.3)", borderRadius: 6, padding: "6px 12px", color: "rgba(0, 180, 255, 0.8)", cursor: "pointer", fontFamily: "var(--font-mono)", fontSize: 10 },
   list: { flex: 1, overflowY: "auto" },
   empty: { color: "rgba(0, 180, 255, 0.3)", fontSize: 12, fontStyle: "italic", padding: 20 },
+  errorText: { color: "rgba(255, 100, 100, 0.85)", fontStyle: "normal" },
   emailItem: { padding: "12px 0", borderBottom: "1px solid rgba(0, 180, 255, 0.08)" },
   emailHeader: { display: "flex", justifyContent: "space-between", marginBottom: 4 },
   sender: { color: "rgba(0, 180, 255, 0.8)", fontSize: 12, fontWeight: 500 },

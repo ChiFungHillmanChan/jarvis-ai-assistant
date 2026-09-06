@@ -59,7 +59,7 @@ export default memo(function ChatPanel({ isOpen, onClose, onNavigateToChat }: Ch
         {messages.length === 0 && (
           <div style={styles.empty}>Start a conversation with JARVIS.</div>
         )}
-        {messages.map((msg, i) => <ChatMessageComponent key={msg.id ?? i} message={msg} />)}
+        {messages.map((msg, i) => <ChatMessageComponent key={msg.id != null ? `db-${msg.id}` : `local-${i}`} message={msg} />)}
         {loading && (
           <div style={styles.liveResponse}>
             {/* Status bar: always visible during loading */}
@@ -106,7 +106,7 @@ export default memo(function ChatPanel({ isOpen, onClose, onNavigateToChat }: Ch
             type="button"
             onClick={() => setThinkHarder((v) => !v)}
             style={thinkHarder ? styles.thinkHarderButtonActive : styles.thinkHarderButton}
-            title="Think harder (routes to Sonnet 4.6)"
+            title="Routes this message to the strongest model in your provider chain."
             aria-pressed={thinkHarder}
           >
             <Sparkles size={12} /> Think harder

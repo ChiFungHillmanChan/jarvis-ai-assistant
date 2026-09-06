@@ -32,7 +32,7 @@ function describeOauthError(kind: OauthErrorKind, raw: string): string {
     case "no-creds":
       return "Google sign-in is not available in this build. Please contact support.";
     case "timeout":
-      return "Google did not respond within 3 minutes. Check your internet connection and try again.";
+      return `Google did not send JARVIS a sign-in response. If Google showed "Access blocked" or "app not verified", your account must be added as a tester first. Otherwise check your connection and try again.`;
     case "denied":
       return "Permission was declined in the browser. JARVIS needs Gmail and Calendar access to triage email — try again, or skip and connect later in Settings.";
     default:
@@ -198,15 +198,15 @@ export default function OnboardingWizard({ onComplete }: Props) {
             <div style={styles.error}>
               <div style={styles.errorTitle}>Couldn't connect to Google</div>
               <div style={styles.errorBody}>{describeOauthError(oauthError.kind, oauthError.raw)}</div>
-              {oauthError.kind !== "no-creds" && (
-                <div style={styles.errorRow}>
+              <div style={styles.errorRow}>
+                {oauthError.kind !== "no-creds" && (
                   <button style={styles.errorRetry} onClick={handleConnectGoogle}>Try again</button>
-                  <button
-                    style={styles.errorSkip}
-                    onClick={() => { setOauthError(null); setStep(4); }}
-                  >Skip and connect later</button>
-                </div>
-              )}
+                )}
+                <button
+                  style={styles.errorSkip}
+                  onClick={() => { setOauthError(null); setStep(4); }}
+                >Skip and connect later</button>
+              </div>
             </div>
           )}
 
@@ -216,6 +216,10 @@ export default function OnboardingWizard({ onComplete }: Props) {
               <div style={styles.statusText}>
                 Opening Google in your browser. Approve the permissions, then return here.
               </div>
+              <button
+                style={styles.statusSkip}
+                onClick={() => { setOauthInFlight(false); setStep(4); }}
+              >Skip for now</button>
             </div>
           )}
 
@@ -281,6 +285,7 @@ const styles: Record<string, React.CSSProperties> = {
   statusBox: { display: "flex", alignItems: "center", gap: 12, padding: "14px 16px", marginBottom: 12, background: "rgba(0,180,255,0.04)", border: "1px solid rgba(0,180,255,0.25)", borderRadius: 8 },
   statusDot: { width: 10, height: 10, borderRadius: "50%", background: "rgba(0,180,255,0.8)", boxShadow: "0 0 8px rgba(0,180,255,0.6)", flexShrink: 0 },
   statusText: { color: "rgba(0,180,255,0.85)", fontSize: 12, lineHeight: 1.5 },
+  statusSkip: { marginLeft: "auto", flexShrink: 0, background: "transparent", border: "1px solid rgba(0,180,255,0.2)", borderRadius: 6, padding: "8px 12px", color: "rgba(0,180,255,0.6)", cursor: "pointer", fontFamily: "var(--font-mono)", fontSize: 11, whiteSpace: "nowrap" },
   testSuccessBox: { padding: "12px 14px", marginBottom: 12, background: "rgba(80,255,180,0.05)", border: "1px solid rgba(80,255,180,0.35)", borderRadius: 8 },
   testSuccessTitle: { color: "rgba(80,255,180,0.9)", fontSize: 12, fontWeight: 600, fontFamily: "var(--font-mono)", letterSpacing: 1, marginBottom: 6 },
   testResponseText: { color: "rgba(180,255,220,0.85)", fontSize: 12, lineHeight: 1.5, fontFamily: "var(--font-mono)" },

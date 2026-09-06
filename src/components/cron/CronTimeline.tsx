@@ -36,6 +36,29 @@ function formatDate(dateStr: string): string {
   });
 }
 
+const HAS_ZONE = /(?:Z|[+-]\d{2}:?\d{2})$/;
+
+// cron_runs.started_at comes from SQLite datetime('now'): UTC with no zone
+// designator, which every browser would otherwise read as local time.
+// get_upcoming_runs already formats in local time, so it is not passed here.
+function formatBackendUtcDate(dateStr: string): string {
+  return formatDate(HAS_ZONE.test(dateStr) ? dateStr : `${dateStr.replace(" ", "T")}Z`);
+}
+
+function statusBadge(status: string): { label: string; color: string; border: string } {
+  if (status === "completed" || status === "done") {
+    return { label: "DONE", color: "rgba(16, 185, 129, 0.8)", border: "rgba(16, 185, 129, 0.25)" };
+  }
+  if (status === "running") {
+    return { label: "RUNNING", color: "rgba(0, 180, 255, 0.75)", border: "rgba(0, 180, 255, 0.25)" };
+  }
+  // An unclean exit is not a failure -- see scheduler::jobs::reconcile_interrupted_runs.
+  if (status === "interrupted") {
+    return { label: "INTERRUPTED", color: "rgba(0, 180, 255, 0.5)", border: "rgba(0, 180, 255, 0.18)" };
+  }
+  return { label: "FAIL", color: "rgba(255, 100, 100, 0.8)", border: "rgba(255, 100, 100, 0.25)" };
+}
+
 export default function CronTimeline({ jobId, schedule }: CronTimelineProps) {
   const [upcoming, setUpcoming] = useState<string[]>([]);
   const [runs, setRuns] = useState<CronRunView[]>([]);
@@ -112,26 +135,21 @@ export default function CronTimeline({ jobId, schedule }: CronTimelineProps) {
           <div style={styles.emptyText}>No runs yet</div>
         )}
         {runs.map((run) => {
-          const isSuccess =
-            run.status === "completed" || run.status === "done";
+          const badge = statusBadge(run.status);
           return (
             <div key={run.id} style={styles.runItem}>
               <div style={styles.runHeader}>
                 <span
                   style={{
                     ...styles.statusBadge,
-                    color: isSuccess
-                      ? "rgba(16, 185, 129, 0.8)"
-                      : "rgba(255, 100, 100, 0.8)",
-                    borderColor: isSuccess
-                      ? "rgba(16, 185, 129, 0.25)"
-                      : "rgba(255, 100, 100, 0.25)",
+                    color: badge.color,
+                    borderColor: badge.border,
                   }}
                 >
-                  {isSuccess ? "DONE" : "FAIL"}
+                  {badge.label}
                 </span>
                 <span style={styles.runTimestamp}>
-                  {formatDate(run.started_at)}
+                  {formatBackendUtcDate(run.started_at)}
                 </span>
               </div>
               {run.result && (

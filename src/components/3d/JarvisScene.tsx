@@ -347,8 +347,9 @@ export default memo(function JarvisScene({ activityLevel = "idle", assistantPhas
 
     // Mouse controls
     function onDown(e: MouseEvent) {
-      const target = e.target as HTMLElement;
-      if (target.closest("button, input, select, textarea, .panel, .no-drag, nav, form")) return;
+      // Only the scene's own canvas may start a drag. Anything else is UI, and
+      // preventDefault there kills text selection across the whole app.
+      if (e.target !== canvas) return;
       e.preventDefault();
       document.body.style.userSelect = "none";
       document.body.style.webkitUserSelect = "none";
@@ -382,6 +383,9 @@ export default memo(function JarvisScene({ activityLevel = "idle", assistantPhas
       setTimeout(() => { if (!dragging.current && !focusTarget.current) autoRot.current = true; }, 2000);
     }
     function onWheel(e: WheelEvent) {
+      // Same rule as onDown: swallowing wheel events outside the canvas stops
+      // every scrollable panel in the app from scrolling.
+      if (e.target !== canvas) return;
       e.preventDefault();
       targetZoom.current += e.deltaY * 0.8;
       targetZoom.current = Math.max(50, Math.min(2000, targetZoom.current));

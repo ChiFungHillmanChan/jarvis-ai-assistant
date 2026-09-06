@@ -151,6 +151,7 @@ export default function Settings() {
   const [awsAccessKey, setAwsAccessKey] = useState("");
   const [awsSecret, setAwsSecret] = useState("");
   const [awsRegion, setAwsRegion] = useState("ap-southeast-1");
+  const [awsError, setAwsError] = useState<string | null>(null);
   const [awsStatus, setAwsStatus] = useState<{ configured: boolean; region: string | null }>(
     { configured: false, region: null }
   );
@@ -913,10 +914,15 @@ export default function Settings() {
               </select>
             </div>
             <div style={{ display: "flex", gap: 8 }}>
-              <button onClick={async () => {
-                await setAwsCredentials(awsAccessKey, awsSecret, awsRegion);
-                setAwsAccessKey(""); setAwsSecret("");
-                setAwsStatus(await getAwsCredentialsStatus());
+              <button disabled={!awsAccessKey.trim() || !awsSecret.trim()} onClick={async () => {
+                setAwsError(null);
+                try {
+                  await setAwsCredentials(awsAccessKey, awsSecret, awsRegion);
+                  setAwsAccessKey(""); setAwsSecret("");
+                  setAwsStatus(await getAwsCredentialsStatus());
+                } catch (e) {
+                  setAwsError(String(e));
+                }
               }} style={styles.saveBtn}>SAVE</button>
               {awsStatus.configured && (
                 <button onClick={async () => {
@@ -925,6 +931,7 @@ export default function Settings() {
                 }} style={{ ...styles.saveBtn, borderColor: "rgba(255, 100, 100, 0.3)", color: "rgba(255, 100, 100, 0.7)" }}>CLEAR</button>
               )}
             </div>
+            {awsError && <div style={styles.errorText}>{awsError}</div>}
           </div>
         )}
 
