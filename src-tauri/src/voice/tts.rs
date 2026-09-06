@@ -281,6 +281,7 @@ async fn streaming_tts_consumer(
 #[derive(Clone)]
 pub struct TextToSpeech {
     voice: String,
+    voice_yue: String,
     rate: u32,
     enabled: bool,
     cancel_flag: Arc<AtomicBool>,
@@ -290,6 +291,7 @@ impl TextToSpeech {
     pub fn new() -> Self {
         TextToSpeech {
             voice: "Samantha".to_string(),
+            voice_yue: "Sinji".to_string(),
             rate: 200,
             enabled: true,
             cancel_flag: Arc::new(AtomicBool::new(false)),
@@ -309,6 +311,7 @@ impl TextToSpeech {
         };
         TextToSpeech {
             voice: get("tts_voice", "Samantha"),
+            voice_yue: get("tts_voice_yue", "Sinji"),
             rate: get("tts_rate", "200").parse().unwrap_or(200),
             enabled: get("tts_enabled", "true") == "true",
             cancel_flag: Arc::new(AtomicBool::new(false)),
@@ -317,6 +320,9 @@ impl TextToSpeech {
 
     pub fn set_voice(&mut self, voice: String) {
         self.voice = voice;
+    }
+    pub fn set_voice_yue(&mut self, voice: String) {
+        self.voice_yue = voice;
     }
     pub fn set_rate(&mut self, rate: u32) {
         self.rate = rate;
@@ -362,7 +368,14 @@ impl TextToSpeech {
             if self.is_cancelled() {
                 return Ok(());
             }
-            let status = spawn_say(&self.voice, self.rate, &sentence, &self.cancel_flag).await?;
+            let status = spawn_say(
+                &self.voice,
+                &self.voice_yue,
+                self.rate,
+                &sentence,
+                &self.cancel_flag,
+            )
+            .await?;
             if self.is_cancelled() {
                 return Ok(());
             }
@@ -475,7 +488,14 @@ impl TextToSpeech {
                 tokio::time::sleep(interval).await;
             }
         });
-        let status = spawn_say(&self.voice, self.rate, &clean, &self.cancel_flag).await?;
+        let status = spawn_say(
+            &self.voice,
+            &self.voice_yue,
+            self.rate,
+            &clean,
+            &self.cancel_flag,
+        )
+        .await?;
         amp_handle.abort();
         let _ = app_handle.emit("tts-amplitude", json!({"amplitude": 0.0}));
         if !status.success() && !self.cancel_flag.load(Ordering::SeqCst) {
@@ -503,6 +523,18 @@ impl TextToSpeech {
 /// How often an in-flight `say` child is re-checked against the cancel flag.
 const CANCEL_POLL_MS: u64 = 60;
 
+/// Pick the macOS voice for one sentence: `yue_voice` when `text` contains any
+/// CJK character, `en_voice` otherwise. An English voice given CJK text does
+/// not mispronounce it -- it drops it, producing a fraction of a second of
+/// silence instead of the sentence.
+pub fn voice_for<'a>(text: &str, en_voice: &'a str, yue_voice: &'a str) -> &'a str {
+    if text.chars().any(is_cjk) {
+        yue_voice
+    } else {
+        en_voice
+    }
+}
+
 /// Spawn macOS `say` with the utterance on stdin.
 ///
 /// `say` parses its arguments with getopt, so text passed positionally is
@@ -511,11 +543,13 @@ const CANCEL_POLL_MS: u64 = 60;
 /// positional argument `say` reads the utterance from stdin, which keeps
 /// untrusted text out of argv entirely.
 async fn spawn_say(
-    voice: &str,
+    en_voice: &str,
+    yue_voice: &str,
     rate: u32,
     text: &str,
     cancel: &AtomicBool,
 ) -> Result<std::process::ExitStatus, String> {
+    let voice = voice_for(text, en_voice, yue_voice);
     let mut child = Command::new("say")
         .arg("-v")
         .arg(voice)
@@ -719,6 +753,37 @@ fn split_sentences(text: &str) -> Vec<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use rusqlite::Connection;
+    use std::sync::Mutex;
+
+    #[test]
+    fn voice_for_picks_the_cantonese_voice_for_cjk() {
+        // Chinese sentence -- English voice would drop this text entirely.
+        assert_eq!(voice_for("今日天氣好好", "Samantha", "Sinji"), "Sinji");
+        // English sentence -- stays on the configured English voice.
+        assert_eq!(voice_for("Good morning", "Samantha", "Sinji"), "Samantha");
+        // Mixed sentence -- any CJK content routes the whole sentence to the
+        // Cantonese voice rather than losing the CJK half.
+        assert_eq!(voice_for("Good morning 早晨", "Samantha", "Sinji"), "Sinji");
+    }
+
+    #[test]
+    fn from_db_defaults_the_yue_voice_to_sinji() {
+        let conn = Connection::open_in_memory().expect("open in-memory db");
+        conn.execute_batch(
+            "CREATE TABLE user_preferences (
+                key TEXT PRIMARY KEY,
+                value TEXT NOT NULL,
+                updated_at TEXT NOT NULL DEFAULT (datetime('now'))
+            );",
+        )
+        .expect("create table");
+        let db = crate::db::Database {
+            conn: Mutex::new(conn),
+        };
+        let tts = TextToSpeech::from_db(&db);
+        assert_eq!(tts.voice_yue, "Sinji");
+    }
 
     fn segment(text: &str) -> Vec<String> {
         let mut buffer = SentenceBuffer::new();

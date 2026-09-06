@@ -159,6 +159,7 @@ export default function Settings() {
   const [language, setLanguage] = useState("en");
   const [sttLanguage, setSttLanguage] = useState("auto");
   const [ttsContentProvider, setTtsContentProvider] = useState("sin-ji");
+  const [ttsVoiceYue, setTtsVoiceYue] = useState("Sinji");
   // The MiniMax key lives in the Keychain like every other provider key, so the
   // form holds a draft and a configured flag -- never the saved secret.
   const [minimaxKeyDraft, setMinimaxKeyDraft] = useState("");
@@ -231,6 +232,7 @@ export default function Settings() {
         setLanguage(await getPreference("language"));
         setSttLanguage(await getPreference("stt_language"));
         setTtsContentProvider(await getPreference("tts_content_provider"));
+        setTtsVoiceYue(await getPreference("tts_voice_yue"));
         setOfflineEnabled((await getPreference("tts_offline_mode")) === "1");
         setHasCosyBinary(await checkCosyvoiceBinary());
       } catch (e) {
@@ -1057,6 +1059,14 @@ export default function Settings() {
               <div style={{ marginTop: 8 }}>
                 <div style={{ color: "rgba(0, 180, 255, 0.5)", fontSize: 10, marginBottom: 4 }}>TTS Voice</div>
                 <select value={voiceSettings?.tts_voice ?? "Samantha"} onChange={(e) => { void setVoiceSetting("tts_voice", e.target.value); setVoiceSettingsState((prev) => prev ? { ...prev, tts_voice: e.target.value } : prev); }} style={styles.select}>
+                  {ttsVoices.map((voice) => <option key={voice} value={voice}>{voice}</option>)}
+                </select>
+              </div>
+            )}
+            {ttsVoices.length > 0 && (
+              <div style={{ marginTop: 8 }}>
+                <div style={{ color: "rgba(0, 180, 255, 0.5)", fontSize: 10, marginBottom: 4 }}>Cantonese voice</div>
+                <select value={ttsVoiceYue} onChange={(e) => { void setVoiceSetting("tts_voice_yue", e.target.value); setTtsVoiceYue(e.target.value); }} style={styles.select}>
                   {ttsVoices.map((voice) => <option key={voice} value={voice}>{voice}</option>)}
                 </select>
               </div>

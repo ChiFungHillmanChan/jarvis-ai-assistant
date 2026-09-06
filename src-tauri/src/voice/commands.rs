@@ -310,6 +310,11 @@ pub fn set_voice_setting(
             .lock()
             .map_err(|e| e.to_string())?
             .set_voice(value),
+        "tts_voice_yue" => engine
+            .tts
+            .lock()
+            .map_err(|e| e.to_string())?
+            .set_voice_yue(value),
         "tts_rate" => engine
             .tts
             .lock()
