@@ -352,7 +352,7 @@ pub async fn send(
                 }
                 ledger.note(&tc.function.name);
                 let result =
-                    tools::execute_tool(&tc.function.name, &tc.function.arguments, db, google_auth)
+                    tools::execute_tool(&tc.function.name, &tc.function.arguments, db, google_auth, ledger)
                         .await;
                 log::info!("JARVIS tool result: {}", crate::util::truncate_bytes(&result, 200));
                 openai_messages.push(OpenAIMessage {

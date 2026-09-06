@@ -13,7 +13,7 @@ use local::backend::{BackendType, LocalEndpoint};
 use serde::{Deserialize, Serialize};
 use serde_json::json;
 use std::collections::HashSet;
-use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::Arc;
 use tauri::Emitter;
 
@@ -150,26 +150,54 @@ const SIDE_EFFECTING_TOOLS: &[&str] = &[
     "forget",
 ];
 
+/// Tools that pull text into the model's context that nobody on this device
+/// wrote. Whatever a stranger put in an email, a shared Notion page or a synced
+/// note arrives through one of these.
+const UNTRUSTED_READ_TOOLS: &[&str] = &[
+    "read_email",
+    "search_emails",
+    "read_note",
+    "search_notes",
+    "read_notion_page",
+    "search_notion",
+];
+
 /// Per-turn tally of side-effecting tool calls, shared between the router and
 /// whichever provider is currently running. Providers bump it as they execute;
 /// the router reads it to decide whether a fallback would duplicate work.
+///
+/// It also records whether the turn has read untrusted content, which
+/// `ai::tools` uses to refuse `remember`: a fact saved now lands in every
+/// future system prompt, so a one-shot injection would become standing.
 #[derive(Clone, Default)]
-pub struct SideEffectLedger(Arc<AtomicUsize>);
+pub struct SideEffectLedger {
+    side_effects: Arc<AtomicUsize>,
+    untrusted_read: Arc<AtomicBool>,
+}
 
 impl SideEffectLedger {
     pub fn new() -> Self {
         Self::default()
     }
 
-    /// Record `tool_name` if it mutates state outside JARVIS.
+    /// Record `tool_name` if it mutates state outside JARVIS, or if it brings
+    /// content from outside this device into the turn.
     pub fn note(&self, tool_name: &str) {
         if SIDE_EFFECTING_TOOLS.contains(&tool_name) {
-            self.0.fetch_add(1, Ordering::Relaxed);
+            self.side_effects.fetch_add(1, Ordering::Relaxed);
+        }
+        if UNTRUSTED_READ_TOOLS.contains(&tool_name) {
+            self.untrusted_read.store(true, Ordering::Relaxed);
         }
     }
 
     pub fn count(&self) -> usize {
-        self.0.load(Ordering::Relaxed)
+        self.side_effects.load(Ordering::Relaxed)
+    }
+
+    /// True once this turn has read content authored off this device.
+    pub fn saw_untrusted_read(&self) -> bool {
+        self.untrusted_read.load(Ordering::Relaxed)
     }
 }
 
@@ -969,10 +997,13 @@ mod tests {
     fn ledger_counts_only_side_effecting_tools() {
         let ledger = SideEffectLedger::new();
         assert_eq!(ledger.count(), 0);
+        assert!(!ledger.saw_untrusted_read());
         ledger.note("read_email");
         ledger.note("search_emails");
         ledger.note("list_events");
         assert_eq!(ledger.count(), 0);
+        // Reading is not a side effect, but it does taint the turn.
+        assert!(ledger.saw_untrusted_read());
         ledger.note("create_event");
         assert_eq!(ledger.count(), 1);
         ledger.note("draft_email");

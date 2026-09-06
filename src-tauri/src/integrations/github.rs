@@ -239,6 +239,29 @@ pub async fn fetch_items_filtered(
     Ok(filtered)
 }
 
+/// Fetch the repository metadata JSON as raw text. `ai/tools.rs` reads the
+/// `private` flag out of it before filing a model-authored issue -- a public
+/// repo would publish that body to the world.
+pub async fn get_repo(token: &str, owner: &str, repo: &str) -> Result<String, String> {
+    let client = crate::util::http_client();
+    let resp = client
+        .get(&format!("{}/repos/{}/{}", GITHUB_API, owner, repo))
+        .header("Authorization", format!("Bearer {}", token))
+        .header("User-Agent", "JARVIS-App")
+        .header("Accept", "application/vnd.github+json")
+        .send()
+        .await
+        .map_err(|e| format!("GitHub repo lookup error: {}", e))?;
+
+    if !resp.status().is_success() {
+        let s = resp.status();
+        let t = resp.text().await.unwrap_or_default();
+        return Err(format!("GitHub repo lookup failed {}: {}", s, t));
+    }
+
+    resp.text().await.map_err(|e| e.to_string())
+}
+
 pub async fn create_issue(
     token: &str,
     owner: &str,

@@ -336,7 +336,7 @@ pub async fn send(
                     }
                 }
                 ledger.note(&fc.name);
-                let result = tools::execute_tool(&fc.name, &args_str, db, google_auth).await;
+                let result = tools::execute_tool(&fc.name, &args_str, db, google_auth, ledger).await;
                 log::info!("JARVIS tool result: {}", crate::util::truncate_bytes(&result, 200));
                 response_parts.push(GeminiPart {
                     function_response: Some(FunctionResponseData {

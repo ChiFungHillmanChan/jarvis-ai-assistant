@@ -424,7 +424,7 @@ pub async fn send_local(
                     }
 
                     ledger.note(&call.name);
-                    let result = tools::execute_tool(&call.name, &args_str, db, google_auth).await;
+                    let result = tools::execute_tool(&call.name, &args_str, db, google_auth, ledger).await;
                     log::info!(
                         "Local LLM tool result: {}",
                         crate::util::truncate_bytes(&result, 200)
@@ -554,7 +554,7 @@ pub async fn send_local(
                 }
                 ledger.note(&tc.function.name);
                 let result =
-                    tools::execute_tool(&tc.function.name, &tc.function.arguments, db, google_auth)
+                    tools::execute_tool(&tc.function.name, &tc.function.arguments, db, google_auth, ledger)
                         .await;
                 log::info!(
                     "Local LLM tool result: {}",

@@ -380,7 +380,7 @@ pub async fn send(
                     }
                 }
                 ledger.note(name);
-                let result = tools::execute_tool(name, &args_str, db, google_auth).await;
+                let result = tools::execute_tool(name, &args_str, db, google_auth, ledger).await;
                 log::info!("JARVIS tool result: {}", crate::util::truncate_bytes(&result, 200));
                 result_blocks.push(ContentBlock::ToolResult {
                     tool_use_id: id.clone(),
