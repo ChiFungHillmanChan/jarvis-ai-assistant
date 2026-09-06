@@ -143,7 +143,12 @@ pub async fn ask_jarvis(
 
     let messages = vec![("user".to_string(), prompt)];
     let router = router.lock().map_err(|e| e.to_string())?.clone();
-    router.send(messages, &db, &google_auth, &app_handle, None, Workload::Tools).await
+    // Same as the briefing: the prompt already quotes unread senders and
+    // subjects and today's event titles, none of it through a tool call, so
+    // the turn is tainted before the model sees it.
+    router
+        .send_with_untrusted_context(messages, &db, &google_auth, &app_handle, None, Workload::Tools)
+        .await
 }
 
 #[tauri::command]

@@ -160,6 +160,13 @@ const UNTRUSTED_READ_TOOLS: &[&str] = &[
     "search_notes",
     "read_notion_page",
     "search_notion",
+    // An invitation's title, description and location are written by whoever
+    // sent it, and Google drops invitations straight onto the primary calendar
+    // `list_events` reads. The `update_event` guard already treats a shared
+    // event as attacker-reachable; reading one is the same text.
+    "list_events",
+    // Issue and PR titles are written by whoever opened them.
+    "list_github_items",
 ];
 
 /// Per-turn tally of side-effecting tool calls, shared between the router and
@@ -189,6 +196,18 @@ impl SideEffectLedger {
         if UNTRUSTED_READ_TOOLS.contains(&tool_name) {
             self.untrusted_read.store(true, Ordering::Relaxed);
         }
+    }
+
+    /// A ledger for a turn that starts out tainted, because its prompt already
+    /// carries text authored off this device -- mirrored email subjects,
+    /// calendar titles, Obsidian note bodies pasted in as context rather than
+    /// fetched by a tool call. Nothing calls `note` on those paths, so without
+    /// this the turn looks clean and `remember` accepts whatever the injected
+    /// text asked it to store.
+    pub fn untrusted() -> Self {
+        let ledger = Self::default();
+        ledger.untrusted_read.store(true, Ordering::Relaxed);
+        ledger
     }
 
     pub fn count(&self) -> usize {
@@ -579,8 +598,57 @@ impl AiRouter {
         tts_tx: Option<tokio::sync::mpsc::Sender<TtsCommand>>,
         workload: Workload,
     ) -> Result<String, String> {
+        self.send_with_ledger(
+            messages,
+            db,
+            google_auth,
+            app_handle,
+            tts_tx,
+            workload,
+            SideEffectLedger::new(),
+        )
+        .await
+    }
+
+    /// `send` for a turn whose prompt already carries text nobody on this
+    /// device wrote: the briefing pastes unread senders and subjects in,
+    /// `ask_jarvis` pastes the same block plus today's event titles, and the
+    /// chat [CONTEXT] and [OBSIDIAN NOTES] blocks do the same. None of that
+    /// arrives through a tool call, so the ledger would otherwise report a
+    /// clean turn and `remember` would store a standing instruction a stranger
+    /// wrote in a subject line.
+    pub async fn send_with_untrusted_context(
+        &self,
+        messages: Vec<(String, String)>,
+        db: &crate::db::Database,
+        google_auth: &std::sync::Arc<crate::auth::google::GoogleAuth>,
+        app_handle: &tauri::AppHandle,
+        tts_tx: Option<tokio::sync::mpsc::Sender<TtsCommand>>,
+        workload: Workload,
+    ) -> Result<String, String> {
+        self.send_with_ledger(
+            messages,
+            db,
+            google_auth,
+            app_handle,
+            tts_tx,
+            workload,
+            SideEffectLedger::untrusted(),
+        )
+        .await
+    }
+
+    async fn send_with_ledger(
+        &self,
+        messages: Vec<(String, String)>,
+        db: &crate::db::Database,
+        google_auth: &std::sync::Arc<crate::auth::google::GoogleAuth>,
+        app_handle: &tauri::AppHandle,
+        tts_tx: Option<tokio::sync::mpsc::Sender<TtsCommand>>,
+        workload: Workload,
+        ledger: SideEffectLedger,
+    ) -> Result<String, String> {
         let mut errors: Vec<String> = Vec::new();
-        let ledger = SideEffectLedger::new();
         // Credentials already rejected this turn, keyed by `credential_scope`
         // so a dead local endpoint does not take the other local endpoints
         // down with it.
@@ -1034,6 +1102,115 @@ mod tests {
         let copy = ledger.clone();
         copy.note("archive_email");
         assert_eq!(ledger.count(), 3);
+    }
+
+    /// Every tool that pulls text somebody else wrote into the turn has to
+    /// taint it. `list_events` and `list_github_items` were missing: a Google
+    /// invitation's title is the organiser's text and Google files invitations
+    /// on the primary calendar by default, and an issue or PR title is written
+    /// by whoever opened it. Without them "what's on today" was enough to get
+    /// an injected instruction into `remember`, and from there into every
+    /// later system prompt.
+    #[test]
+    fn every_reader_of_other_peoples_text_taints_the_turn() {
+        for reader in [
+            "read_email",
+            "search_emails",
+            "read_note",
+            "search_notes",
+            "read_notion_page",
+            "search_notion",
+            "list_events",
+            "list_github_items",
+        ] {
+            let ledger = SideEffectLedger::new();
+            ledger.note(reader);
+            assert!(
+                ledger.saw_untrusted_read(),
+                "{reader} returns text this device did not author"
+            );
+        }
+        // Reading the device's own state does not taint anything.
+        for local in ["list_tasks", "system_info", "list_memories"] {
+            let ledger = SideEffectLedger::new();
+            ledger.note(local);
+            assert!(
+                !ledger.saw_untrusted_read(),
+                "{local} only reads the user's own data"
+            );
+        }
+    }
+
+    #[test]
+    fn a_pasted_context_block_taints_the_turn_before_any_tool_runs() {
+        let ledger = SideEffectLedger::untrusted();
+        assert!(ledger.saw_untrusted_read());
+        assert_eq!(
+            ledger.count(),
+            0,
+            "marking the context untrusted is not itself a side effect"
+        );
+    }
+
+    /// The taint gate is structurally bypassable: three paths paste mirrored
+    /// email subjects, calendar titles and note bodies straight into the
+    /// prompt, so no tool call ever runs and the ledger stays clean unless the
+    /// call site says otherwise. The compiler cannot see that, so the wiring is
+    /// checked as a property of the source text, bounded to the function that
+    /// builds each prompt so the assertions cannot satisfy themselves.
+    #[test]
+    fn every_pasted_context_site_marks_the_turn_untrusted() {
+        fn between<'a>(source: &'a str, from: &str, to: &str, what: &str) -> &'a str {
+            let start = source
+                .find(from)
+                .unwrap_or_else(|| panic!("{what}: '{from}' must exist"));
+            let len = source[start..]
+                .find(to)
+                .unwrap_or_else(|| panic!("{what}: '{to}' must follow '{from}'"));
+            &source[start..start + len]
+        }
+
+        // The whole briefing prompt is DayContext::to_prompt, which carries the
+        // sender and subject of the three newest unread mails.
+        let briefing = include_str!("../assistant/briefing.rs");
+        assert!(
+            briefing.contains("send_with_untrusted_context"),
+            "the briefing turn reads unread subjects with no tool call and must be tainted"
+        );
+        assert!(
+            !briefing.contains(".send("),
+            "no briefing path may take the untainted send"
+        );
+
+        // ask_jarvis pastes the same block plus today's event titles.
+        let ask = between(
+            include_str!("../commands/assistant.rs"),
+            "pub async fn ask_jarvis(",
+            "pub async fn search_conversations(",
+            "ask_jarvis",
+        );
+        assert!(
+            ask.contains("send_with_untrusted_context"),
+            "ask_jarvis pastes the context block in and must be tainted"
+        );
+        assert!(
+            !ask.contains(".send("),
+            "ask_jarvis must not take the untainted send"
+        );
+
+        // send_message adds the [CONTEXT] and [OBSIDIAN NOTES] blocks, both
+        // optional -- so here the untainted send is legitimate for a turn that
+        // carries neither, and what has to exist is the tainted alternative.
+        let chat = between(
+            include_str!("../commands/chat.rs"),
+            "let mut all_messages = context_messages;",
+            "streaming_tts.finish()",
+            "send_message",
+        );
+        assert!(
+            chat.contains("send_with_untrusted_context"),
+            "a chat turn carrying [CONTEXT] or [OBSIDIAN NOTES] must be tainted"
+        );
     }
 
     #[test]

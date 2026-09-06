@@ -213,6 +213,12 @@ pub async fn send_message(
     }
 
     let mut all_messages = context_messages;
+    // The [CONTEXT] block quotes today's event titles, and the [OBSIDIAN NOTES]
+    // block below quotes note bodies. Neither arrives through a tool call, so
+    // the per-turn ledger only knows this turn read text a stranger may have
+    // written if the call site says so -- and `remember` writes a standing
+    // instruction into every later system prompt.
+    let mut untrusted_context = !all_messages.is_empty();
 
     // Search Obsidian for relevant notes (with 3s timeout to avoid blocking)
     let obsidian_keywords = [
@@ -261,6 +267,7 @@ pub async fn send_message(
                     .collect::<Vec<_>>()
                     .join("\n");
                 if !note_context.is_empty() {
+                    untrusted_context = true;
                     let len = all_messages.len();
                     all_messages.insert(
                         if len > 0 { len - 1 } else { 0 },
@@ -291,10 +298,23 @@ pub async fn send_message(
     };
     let tts_tx = Some(streaming_tts.sender());
 
-    let response_text = match router
-        .send(messages, &db, &google_auth, &app_handle, tts_tx, selected_workload)
-        .await
-    {
+    let sent = if untrusted_context {
+        router
+            .send_with_untrusted_context(
+                messages,
+                &db,
+                &google_auth,
+                &app_handle,
+                tts_tx,
+                selected_workload,
+            )
+            .await
+    } else {
+        router
+            .send(messages, &db, &google_auth, &app_handle, tts_tx, selected_workload)
+            .await
+    };
+    let response_text = match sent {
         Ok(r) => r,
         Err(e) => {
             let _ = app_handle.emit("chat-state", json!({"state": "idle"}));
