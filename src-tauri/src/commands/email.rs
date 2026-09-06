@@ -211,4 +211,56 @@ mod tests {
 
         assert_eq!(ids, vec!["kept".to_string()], "archived mail must not be listed");
     }
+
+    /// `received_at` is compared with bytewise TEXT collation, so it must be
+    /// normalised to a chronologically-sortable form before it is stored.
+    /// These two headers fall on different weekdays -- "Sun" sorts before
+    /// "Wed" bytewise even though the Sunday is chronologically later -- so a
+    /// raw-header sort would put the older message first. Normalised RFC 3339
+    /// values must sort correctly regardless of weekday name.
+    #[test]
+    fn two_headers_from_different_weekdays_sort_chronologically() {
+        let earlier = gmail::normalise_received_at(None, Some("Wed, 2 Sep 2026 09:00:00 +0000"))
+            .unwrap();
+        let later = gmail::normalise_received_at(None, Some("Sun, 6 Sep 2026 09:00:00 +0000"))
+            .unwrap();
+
+        let conn = Connection::open_in_memory().unwrap();
+        conn.execute_batch(
+            "CREATE TABLE emails (
+                 id INTEGER PRIMARY KEY AUTOINCREMENT,
+                 gmail_id TEXT UNIQUE NOT NULL,
+                 subject TEXT,
+                 sender TEXT NOT NULL,
+                 snippet TEXT,
+                 is_read INTEGER DEFAULT 0,
+                 is_spam INTEGER DEFAULT 0,
+                 received_at TEXT NOT NULL,
+                 is_archived INTEGER NOT NULL DEFAULT 0);",
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO emails (gmail_id, sender, received_at, is_archived) VALUES (?1, 'a@b.c', ?2, 0)",
+            rusqlite::params!["earlier", earlier],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO emails (gmail_id, sender, received_at, is_archived) VALUES (?1, 'a@b.c', ?2, 0)",
+            rusqlite::params!["later", later],
+        )
+        .unwrap();
+
+        let mut stmt = conn.prepare(EMAIL_LIST_QUERY).unwrap();
+        let ids: Vec<String> = stmt
+            .query_map(rusqlite::params![50], |r| r.get::<_, String>(1))
+            .unwrap()
+            .map(|r| r.unwrap())
+            .collect();
+
+        assert_eq!(
+            ids,
+            vec!["later".to_string(), "earlier".to_string()],
+            "newest message must sort first regardless of weekday name"
+        );
+    }
 }

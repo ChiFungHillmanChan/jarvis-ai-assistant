@@ -272,6 +272,38 @@ fn retry_delay(attempt: u32) -> std::time::Duration {
     std::time::Duration::from_millis(base_ms + jitter_ms(250))
 }
 
+/// `emails.received_at` is compared with bytewise TEXT collation everywhere it
+/// is sorted (`ORDER BY received_at DESC`), so the stored value has to already
+/// be in a chronologically-sortable form. The raw RFC 2822 `Date` header
+/// (`Thu, 4 Sep 2026 10:15:00 +0800`) starts with a weekday name, so that sort
+/// was ordering mail by weekday, not by time.
+///
+/// Prefers Gmail's `internalDate` (epoch milliseconds as a string -- server
+/// receipt time, not spoofable by a `Date` header) converted to UTC RFC 3339;
+/// falls back to parsing the `Date` header as RFC 2822; falls back to the raw
+/// header untouched if neither parses, so a malformed value is preserved
+/// rather than silently dropped.
+pub fn normalise_received_at(
+    internal_date: Option<&str>,
+    date_header: Option<&str>,
+) -> Option<String> {
+    if let Some(millis) = internal_date.and_then(|s| s.parse::<i64>().ok()) {
+        if let Some(dt) = chrono::DateTime::<chrono::Utc>::from_timestamp_millis(millis) {
+            return Some(dt.format("%Y-%m-%dT%H:%M:%SZ").to_string());
+        }
+    }
+    if let Some(header) = date_header {
+        if let Ok(dt) = chrono::DateTime::parse_from_rfc2822(header) {
+            return Some(
+                dt.with_timezone(&chrono::Utc)
+                    .format("%Y-%m-%dT%H:%M:%SZ")
+                    .to_string(),
+            );
+        }
+    }
+    date_header.map(|s| s.to_string())
+}
+
 pub async fn fetch_message_detail(
     access_token: &str,
     message_id: &str,
@@ -331,7 +363,7 @@ pub async fn fetch_message_detail(
         snippet: detail.snippet,
         label_ids: labels,
         is_read,
-        received_at: date.or(detail.internal_date),
+        received_at: normalise_received_at(detail.internal_date.as_deref(), date.as_deref()),
     })
 }
 
@@ -476,7 +508,7 @@ pub async fn get_message_full(
         snippet: detail.snippet,
         label_ids: labels,
         is_read,
-        received_at: date.clone().or(detail.internal_date),
+        received_at: normalise_received_at(detail.internal_date.as_deref(), date.as_deref()),
     };
 
     let formatted = format!(
@@ -857,5 +889,42 @@ mod tests {
         assert!((500..750).contains(&retry_delay(2).as_millis()));
         // Capped, so a retrying fan-out can never stall a sync for many seconds.
         assert!(retry_delay(9).as_millis() < 2250);
+    }
+
+    #[test]
+    fn internal_date_wins_and_is_utc_rfc3339() {
+        // 1788488100000 ms since epoch is 2026-09-04T02:15:00Z. The header
+        // below claims a different day and time entirely -- internalDate is
+        // Gmail's own receipt timestamp and must win over a client-supplied
+        // header.
+        let internal_date = Some("1788488100000");
+        let date_header = Some("Thu, 3 Sep 2026 05:00:00 +0000");
+        assert_eq!(
+            normalise_received_at(internal_date, date_header),
+            Some("2026-09-04T02:15:00Z".to_string())
+        );
+    }
+
+    #[test]
+    fn rfc2822_header_is_normalised() {
+        // No internalDate (e.g. the metadata-only fetch path); the RFC 2822
+        // header must be parsed and converted to UTC RFC 3339, not stored raw.
+        let date_header = Some("Fri, 4 Sep 2026 10:15:00 +0800");
+        assert_eq!(
+            normalise_received_at(None, date_header),
+            Some("2026-09-04T02:15:00Z".to_string())
+        );
+    }
+
+    #[test]
+    fn garbage_falls_back_to_the_raw_header() {
+        // Neither value parses: the function must not panic or return None,
+        // it must preserve the original header text so no data is lost.
+        let internal_date = Some("not-a-number");
+        let date_header = Some("this is not a real date");
+        assert_eq!(
+            normalise_received_at(internal_date, date_header),
+            Some("this is not a real date".to_string())
+        );
     }
 }
