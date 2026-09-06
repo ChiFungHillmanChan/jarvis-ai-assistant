@@ -200,8 +200,22 @@ pub fn set_api_key(
 #[tauri::command]
 pub fn get_api_key_status() -> Result<HashMap<String, bool>, String> {
     let configured = |env_var: &str, account: &str| {
-        std::env::var(env_var).map(|v| !v.trim().is_empty()).unwrap_or(false)
-            || crate::security::keychain::KeychainStore::get(crate::ai::KEY_SERVICE, account).is_ok()
+        if std::env::var(env_var).map(|v| !v.trim().is_empty()).unwrap_or(false) {
+            return true;
+        }
+        // A read that fails for any reason other than "no such item" reports
+        // the key as unconfigured, which is how a locked keychain shows up in
+        // Settings as a key the user never saved. Log the cause, account name
+        // only -- never the value.
+        match crate::security::keychain::KeychainStore::get(crate::ai::KEY_SERVICE, account) {
+            Ok(_) => true,
+            Err(e) => {
+                if !crate::security::keychain::KeychainStore::is_not_found(&e) {
+                    log::warn!("Keychain read failed for {account}: {e}");
+                }
+                false
+            }
+        }
     };
     Ok(HashMap::from([
         ("gemini".to_string(), configured("GEMINI_API_KEY", "gemini_api_key")),

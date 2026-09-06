@@ -125,7 +125,8 @@ pub async fn send(
             .tool_config(tool_config.clone())
             .inference_config(inference_config.clone())
             .send()
-            .await?;
+            .await
+            .map_err(converse_error)?;
         let latency_ms = start.elapsed().as_millis() as i64;
 
         if let Some(usage) = response.usage() {
@@ -233,6 +234,22 @@ pub async fn send(
     Ok("I've completed the actions.".into())
 }
 
+/// Render a Converse SDK error with the cause chain attached.
+///
+/// `SdkError`'s own `Display` is the literal "service error" -- the
+/// ValidationException text that says which field Bedrock rejected only lives
+/// in the source chain, so every model, region or message-shape mistake reached
+/// the user as three useless words. `DisplayErrorContext` walks that chain.
+fn converse_error<E>(err: E) -> String
+where
+    E: std::error::Error,
+{
+    format!(
+        "Bedrock converse: {}",
+        aws_smithy_types::error::display::DisplayErrorContext(&err)
+    )
+}
+
 fn build_system_blocks(
     static_prompt: String,
     dynamic_suffix: String,
@@ -253,21 +270,47 @@ fn build_system_blocks(
     ])
 }
 
+/// Collapse a stored `(role, content)` history into the shape Converse accepts.
+///
+/// Converse rejects two consecutive messages with the same role, and rejects a
+/// conversation that opens on the assistant. Both shapes come out of the
+/// database routinely: dropping an empty assistant row leaves the user turns on
+/// either side adjacent, and a history trimmed mid-exchange starts on the
+/// assistant. Sending either produced a ValidationException the user saw as a
+/// failed message, so the survivors are merged into one message per run of the
+/// same role -- several text blocks in one message is legal -- and a leading
+/// assistant run is dropped.
+fn merge_history(messages: Vec<(String, String)>) -> Vec<(ConversationRole, Vec<String>)> {
+    let mut merged: Vec<(ConversationRole, Vec<String>)> = Vec::new();
+    for (role, content) in messages {
+        if content.trim().is_empty() {
+            continue;
+        }
+        let role = if role == "assistant" {
+            ConversationRole::Assistant
+        } else {
+            ConversationRole::User
+        };
+        if merged.is_empty() && role == ConversationRole::Assistant {
+            continue;
+        }
+        match merged.last_mut() {
+            Some((last_role, texts)) if *last_role == role => texts.push(content),
+            _ => merged.push((role, vec![content])),
+        }
+    }
+    merged
+}
+
 fn build_messages(
     messages: Vec<(String, String)>,
 ) -> Result<Vec<Message>, Box<dyn std::error::Error + Send + Sync>> {
-    messages
+    merge_history(messages)
         .into_iter()
-        .filter(|(_, content)| !content.trim().is_empty())
-        .map(|(role, content)| {
-            let role = if role == "assistant" {
-                ConversationRole::Assistant
-            } else {
-                ConversationRole::User
-            };
+        .map(|(role, texts)| {
             Ok(Message::builder()
                 .role(role)
-                .content(ContentBlock::Text(content))
+                .set_content(Some(texts.into_iter().map(ContentBlock::Text).collect()))
                 .build()?)
         })
         .collect()
@@ -413,6 +456,66 @@ mod tests {
         assert_eq!(built[0].content()[0].as_text().unwrap(), "hello");
         assert_eq!(*built[1].role(), ConversationRole::Assistant);
         assert_eq!(built[1].content()[0].as_text().unwrap(), "hi");
+    }
+
+    /// Converse rejects two consecutive turns with the same role. Dropping an
+    /// empty assistant row is exactly what leaves two user turns adjacent, so
+    /// the survivors have to be merged into one message with two text blocks
+    /// rather than sent as-is.
+    #[test]
+    fn consecutive_same_role_turns_are_merged() {
+        let built = build_messages(vec![
+            ("user".to_string(), "what is on today".to_string()),
+            ("assistant".to_string(), String::new()),
+            ("user".to_string(), "and tomorrow".to_string()),
+            ("assistant".to_string(), "checking".to_string()),
+            ("assistant".to_string(), "two meetings".to_string()),
+            ("user".to_string(), "thanks".to_string()),
+        ])
+        .unwrap();
+
+        assert_eq!(built.len(), 3);
+        assert_eq!(*built[0].role(), ConversationRole::User);
+        assert_eq!(built[0].content().len(), 2);
+        assert_eq!(built[0].content()[0].as_text().unwrap(), "what is on today");
+        assert_eq!(built[0].content()[1].as_text().unwrap(), "and tomorrow");
+        assert_eq!(*built[1].role(), ConversationRole::Assistant);
+        assert_eq!(built[1].content().len(), 2);
+        assert_eq!(built[1].content()[0].as_text().unwrap(), "checking");
+        assert_eq!(built[1].content()[1].as_text().unwrap(), "two meetings");
+        assert_eq!(*built[2].role(), ConversationRole::User);
+        assert_eq!(built[2].content().len(), 1);
+        assert_eq!(built[2].content()[0].as_text().unwrap(), "thanks");
+    }
+
+    /// Converse also rejects a conversation that opens on the assistant, which
+    /// is what a history trimmed mid-exchange looks like.
+    #[test]
+    fn a_leading_assistant_turn_is_dropped() {
+        let built = build_messages(vec![
+            ("assistant".to_string(), "as I was saying".to_string()),
+            ("user".to_string(), "go on".to_string()),
+            ("assistant".to_string(), "here it is".to_string()),
+        ])
+        .unwrap();
+
+        assert_eq!(built.len(), 2);
+        assert_eq!(*built[0].role(), ConversationRole::User);
+        assert_eq!(built[0].content()[0].as_text().unwrap(), "go on");
+        assert_eq!(*built[1].role(), ConversationRole::Assistant);
+    }
+
+    /// A history whose only surviving rows are assistant turns leaves nothing
+    /// to send, not a message the API will reject.
+    #[test]
+    fn an_assistant_only_history_merges_to_nothing() {
+        let built = build_messages(vec![
+            ("assistant".to_string(), "one".to_string()),
+            ("assistant".to_string(), "two".to_string()),
+        ])
+        .unwrap();
+
+        assert!(built.is_empty());
     }
 
     // Requires AWS_ACCESS_KEY_ID + AWS_SECRET_ACCESS_KEY in env, region ap-southeast-1

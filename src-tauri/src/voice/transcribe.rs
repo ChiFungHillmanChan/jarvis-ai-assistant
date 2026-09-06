@@ -72,7 +72,15 @@ impl Transcriber {
             gemini::MODEL_FLASH
         );
 
-        let client = reqwest::Client::new();
+        // Bounded, because this call sits between the user speaking and any
+        // reply: reqwest's default is no timeout at all, so an unreachable or
+        // stalled endpoint left the assistant silent indefinitely with no error
+        // and no way back. 90 s total is well beyond a normal transcription.
+        let client = reqwest::Client::builder()
+            .connect_timeout(std::time::Duration::from_secs(10))
+            .timeout(std::time::Duration::from_secs(90))
+            .build()
+            .map_err(|e| format!("Gemini STT client: {}", e))?;
         let resp = client
             .post(&url)
             .header("x-goog-api-key", &self.api_key)

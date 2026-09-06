@@ -6,13 +6,13 @@ use crate::voice::VoiceEngine;
 use std::sync::{Arc, Mutex};
 use tauri::State;
 
-#[tauri::command]
-pub async fn get_briefing(
-    app_handle: tauri::AppHandle,
-    db: State<'_, Arc<Database>>,
-    router: State<'_, Mutex<AiRouter>>,
-    google_auth: State<'_, Arc<GoogleAuth>>,
-) -> Result<briefing::BriefingResult, String> {
+/// Today's briefing, if one was already generated today.
+///
+/// `last_briefing_date` and `cached_briefing` are written together, so a
+/// `cached_briefing` carrying an earlier date is stale and must not be served.
+/// Only the generated text is cached: the greeting and the counts are rebuilt
+/// from live context on every read.
+fn cached_briefing_today(db: &Arc<Database>) -> Result<Option<briefing::BriefingResult>, String> {
     let today = chrono::Local::now().format("%Y-%m-%d").to_string();
 
     let cached = {
@@ -32,14 +32,29 @@ pub async fn get_briefing(
         }
     };
 
-    if let Some(text) = cached {
-        let context = DayContext::gather(&db)?;
-        return Ok(briefing::BriefingResult {
-            greeting: context.greeting,
-            briefing: text,
-            has_overdue: context.tasks_summary.contains("overdue"),
-            task_count: briefing::extract_task_count(&context.tasks_summary),
-        });
+    let Some(text) = cached else {
+        return Ok(None);
+    };
+    let context = DayContext::gather(db)?;
+    Ok(Some(briefing::BriefingResult {
+        greeting: context.greeting,
+        briefing: text,
+        has_overdue: context.tasks_summary.contains("overdue"),
+        task_count: briefing::extract_task_count(&context.tasks_summary),
+    }))
+}
+
+#[tauri::command]
+pub async fn get_briefing(
+    app_handle: tauri::AppHandle,
+    db: State<'_, Arc<Database>>,
+    router: State<'_, Mutex<AiRouter>>,
+    google_auth: State<'_, Arc<GoogleAuth>>,
+) -> Result<briefing::BriefingResult, String> {
+    let today = chrono::Local::now().format("%Y-%m-%d").to_string();
+
+    if let Some(cached) = cached_briefing_today(&db)? {
+        return Ok(cached);
     }
 
     let router = router.lock().map_err(|e| e.to_string())?.clone();
@@ -70,8 +85,16 @@ pub async fn speak_briefing(
     google_auth: State<'_, Arc<GoogleAuth>>,
     engine: State<'_, Arc<VoiceEngine>>,
 ) -> Result<briefing::BriefingResult, String> {
-    let router = router.lock().map_err(|e| e.to_string())?.clone();
-    let result = briefing::generate_briefing(&db, &router, &google_auth, &app_handle).await?;
+    // Pressing play regenerated the whole briefing -- a second full model call,
+    // and a different text from the one already on screen. Speak what was
+    // generated today if there is one.
+    let result = match cached_briefing_today(&db)? {
+        Some(cached) => cached,
+        None => {
+            let router = router.lock().map_err(|e| e.to_string())?.clone();
+            briefing::generate_briefing(&db, &router, &google_auth, &app_handle).await?
+        }
+    };
 
     // Share VoiceEngine's TextToSpeech, and with it the cancel flag the rest of
     // the app reaches -- send_message and the stop control both cancel that one

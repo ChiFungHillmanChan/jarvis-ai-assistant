@@ -29,7 +29,12 @@ impl BackendType {
     }
 }
 
+/// The wire form has to be the snake_case one `src/lib/types.ts` declares for
+/// `LocalModel.supports_tools` ("native" | "prompt_injected" | "chat_only").
+/// Serde's default was the variant name, so the webview compared "Native"
+/// against "native", never matched, and labelled every local model "chat".
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(rename_all = "snake_case")]
 pub enum ToolCapability {
     Native,
     PromptInjected,

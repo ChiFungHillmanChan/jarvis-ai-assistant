@@ -124,6 +124,7 @@ pub fn run() {
             // provider chain from Settings without manual URL entry. We do
             // not auto-insert into provider_chain -- that stays a user choice.
             let db_for_ollama = std::sync::Arc::clone(&db_arc);
+            let handle_for_ollama = app.handle().clone();
             tauri::async_runtime::spawn(async move {
                 let client = match reqwest::Client::builder()
                     .timeout(std::time::Duration::from_secs(2))
@@ -139,18 +140,47 @@ pub fn run() {
                 if !body.contains("Ollama") {
                     return;
                 }
-                if let Ok(conn) = db_for_ollama.conn.lock() {
-                    let res = conn.execute(
-                        "INSERT OR IGNORE INTO local_endpoints
-                            (id, name, url, backend_type, is_active)
-                         VALUES ('ollama-local', 'Ollama (local)',
-                                 'http://localhost:11434', 'ollama', 1)",
-                        [],
-                    );
-                    match res {
-                        Ok(0) => log::debug!("Ollama endpoint already registered"),
-                        Ok(_) => log::info!("Detected local Ollama at :11434, endpoint registered"),
-                        Err(e) => log::warn!("Ollama endpoint insert failed: {e}"),
+                let inserted = match db_for_ollama.conn.lock() {
+                    Ok(conn) => {
+                        let res = conn.execute(
+                            "INSERT OR IGNORE INTO local_endpoints
+                                (id, name, url, backend_type, is_active)
+                             VALUES ('ollama-local', 'Ollama (local)',
+                                     'http://localhost:11434', 'ollama', 1)",
+                            [],
+                        );
+                        match res {
+                            Ok(0) => {
+                                log::debug!("Ollama endpoint already registered");
+                                false
+                            }
+                            Ok(_) => {
+                                log::info!("Detected local Ollama at :11434, endpoint registered");
+                                true
+                            }
+                            Err(e) => {
+                                log::warn!("Ollama endpoint insert failed: {e}");
+                                false
+                            }
+                        }
+                    }
+                    Err(_) => false,
+                };
+                // The managed router loaded its endpoints before this row
+                // existed, so without a reload the freshly registered Ollama
+                // could not be chained until the next relaunch -- the Settings
+                // list showed it and selecting it did nothing. The lock is
+                // taken only after the database guard above has been dropped.
+                if inserted {
+                    match handle_for_ollama.try_state::<std::sync::Mutex<AiRouter>>() {
+                        Some(managed) => match managed.lock() {
+                            Ok(mut router) => {
+                                router.load_from_db(&db_for_ollama);
+                                log::info!("Router endpoints reloaded after Ollama detection");
+                            }
+                            Err(e) => log::warn!("Router lock failed after Ollama detection: {e}"),
+                        },
+                        None => log::warn!("Router unavailable after Ollama detection"),
                     }
                 }
             });
@@ -162,7 +192,6 @@ pub fn run() {
             let wake_service = std::sync::Arc::new(voice::wake_word::WakeWordService::new(
                 std::sync::Arc::clone(&voice_engine),
                 std::sync::Arc::clone(&db_arc),
-                router.clone(),
                 std::sync::Arc::clone(&auth_arc),
                 app.handle().clone(),
             ));

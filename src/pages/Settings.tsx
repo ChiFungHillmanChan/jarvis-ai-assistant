@@ -500,7 +500,7 @@ export default function Settings() {
   }
 
   const options = [
-    { value: "gemini_primary", label: "Gemini Pro (primary) + Flash (fallback)" },
+    { value: "gemini_primary", label: "Gemini Flash (routine) + Gemini Pro (fallback)" },
     { value: "gemini_flash", label: "Gemini Flash (primary) + Pro (fallback)" },
     { value: "gemini_pro_only", label: "Gemini Pro only" },
     { value: "gemini_flash_only", label: "Gemini Flash only" },

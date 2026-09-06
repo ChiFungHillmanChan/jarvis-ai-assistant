@@ -135,6 +135,14 @@ impl KeychainStore {
             .delete(service, account)
             .map_err(|e| format!("keychain delete: {e}"))
     }
+
+    /// True when a failure means "no such item", which is the ordinary case for
+    /// a key the user has simply never saved. Anything else -- a locked
+    /// keychain, a denied access prompt -- is a real fault that a caller
+    /// treating every error as "not configured" would swallow silently.
+    pub fn is_not_found(error: &str) -> bool {
+        error.contains("could not be found")
+    }
 }
 
 #[cfg(test)]
@@ -178,6 +186,20 @@ mod tests {
         assert!(read.contains("not allowed"), "got {read}");
         let write = KeychainStore::put(svc, acct, "AKIA-TEST-SECRET").unwrap_err();
         assert!(write.starts_with("keychain put:"), "got {write}");
+    }
+
+    /// Callers use `is_not_found` to decide whether a `get` failure is worth
+    /// logging. An absent item is routine; a locked keychain is not, and must
+    /// not be classified as absent.
+    #[test]
+    fn only_a_missing_item_counts_as_not_found() {
+        let svc = "com.jarvis.test";
+        let missing = KeychainStore::get(svc, "never-written-not-found").unwrap_err();
+        assert!(KeychainStore::is_not_found(&missing), "got {missing}");
+
+        memory::seed_failure(svc, "locked", "interaction with the Security Server is not allowed");
+        let locked = KeychainStore::get(svc, "locked").unwrap_err();
+        assert!(!KeychainStore::is_not_found(&locked), "got {locked}");
     }
 
     /// Bytes that are not UTF-8 must be rejected, never lossily converted into a

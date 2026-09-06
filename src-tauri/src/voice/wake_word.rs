@@ -13,12 +13,17 @@ use tauri::{Emitter, Manager};
 use tokio::sync::Mutex as AsyncMutex;
 use tokio_util::sync::CancellationToken;
 
+/// Deliberately holds no `AiRouter`. It used to keep a by-value clone taken at
+/// startup, so an API key pasted or a provider chain edited afterwards never
+/// reached "Hey Jarvis" -- the wake word kept talking to the snapshot from
+/// launch and answered "No API key configured" long after the key was saved.
+/// The live router is read out of managed state per turn instead; see
+/// `current_router`.
 pub struct WakeWordService {
     task: AsyncMutex<Option<JoinHandle<()>>>,
     cancellation_token: Mutex<CancellationToken>,
     voice_engine: Arc<VoiceEngine>,
     db: Arc<Database>,
-    router: AiRouter,
     auth: Arc<GoogleAuth>,
     app_handle: JarvisAppHandle,
 }
@@ -27,7 +32,6 @@ impl WakeWordService {
     pub fn new(
         voice_engine: Arc<VoiceEngine>,
         db: Arc<Database>,
-        router: AiRouter,
         auth: Arc<GoogleAuth>,
         app_handle: JarvisAppHandle,
     ) -> Self {
@@ -36,7 +40,6 @@ impl WakeWordService {
             cancellation_token: Mutex::new(CancellationToken::new()),
             voice_engine,
             db,
-            router,
             auth,
             app_handle,
         }
@@ -93,7 +96,6 @@ impl WakeWordService {
 
         let voice_engine = Arc::clone(&self.voice_engine);
         let db = Arc::clone(&self.db);
-        let router = self.router.clone();
         let auth = Arc::clone(&self.auth);
         let app_handle = self.app_handle.clone();
 
@@ -101,7 +103,6 @@ impl WakeWordService {
             supervisor_loop(
                 voice_engine,
                 db,
-                router,
                 auth,
                 app_handle,
                 token,
@@ -162,10 +163,21 @@ impl WakeWordService {
     }
 }
 
+/// Clone the live `AiRouter` out of managed state for one turn.
+///
+/// Cloning out of the lock, never holding it across an `.await`, is the rule
+/// every other caller of the managed router follows.
+fn current_router(app_handle: &JarvisAppHandle) -> Result<AiRouter, String> {
+    let managed = app_handle
+        .try_state::<Mutex<AiRouter>>()
+        .ok_or_else(|| "AI router is not available yet".to_string())?;
+    let router = managed.lock().map_err(|e| e.to_string())?.clone();
+    Ok(router)
+}
+
 async fn supervisor_loop(
     voice_engine: Arc<VoiceEngine>,
     db: Arc<Database>,
-    router: AiRouter,
     auth: Arc<GoogleAuth>,
     app_handle: JarvisAppHandle,
     token: CancellationToken,
@@ -179,7 +191,6 @@ async fn supervisor_loop(
         match detection_loop(
             Arc::clone(&voice_engine),
             Arc::clone(&db),
-            router.clone(),
             Arc::clone(&auth),
             app_handle.clone(),
             token.clone(),
@@ -224,7 +235,6 @@ async fn supervisor_loop(
 async fn detection_loop(
     voice_engine: Arc<VoiceEngine>,
     db: Arc<Database>,
-    router: AiRouter,
     auth: Arc<GoogleAuth>,
     app_handle: JarvisAppHandle,
     token: CancellationToken,
@@ -299,7 +309,6 @@ async fn detection_loop(
                 handle_wake_word_detection(
                     Arc::clone(&voice_engine),
                     Arc::clone(&db),
-                    router.clone(),
                     Arc::clone(&auth),
                     app_handle.clone(),
                     token.clone(),
@@ -319,7 +328,6 @@ async fn detection_loop(
 async fn handle_wake_word_detection(
     voice_engine: Arc<VoiceEngine>,
     db: Arc<Database>,
-    router: AiRouter,
     auth: Arc<GoogleAuth>,
     app_handle: JarvisAppHandle,
     token: CancellationToken,
@@ -410,6 +418,9 @@ async fn handle_wake_word_detection(
     };
     let tts_tx = Some(streaming_tts.sender());
 
+    // Read per turn, so a key or chain saved after launch is in force on the
+    // very next "Hey Jarvis" rather than after a relaunch.
+    let router = current_router(&app_handle)?;
     let response = match router.send(messages, &db, &auth, &app_handle, tts_tx, Workload::Tools).await {
         Ok(r) => r,
         Err(e) => {

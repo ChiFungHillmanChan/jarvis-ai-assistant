@@ -477,8 +477,20 @@ impl AiRouter {
     /// startup and again whenever a key is saved in Settings, so a freshly
     /// pasted key takes effect without restarting the app.
     pub fn reload_keys(&mut self) {
+        // A locked keychain, or an access prompt nobody answered, fails here
+        // exactly like an unsaved key, so the user gets "No API key configured"
+        // for a key they can see in Keychain Access. Say so in the log. The
+        // account name only -- never the value.
         let from_keychain = |account: &str| {
-            crate::security::keychain::KeychainStore::get(KEY_SERVICE, account).ok()
+            match crate::security::keychain::KeychainStore::get(KEY_SERVICE, account) {
+                Ok(value) => Some(value),
+                Err(e) => {
+                    if !crate::security::keychain::KeychainStore::is_not_found(&e) {
+                        log::warn!("Keychain read failed for {account}: {e}");
+                    }
+                    None
+                }
+            }
         };
         self.gemini_key = resolve_key("GEMINI_API_KEY", from_keychain("gemini_api_key"));
         self.claude_key = resolve_key("ANTHROPIC_API_KEY", from_keychain("claude_api_key"));

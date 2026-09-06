@@ -175,10 +175,30 @@ async fn detect_ollama() -> OllamaStatus {
     OllamaStatus { installed, running, version }
 }
 
+/// True when the macOS Command Line Tools are actually installed.
+///
+/// `/usr/bin/python3` on a stock Mac is a stub: `which python3` succeeds, but
+/// running it pops the "install the command line developer tools" dialog in the
+/// user's face -- and `check_system_compatibility` runs unprompted, so a user
+/// who never asked about vLLM got the dialog anyway. `xcode-select -p` exits
+/// non-zero until the tools are present and never prompts, so it is the safe
+/// gate to check before executing python3 at all.
+fn developer_tools_installed() -> bool {
+    if std::env::consts::OS != "macos" {
+        return true;
+    }
+    Command::new("xcode-select")
+        .arg("-p")
+        .output()
+        .map(|o| o.status.success())
+        .unwrap_or(false)
+}
+
 /// Detect vLLM / Python availability.
 fn detect_vllm() -> VllmStatus {
     let python_available = binary_exists("python3");
     let installed = python_available
+        && developer_tools_installed()
         && run_command("python3", &["-c", "import vllm; print(vllm.__version__)"]).is_some();
 
     VllmStatus { installed, python_available }
