@@ -361,71 +361,62 @@ pub async fn list_endpoint_models(
     Ok(result)
 }
 
-/// The chain to show when `provider_chain` is empty. It has to be exactly the
-/// chain `AiRouter::new` is already running, because Settings loads this array
-/// into React state on mount and writes it back verbatim on the first chain
-/// edit -- a model pinned here becomes a persisted pin the user never chose.
-/// Position 0 of the default is therefore unpinned so the workload tier keeps
-/// choosing (Flash for volume and tool turns, Pro for premium); the named
-/// presets stay pinned because their names promise a specific model.
-/// `default_chain_matches_the_router_default` holds the two in step.
-fn default_chain_for(ai_provider: &str) -> Vec<ProviderChainEntry> {
-    match ai_provider {
-        "gemini_flash" => vec![
-            ProviderChainEntry { position: 0, provider_type: "gemini".into(), endpoint_id: None, model_id: Some(crate::ai::gemini::MODEL_FLASH.into()), enabled: true },
-            ProviderChainEntry { position: 1, provider_type: "gemini".into(), endpoint_id: None, model_id: Some(crate::ai::gemini::MODEL_PRO.into()), enabled: true },
-        ],
-        "gemini_pro_only" => vec![
-            ProviderChainEntry { position: 0, provider_type: "gemini".into(), endpoint_id: None, model_id: Some(crate::ai::gemini::MODEL_PRO.into()), enabled: true },
-        ],
-        "gemini_flash_only" => vec![
-            ProviderChainEntry { position: 0, provider_type: "gemini".into(), endpoint_id: None, model_id: Some(crate::ai::gemini::MODEL_FLASH.into()), enabled: true },
-        ],
-        _ => vec![
-            ProviderChainEntry { position: 0, provider_type: "gemini".into(), endpoint_id: None, model_id: None, enabled: true },
-            ProviderChainEntry { position: 1, provider_type: "gemini".into(), endpoint_id: None, model_id: Some(crate::ai::gemini::MODEL_PRO.into()), enabled: true },
-        ],
+/// Persisted rows win. With nothing persisted, Settings shows the chain the
+/// live router is actually running: it is built from the same `ai_provider`
+/// preference, and `append_default_fallbacks` has already added the Claude or
+/// OpenAI entry a user whose only key is one of those is really being served
+/// by. Recomputing a default here instead showed them a Gemini-only chain --
+/// and Settings writes this array back verbatim on the first chain edit, so
+/// the omission became a persisted one. Split out from the command so the
+/// choice is testable without a Tauri app.
+fn chain_to_show(
+    persisted: Vec<ProviderChainEntry>,
+    running: Vec<ProviderChainEntry>,
+) -> Vec<ProviderChainEntry> {
+    if persisted.is_empty() {
+        running
+    } else {
+        persisted
     }
 }
 
 #[tauri::command]
-pub async fn get_provider_chain(db: State<'_, Arc<Database>>) -> Result<Vec<ProviderChainEntry>, String> {
-    let conn = db.conn.lock().map_err(|e| e.to_string())?;
-    let mut stmt = conn
-        .prepare(
-            "SELECT position, provider_type, endpoint_id, model_id, enabled \
-             FROM provider_chain ORDER BY position ASC",
-        )
-        .map_err(|e| e.to_string())?;
-
-    let chain = stmt
-        .query_map([], |row| {
-            Ok(ProviderChainEntry {
-                position: row.get(0)?,
-                provider_type: row.get(1)?,
-                endpoint_id: row.get(2)?,
-                model_id: row.get(3)?,
-                enabled: row.get::<_, i32>(4).unwrap_or(1) != 0,
-            })
-        })
-        .map_err(|e| e.to_string())?
-        .collect::<Result<Vec<_>, _>>()
-        .map_err(|e| e.to_string())?;
-
-    // If no chain configured, return defaults based on legacy setting
-    if chain.is_empty() {
-        let ai_provider = conn
-            .query_row(
-                "SELECT value FROM user_preferences WHERE key = 'ai_provider'",
-                [],
-                |row| row.get::<_, String>(0),
+pub async fn get_provider_chain(
+    db: State<'_, Arc<Database>>,
+    router: State<'_, Mutex<AiRouter>>,
+) -> Result<Vec<ProviderChainEntry>, String> {
+    let persisted = {
+        let conn = db.conn.lock().map_err(|e| e.to_string())?;
+        let mut stmt = conn
+            .prepare(
+                "SELECT position, provider_type, endpoint_id, model_id, enabled \
+                 FROM provider_chain ORDER BY position ASC",
             )
-            .unwrap_or_else(|_| "gemini_primary".to_string());
+            .map_err(|e| e.to_string())?;
 
-        return Ok(default_chain_for(&ai_provider));
-    }
+        let rows = stmt
+            .query_map([], |row| {
+                Ok(ProviderChainEntry {
+                    position: row.get(0)?,
+                    provider_type: row.get(1)?,
+                    endpoint_id: row.get(2)?,
+                    model_id: row.get(3)?,
+                    enabled: row.get::<_, i32>(4).unwrap_or(1) != 0,
+                })
+            })
+            .map_err(|e| e.to_string())?
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(|e| e.to_string())?;
+        rows
+    };
+    // Database lock released before the router lock, the order every other
+    // command in this file uses.
+    let running = {
+        let r = router.lock().map_err(|e| e.to_string())?;
+        r.provider_chain().to_vec()
+    };
 
-    Ok(chain)
+    Ok(chain_to_show(persisted, running))
 }
 
 #[tauri::command]
@@ -536,35 +527,53 @@ mod tests {
     }
 
     /// F046: Settings loads `get_provider_chain` into React state and writes it
-    /// straight back on the first chain edit, so any disagreement with
-    /// `AiRouter::new` is persisted as a chain the user never chose. The
-    /// concrete regression was position 0 of the default pinning Gemini Pro,
-    /// which re-pinned the premium model for volume-tier work.
+    /// straight back on the first chain edit, so anything this shows that the
+    /// router is not running gets persisted as a chain the user never chose.
+    /// It used to recompute its own copy of the default, which left out the
+    /// Claude and OpenAI fallbacks the router appends for a user whose only
+    /// key is one of those; it now shows what the router holds.
     #[test]
-    fn default_chain_matches_the_router_default() {
-        for provider in [
-            "gemini_primary",
-            "gemini_flash",
-            "gemini_pro_only",
-            "gemini_flash_only",
-            "something_unrecognised",
-        ] {
-            assert_eq!(
-                shape(&default_chain_for(provider)),
-                shape(AiRouter::new(provider).provider_chain()),
-                "default chain for '{provider}' disagrees with AiRouter::new"
-            );
-        }
+    fn settings_shows_the_running_chain_when_nothing_is_persisted() {
+        let mut running = AiRouter::new("gemini_primary").provider_chain().to_vec();
+        running.push(ProviderChainEntry {
+            position: 2,
+            provider_type: "claude".into(),
+            endpoint_id: None,
+            model_id: None,
+            enabled: true,
+        });
+
+        assert_eq!(
+            shape(&chain_to_show(Vec::new(), running.clone())),
+            shape(&running),
+            "with nothing persisted Settings must show every provider the router will use"
+        );
+
+        // Rows the user saved are what they see, appended fallbacks or not.
+        let persisted = vec![ProviderChainEntry {
+            position: 0,
+            provider_type: "local".into(),
+            endpoint_id: Some("ollama-1".into()),
+            model_id: Some("llama3".into()),
+            enabled: true,
+        }];
+        assert_eq!(
+            shape(&chain_to_show(persisted.clone(), running)),
+            shape(&persisted),
+            "a persisted chain must be shown exactly as the user saved it"
+        );
     }
 
     /// F046: position 0 stays unpinned so the workload tier keeps choosing the
     /// model -- pinning it (to Gemini Pro) was F046's regression, re-pinning
-    /// the premium model for volume-tier work (see the comment above). Position
-    /// 1 stays pinned to Pro so the fallback degrades to a different model
-    /// instead of retrying position 0's.
+    /// the premium model for volume-tier work. Position 1 stays pinned to Pro
+    /// so the fallback degrades to a different model instead of retrying
+    /// position 0's. Checked here because this is the chain Settings shows and
+    /// writes back when nothing is persisted.
     #[test]
     fn the_default_chain_leaves_position_zero_unpinned() {
-        let chain = default_chain_for("gemini_primary");
+        let router = AiRouter::new("gemini_primary");
+        let chain = router.provider_chain();
         assert_eq!(chain[0].model_id, None, "position 0 must let the workload tier pick");
         assert_eq!(
             chain[1].model_id.as_deref(),

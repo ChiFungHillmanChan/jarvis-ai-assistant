@@ -549,8 +549,17 @@ impl AiRouter {
         &self.local_endpoints
     }
 
+    /// Replace the chain with the one the user just saved in Settings. That
+    /// save has already written the rows, so this chain is a persisted one and
+    /// `append_default_fallbacks` has to leave it alone from here. Without the
+    /// flag the very next API key saved in Settings re-added the claude and
+    /// openai entries the user had just deleted, and the live router diverged
+    /// from both the database and the Settings screen until the next relaunch
+    /// -- on a chain deliberately trimmed to a local endpoint, that put the
+    /// next failed message on OpenAI.
     pub fn set_provider_chain(&mut self, chain: Vec<ProviderChainEntry>) {
         self.provider_chain = chain;
+        self.chain_loaded_from_db = true;
     }
 
     pub fn set_local_endpoints(&mut self, endpoints: Vec<LocalEndpoint>) {
@@ -1238,6 +1247,42 @@ mod tests {
         assert_eq!(chain.len(), 2, "persisted chain must not gain new entries");
         let types: Vec<&str> = chain.iter().map(|e| e.provider_type.as_str()).collect();
         assert_eq!(types, vec!["gemini", "gemini"]);
+    }
+
+    /// The Settings save path reaches the router through `set_provider_chain`,
+    /// never through `load_from_db`, so it has to mark the chain persisted too.
+    /// It did not, and `set_api_key` -- which calls `append_default_fallbacks`
+    /// on every save -- put back the cloud entries the user had just removed.
+    #[test]
+    fn a_chain_saved_in_settings_is_not_appended_to() {
+        let mut router = AiRouter::new("gemini_primary");
+        router.claude_key = Some("sk-ant-test".to_string());
+        router.openai_key = Some("sk-oai-test".to_string());
+
+        // What `commands::local_llm::update_provider_chain` does once it has
+        // written the rows: hand the router the chain the user saved. Here the
+        // user deliberately trimmed inference down to one local endpoint.
+        router.set_provider_chain(vec![ProviderChainEntry {
+            position: 0,
+            provider_type: "local".into(),
+            endpoint_id: Some("ollama-1".into()),
+            model_id: Some("llama3".into()),
+            enabled: true,
+        }]);
+
+        // What `commands::settings::set_api_key` does on the next key save.
+        router.append_default_fallbacks();
+
+        let types: Vec<&str> = router
+            .provider_chain()
+            .iter()
+            .map(|e| e.provider_type.as_str())
+            .collect();
+        assert_eq!(
+            types,
+            vec!["local"],
+            "a chain saved in Settings must not gain cloud entries behind the user's back"
+        );
     }
 
     /// The shipped migration, not a copy of it -- a hand-written mirror of the
