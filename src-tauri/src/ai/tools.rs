@@ -156,13 +156,13 @@ pub fn get_tool_definitions() -> Vec<Tool> {
         // adds invitees in Google Calendar.
         Tool {
             name: "create_event".into(),
-            description: "Create a new Google Calendar event. Times must be in RFC 3339 format using the UTC offset given in the system prompt (e.g. 2026-09-05T10:00:00+08:00 using the offset from the system prompt).".into(),
+            description: "Create a new Google Calendar event. Give times as plain local wall-clock with no UTC offset (e.g. 2026-09-05T10:00:00); JARVIS attaches the offset that date is on.".into(),
             parameters: json!({
                 "type": "object",
                 "properties": {
                     "title": { "type": "string", "description": "Event title/summary" },
-                    "start": { "type": "string", "description": "Start time in RFC 3339 format with the UTC offset from the system prompt" },
-                    "end": { "type": "string", "description": "End time in RFC 3339 format with the UTC offset from the system prompt" },
+                    "start": { "type": "string", "description": "Start time as local wall-clock with no UTC offset, e.g. 2026-09-05T10:00:00" },
+                    "end": { "type": "string", "description": "End time as local wall-clock with no UTC offset, e.g. 2026-09-05T11:00:00" },
                     "location": { "type": "string", "description": "Event location (optional)" },
                     "description": { "type": "string", "description": "Event description (optional)" }
                 },
@@ -171,14 +171,14 @@ pub fn get_tool_definitions() -> Vec<Tool> {
         },
         Tool {
             name: "update_event".into(),
-            description: "Update an existing Google Calendar event. Only provided fields will be changed. Times must be in RFC 3339 format using the UTC offset given in the system prompt (e.g. 2026-09-05T10:00:00+08:00 using the offset from the system prompt).".into(),
+            description: "Update an existing Google Calendar event. Only provided fields will be changed. Give times as plain local wall-clock with no UTC offset (e.g. 2026-09-05T10:00:00); JARVIS attaches the offset that date is on.".into(),
             parameters: json!({
                 "type": "object",
                 "properties": {
                     "event_id": { "type": "string", "description": "Google Calendar event ID" },
                     "title": { "type": "string", "description": "New event title/summary" },
-                    "start": { "type": "string", "description": "New start time in RFC 3339 format with the UTC offset from the system prompt" },
-                    "end": { "type": "string", "description": "New end time in RFC 3339 format with the UTC offset from the system prompt" },
+                    "start": { "type": "string", "description": "New start time as local wall-clock with no UTC offset, e.g. 2026-09-05T10:00:00" },
+                    "end": { "type": "string", "description": "New end time as local wall-clock with no UTC offset, e.g. 2026-09-05T11:00:00" },
                     "location": { "type": "string", "description": "New event location" },
                     "description": { "type": "string", "description": "New event description" }
                 },
@@ -693,9 +693,8 @@ async fn execute_calendar_tool(
         }
         "create_event" => {
             let title = args["title"].as_str().unwrap_or("");
-            let offset = *chrono::Local::now().offset();
-            let start = with_local_offset(args["start"].as_str().unwrap_or(""), offset);
-            let end = with_local_offset(args["end"].as_str().unwrap_or(""), offset);
+            let start = with_local_offset(args["start"].as_str().unwrap_or(""), &chrono::Local);
+            let end = with_local_offset(args["end"].as_str().unwrap_or(""), &chrono::Local);
             let location = args["location"].as_str();
             let description = args["description"].as_str();
             // Attendees are never model-chosen -- inviting an address copies the
@@ -708,9 +707,8 @@ async fn execute_calendar_tool(
         "update_event" => {
             let event_id = args["event_id"].as_str().unwrap_or("");
             let title = args["title"].as_str();
-            let offset = *chrono::Local::now().offset();
-            let start = args["start"].as_str().map(|s| with_local_offset(s, offset));
-            let end = args["end"].as_str().map(|s| with_local_offset(s, offset));
+            let start = args["start"].as_str().map(|s| with_local_offset(s, &chrono::Local));
+            let end = args["end"].as_str().map(|s| with_local_offset(s, &chrono::Local));
             let location = args["location"].as_str();
             let description = args["description"].as_str();
             // Google copies title, description and location onto every
@@ -1207,22 +1205,34 @@ pub fn system_prompt_for(name: &str) -> String {
 pub fn current_time_line(now: chrono::DateTime<chrono::Local>) -> String {
     format!(
         "Current local time: {} ({}, UTC offset {}). Resolve relative dates such as today, \
-         tomorrow and next week against this, and always send RFC 3339 times with this \
-         offset to create_event and update_event.",
+         tomorrow and next week against this. Send create_event and update_event times as \
+         plain local wall-clock with no UTC offset (for example 2026-12-03T10:00:00) -- \
+         JARVIS attaches the offset that date is on, which is not always today's.",
         now.to_rfc3339_opts(chrono::SecondsFormat::Secs, false),
         now.format("%A"),
         now.format("%:z"),
     )
 }
 
-/// Attach `offset` to a naive `YYYY-MM-DDTHH:MM[:SS]` value so Google does not
-/// read it as UTC. A value that already carries `Z` or an `+hh:mm`/`-hh:mm`
+/// Attach the UTC offset `tz` is on *at that moment* to a naive
+/// `YYYY-MM-DDTHH:MM[:SS]` value, so Google does not read it as UTC. `tz` is
+/// the zone, not a sampled offset: stamping `Local::now().offset()` onto every
+/// event put a December booking made in August an hour out everywhere the
+/// clocks change. A value that already carries `Z` or an `+hh:mm`/`-hh:mm`
 /// offset, a date-only value, or anything else is returned unchanged.
-pub fn with_local_offset(value: &str, offset: chrono::FixedOffset) -> String {
-    use chrono::TimeZone;
+pub fn with_local_offset<Tz>(value: &str, tz: &Tz) -> String
+where
+    Tz: chrono::TimeZone,
+    Tz::Offset: std::fmt::Display,
+{
     let naive = chrono::NaiveDateTime::parse_from_str(value, "%Y-%m-%dT%H:%M:%S")
         .or_else(|_| chrono::NaiveDateTime::parse_from_str(value, "%Y-%m-%dT%H:%M"));
-    match naive.ok().and_then(|n| offset.from_local_datetime(&n).single()) {
+    // `earliest`, not `single`: on the autumn changeover the same wall clock
+    // happens twice, and `single` would give up and hand Google a naive time
+    // for the one hour a year the user is most likely to be booking around.
+    // A wall clock the changeover skips has no instant at all, so it falls
+    // through unchanged like any other unparseable value.
+    match naive.ok().and_then(|n| tz.from_local_datetime(&n).earliest()) {
         Some(dt) => dt.to_rfc3339_opts(chrono::SecondsFormat::Secs, false),
         None => value.to_string(),
     }
@@ -1882,7 +1892,8 @@ mod calendar_scope_tests {
 mod local_time_tests {
     use super::*;
     use crate::db::Database;
-    use chrono::{DateTime, FixedOffset, Local, NaiveDate};
+    use chrono::{DateTime, Datelike, FixedOffset, Local, LocalResult, NaiveDate, NaiveDateTime,
+        TimeZone};
     use rusqlite::Connection;
     use std::sync::Mutex;
 
@@ -1892,6 +1903,45 @@ mod local_time_tests {
 
     fn hong_kong() -> FixedOffset {
         FixedOffset::east_opt(8 * 3600).unwrap()
+    }
+
+    /// A stand-in for a DST-observing zone, on UTC-4 from April to October and
+    /// UTC-5 the rest of the year -- America/New_York's rule, coarse enough to
+    /// state in a few lines. `chrono` ships no zone database and this repo
+    /// takes no dependency on one, so the rule is written out here; what the
+    /// tests below need is only that the offset depends on the *date*.
+    #[derive(Clone, Copy, Debug)]
+    struct Eastern;
+
+    impl Eastern {
+        fn offset_on(naive: &NaiveDateTime) -> FixedOffset {
+            let hours = if (4..=10).contains(&naive.month()) { -4 } else { -5 };
+            FixedOffset::east_opt(hours * 3600).unwrap()
+        }
+    }
+
+    impl TimeZone for Eastern {
+        type Offset = FixedOffset;
+
+        fn from_offset(_: &FixedOffset) -> Self {
+            Eastern
+        }
+
+        fn offset_from_local_date(&self, local: &NaiveDate) -> LocalResult<FixedOffset> {
+            LocalResult::Single(Eastern::offset_on(&local.and_hms_opt(0, 0, 0).unwrap()))
+        }
+
+        fn offset_from_local_datetime(&self, local: &NaiveDateTime) -> LocalResult<FixedOffset> {
+            LocalResult::Single(Eastern::offset_on(local))
+        }
+
+        fn offset_from_utc_date(&self, utc: &NaiveDate) -> FixedOffset {
+            Eastern::offset_on(&utc.and_hms_opt(0, 0, 0).unwrap())
+        }
+
+        fn offset_from_utc_datetime(&self, utc: &NaiveDateTime) -> FixedOffset {
+            Eastern::offset_on(utc)
+        }
     }
 
     /// 2026-09-05T00:30:12+08:00, a Saturday in Hong Kong while it is still
@@ -1915,6 +1965,13 @@ mod local_time_tests {
         assert!(line.contains("UTC offset +08:00"), "got: {line}");
         assert!(line.contains("create_event"), "got: {line}");
         assert!(line.contains("update_event"), "got: {line}");
+        // The offset on this line is today's. Telling the model to reuse it on
+        // every booking reproduced the DST bug from the model's side, so the
+        // instruction must ask for a bare wall clock instead.
+        assert!(
+            line.contains("no UTC offset"),
+            "the model must not be told to stamp today's offset on a future date, got: {line}"
+        );
         assert!(!line.contains('\n'), "must stay a single line, got: {line}");
     }
 
@@ -1922,27 +1979,53 @@ mod local_time_tests {
     fn with_local_offset_appends_only_when_missing() {
         let hk = hong_kong();
         assert_eq!(
-            with_local_offset("2026-09-05T10:00:00", hk),
+            with_local_offset("2026-09-05T10:00:00", &hk),
             "2026-09-05T10:00:00+08:00"
         );
         assert_eq!(
-            with_local_offset("2026-09-05T10:00", hk),
+            with_local_offset("2026-09-05T10:00", &hk),
             "2026-09-05T10:00:00+08:00"
         );
         assert_eq!(
-            with_local_offset("2026-09-05T02:00:00Z", hk),
+            with_local_offset("2026-09-05T02:00:00Z", &hk),
             "2026-09-05T02:00:00Z"
         );
         assert_eq!(
-            with_local_offset("2026-09-05T10:00:00+01:00", hk),
+            with_local_offset("2026-09-05T10:00:00+01:00", &hk),
             "2026-09-05T10:00:00+01:00"
         );
         assert_eq!(
-            with_local_offset("2026-09-05T10:00:00-05:00", hk),
+            with_local_offset("2026-09-05T10:00:00-05:00", &hk),
             "2026-09-05T10:00:00-05:00"
         );
-        assert_eq!(with_local_offset("2026-09-05", hk), "2026-09-05");
-        assert_eq!(with_local_offset("", hk), "");
+        assert_eq!(with_local_offset("2026-09-05", &hk), "2026-09-05");
+        assert_eq!(with_local_offset("", &hk), "");
+    }
+
+    /// The bug this closes: the offset used to be sampled from `Local::now()`,
+    /// so a call booked in August ("book it for 3 December at 10am") was
+    /// stamped with the summer offset and Google showed it an hour early.
+    /// The offset has to come from the event's own date.
+    #[test]
+    fn with_local_offset_uses_the_offset_in_force_on_the_event_date() {
+        assert_eq!(
+            with_local_offset("2026-12-03T10:00:00", &Eastern),
+            "2026-12-03T10:00:00-05:00",
+            "a December booking must carry the winter offset"
+        );
+        assert_eq!(
+            with_local_offset("2026-08-15T10:00:00", &Eastern),
+            "2026-08-15T10:00:00-04:00",
+            "an August booking must carry the summer offset"
+        );
+        // Sampling the offset from "now" -- the old behaviour -- would have
+        // given both dates the same one.
+        assert_ne!(
+            with_local_offset("2026-12-03T10:00:00", &Eastern),
+            with_local_offset("2026-08-15T10:00:00", &Eastern)
+                .replace("2026-08-15", "2026-12-03"),
+            "the two sides of the changeover must not share an offset"
+        );
     }
 
     #[test]
