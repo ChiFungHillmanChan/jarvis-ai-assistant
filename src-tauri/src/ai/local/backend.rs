@@ -102,3 +102,48 @@ pub trait LocalBackend: Send + Sync {
     async fn health_check(&self, url: &str, api_key: Option<&str>) -> Result<bool, String>;
     async fn detect_tool_capability(&self, url: &str, model: &str) -> ToolCapability;
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// `list_local_models` serializes this enum straight to the webview, and
+    /// `src/lib/types.ts` declares the three snake_case strings Settings
+    /// compares against. Serde's default is the variant name, so without
+    /// `rename_all` the webview matched "Native" against "native", no branch
+    /// hit, and every local model was relabelled "chat". Nothing else in the
+    /// suite serializes this type, so the attribute is checked here.
+    #[test]
+    fn tool_capability_serializes_as_the_typescript_contract() {
+        for cap in [
+            ToolCapability::Native,
+            ToolCapability::PromptInjected,
+            ToolCapability::ChatOnly,
+        ] {
+            let wire = serde_json::to_value(&cap).expect("serialize");
+            assert_eq!(
+                wire,
+                serde_json::Value::String(cap.as_str().to_string()),
+                "the wire form must be as_str(), not the variant name"
+            );
+            assert_eq!(
+                serde_json::from_value::<ToolCapability>(wire).expect("deserialize"),
+                cap,
+                "the round trip must survive"
+            );
+            assert_eq!(ToolCapability::from_str(cap.as_str()), cap);
+        }
+    }
+
+    /// The other half of the contract: the strings the webview compares
+    /// against are declared in TypeScript, so a rename on either side has to
+    /// fail here rather than silently relabel every model.
+    #[test]
+    fn types_ts_declares_the_same_three_strings() {
+        let types_ts = include_str!("../../../../src/lib/types.ts");
+        assert!(
+            types_ts.contains(r#"supports_tools: "native" | "prompt_injected" | "chat_only""#),
+            "src/lib/types.ts must declare LocalModel.supports_tools as the three snake_case ids"
+        );
+    }
+}

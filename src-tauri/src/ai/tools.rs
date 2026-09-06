@@ -1758,6 +1758,57 @@ mod github_scope_tests {
         assert!(!repo_is_private(""));
     }
 
+    /// Both halves of the ALLOWED_OUTBOUND entry for `create_github_issue`
+    /// ("repo must already appear in github_items and be private") have to be
+    /// enforced by code, not just written down. Neither can be driven from a
+    /// unit test -- the visibility check sits behind a live GitHub call and the
+    /// dispatch needs a token -- and deleting either line left the whole suite
+    /// green. They are checked here as a property of the source, each bounded
+    /// to the arm that has to do the work.
+    #[test]
+    fn the_issue_arms_check_the_destination_before_filing() {
+        let source = include_str!("tools.rs");
+        let slice = |from: &str, to: &str| -> &str {
+            let start = source.find(from).unwrap_or_else(|| panic!("'{from}' must exist"));
+            let len = source[start..]
+                .find(to)
+                .unwrap_or_else(|| panic!("'{to}' must follow '{from}'"));
+            &source[start..start + len]
+        };
+
+        // Dispatch: an unknown repo never reaches the GitHub client at all.
+        let dispatch = slice(
+            "        \"list_github_items\" | \"create_github_issue\" => {",
+            "        \"search_notion\" | \"read_notion_page\" | \"create_notion_page\" => {",
+        );
+        let known = dispatch
+            .find("github_repo_is_known(")
+            .expect("dispatch must reject a repo the user has never worked with");
+        let call = dispatch
+            .find("execute_github_tool(")
+            .expect("dispatch must reach execute_github_tool");
+        assert!(
+            known < call,
+            "the known-repo check must run before the GitHub client is reached"
+        );
+
+        // The arm itself: a public repo is refused before anything is filed.
+        let arm = slice(
+            "        \"create_github_issue\" => {",
+            "        _ => Err(format!(\"Unknown GitHub tool",
+        );
+        let private = arm
+            .find("repo_is_private(")
+            .expect("the arm must ask GitHub whether the repo is private");
+        let file = arm
+            .find("github::create_issue(")
+            .expect("the arm must file the issue");
+        assert!(
+            private < file,
+            "an issue must not be filed before the repo is known to be private"
+        );
+    }
+
     #[test]
     fn repo_the_user_already_works_with_is_allowed() {
         let db = github_db(&["ChiFungHillmanChan/jarvis-ai-assistant"]);
