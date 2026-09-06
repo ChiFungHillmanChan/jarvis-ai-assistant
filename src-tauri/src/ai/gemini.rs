@@ -490,8 +490,8 @@ mod tests {
     }
 
     /// `MODEL_PRO` / `MODEL_FLASH` are also hardcoded as TypeScript literals in
-    /// Settings.tsx (a fourth copy, after this file, `AiRouter::new` in
-    /// `ai/mod.rs`, and `default_chain_for` in `commands/local_llm.rs`) so its
+    /// Settings.tsx (a third copy, after this file and `AiRouter::new` in
+    /// `ai/mod.rs`) so its
     /// "+ Gemini Pro" / "+ Gemini Flash" buttons send a model id that still
     /// exists. There is no JS test runner in this repo to catch drift on the
     /// TS side, so this reads the file as text instead.
