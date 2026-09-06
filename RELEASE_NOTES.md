@@ -1,16 +1,17 @@
-JARVIS v0.1.2
+JARVIS v0.1.3
 
-Security and reliability release.
+Voice, sync, and tool-safety release.
 
-- Stronger protection against malicious email content: the assistant can no
-  longer be tricked into sending data out. Mail is always drafted for your
-  review, never sent automatically, and the same restrictions now apply to
-  local models.
-- Your GitHub, Notion, and Obsidian tokens moved from the local database into
-  the macOS Keychain.
-- Smarter model routing: routine tasks now run on faster, cheaper models
-  automatically; complex work still gets the most capable model.
-- Fixed onboarding losing API keys, the app addressing you by the wrong name,
-  and archived email reappearing in lists.
-- Startup is more resilient in the first minute after launch.
-- Download and automatic updates now work end to end.
+- The microphone now works in the installed app: the shipped build carries the
+  entitlement it was missing.
+- Escape stops a spoken response mid-sentence.
+- Cantonese replies are now spoken in a Cantonese voice.
+- Calendar requests use your local time, not the server's.
+- Your inbox is sorted by actual message time.
+- Claude and OpenAI keys, when you provide them, are usable as fallbacks
+  alongside Gemini.
+- Sync and voice errors are now shown in the app instead of failing silently.
+- Fixed scrolling and text selection being blocked in several panels.
+- Safer tool behaviour: the assistant can no longer write inbox content into a
+  shared calendar event, file an issue against a public repository, or turn
+  injected text from an email into a standing memory.

@@ -267,7 +267,8 @@ Full detailed roadmap: [`docs/business/BUSINESS_ROADMAP.md`](docs/business/BUSIN
 
 ### Prerequisites
 
-- **macOS** (uses native APIs: `say`, `mdfind`, `open`, accessibility)
+- Requires macOS 12 or later on Apple Silicon (uses native APIs: `say`, `mdfind`, `open`,
+  accessibility)
 - Xcode Command Line Tools -- `xcode-select --install`
 - [Rust](https://rustup.rs/) 1.70+
 - [Node.js](https://nodejs.org/) 18+

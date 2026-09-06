@@ -23,6 +23,12 @@ NOTARYTOOL_PROFILE="${NOTARYTOOL_PROFILE:-jarvis-notarytool}"
 REPO_ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 cd "${REPO_ROOT}"
 
+# This script ends by committing the version bump and tagging the release
+# (see step after the reachability gate below). A dirty tree at that point
+# would either mix unrelated changes into the release commit or make the
+# commit itself fail confusingly, so refuse to start.
+[ -z "$(git status --porcelain)" ] || { echo "commit or stash first"; exit 1; }
+
 # Source .env so option_env! macros (GOOGLE_CLIENT_ID, GOOGLE_CLIENT_SECRET,
 # JARVIS_PAYMENT_API) get baked into the release binary at compile time. dotenvy
 # at runtime is enough for `tauri dev`, but a packaged DMG has no .env to read —
@@ -216,7 +222,19 @@ if [ "${RELEASE_OK}" -ne 1 ]; then
 fi
 
 echo ""
+echo "==> Committing release artifacts and tagging v${VERSION}"
+git add package.json src-tauri/tauri.conf.json src-tauri/Cargo.toml src-tauri/Cargo.lock RELEASE_NOTES.md
+git commit -m "release: v${VERSION}"
+git tag "v${VERSION}"
+
+echo ""
 echo "Released v${VERSION}"
 echo "Manifest (live after website deploy): https://jarvis-automation.com/latest.json"
 echo "Download (DMG):  ${DMG_PUBLIC_URL}"
 echo "Updater payload: ${UPDATER_URL}"
+echo ""
+echo "Push this repo:"
+echo "  git push origin main"
+echo "  git push origin v${VERSION}"
+echo "Push the website repo:"
+echo "  git -C \"${REPO_ROOT}/../jarvis-official-website\" push"
