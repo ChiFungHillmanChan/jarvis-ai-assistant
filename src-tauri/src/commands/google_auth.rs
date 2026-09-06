@@ -8,6 +8,22 @@ use tauri::State;
 /// result instead of treating it as success.
 pub const ALREADY_CONNECTED: &str = "Already connected to Google";
 
+/// Scopes requested at OAuth.
+///
+/// gmail.modify is a superset of gmail.readonly, and both are restricted
+/// scopes. Requesting only modify halves the restricted-scope surface the
+/// Google OAuth verification / CASA assessment has to cover.
+///
+/// userinfo.profile is not decoration: `store_profile_name` reads the userinfo
+/// endpoint, and a token without this scope is rejected there. Without it
+/// user_name is never written and `util::display_name` greets every user as
+/// "there" for the life of the install.
+const REQUESTED_SCOPES: &[&str] = &[
+    "https://www.googleapis.com/auth/gmail.modify",
+    "https://www.googleapis.com/auth/calendar",
+    "https://www.googleapis.com/auth/userinfo.profile",
+];
+
 /// What `google_connect` should do for a given (linked, force) pair.
 #[derive(Debug, PartialEq, Eq)]
 enum ConnectPlan {
@@ -50,14 +66,8 @@ pub async fn google_connect(
         ConnectPlan::Fresh => {}
     }
 
-    // gmail.modify is a superset of gmail.readonly, and both are restricted
-    // scopes. Requesting only modify halves the restricted-scope surface the
-    // Google OAuth verification / CASA assessment has to cover.
-    let scopes = vec![
-        "https://www.googleapis.com/auth/gmail.modify".to_string(),
-        "https://www.googleapis.com/auth/calendar".to_string(),
-    ];
-    auth.start_auth_flow(scopes).await?;
+    auth.start_auth_flow(REQUESTED_SCOPES.iter().map(|s| s.to_string()).collect())
+        .await?;
     // A Keychain write that fails silently leaves the user looking connected
     // now and signed out on the next launch. Say so instead.
     auth.save_to_db(&db).map_err(|e| {
@@ -75,6 +85,21 @@ pub async fn google_connect(
             log::warn!("Could not read Google profile name: {}", e);
         }
     }
+    // Nothing used to sync on connect: the first mail and events arrived with
+    // the scheduler's five-minute tick, and until then the injected [CONTEXT]
+    // block reported the empty mirror. Pull one of each now. Best-effort and
+    // off the connect path -- the account is linked either way, and the two run
+    // in sequence so they cannot race each other refreshing the same token.
+    let sync_auth = auth.inner().clone();
+    let sync_db = db.inner().clone();
+    tauri::async_runtime::spawn(async move {
+        if let Err(e) = crate::scheduler::jobs::run_email_sync(&sync_db, &sync_auth).await {
+            log::warn!("First email sync after Google connect failed: {}", e);
+        }
+        if let Err(e) = crate::scheduler::jobs::run_calendar_sync(&sync_db, &sync_auth).await {
+            log::warn!("First calendar sync after Google connect failed: {}", e);
+        }
+    });
     Ok("Connected to Google".to_string())
 }
 
@@ -161,7 +186,20 @@ pub async fn google_status(auth: State<'_, Arc<GoogleAuth>>) -> Result<bool, Str
 
 #[cfg(test)]
 mod tests {
-    use super::{connect_plan, ConnectPlan};
+    use super::{connect_plan, ConnectPlan, REQUESTED_SCOPES};
+
+    #[test]
+    fn profile_scope_is_requested() {
+        // store_profile_name reads https://www.googleapis.com/oauth2/v2/userinfo.
+        // A token carrying only gmail.modify and calendar is rejected there, so
+        // user_name was never written and display_name greeted every user as
+        // "there" for the life of the install.
+        assert!(
+            REQUESTED_SCOPES.contains(&"https://www.googleapis.com/auth/userinfo.profile"),
+            "the userinfo call needs its own scope: {:?}",
+            REQUESTED_SCOPES
+        );
+    }
 
     #[test]
     fn force_relinks_rather_than_dead_ending() {

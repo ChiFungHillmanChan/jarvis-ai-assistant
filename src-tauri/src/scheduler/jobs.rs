@@ -92,7 +92,7 @@ pub async fn run_job(db: &Arc<Database>, auth: &Arc<GoogleAuth>, action_type: &s
     result
 }
 
-async fn run_email_sync(db: &Arc<Database>, auth: &Arc<GoogleAuth>) -> Result<String, String> {
+pub(crate) async fn run_email_sync(db: &Arc<Database>, auth: &Arc<GoogleAuth>) -> Result<String, String> {
     let token = match auth.ensure_access_token().await {
         Ok(t) => t,
         Err(_) => return Ok("Skipped: not authenticated".to_string()),
@@ -110,7 +110,7 @@ async fn run_email_sync(db: &Arc<Database>, auth: &Arc<GoogleAuth>) -> Result<St
     }
 }
 
-async fn run_calendar_sync(db: &Arc<Database>, auth: &Arc<GoogleAuth>) -> Result<String, String> {
+pub(crate) async fn run_calendar_sync(db: &Arc<Database>, auth: &Arc<GoogleAuth>) -> Result<String, String> {
     let token = match auth.ensure_access_token().await {
         Ok(t) => t,
         Err(_) => return Ok("Skipped: not authenticated".to_string()),

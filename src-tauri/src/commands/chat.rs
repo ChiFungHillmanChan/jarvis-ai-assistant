@@ -105,14 +105,7 @@ pub async fn send_message(
             let mut ctx_msgs = Vec::new();
             if needs_context {
                 if let Ok(ctx) = crate::assistant::context::DayContext::gather(&db_arc) {
-                    let context_prompt = format!(
-                        "[CONTEXT] TASKS: {} | CALENDAR: {} | EMAIL: {} | GITHUB: {}",
-                        ctx.tasks_summary.lines().next().unwrap_or(""),
-                        ctx.calendar_summary.lines().next().unwrap_or(""),
-                        ctx.email_summary.lines().next().unwrap_or(""),
-                        ctx.github_summary,
-                    );
-                    ctx_msgs.push(("user".to_string(), context_prompt));
+                    ctx_msgs.push(("user".to_string(), ctx.inline_context()));
                     ctx_msgs.push(("assistant".to_string(), "Understood.".to_string()));
                 }
             }
