@@ -578,7 +578,13 @@ mod tests {
         let handler_start = lib_rs
             .find("tauri::generate_handler![")
             .expect("generate_handler! block must exist in lib.rs");
-        let handler_block = &lib_rs[handler_start..];
+        // Stop at the macro's own closing bracket. Left unbounded the slice ran
+        // to end of file and swallowed this test's own source, so the assertion
+        // message below matched itself and the test could never fail.
+        let handler_len = lib_rs[handler_start..]
+            .find(']')
+            .expect("generate_handler! block must be closed");
+        let handler_block = &lib_rs[handler_start..handler_start + handler_len];
         assert!(
             handler_block.contains("voice::commands::stop_speaking"),
             "voice::commands::stop_speaking must be registered in generate_handler!"
