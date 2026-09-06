@@ -1204,6 +1204,208 @@ mod tests {
         assert_eq!(rows, 0);
     }
 
+    /// The shipped V21 migration -- see the V20 comment above for why this is
+    /// `include_str!`ed rather than a hand-copied string that could drift.
+    const V21_SQL: &str = include_str!("../../migrations/V21__beta_cleanup.sql");
+
+    /// Minimal subset of the four tables V21's statements touch, not a
+    /// replay of the full migration chain -- same approach as
+    /// `fresh_provider_chain_conn` above.
+    fn fresh_v21_conn() -> Connection {
+        let conn = Connection::open_in_memory().expect("open in-memory db");
+        conn.execute_batch(
+            "CREATE TABLE emails (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                gmail_id TEXT UNIQUE NOT NULL,
+                sender TEXT NOT NULL,
+                received_at TEXT NOT NULL
+            );
+            CREATE TABLE user_preferences (
+                key TEXT PRIMARY KEY,
+                value TEXT NOT NULL,
+                updated_at TEXT NOT NULL DEFAULT (datetime('now'))
+            );
+            CREATE TABLE provider_chain (
+                position INTEGER NOT NULL PRIMARY KEY,
+                provider_type TEXT NOT NULL
+                    CHECK(provider_type IN ('claude', 'openai', 'local', 'gemini', 'bedrock')),
+                endpoint_id TEXT,
+                model_id TEXT,
+                enabled INTEGER NOT NULL DEFAULT 1
+            );
+            CREATE TABLE cron_jobs (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                name TEXT NOT NULL,
+                schedule TEXT NOT NULL,
+                action_type TEXT NOT NULL,
+                parameters TEXT,
+                status TEXT NOT NULL DEFAULT 'active',
+                last_run TEXT,
+                next_run TEXT,
+                created_at TEXT NOT NULL DEFAULT (datetime('now')),
+                description TEXT
+            );",
+        )
+        .expect("create V21 subset tables");
+        conn
+    }
+
+    /// Pre-fix rows stored the raw RFC 2822 `Date` header; `received_at` is
+    /// compared with bytewise TEXT collation everywhere, so those rows sort
+    /// wrong and cannot be repaired in place -- they must be dropped. A row
+    /// already in the RFC 3339 shape the gmail fix now writes must survive.
+    #[test]
+    fn v21_deletes_only_pre_fix_email_rows() {
+        let conn = fresh_v21_conn();
+        conn.execute(
+            "INSERT INTO emails (gmail_id, sender, received_at) VALUES ('old', 'a@b.c', ?1)",
+            rusqlite::params!["Thu, 4 Sep 2026 10:15:00 +0800"],
+        )
+        .expect("seed legacy row");
+        conn.execute(
+            "INSERT INTO emails (gmail_id, sender, received_at) VALUES ('new', 'a@b.c', ?1)",
+            rusqlite::params!["2026-09-04T02:15:00Z"],
+        )
+        .expect("seed ISO row");
+
+        conn.execute_batch(V21_SQL).expect("run V21");
+
+        let ids: Vec<String> = conn
+            .prepare("SELECT gmail_id FROM emails ORDER BY gmail_id")
+            .unwrap()
+            .query_map([], |r| r.get(0))
+            .unwrap()
+            .map(|r| r.unwrap())
+            .collect();
+        assert_eq!(ids, vec!["new".to_string()], "only the ISO-format row must survive");
+    }
+
+    /// The V1 seed wrote `ai_provider = 'claude_primary'`, a value no
+    /// provider-selection code recognises. It must be rewritten to the
+    /// actual default, and only that exact key/value pair -- an install that
+    /// already picked `gemini_primary`, or an unrelated preference, must be
+    /// left untouched.
+    #[test]
+    fn v21_rewrites_claude_primary_ai_provider_only() {
+        let conn = fresh_v21_conn();
+        conn.execute(
+            "INSERT INTO user_preferences (key, value) VALUES ('ai_provider', 'claude_primary')",
+            [],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO user_preferences (key, value) VALUES ('language', 'en')",
+            [],
+        )
+        .unwrap();
+
+        conn.execute_batch(V21_SQL).expect("run V21");
+
+        let provider: String = conn
+            .query_row(
+                "SELECT value FROM user_preferences WHERE key = 'ai_provider'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(provider, "gemini_primary");
+        let language: String = conn
+            .query_row(
+                "SELECT value FROM user_preferences WHERE key = 'language'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(language, "en", "an unrelated preference must not be touched");
+    }
+
+    /// Rows persisted before the model id moved on are still pinned to the
+    /// retired `gemini-3-flash-preview` id. The rewrite must key off
+    /// `provider_type = 'gemini'` -- a row of a different provider type that
+    /// happens to carry the same string is not this defect and must be left
+    /// alone.
+    #[test]
+    fn v21_rewrites_flash_id_only_for_gemini_provider_type() {
+        const STALE_FLASH: &str = "gemini-3-flash-preview";
+        let conn = fresh_v21_conn();
+        conn.execute(
+            "INSERT INTO provider_chain (position, provider_type, model_id) VALUES (0, 'gemini', ?1)",
+            rusqlite::params![STALE_FLASH],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO provider_chain (position, provider_type, model_id) VALUES (1, 'claude', ?1)",
+            rusqlite::params![STALE_FLASH],
+        )
+        .unwrap();
+
+        conn.execute_batch(V21_SQL).expect("run V21");
+
+        assert_eq!(model_id_at(&conn, 0).as_deref(), Some("gemini-3.7-flash"));
+        assert_eq!(
+            model_id_at(&conn, 1).as_deref(),
+            Some(STALE_FLASH),
+            "a non-gemini row must not be rewritten"
+        );
+    }
+
+    /// The V14 seed wrote `tts_voice_yue = 'Sin-ji'`, but the installed
+    /// macOS voice is `Sinji` (no hyphen), so `say -v` never matches it.
+    #[test]
+    fn v21_rewrites_sin_ji_voice_pref_to_sinji() {
+        let conn = fresh_v21_conn();
+        conn.execute(
+            "INSERT INTO user_preferences (key, value) VALUES ('tts_voice_yue', 'Sin-ji')",
+            [],
+        )
+        .unwrap();
+
+        conn.execute_batch(V21_SQL).expect("run V21");
+
+        let voice: String = conn
+            .query_row(
+                "SELECT value FROM user_preferences WHERE key = 'tts_voice_yue'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(voice, "Sinji");
+    }
+
+    /// Accepted email rules (`email_rules`) never ran because no cron job
+    /// dispatched `auto_archive_emails`. The seed must land once on a fresh
+    /// install and must not duplicate if the migration body is ever re-run
+    /// against a database that already has it.
+    #[test]
+    fn v21_seeds_auto_archive_job_once_not_twice() {
+        let conn = fresh_v21_conn();
+        conn.execute_batch(V21_SQL).expect("run V21 the first time");
+        conn.execute_batch(V21_SQL).expect("run V21 the second time");
+
+        let count: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM cron_jobs WHERE action_type = 'auto_archive_emails'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(count, 1, "re-running the migration must not duplicate the job");
+
+        let (schedule, status, description): (String, String, Option<String>) = conn
+            .query_row(
+                "SELECT schedule, status, description FROM cron_jobs WHERE action_type = 'auto_archive_emails'",
+                [],
+                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+            )
+            .unwrap();
+        assert_eq!(schedule, "0 */10 * * * *");
+        assert_eq!(status, "active");
+        assert_eq!(
+            description.as_deref(),
+            Some("Archives new mail from senders whose rules you accepted")
+        );
+    }
+
     fn entry(position: i32, provider_type: &str, endpoint_id: Option<&str>) -> ProviderChainEntry {
         ProviderChainEntry {
             position,
