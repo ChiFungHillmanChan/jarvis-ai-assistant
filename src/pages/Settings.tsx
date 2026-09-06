@@ -31,9 +31,6 @@ import {
   clearAwsCredentials,
   getPreference,
   setPreference,
-  enableOfflineVoice,
-  checkCosyvoiceBinary,
-  paymentsStartCheckout,
   setApiKey,
   getApiKeyStatus,
 } from "../lib/commands";
@@ -43,7 +40,7 @@ import type { VoiceSettings, WakeWordStatus, VoiceState, LocalEndpoint, LocalMod
 import { GOOGLE_ALREADY_CONNECTED } from "../lib/types";
 import { useVoiceState } from "../hooks/useVoiceState";
 import LocalAiSetup from "../components/LocalAiSetup";
-import { Cpu, Key, Globe, Gem, Mic, Bot, Palette, CreditCard, GithubMark, NotionMark } from "../components/icons";
+import { Cpu, Key, Globe, Gem, Mic, Bot, Palette, GithubMark, NotionMark } from "../components/icons";
 
 const API_KEY_PROVIDERS = [
   { id: "gemini", label: "Google Gemini", help: "Recommended -- fastest replies" },
@@ -94,17 +91,6 @@ export default function Settings() {
   const { state: voiceState } = useVoiceState();
   const [wallpaperActive, setWallpaperActive] = useState(false);
   const [wallpaperBusy, setWallpaperBusy] = useState(false);
-
-  // Billing / upgrade
-  const [billingEmail, setBillingEmail] = useState("");
-  const [upgrading, setUpgrading] = useState(false);
-  const [payError, setPayError] = useState<string | null>(null);
-
-  useEffect(() => {
-    getPreference("billing_email")
-      .then((v) => { if (v) setBillingEmail(v); })
-      .catch(() => {});
-  }, []);
 
   useEffect(() => {
     getApiKeyStatus().then(setApiKeyStatus).catch(() => {});
@@ -159,18 +145,7 @@ export default function Settings() {
   // Language & Voice prefs
   const [language, setLanguage] = useState("en");
   const [sttLanguage, setSttLanguage] = useState("auto");
-  const [ttsContentProvider, setTtsContentProvider] = useState("sin-ji");
   const [ttsVoiceYue, setTtsVoiceYue] = useState("Sinji");
-  // The MiniMax key lives in the Keychain like every other provider key, so the
-  // form holds a draft and a configured flag -- never the saved secret.
-  const [minimaxKeyDraft, setMinimaxKeyDraft] = useState("");
-  const [minimaxConfigured, setMinimaxConfigured] = useState(false);
-  const [minimaxError, setMinimaxError] = useState<string | null>(null);
-
-  // CosyVoice 2 offline voice
-  const [offlineEnabled, setOfflineEnabled] = useState(false);
-  const [downloadProgress, setDownloadProgress] = useState<string | null>(null);
-  const [hasCosyBinary, setHasCosyBinary] = useState<boolean | null>(null);
 
   // Local LLM state
   const [endpoints, setEndpoints] = useState<LocalEndpoint[]>([]);
@@ -188,9 +163,6 @@ export default function Settings() {
       setAiProvider(s.values["ai_provider"] || "gemini_primary");
       // Same rule as the startup reader in lib.rs: an absent row means off.
       setAutoBriefing(s.values["auto_briefing"] === "true");
-      // get_settings redacts credential rows into a boolean flag; the key
-      // itself is in the Keychain and never comes back over IPC.
-      setMinimaxConfigured(s.values["minimax_api_key_configured"] === "true");
       setLoaded(true);
     });
   }, []);
@@ -232,39 +204,11 @@ export default function Settings() {
       try {
         setLanguage(await getPreference("language"));
         setSttLanguage(await getPreference("stt_language"));
-        setTtsContentProvider(await getPreference("tts_content_provider"));
         setTtsVoiceYue(await getPreference("tts_voice_yue"));
-        setOfflineEnabled((await getPreference("tts_offline_mode")) === "1");
-        setHasCosyBinary(await checkCosyvoiceBinary());
       } catch (e) {
         console.error("load language prefs:", e);
       }
     })();
-  }, []);
-
-  useEffect(() => {
-    let unlisten: (() => void) | null = null;
-    (async () => {
-      const { listen } = await import("@tauri-apps/api/event");
-      const u = await listen<unknown>("cosyvoice_progress", (e) => {
-        const p = e.payload;
-        if (p === "Complete") {
-          setDownloadProgress("Download complete");
-        } else if (p !== null && typeof p === "object" && "File" in p) {
-          const f = (p as { File: { name: string; bytes_done: number } }).File;
-          setDownloadProgress(`Downloading ${f.name} (${f.bytes_done} bytes)`);
-        } else if (p !== null && typeof p === "object" && "Failed" in p) {
-          const err = (p as { Failed: { error: string } }).Failed;
-          setDownloadProgress(`Failed: ${err.error}`);
-        } else {
-          setDownloadProgress(JSON.stringify(p));
-        }
-      });
-      unlisten = u;
-    })();
-    return () => {
-      if (unlisten) unlisten();
-    };
   }, []);
 
   async function refreshWakeStatus() {
@@ -461,20 +405,6 @@ export default function Settings() {
     setNotionSaved(true);
   }
 
-  async function handleUpgrade() {
-    setUpgrading(true);
-    setPayError(null);
-    try {
-      const email = billingEmail.trim();
-      await setPreference("billing_email", email);
-      await paymentsStartCheckout("pro", email);
-    } catch (e) {
-      setPayError(String(e));
-    } finally {
-      setUpgrading(false);
-    }
-  }
-
   async function handleSaveGitHub() {
     if (!githubToken.trim()) return;
     await saveGitHubToken(githubToken);
@@ -485,37 +415,6 @@ export default function Settings() {
     if (!obsidianKey.trim()) return;
     await saveObsidianKey(obsidianKey);
     setObsidianSaved(true);
-  }
-
-  async function handleSaveMinimaxKey() {
-    setMinimaxError(null);
-    // Same rule as the provider keys: a blank draft saves nothing and, above
-    // all, removes nothing.
-    const draft = minimaxKeyDraft.trim();
-    if (!draft) return;
-    try {
-      await setApiKey("minimax", draft);
-      setMinimaxKeyDraft("");
-      const s = await getSettings();
-      setMinimaxConfigured(s.values["minimax_api_key_configured"] === "true");
-    } catch (e) {
-      setMinimaxError(String(e));
-    }
-  }
-
-  async function handleClearMinimaxKey() {
-    setMinimaxError(null);
-    if (!window.confirm("Remove the saved MiniMax key from your Keychain? This cannot be undone.")) {
-      return;
-    }
-    try {
-      await clearApiKey("minimax");
-      setMinimaxKeyDraft("");
-      const s = await getSettings();
-      setMinimaxConfigured(s.values["minimax_api_key_configured"] === "true");
-    } catch (e) {
-      setMinimaxError(String(e));
-    }
   }
 
   async function handleWakeToggle(enabled: boolean) {
@@ -624,7 +523,6 @@ export default function Settings() {
     { id: "voice", label: "Voice", Icon: () => <Mic size={17} /> },
     { id: "assistant", label: "Assistant", Icon: () => <Bot size={17} /> },
     { id: "appearance", label: "Appearance", Icon: () => <Palette size={17} /> },
-    { id: "account", label: "Account", Icon: () => <CreditCard size={17} /> },
   ];
 
   return (
@@ -939,7 +837,7 @@ export default function Settings() {
           <div className="panel" style={styles.panel}>
             <div className="label" style={styles.sectionTitle}>LANGUAGE &amp; VOICE</div>
             <div style={styles.hint}>
-              Controls the assistant's response language, speech-to-text language, and which TTS provider voices Cantonese content.
+              Controls the assistant's response language and speech-to-text language.
             </div>
 
             <div style={{ marginTop: 12 }}>
@@ -966,93 +864,6 @@ export default function Settings() {
                 <option value="en">English</option>
                 <option value="yue">廣東話</option>
               </select>
-            </div>
-
-            <div style={{ marginTop: 12 }}>
-              <div style={{ color: "rgba(0, 180, 255, 0.5)", fontSize: 10, marginBottom: 4 }}>Cantonese content voice</div>
-              <select value={ttsContentProvider} style={styles.select} onChange={async (e) => {
-                const v = e.target.value;
-                setTtsContentProvider(v);
-                await setPreference("tts_content_provider", v);
-              }}>
-                <option value="sin-ji">Sin-ji (free, local, basic)</option>
-                <option value="minimax">MiniMax Speech-02-HD (cloud, best quality)</option>
-                <option value="cosyvoice">CosyVoice 2 (offline, requires download)</option>
-              </select>
-            </div>
-
-            <div style={{ marginTop: 12 }}>
-              <div style={{ color: "rgba(0, 180, 255, 0.5)", fontSize: 10, marginBottom: 4 }}>
-                MiniMax API key (for cloud Cantonese voice)
-                {minimaxConfigured ? <span style={{ color: "rgba(16, 185, 129, 0.7)" }}> -- configured</span> : null}
-              </div>
-              <div style={{ display: "flex", gap: 8 }}>
-                <input
-                  type="password"
-                  value={minimaxKeyDraft}
-                  style={styles.tokenInput}
-                  onChange={(e) => setMinimaxKeyDraft(e.target.value)}
-                  placeholder={minimaxConfigured ? "Replace saved key" : "Required for tts_content_provider = minimax"}
-                />
-                <button
-                  onClick={() => { void handleSaveMinimaxKey(); }}
-                  disabled={!minimaxKeyDraft.trim()}
-                  style={styles.saveBtn}
-                >SAVE</button>
-                {minimaxConfigured && (
-                  <button
-                    onClick={() => { void handleClearMinimaxKey(); }}
-                    style={{ ...styles.saveBtn, borderColor: "rgba(255, 100, 100, 0.3)", color: "rgba(255, 100, 100, 0.7)" }}
-                  >CLEAR</button>
-                )}
-              </div>
-              <div style={{ ...styles.hint, marginTop: 4 }}>
-                Stored in your macOS Keychain. A saved key cannot be read back, so this field
-                stays empty -- entering a new one replaces it, and CLEAR removes it.
-              </div>
-              {minimaxError && <div style={styles.errorText}>{minimaxError}</div>}
-            </div>
-
-            <div style={{ marginTop: 12 }}>
-              <label style={{ display: "flex", gap: 8, alignItems: "center" }}>
-                <input
-                  type="checkbox"
-                  style={styles.radio}
-                  checked={offlineEnabled}
-                  onChange={async (e) => {
-                    if (e.target.checked) {
-                      if (!hasCosyBinary) {
-                        alert(
-                          "speech-swift CosyVoice binary not found in PATH. " +
-                          "Install via `swift build -c release` from https://github.com/soniqo/speech-swift, " +
-                          "then either add it to PATH as `cosyvoice` or set $JARVIS_COSYVOICE_BIN, and re-toggle."
-                        );
-                        return;
-                      }
-                      setDownloadProgress("Starting model download...");
-                      await enableOfflineVoice();
-                      setOfflineEnabled(true);
-                    } else {
-                      await setPreference("tts_offline_mode", "0");
-                      setOfflineEnabled(false);
-                      setDownloadProgress(null);
-                    }
-                  }}
-                />
-                <span style={styles.optionLabel}>
-                  Offline voice mode (downloads ~500MB CosyVoice 2 model on first enable)
-                </span>
-              </label>
-              {hasCosyBinary === false && (
-                <div style={{ ...styles.hint, color: "rgba(255,180,80,0.85)", marginTop: 4 }}>
-                  Note: speech-swift CosyVoice CLI not detected. Build and install it before enabling.
-                </div>
-              )}
-              {downloadProgress && (
-                <div style={{ ...styles.hint, marginTop: 4, fontFamily: "var(--font-mono)" }}>
-                  {downloadProgress}
-                </div>
-              )}
             </div>
           </div>
 
@@ -1083,7 +894,7 @@ export default function Settings() {
           </div>
 
           <div className="panel" style={styles.panel}>
-            <div className="label" style={styles.sectionTitle}>WAKE WORD</div>
+            <div className="label" style={styles.sectionTitle}>WAKE WORD (EXPERIMENTAL)</div>
             <div style={styles.hint}>Always-on local wake-word detection for "Hey Jarvis"</div>
             <label style={styles.option}>
               <input type="checkbox" checked={wakeStatus?.enabled ?? false} disabled={!wakeCanEnable || wakeBusy || modelDownloading !== null} onChange={(e) => { void handleWakeToggle(e.target.checked); }} style={styles.radio} />
@@ -1151,32 +962,6 @@ export default function Settings() {
           </div>
         )}
 
-        {section === "account" && (
-          <div className="panel" style={styles.panel}>
-            <div className="label" style={styles.sectionTitle}>UPGRADE</div>
-            <div style={styles.hint}>
-              JARVIS Pro -- HK$148/mo. All 5 integrations, unlimited voice, automation.
-              Checkout opens in your browser. Stripe test mode until public launch.
-            </div>
-            <div style={{ display: "flex", gap: 8 }}>
-              <input
-                type="email"
-                value={billingEmail}
-                onChange={(e) => setBillingEmail(e.target.value)}
-                placeholder="billing email"
-                style={styles.tokenInput}
-              />
-              <button
-                onClick={() => { void handleUpgrade(); }}
-                disabled={upgrading || !billingEmail.includes("@")}
-                style={styles.actionBtn}
-              >
-                {upgrading ? "OPENING..." : "UPGRADE TO PRO"}
-              </button>
-            </div>
-            {payError && <div style={styles.errorText}>{payError}</div>}
-          </div>
-        )}
       </div>
     </div>
   );

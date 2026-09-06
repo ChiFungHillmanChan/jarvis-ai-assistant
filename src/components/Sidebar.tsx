@@ -1,6 +1,6 @@
 import { memo } from "react";
 import {
-  LayoutDashboard, MessageSquare, Mail, Calendar, Clock, Rocket, Settings,
+  LayoutDashboard, MessageSquare, Mail, Calendar, Clock, Settings,
   GithubMark, NotionMark,
 } from "./icons";
 
@@ -19,7 +19,6 @@ const navItems = [
   { id: "github", label: "GITHUB", Icon: (p: { size: number }) => <GithubMark size={p.size} /> },
   { id: "notion", label: "NOTION", Icon: (p: { size: number }) => <NotionMark size={p.size} /> },
   { id: "cron", label: "CRON", Icon: (p: { size: number }) => <Clock size={p.size} /> },
-  { id: "launch", label: "BETA", Icon: (p: { size: number }) => <Rocket size={p.size} /> },
 ];
 
 export default memo(function Sidebar({ activeView, onNavigate, onChatToggle }: SidebarProps) {

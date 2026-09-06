@@ -1,5 +1,4 @@
 import { useState } from "react";
-import LocalAiSetup from "../components/LocalAiSetup";
 import {
   googleConnect,
   markOnboardingComplete,
@@ -7,7 +6,7 @@ import {
   setApiKey,
 } from "../lib/commands";
 
-type Step = 1 | 2 | 3 | 4;
+type Step = 1 | 2 | 3;
 type OauthErrorKind = "denied" | "timeout" | "no-creds" | "generic";
 
 interface Props {
@@ -73,7 +72,7 @@ export default function OnboardingWizard({ onComplete }: Props) {
     try {
       await googleConnect();
       setOauthInFlight(false);
-      setStep(4);
+      setStep(3);
     } catch (e) {
       const raw = String(e);
       setOauthError({ kind: classifyOauthError(raw), raw });
@@ -93,7 +92,7 @@ export default function OnboardingWizard({ onComplete }: Props) {
 
   return (
     <div style={styles.container}>
-      <div style={styles.stepBadge}>STEP {step} / 4</div>
+      <div style={styles.stepBadge}>STEP {step} / 3</div>
       <h1 style={styles.title}>{titleFor(step)}</h1>
       {globalError && <div style={styles.error}>{globalError}</div>}
 
@@ -134,33 +133,6 @@ export default function OnboardingWizard({ onComplete }: Props) {
       )}
 
       {step === 2 && (
-        <div>
-          <p style={styles.body}>
-            Optional. JARVIS can run a model on your Mac for full privacy, but it requires
-            installing a local backend such as Ollama or LM Studio. If you set up cloud
-            keys on the previous step, you can skip this entirely.
-          </p>
-          <div style={styles.skipBanner}>
-            <div>
-              <div style={styles.skipBannerTitle}>Already configured cloud?</div>
-              <div style={styles.skipBannerHint}>You can skip local setup.</div>
-            </div>
-            <button style={styles.skipPrimary} onClick={() => setStep(3)}>Skip local setup</button>
-          </div>
-          <LocalAiSetup
-            endpoints={[]}
-            onEndpointAdded={() => {}}
-            onModelsLoaded={() => {}}
-            onAddToChain={() => {}}
-          />
-          <div style={styles.row}>
-            <button style={styles.skip} onClick={() => setStep(3)}>Skip</button>
-            <button style={styles.next} onClick={() => setStep(3)}>Next</button>
-          </div>
-        </div>
-      )}
-
-      {step === 3 && (
         <div>
           <p style={styles.body}>
             Connect Gmail and Calendar so JARVIS can triage email and schedule
@@ -204,7 +176,7 @@ export default function OnboardingWizard({ onComplete }: Props) {
                 )}
                 <button
                   style={styles.errorSkip}
-                  onClick={() => { setOauthError(null); setStep(4); }}
+                  onClick={() => { setOauthError(null); setStep(3); }}
                 >Skip and connect later</button>
               </div>
             </div>
@@ -218,21 +190,21 @@ export default function OnboardingWizard({ onComplete }: Props) {
               </div>
               <button
                 style={styles.statusSkip}
-                onClick={() => { setOauthInFlight(false); setStep(4); }}
+                onClick={() => { setOauthInFlight(false); setStep(3); }}
               >Skip for now</button>
             </div>
           )}
 
           {!oauthInFlight && !oauthError && (
             <div style={styles.row}>
-              <button style={styles.skip} onClick={() => setStep(4)}>Skip</button>
+              <button style={styles.skip} onClick={() => setStep(3)}>Skip</button>
               <button style={styles.next} onClick={handleConnectGoogle}>Connect Google</button>
             </div>
           )}
         </div>
       )}
 
-      {step === 4 && (
+      {step === 3 && (
         <div>
           <p style={styles.body}>
             Setup complete. Press Start to open the Dashboard. You can run a test
@@ -251,9 +223,8 @@ export default function OnboardingWizard({ onComplete }: Props) {
 function titleFor(step: Step): string {
   switch (step) {
     case 1: return "Cloud AI providers";
-    case 2: return "Local AI (optional)";
-    case 3: return "Connect Google";
-    case 4: return "Ready";
+    case 2: return "Connect Google";
+    case 3: return "Ready";
   }
 }
 
@@ -266,10 +237,6 @@ const styles: Record<string, React.CSSProperties> = {
   row: { display: "flex", gap: 8, marginTop: 16 },
   next: { background: "rgba(0,180,255,0.12)", border: "1px solid rgba(0,180,255,0.4)", borderRadius: 6, padding: "10px 14px", color: "rgba(0,180,255,0.9)", cursor: "pointer", fontFamily: "var(--font-mono)" },
   skip: { background: "transparent", border: "1px solid rgba(0,180,255,0.2)", borderRadius: 6, padding: "10px 14px", color: "rgba(0,180,255,0.6)", cursor: "pointer", fontFamily: "var(--font-mono)" },
-  skipBanner: { display: "flex", justifyContent: "space-between", alignItems: "center", gap: 12, padding: "12px 14px", marginBottom: 16, background: "rgba(0,180,255,0.06)", border: "1px solid rgba(0,180,255,0.25)", borderRadius: 8 },
-  skipBannerTitle: { color: "rgba(0,180,255,0.9)", fontSize: 13, fontWeight: 600 },
-  skipBannerHint: { color: "rgba(0,180,255,0.55)", fontSize: 11, marginTop: 2 },
-  skipPrimary: { background: "rgba(0,180,255,0.18)", border: "1px solid rgba(0,180,255,0.5)", borderRadius: 6, padding: "8px 14px", color: "rgba(0,180,255,0.95)", cursor: "pointer", fontFamily: "var(--font-mono)", fontSize: 11, letterSpacing: 1, whiteSpace: "nowrap" },
   error: { color: "rgba(255,100,100,0.9)", border: "1px solid rgba(255,100,100,0.3)", borderRadius: 6, padding: 12, marginBottom: 12, fontSize: 12, background: "rgba(255,100,100,0.04)" },
   errorTitle: { fontWeight: 600, marginBottom: 4, fontSize: 12, letterSpacing: 0.5 },
   errorBody: { color: "rgba(255,180,180,0.85)", lineHeight: 1.5 },
