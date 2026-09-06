@@ -429,7 +429,14 @@ async fn handle_wake_word_detection(
             return Err(e);
         }
     };
-    save_message(&db, "assistant", &response)?;
+    // The assistant turn goes through the shared guard, never the raw insert:
+    // a provider that returns no text still yields Ok("") here, and a blank row
+    // renders as an empty bubble and replays as an empty message part.
+    {
+        let conn = db.conn.lock().map_err(|e| e.to_string())?;
+        crate::commands::chat::persist_assistant_reply(&conn, &response)
+            .map_err(|e| e.to_string())?;
+    }
 
     // Show assistant response in chat
     let _ = app_handle.emit(
@@ -991,5 +998,34 @@ mod tests {
             );
             now += step;
         }
+    }
+
+    /// The wake-word turn is the third assistant-reply persist site, and it is
+    /// the one that reaches every provider in the chain through `Workload::Tools`:
+    /// Claude, OpenAI, Bedrock and the local backends can all return `Ok("")`,
+    /// which used to be inserted verbatim and render as an empty chat bubble.
+    /// The compiler cannot see that this call site skipped the shared guard, so
+    /// the wiring is checked as a property of the source text. The search is
+    /// bounded to this one function's body, so the assertions below cannot
+    /// satisfy themselves.
+    #[test]
+    fn the_wake_word_assistant_turn_goes_through_the_shared_guard() {
+        let source = include_str!("wake_word.rs");
+        let start = source
+            .find("async fn handle_wake_word_detection(")
+            .expect("handle_wake_word_detection must exist");
+        let len = source[start..]
+            .find("\nasync fn transcribe_local_window(")
+            .expect("transcribe_local_window must follow handle_wake_word_detection");
+        let body = &source[start..start + len];
+
+        assert!(
+            body.contains("persist_assistant_reply"),
+            "the wake-word flow must persist the assistant turn through persist_assistant_reply"
+        );
+        assert!(
+            !body.contains("save_message(&db, \"assistant\""),
+            "the wake-word flow must not insert the assistant turn with the unguarded save_message"
+        );
     }
 }
