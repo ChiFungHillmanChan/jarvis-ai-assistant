@@ -198,11 +198,15 @@ async fn streaming_tts_consumer(
     mut rx: mpsc::Receiver<TtsCommand>,
 ) {
     if !tts.enabled {
-        // Drain channel without speaking. Nothing else on this path emits
-        // "idle" -- callers rely on the consumer for it -- so without this
-        // the "Composing response..." HUD never dismisses with TTS off.
-        let _ = app_handle.emit("chat-state", json!({"state": "idle"}));
+        // Drain the channel without speaking, and only then say the turn is
+        // over. The consumer is spawned before the provider call, so emitting
+        // on entry told the HUD "idle" while the request was still in flight:
+        // App.tsx arms a 900 ms timer on any non-thinking state, so the
+        // "Understanding your request..." HUD blanked a second in and stayed
+        // blank until the first text token. The channel closes when the caller
+        // drops the sender in `finish()`, which is the turn actually ending.
         while rx.recv().await.is_some() {}
+        let _ = app_handle.emit("chat-state", json!({"state": "idle"}));
         return;
     }
 
@@ -923,6 +927,40 @@ mod tests {
         // but the utterance is still armed.
         tts.speak("   ").await.expect("speak");
         assert!(!tts.is_cancelled());
+    }
+
+    /// Task 7 asked for the idle emit "before returning", and with TTS off
+    /// that distinction is the whole fix: the consumer is spawned before the
+    /// model call (commands/chat.rs, voice/commands.rs, voice/wake_word.rs all
+    /// build StreamingTts first), so an emit at the top of the branch reports
+    /// the turn finished before it starts. Ordering inside a spawned task that
+    /// needs a real tauri::AppHandle cannot be observed from a unit test, so it
+    /// is checked as a property of the source, bounded to the branch itself.
+    #[test]
+    fn the_disabled_branch_reports_idle_only_after_the_channel_closes() {
+        let source = include_str!("tts.rs");
+        let consumer = source
+            .find("async fn streaming_tts_consumer(")
+            .expect("streaming_tts_consumer must exist");
+        let body = &source[consumer..];
+        let branch_start = body
+            .find("if !tts.enabled {")
+            .expect("the disabled branch must exist");
+        let branch_len = body[branch_start..]
+            .find("\n    }\n")
+            .expect("the disabled branch must be closed");
+        let branch = &body[branch_start..branch_start + branch_len];
+
+        let drain = branch
+            .find("while rx.recv().await.is_some() {}")
+            .expect("the disabled branch must drain the channel");
+        let emit = branch
+            .find("chat-state")
+            .expect("the disabled branch must still return the HUD to idle");
+        assert!(
+            drain < emit,
+            "idle must be emitted after the drain, not while the model call is still running"
+        );
     }
 
     #[test]
