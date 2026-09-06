@@ -79,7 +79,7 @@ pub async fn sync_calendar(db: State<'_, Arc<Database>>, auth: State<'_, Arc<Goo
     let time_max = (now + chrono::TimeDelta::days(7)).to_rfc3339();
     let events = cal::fetch_events(&token, &time_min, &time_max).await?;
     let count = events.len();
-    cal::save_to_db(&db, &events)?;
+    cal::save_to_db(&db, &events, &time_min, &time_max)?;
     Ok(format!("Synced {} events", count))
 }
 

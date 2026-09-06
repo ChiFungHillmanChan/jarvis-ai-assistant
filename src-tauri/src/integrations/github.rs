@@ -1,5 +1,6 @@
 // jarvis/src-tauri/src/integrations/github.rs
 use serde::{Deserialize, Serialize};
+use std::collections::HashSet;
 
 const GITHUB_API: &str = "https://api.github.com";
 
@@ -273,10 +274,17 @@ pub async fn create_issue(
     Ok(result["html_url"].as_str().unwrap_or("").to_string())
 }
 
-pub fn save_to_db(db: &crate::db::Database, items: &[GitHubItem]) -> Result<(), String> {
-    let conn = db.conn.lock().map_err(|e| e.to_string())?;
-    for item in items {
-        conn.execute(
+/// The item types the assigned-issues call covers. Both come out of the same
+/// `/issues?filter=assigned&state=open` request, so either it succeeded and both
+/// are complete or `fetch_assigned_items_detailed` returned Err and nothing
+/// reaches this function at all.
+const ASSIGNED_TYPES: [&str; 2] = ["issue", "pr"];
+
+pub fn save_to_db(db: &crate::db::Database, fetched: &AssignedItemsFetch) -> Result<(), String> {
+    let mut conn = db.conn.lock().map_err(|e| e.to_string())?;
+    let tx = conn.transaction().map_err(|e| e.to_string())?;
+    for item in &fetched.items {
+        tx.execute(
             "INSERT INTO github_items (github_id, item_type, title, repo, number, state, url, author, updated_at, ci_status)
              VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)
              ON CONFLICT(github_id, item_type) DO UPDATE SET
@@ -284,7 +292,48 @@ pub fn save_to_db(db: &crate::db::Database, items: &[GitHubItem]) -> Result<(), 
             rusqlite::params![item.github_id, item.item_type, item.title, item.repo, item.number, item.state, item.url, item.author, item.updated_at, item.ci_status],
         ).map_err(|e| e.to_string())?;
     }
-    Ok(())
+
+    // Reconcile only the halves that actually came back. The review-requested
+    // search runs on its own rate budget and fails independently (`warning`);
+    // its rows are then stale rather than gone, and deleting them would empty
+    // the review queue on every rate limit. The assigned half is always complete
+    // here, so an issue that was closed or unassigned stops inflating the counts
+    // instead of sitting in github_items forever.
+    let mut reconciled: Vec<&str> = ASSIGNED_TYPES.to_vec();
+    if fetched.warning.is_none() {
+        reconciled.push("pr_review");
+    }
+    let live: HashSet<(i64, &str)> = fetched
+        .items
+        .iter()
+        .map(|item| (item.github_id, item.item_type.as_str()))
+        .collect();
+    let gone: Vec<(i64, String)> = {
+        let mut stmt = tx
+            .prepare("SELECT github_id, item_type FROM github_items")
+            .map_err(|e| e.to_string())?;
+        let stored = stmt
+            .query_map([], |r| Ok((r.get::<_, i64>(0)?, r.get::<_, String>(1)?)))
+            .map_err(|e| e.to_string())?
+            .collect::<Result<Vec<(i64, String)>, _>>()
+            .map_err(|e| e.to_string())?;
+        stored
+            .into_iter()
+            .filter(|(github_id, item_type)| {
+                reconciled.contains(&item_type.as_str())
+                    && !live.contains(&(*github_id, item_type.as_str()))
+            })
+            .collect()
+    };
+    for (github_id, item_type) in gone {
+        tx.execute(
+            "DELETE FROM github_items WHERE github_id = ?1 AND item_type = ?2",
+            rusqlite::params![github_id, item_type],
+        )
+        .map_err(|e| e.to_string())?;
+    }
+
+    tx.commit().map_err(|e| e.to_string())
 }
 
 #[cfg(test)]
@@ -339,5 +388,120 @@ mod tests {
         assert!(!is_rate_limited(403, None, None));
         assert!(!is_rate_limited(422, None, None));
         assert!(!is_rate_limited(503, None, None));
+    }
+}
+
+#[cfg(test)]
+mod sync_tests {
+    use super::*;
+    use rusqlite::Connection;
+    use std::sync::Mutex;
+
+    fn github_db() -> crate::db::Database {
+        let conn = Connection::open_in_memory().unwrap();
+        conn.execute_batch(
+            "CREATE TABLE github_items (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                github_id INTEGER NOT NULL,
+                item_type TEXT NOT NULL,
+                title TEXT NOT NULL,
+                repo TEXT NOT NULL,
+                number INTEGER,
+                state TEXT NOT NULL,
+                url TEXT,
+                author TEXT,
+                updated_at TEXT,
+                ci_status TEXT,
+                synced_at TEXT NOT NULL DEFAULT (datetime('now')),
+                UNIQUE(github_id, item_type)
+            );",
+        )
+        .unwrap();
+        crate::db::Database { conn: Mutex::new(conn) }
+    }
+
+    fn seed(db: &crate::db::Database, github_id: i64, item_type: &str) {
+        db.conn
+            .lock()
+            .unwrap()
+            .execute(
+                "INSERT INTO github_items (github_id, item_type, title, repo, state)
+                 VALUES (?1, ?2, 'title', 'owner/repo', 'open')",
+                rusqlite::params![github_id, item_type],
+            )
+            .unwrap();
+    }
+
+    fn stored(db: &crate::db::Database) -> Vec<(i64, String)> {
+        let conn = db.conn.lock().unwrap();
+        let mut stmt = conn
+            .prepare("SELECT github_id, item_type FROM github_items ORDER BY github_id, item_type")
+            .unwrap();
+        let rows = stmt
+            .query_map([], |r| Ok((r.get::<_, i64>(0)?, r.get::<_, String>(1)?)))
+            .unwrap()
+            .collect::<Result<Vec<(i64, String)>, _>>()
+            .unwrap();
+        rows
+    }
+
+    fn item(github_id: i64, item_type: &str) -> GitHubItem {
+        GitHubItem {
+            github_id,
+            item_type: item_type.to_string(),
+            title: "title".to_string(),
+            repo: "owner/repo".to_string(),
+            number: Some(1),
+            state: "open".to_string(),
+            url: None,
+            author: None,
+            updated_at: None,
+            ci_status: None,
+        }
+    }
+
+    fn complete(items: Vec<GitHubItem>) -> AssignedItemsFetch {
+        AssignedItemsFetch { items, warning: None }
+    }
+
+    #[test]
+    fn an_item_that_left_the_fetch_is_dropped() {
+        // The assigned query asks for state=open, so a closed or unassigned
+        // issue simply stops coming back. Upsert alone left it inflating the
+        // open-issue count forever.
+        let db = github_db();
+        seed(&db, 1, "issue");
+        seed(&db, 10, "pr_review");
+        save_to_db(&db, &complete(vec![item(2, "issue")])).unwrap();
+        assert_eq!(stored(&db), vec![(2, "issue".to_string())]);
+    }
+
+    #[test]
+    fn a_failed_review_search_leaves_the_review_queue_alone() {
+        // The review search has its own rate budget and fails independently.
+        // Its rows are then stale, not gone -- deleting them would empty the
+        // review queue on every 403 while the assigned half still reconciles.
+        let db = github_db();
+        seed(&db, 1, "issue");
+        seed(&db, 10, "pr_review");
+        let fetched = AssignedItemsFetch {
+            items: vec![item(2, "issue")],
+            warning: Some(search_failure_warning(403, Some("0"), None, "")),
+        };
+        save_to_db(&db, &fetched).unwrap();
+        assert_eq!(
+            stored(&db),
+            vec![(2, "issue".to_string()), (10, "pr_review".to_string())]
+        );
+    }
+
+    #[test]
+    fn a_re_fetched_item_is_restored() {
+        let db = github_db();
+        save_to_db(&db, &complete(vec![item(1, "issue")])).unwrap();
+        save_to_db(&db, &complete(vec![])).unwrap();
+        assert!(stored(&db).is_empty(), "an empty fetch clears the mirror");
+        save_to_db(&db, &complete(vec![item(1, "issue")])).unwrap();
+        assert_eq!(stored(&db), vec![(1, "issue".to_string())]);
     }
 }

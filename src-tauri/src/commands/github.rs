@@ -62,7 +62,7 @@ pub async fn sync_github(db: State<'_, Arc<Database>>) -> Result<String, String>
         .ok_or_else(|| "GitHub token not configured".to_string())?;
     let fetched = github::fetch_assigned_items_detailed(&token).await?;
     let count = fetched.items.len();
-    github::save_to_db(&db, &fetched.items)?;
+    github::save_to_db(&db, &fetched)?;
     Ok(sync_summary(count, fetched.warning.as_deref()))
 }
 

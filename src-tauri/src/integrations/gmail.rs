@@ -2,6 +2,7 @@ use base64::Engine;
 use futures_util::stream::StreamExt;
 use reqwest::Client;
 use serde::{Deserialize, Serialize};
+use std::collections::HashSet;
 use std::sync::LazyLock;
 
 const GMAIL_API: &str = "https://gmail.googleapis.com/gmail/v1/users/me";
@@ -387,17 +388,71 @@ pub async fn archive_message(access_token: &str, message_id: &str) -> Result<(),
     Ok(())
 }
 
-pub fn save_to_db(db: &crate::db::Database, messages: &[GmailMessage]) -> Result<(), String> {
-    let conn = db.conn.lock().map_err(|e| e.to_string())?;
-    for msg in messages {
-        conn.execute(
+/// The local inbox rows a fetched batch covers. `fetch_inbox` asks Gmail for the
+/// newest `max_results` messages carrying the INBOX label, so every row at least
+/// as new as the oldest message that came back was inside that window: one that
+/// did not come back has left the INBOX -- archived on the phone, deleted, or
+/// filtered -- and must stop counting as inbox mail. Rows older than the batch
+/// were never in the window and are left alone.
+///
+/// datetime() on both sides rather than a text compare: `normalise_received_at`
+/// falls back to the raw RFC2822 Date header when neither value parses, and that
+/// shape does not sort against the normalised one. datetime() yields NULL for it,
+/// so the comparison is NULL and the row is skipped -- the safe direction.
+const INBOX_WINDOW_QUERY: &str =
+    "SELECT gmail_id FROM emails WHERE is_archived = 0 AND datetime(received_at) >= datetime(?1)";
+
+pub fn save_to_db(db: &crate::db::Database, fetched: &InboxFetch) -> Result<(), String> {
+    let mut conn = db.conn.lock().map_err(|e| e.to_string())?;
+    // One transaction: the upsert and the reconciliation below are one view of
+    // the inbox, and a half-applied one archives mail that is still there.
+    let tx = conn.transaction().map_err(|e| e.to_string())?;
+    for msg in &fetched.messages {
+        // is_archived = 0 on conflict, so a message moved back into the INBOX --
+        // or one an earlier reconciliation archived -- reappears in the list.
+        tx.execute(
             "INSERT INTO emails (gmail_id, thread_id, subject, sender, snippet, labels, is_read, received_at)
              VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)
-             ON CONFLICT(gmail_id) DO UPDATE SET is_read = ?7, labels = ?6, synced_at = datetime('now')",
+             ON CONFLICT(gmail_id) DO UPDATE SET is_read = ?7, labels = ?6, is_archived = 0, synced_at = datetime('now')",
             rusqlite::params![msg.id, msg.thread_id, msg.subject, msg.sender, msg.snippet, msg.label_ids.join(","), msg.is_read as i32, msg.received_at],
         ).map_err(|e| e.to_string())?;
     }
-    Ok(())
+
+    // An empty batch establishes no window. A batch that lost messages to failed
+    // detail fetches (`warning`) is not the inbox either, so reconciling against
+    // it would archive mail that is still sitting in it.
+    if fetched.warning.is_none() {
+        let oldest = fetched
+            .messages
+            .iter()
+            .filter_map(|m| m.received_at.as_deref())
+            .min();
+        if let Some(oldest) = oldest {
+            let in_batch: HashSet<&str> =
+                fetched.messages.iter().map(|m| m.id.as_str()).collect();
+            let left_the_inbox: Vec<String> = {
+                let mut stmt = tx.prepare(INBOX_WINDOW_QUERY).map_err(|e| e.to_string())?;
+                let covered = stmt
+                    .query_map(rusqlite::params![oldest], |r| r.get::<_, String>(0))
+                    .map_err(|e| e.to_string())?
+                    .collect::<Result<Vec<String>, _>>()
+                    .map_err(|e| e.to_string())?;
+                covered
+                    .into_iter()
+                    .filter(|gmail_id| !in_batch.contains(gmail_id.as_str()))
+                    .collect()
+            };
+            for gmail_id in left_the_inbox {
+                tx.execute(
+                    "UPDATE emails SET is_archived = 1 WHERE gmail_id = ?1",
+                    rusqlite::params![gmail_id],
+                )
+                .map_err(|e| e.to_string())?;
+            }
+        }
+    }
+
+    tx.commit().map_err(|e| e.to_string())
 }
 
 pub async fn search_messages(access_token: &str, query: &str) -> Result<Vec<GmailMessage>, String> {
@@ -926,5 +981,137 @@ mod tests {
             normalise_received_at(internal_date, date_header),
             Some("this is not a real date".to_string())
         );
+    }
+}
+
+#[cfg(test)]
+mod sync_tests {
+    use super::*;
+    use rusqlite::Connection;
+    use std::sync::Mutex;
+
+    fn emails_db() -> crate::db::Database {
+        let conn = Connection::open_in_memory().unwrap();
+        conn.execute_batch(
+            "CREATE TABLE emails (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                gmail_id TEXT UNIQUE NOT NULL,
+                thread_id TEXT,
+                subject TEXT,
+                sender TEXT NOT NULL,
+                snippet TEXT,
+                labels TEXT,
+                importance_score INTEGER DEFAULT 0,
+                is_spam INTEGER DEFAULT 0,
+                is_read INTEGER DEFAULT 0,
+                received_at TEXT NOT NULL,
+                synced_at TEXT NOT NULL DEFAULT (datetime('now')),
+                is_archived INTEGER NOT NULL DEFAULT 0
+            );",
+        )
+        .unwrap();
+        crate::db::Database { conn: Mutex::new(conn) }
+    }
+
+    fn seed(db: &crate::db::Database, gmail_id: &str, received_at: &str, is_archived: i32) {
+        db.conn
+            .lock()
+            .unwrap()
+            .execute(
+                "INSERT INTO emails (gmail_id, sender, labels, received_at, is_archived)
+                 VALUES (?1, 'sender@example.com', 'INBOX', ?2, ?3)",
+                rusqlite::params![gmail_id, received_at, is_archived],
+            )
+            .unwrap();
+    }
+
+    fn archived(db: &crate::db::Database, gmail_id: &str) -> i32 {
+        db.conn
+            .lock()
+            .unwrap()
+            .query_row(
+                "SELECT is_archived FROM emails WHERE gmail_id = ?1",
+                rusqlite::params![gmail_id],
+                |r| r.get(0),
+            )
+            .unwrap()
+    }
+
+    fn message(id: &str, received_at: &str) -> GmailMessage {
+        GmailMessage {
+            id: id.to_string(),
+            thread_id: None,
+            subject: Some("subject".to_string()),
+            sender: Some("sender@example.com".to_string()),
+            snippet: None,
+            label_ids: vec!["INBOX".to_string()],
+            is_read: false,
+            received_at: Some(received_at.to_string()),
+        }
+    }
+
+    fn complete(messages: Vec<GmailMessage>) -> InboxFetch {
+        InboxFetch { messages, warning: None }
+    }
+
+    #[test]
+    fn mail_older_than_the_batch_survives_the_sync() {
+        // fetch_inbox returns the newest N: a message older than all of them was
+        // never inside the fetched window, so its absence says nothing.
+        let db = emails_db();
+        seed(&db, "old", "2026-08-01T09:00:00Z", 0);
+        save_to_db(&db, &complete(vec![message("new", "2026-09-04T09:00:00Z")])).unwrap();
+        assert_eq!(
+            archived(&db, "old"),
+            0,
+            "mail outside the fetched window must not be archived"
+        );
+    }
+
+    #[test]
+    fn mail_that_left_the_inbox_is_archived_locally() {
+        // Archived on the phone: inside the window, absent from the batch.
+        // Leaving it at is_archived = 0 kept it in every list and count.
+        let db = emails_db();
+        seed(&db, "gone", "2026-09-04T10:00:00Z", 0);
+        save_to_db(&db, &complete(vec![message("kept", "2026-09-04T09:00:00Z")])).unwrap();
+        assert_eq!(archived(&db, "gone"), 1);
+        assert_eq!(archived(&db, "kept"), 0);
+    }
+
+    #[test]
+    fn mail_moved_back_to_the_inbox_is_unarchived() {
+        let db = emails_db();
+        seed(&db, "back", "2026-09-04T10:00:00Z", 1);
+        save_to_db(&db, &complete(vec![message("back", "2026-09-04T10:00:00Z")])).unwrap();
+        assert_eq!(
+            archived(&db, "back"),
+            0,
+            "a message that returned to the INBOX must reappear in the list"
+        );
+    }
+
+    #[test]
+    fn an_empty_batch_archives_nothing() {
+        // No batch, no window: an empty fetch establishes no oldest message to
+        // reconcile against.
+        let db = emails_db();
+        seed(&db, "still-here", "2026-09-04T10:00:00Z", 0);
+        save_to_db(&db, &complete(vec![])).unwrap();
+        assert_eq!(archived(&db, "still-here"), 0);
+    }
+
+    #[test]
+    fn a_partial_fetch_archives_nothing() {
+        // Detail fetches failed, so the batch is not the inbox. Reconciling
+        // against it would hide mail that is still sitting there.
+        let db = emails_db();
+        seed(&db, "unlucky", "2026-09-04T10:00:00Z", 0);
+        let fetched = InboxFetch {
+            messages: vec![message("kept", "2026-09-04T09:00:00Z")],
+            warning: Some("1 of 2 messages could not be fetched".to_string()),
+        };
+        save_to_db(&db, &fetched).unwrap();
+        assert_eq!(archived(&db, "unlucky"), 0);
     }
 }

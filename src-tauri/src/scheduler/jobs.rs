@@ -97,13 +97,16 @@ pub(crate) async fn run_email_sync(db: &Arc<Database>, auth: &Arc<GoogleAuth>) -
         Ok(t) => t,
         Err(_) => return Ok("Skipped: not authenticated".to_string()),
     };
-    match gmail::fetch_inbox(&token, 20).await {
-        Ok(msgs) => { let c = msgs.len(); gmail::save_to_db(db, &msgs)?; Ok(format!("Synced {} emails", c)) }
+    // The detailed form: `save_to_db` reconciles the local mirror against the
+    // batch, and a batch missing messages to failed detail fetches must not
+    // archive mail that is still in the inbox.
+    match gmail::fetch_inbox_detailed(&token, 20).await {
+        Ok(f) => { let c = f.messages.len(); gmail::save_to_db(db, &f)?; Ok(format!("Synced {} emails", c)) }
         Err(ref e) if e == "UNAUTHORIZED" => {
             auth.refresh_access_token().await?;
             let t = auth.get_access_token().ok_or("No token after refresh")?;
-            let msgs = gmail::fetch_inbox(&t, 20).await?;
-            let c = msgs.len(); gmail::save_to_db(db, &msgs)?;
+            let f = gmail::fetch_inbox_detailed(&t, 20).await?;
+            let c = f.messages.len(); gmail::save_to_db(db, &f)?;
             Ok(format!("Synced {} emails (refreshed)", c))
         }
         Err(e) => Err(e),
@@ -119,12 +122,12 @@ pub(crate) async fn run_calendar_sync(db: &Arc<Database>, auth: &Arc<GoogleAuth>
     let time_min = now.to_rfc3339();
     let time_max = (now + chrono::TimeDelta::days(7)).to_rfc3339();
     match calendar::fetch_events(&token, &time_min, &time_max).await {
-        Ok(evts) => { let c = evts.len(); calendar::save_to_db(db, &evts)?; Ok(format!("Synced {} events", c)) }
+        Ok(evts) => { let c = evts.len(); calendar::save_to_db(db, &evts, &time_min, &time_max)?; Ok(format!("Synced {} events", c)) }
         Err(ref e) if e == "UNAUTHORIZED" => {
             auth.refresh_access_token().await?;
             let t = auth.get_access_token().ok_or("No token after refresh")?;
             let evts = calendar::fetch_events(&t, &time_min, &time_max).await?;
-            let c = evts.len(); calendar::save_to_db(db, &evts)?;
+            let c = evts.len(); calendar::save_to_db(db, &evts, &time_min, &time_max)?;
             Ok(format!("Synced {} events (refreshed)", c))
         }
         Err(e) => Err(e),
@@ -147,9 +150,11 @@ async fn run_github_digest(db: &Arc<Database>) -> Result<String, String> {
         Some(t) => t,
         None => return Ok("Skipped: GitHub token not configured".to_string()),
     };
-    let items = github::fetch_assigned_items(&token).await?;
-    let count = items.len();
-    github::save_to_db(db, &items)?;
+    // The detailed form: `save_to_db` only reconciles the halves of the fetch
+    // that actually succeeded, and the warning is what tells it which.
+    let fetched = github::fetch_assigned_items_detailed(&token).await?;
+    let count = fetched.items.len();
+    github::save_to_db(db, &fetched)?;
     Ok(format!("Synced {} GitHub items", count))
 }
 

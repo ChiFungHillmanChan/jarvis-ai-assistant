@@ -38,8 +38,11 @@ pub fn get_emails(db: State<Arc<Database>>, limit: Option<u32>) -> Result<Vec<Em
 #[tauri::command]
 pub async fn sync_emails(db: State<'_, Arc<Database>>, auth: State<'_, Arc<GoogleAuth>>) -> Result<String, String> {
     let token = auth.ensure_access_token().await?;
-    let messages = match gmail::fetch_inbox(&token, 20).await {
-        Ok(msgs) => msgs,
+    // The detailed form, because `save_to_db` reconciles the local mirror
+    // against the batch and must not archive mail that a failed detail fetch
+    // merely dropped from it.
+    let fetched = match gmail::fetch_inbox_detailed(&token, 20).await {
+        Ok(f) => f,
         // Backstop, matching the scheduler's sync job: `ensure_access_token`
         // now refreshes before the token expires, but a token Google
         // invalidates early still has to be recovered rather than surfaced to
@@ -47,12 +50,12 @@ pub async fn sync_emails(db: State<'_, Arc<Database>>, auth: State<'_, Arc<Googl
         Err(ref e) if e == "UNAUTHORIZED" => {
             auth.refresh_access_token().await?;
             let refreshed = auth.get_access_token().ok_or("No token after refresh")?;
-            gmail::fetch_inbox(&refreshed, 20).await?
+            gmail::fetch_inbox_detailed(&refreshed, 20).await?
         }
         Err(e) => return Err(e),
     };
-    let count = messages.len();
-    gmail::save_to_db(&db, &messages)?;
+    let count = fetched.messages.len();
+    gmail::save_to_db(&db, &fetched)?;
     Ok(format!("Synced {} emails", count))
 }
 

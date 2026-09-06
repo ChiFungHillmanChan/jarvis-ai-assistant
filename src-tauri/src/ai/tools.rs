@@ -637,6 +637,7 @@ async fn execute_calendar_tool(
     name: &str,
     args: &serde_json::Value,
     token: &str,
+    db: &crate::db::Database,
 ) -> Result<String, String> {
     use crate::integrations::calendar;
     match name {
@@ -709,7 +710,22 @@ async fn execute_calendar_tool(
         }
         "delete_event" => {
             let event_id = args["event_id"].as_str().unwrap_or("");
-            calendar::delete_event(token, event_id).await
+            let result = calendar::delete_event(token, event_id).await?;
+            // Google has confirmed the deletion, so drop the local mirror row
+            // too. Without this the event stayed on the Calendar page and in the
+            // briefing until a sync whose window still covered it ran.
+            match db.conn.lock() {
+                Ok(conn) => {
+                    if let Err(e) = conn.execute(
+                        "DELETE FROM calendar_events WHERE google_id = ?1",
+                        rusqlite::params![event_id],
+                    ) {
+                        log::warn!("[calendar] local row for deleted event {} not removed: {}", event_id, e);
+                    }
+                }
+                Err(e) => log::warn!("[calendar] could not lock db to remove deleted event {}: {}", event_id, e),
+            }
+            Ok(result)
         }
         _ => Err(format!("Unknown Calendar tool: {}", name)),
     }
@@ -974,10 +990,10 @@ pub async fn execute_tool(
                 Ok(t) => t,
                 Err(msg) => return msg,
             };
-            match execute_calendar_tool(name, &args, &token).await {
+            match execute_calendar_tool(name, &args, &token, db).await {
                 Ok(r) => r,
                 Err(e) if e.contains("UNAUTHORIZED") => match refresh_google_token(google_auth).await {
-                    Ok(t) => execute_calendar_tool(name, &args, &t).await.unwrap_or_else(|e| format!("Calendar error: {}", e)),
+                    Ok(t) => execute_calendar_tool(name, &args, &t, db).await.unwrap_or_else(|e| format!("Calendar error: {}", e)),
                     Err(e) => e,
                 },
                 Err(e) => format!("Calendar error: {}", e),
