@@ -1,17 +1,14 @@
-JARVIS v0.1.3
+JARVIS v0.2.0
 
-Voice, sync, and tool-safety release.
+今次改版將 JARVIS 整理成日常工作工具，同時保留 Automation 主頁嘅旋轉 3D 模型。
 
-- The microphone now works in the installed app: the shipped build carries the
-  entitlement it was missing.
-- Escape stops a spoken response mid-sentence.
-- Cantonese replies are now spoken in a Cantonese voice.
-- Calendar requests use your local time, not the server's.
-- Your inbox is sorted by actual message time.
-- Claude and OpenAI keys, when you provide them, are usable as fallbacks
-  alongside Gemini.
-- Sync and voice errors are now shown in the app instead of failing silently.
-- Fixed scrolling and text selection being blocked in several panels.
-- Safer tool behaviour: the assistant can no longer write inbox content into a
-  shared calendar event, file an issue against a public repository, or turn
-  injected text from an email into a standing memory.
+- Automation 主頁顯示已啟用嘅自動化、執行狀態同結果；開啟主頁本身唔會啟動新工作。
+- 新側邊欄同可保留狀態嘅多分頁，方便喺 Mail、日曆、任務、自動化同設定之間切換。
+- 每個文字任務有獨立對話記錄；工具結果可直接開成工作分頁，背景結果唔會搶走目前畫面。
+- 本機 Mail 工作區集中多個 Gmail，支援搜尋、跨信箱分組、個人指示、來源記憶同 GPT 分析。
+- 日曆、Notion、GitHub、連接同設定採用清晰工作介面，並支援淺色、深色及跟隨系統外觀。
+- 建立自動化時先預覽解讀結果，再由用戶確認建立；暫停及啟用狀態會同步顯示。
+- 保留現有郵件、群組、記憶、模型選擇同 Keychain 憑證；新增任務記錄資料結構。
+- 包含咪高峰權限、廣東話語音、日曆時區、同步錯誤提示及工具權限修復。
+
+適用於 Apple Silicon Mac，macOS 12 或以上。
