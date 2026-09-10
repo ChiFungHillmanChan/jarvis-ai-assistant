@@ -627,6 +627,7 @@ async fn execute_gmail_tool(
         "read_email" => {
             let email_id = args["email_id"].as_str().unwrap_or("");
             let (_msg, full_text) = gmail::get_message_full(token, email_id).await?;
+            crate::chat_session::tool_result(name, json!({"view":"email","store":"legacy","accountId":"legacy-google","messageId":email_id}), json!({"content":full_text}));
             Ok(full_text)
         }
         "draft_email" => {
@@ -636,6 +637,9 @@ async fn execute_gmail_tool(
             let cc = args["cc"].as_str();
 
             let draft_id = gmail::create_draft(token, to, subject, body, cc).await?;
+            if !draft_id.is_empty() && draft_id != "unknown" {
+                crate::chat_session::tool_result(name, json!({"view":"email","store":"legacy","accountId":"legacy-google","draftId":draft_id}), json!({"to":to,"subject":subject,"body":body,"state":"saved_to_gmail"}));
+            }
             Ok(format!(
                 "Draft saved to Gmail for {} (ID: {}). Review and send it from Gmail.",
                 to, draft_id
@@ -676,6 +680,7 @@ async fn execute_calendar_tool(
             let time_min = format!("{}T00:00:00{}", date_from, tz_offset);
             let time_max = format!("{}T23:59:59{}", date_to, tz_offset);
             let events = calendar::fetch_events(token, &time_min, &time_max).await?;
+            crate::chat_session::tool_result(name, json!({"view":"calendar","accountId":"legacy-google","dateRange":{"from":date_from,"to":date_to}}), json!({"events":events}));
             if events.is_empty() {
                 return Ok("No events found in the specified date range.".to_string());
             }
@@ -702,6 +707,10 @@ async fn execute_calendar_tool(
             let result =
                 calendar::create_event(token, title, &start, &end, description, location, None)
                     .await?;
+            let event_id = result.split(" | ").next().unwrap_or("");
+            if !event_id.is_empty() && event_id != "unknown" {
+                crate::chat_session::tool_result(name, json!({"view":"calendar","accountId":"legacy-google","eventId":event_id}), json!({"title":title,"start":start,"end":end,"state":"created"}));
+            }
             Ok(format!("Event created: {}", result))
         }
         "update_event" => {
@@ -729,6 +738,7 @@ async fn execute_calendar_tool(
                 description,
             )
             .await?;
+            crate::chat_session::tool_result(name, json!({"view":"calendar","accountId":"legacy-google","eventId":event_id}), json!({"state":"updated"}));
             Ok(format!("Event updated: {}", result))
         }
         "delete_event" => {
@@ -803,6 +813,7 @@ async fn execute_github_tool(
             let item_type = args["item_type"].as_str().unwrap_or("all");
             let repo = args["repo"].as_str();
             let items = github::fetch_items_filtered(token, item_type, repo).await?;
+            crate::chat_session::tool_result(name, json!({"view":"github","repo":repo}), json!({"items":items}));
             if items.is_empty() {
                 return Ok("No GitHub items found matching that filter.".to_string());
             }
@@ -838,6 +849,7 @@ async fn execute_github_tool(
                 return Ok("JARVIS only files issues in private repositories.".to_string());
             }
             let url = github::create_issue(token, parts[0], parts[1], title, body, labels).await?;
+            crate::chat_session::tool_result(name, json!({"view":"github","repo":repo_str}), json!({"state":"created","providerUrl":url}));
             Ok(format!("GitHub issue created: {}", url))
         }
         _ => Err(format!("Unknown GitHub tool: {}", name)),
@@ -880,13 +892,16 @@ async fn execute_notion_tool(
         }
         "read_notion_page" => {
             let page_id = args["page_id"].as_str().unwrap_or("");
-            notion::get_page_content(token, page_id).await
+            let content = notion::get_page_content(token, page_id).await?;
+            crate::chat_session::tool_result(name, json!({"view":"notion","provider":"notion","pageId":page_id}), json!({"content":content}));
+            Ok(content)
         }
         "create_notion_page" => {
             let title = args["title"].as_str().unwrap_or("");
             let content = args["content"].as_str().unwrap_or("");
             let parent_id = args["parent_id"].as_str().unwrap_or("");
             let page_id = notion::create_page(token, parent_id, title, content).await?;
+            crate::chat_session::tool_result(name, json!({"view":"notion","provider":"notion","pageId":page_id,"parentId":parent_id}), json!({"state":"created","title":title}));
             Ok(format!("Notion page created (ID: {})", page_id))
         }
         _ => Err(format!("Unknown Notion tool: {}", name)),
@@ -996,6 +1011,28 @@ fn github_repo_is_known(db: &crate::db::Database, repo: &str) -> bool {
 
 /// Execute a tool by name with JSON arguments. Shared by both APIs.
 pub async fn execute_tool(
+    name: &str,
+    args_str: &str,
+    db: &crate::db::Database,
+    google_auth: &std::sync::Arc<crate::auth::google::GoogleAuth>,
+    ledger: &crate::ai::SideEffectLedger,
+) -> String {
+    if crate::chat_session::TOOL_EXECUTION_DISABLED.try_with(|v| *v).unwrap_or(false) {
+        return "Tools are disabled for this preview. Return only the requested schedule JSON.".into();
+    }
+    crate::chat_session::TOOL_CALL_ID.scope(uuid::Uuid::new_v4().to_string(),
+        crate::chat_session::TOOL_RESULT_AVAILABLE.scope(std::cell::Cell::new(false), async {
+            crate::chat_session::tool_lifecycle(name, "started");
+            let result = execute_tool_inner(name, args_str, db, google_auth, ledger).await;
+            // Legacy executors encode errors/refusals as text. "finished" means
+            // execution returned, not that an operation succeeded. Only the
+            // typed result emitted at a checked Ok site is navigable success.
+            crate::chat_session::tool_lifecycle(name, "finished");
+            result
+        })).await
+}
+
+async fn execute_tool_inner(
     name: &str,
     args_str: &str,
     db: &crate::db::Database,

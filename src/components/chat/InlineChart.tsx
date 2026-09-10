@@ -91,10 +91,10 @@ function toPieChartData(data: Record<string, unknown>): PieChartData | null {
 // ---------------------------------------------------------------------------
 
 const COLORS = [
-  "rgba(0,180,255,0.8)",
-  "rgba(16,185,129,0.8)",
-  "rgba(255,180,0,0.8)",
-  "rgba(168,85,247,0.8)",
+  "var(--cyan)",
+  "var(--accent-success)",
+  "var(--accent-warning)",
+  "var(--text-secondary)",
 ];
 
 // ---------------------------------------------------------------------------
@@ -208,7 +208,7 @@ function LineChart({ data }: { data: LineChartData }) {
             x={toX(i, labels.length)}
             y={H - 2}
             textAnchor="middle"
-            fill="rgba(0,180,255,0.4)"
+            fill="var(--text-muted)"
             fontSize={4}
             fontFamily="var(--font-mono)"
           >
@@ -249,7 +249,7 @@ function PieChart({ data }: { data: PieChartData }) {
           cy={cy}
           r={r}
           fill="none"
-          stroke="rgba(0,180,255,0.06)"
+          stroke="var(--border-primary)"
           strokeWidth={8}
         />
 
@@ -285,7 +285,7 @@ function PieChart({ data }: { data: PieChartData }) {
             y={cy + 1}
             textAnchor="middle"
             dominantBaseline="central"
-            fill="rgba(0,180,255,0.8)"
+            fill="var(--text-primary)"
             fontSize={10}
             fontFamily="var(--font-mono)"
           >
@@ -402,17 +402,17 @@ export default InlineChart;
 // ---------------------------------------------------------------------------
 
 const wrapperStyle: React.CSSProperties = {
-  background: "rgba(0,180,255,0.04)",
-  border: "1px solid rgba(0,180,255,0.1)",
-  borderRadius: 6,
-  padding: 10,
-  marginTop: 6,
+  background: "var(--surface)",
+  border: "1px solid var(--border-primary)",
+  borderRadius: 8,
+  padding: 12,
+  marginTop: 8,
 };
 
 const unknownStyle: React.CSSProperties = {
   fontFamily: "var(--font-mono)",
   fontSize: 11,
-  color: "rgba(0,180,255,0.5)",
+  color: "var(--text-muted)",
 };
 
 const pieStyles: Record<string, React.CSSProperties> = {
@@ -437,7 +437,7 @@ const pieStyles: Record<string, React.CSSProperties> = {
   legendLabel: {
     fontSize: 10,
     fontFamily: "var(--font-mono)",
-    color: "rgba(0,180,255,0.6)",
+    color: "var(--text-secondary)",
   },
 };
 
@@ -460,6 +460,6 @@ const barStyles: Record<string, React.CSSProperties> = {
   label: {
     fontSize: 10,
     fontFamily: "var(--font-mono)",
-    color: "rgba(0,180,255,0.4)",
+    color: "var(--text-muted)",
   },
 };

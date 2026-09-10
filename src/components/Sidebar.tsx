@@ -1,73 +1,25 @@
-import { memo } from "react";
-import {
-  LayoutDashboard, MessageSquare, Mail, Calendar, Clock, Settings,
-  GithubMark, NotionMark,
-} from "./icons";
-
-interface SidebarProps {
-  activeView: string;
-  onNavigate: (view: string) => void;
-  onChatToggle: () => void;
+import { Orbit, Mail, CalendarDays, NotebookPen, GitPullRequest, Clock3, Settings2, Plug, Plus, PanelLeftClose, Search, MessageSquare } from 'lucide-react';
+import { useWorkspace } from '../workspace/WorkspaceContext';
+import type { WorkspaceView } from '../workspace/model';
+const destinations = [
+  { view: 'home', label: 'Automation', Icon: Orbit },
+  { view: 'email', label: 'Mail', Icon: Mail },
+  { view: 'calendar', label: 'Calendar', Icon: CalendarDays },
+  { view: 'notion', label: 'Notes', Icon: NotebookPen },
+  { view: 'github', label: 'GitHub', Icon: GitPullRequest },
+  { view: 'cron', label: 'Automations', Icon: Clock3 },
+] as const;
+export default function Sidebar({ onSearch, onCollapse }: { onSearch: () => void; onCollapse: () => void }) {
+  const { state, open, newTask, dispatch } = useWorkspace();
+  const active = state.tabs.find(t => t.id === state.activeId)?.view;
+  const nav = (view: WorkspaceView) => open(view);
+  return <aside className="workspace-sidebar" aria-label="App navigation">
+    <div className="sidebar-brand"><span className="brand-mark"><Orbit size={20} /></span><strong>JARVIS</strong><button className="icon-button" onClick={onCollapse} aria-label="Hide sidebar"><PanelLeftClose size={16} /></button></div>
+    <button className="workspace-button sidebar-new" onClick={newTask}><Plus size={16} />New task<span className="shortcut">⌘N</span></button>
+    <button className="sidebar-search" onClick={onSearch}><Search size={15} />Search and commands<span className="shortcut">⌘K</span></button>
+    <nav>{destinations.map(({ view, label, Icon }) => <button key={view} className="sidebar-item" aria-current={active === view ? 'page' : undefined} onClick={() => nav(view)}><Icon size={18} /><span>{label}</span></button>)}</nav>
+    <div className="sidebar-section-title">Recent tasks</div>
+    <div className="sidebar-history">{[...state.tabs.slice().reverse(), ...state.history].filter(t => t.view === 'chat').slice(0, 8).map(t => <button key={t.id} className="sidebar-item" aria-current={state.activeId === t.id ? 'page' : undefined} onClick={() => dispatch({ type: 'open', view: t.view, id: t.id, sessionId: t.sessionId, title: t.title })}><MessageSquare size={15} /><span>{t.title}</span>{t.notice && <span className="status-dot" aria-label="New result" />}</button>)}{![...state.tabs, ...state.history].some(t => t.view === 'chat') && <p>Tasks you start will appear here.</p>}</div>
+    <div className="sidebar-bottom"><button className="sidebar-item" aria-current={active === 'connections' ? 'page' : undefined} onClick={() => nav('connections')}><Plug size={18} /><span>Connections</span></button><button className="sidebar-item" aria-current={active === 'settings' ? 'page' : undefined} onClick={() => nav('settings')}><Settings2 size={18} /><span>Settings</span></button></div>
+  </aside>;
 }
-
-const ICON = 19;
-const navItems = [
-  { id: "home", label: "HOME", Icon: (p: { size: number }) => <LayoutDashboard size={p.size} /> },
-  { id: "chat", label: "CHAT", Icon: (p: { size: number }) => <MessageSquare size={p.size} /> },
-  { id: "email", label: "MAIL", Icon: (p: { size: number }) => <Mail size={p.size} /> },
-  { id: "calendar", label: "CALENDAR", Icon: (p: { size: number }) => <Calendar size={p.size} /> },
-  { id: "github", label: "GITHUB", Icon: (p: { size: number }) => <GithubMark size={p.size} /> },
-  { id: "notion", label: "NOTION", Icon: (p: { size: number }) => <NotionMark size={p.size} /> },
-  { id: "cron", label: "CRON", Icon: (p: { size: number }) => <Clock size={p.size} /> },
-];
-
-export default memo(function Sidebar({ activeView, onNavigate, onChatToggle }: SidebarProps) {
-  const renderItem = (item: { id: string; label: string; Icon: (p: { size: number }) => JSX.Element }) => {
-    const active = activeView === item.id;
-    return (
-      <button
-        key={item.id}
-        onClick={() => onNavigate(item.id)}
-        style={{ ...styles.navButton, ...(active ? styles.navButtonActive : {}) }}
-        title={item.label}
-        aria-label={item.label}
-        aria-current={active ? "page" : undefined}
-      >
-        {active && <span style={styles.activeBar} aria-hidden="true" />}
-        <item.Icon size={ICON} />
-      </button>
-    );
-  };
-
-  const settingsActive = activeView === "settings";
-  return (
-    <div style={styles.container}>
-      <div style={styles.logo}><span style={styles.logoText}>J</span></div>
-      <nav style={styles.nav}>{navItems.map(renderItem)}</nav>
-      <button
-        onClick={() => onNavigate("settings")}
-        style={{ ...styles.navButton, ...(settingsActive ? styles.navButtonActive : {}), marginTop: "auto" }}
-        title="SETTINGS"
-        aria-label="SETTINGS"
-        aria-current={settingsActive ? "page" : undefined}
-      >
-        {settingsActive && <span style={styles.activeBar} aria-hidden="true" />}
-        <Settings size={ICON} />
-      </button>
-      <button onClick={onChatToggle} style={styles.chatButton} title="Chat (Cmd+K)" aria-label="Open chat">
-        <MessageSquare size={18} />
-      </button>
-    </div>
-  );
-});
-
-const styles: Record<string, React.CSSProperties> = {
-  container: { width: 60, height: "100%", display: "flex", flexDirection: "column", alignItems: "center", padding: "12px 0", borderRight: "1px solid var(--border-primary)", background: "var(--surface)", backdropFilter: "blur(12px)", gap: 6 },
-  logo: { width: 34, height: 34, borderRadius: 10, display: "flex", alignItems: "center", justifyContent: "center", marginBottom: 14, background: "linear-gradient(150deg, rgba(0,180,255,0.95), rgba(10,134,196,0.9))", boxShadow: "0 0 18px rgba(0,180,255,0.4)" },
-  logoText: { color: "#04121c", fontFamily: "var(--font-mono)", fontSize: 16, fontWeight: 700 },
-  nav: { display: "flex", flexDirection: "column", gap: 6, alignItems: "center" },
-  navButton: { position: "relative", width: 42, height: 42, border: "1px solid transparent", borderRadius: 11, background: "transparent", cursor: "pointer", display: "flex", alignItems: "center", justifyContent: "center", color: "var(--text-muted)", transition: "all 0.15s ease" },
-  navButtonActive: { background: "rgba(0,180,255,0.12)", borderColor: "var(--border-strong)", color: "var(--text-primary)", boxShadow: "0 0 16px -4px rgba(0,180,255,0.6), inset 0 0 0 1px var(--border-primary)" },
-  activeBar: { position: "absolute", left: -13, top: "50%", transform: "translateY(-50%)", width: 3, height: 20, borderRadius: 2, background: "rgb(0,180,255)", boxShadow: "0 0 10px rgb(0,180,255)" },
-  chatButton: { width: 42, height: 42, borderRadius: 12, border: "none", cursor: "pointer", display: "flex", alignItems: "center", justifyContent: "center", marginTop: 8, color: "#04121c", background: "linear-gradient(150deg, rgba(0,180,255,0.95), rgba(10,134,196,0.9))", boxShadow: "0 0 16px rgba(0,180,255,0.45)" },
-};

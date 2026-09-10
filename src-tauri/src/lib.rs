@@ -3,9 +3,13 @@ pub mod assistant;
 pub mod aws;
 pub mod auth;
 pub mod commands;
+pub mod chat_session;
 pub mod db;
 pub mod integration_keys;
 pub mod integrations;
+pub mod mail;
+#[cfg(feature = "native-qa")]
+mod native_qa;
 pub mod payments;
 pub mod scheduler;
 pub mod security;
@@ -20,13 +24,16 @@ use db::Database;
 use tauri::Manager;
 
 pub fn run() {
-    if let Some(data_dir) = dirs::data_dir() {
-        let env_path = data_dir.join("jarvis").join(".env");
-        if env_path.exists() {
-            dotenvy::from_path(&env_path).ok();
+    #[cfg(not(feature = "native-qa"))]
+    {
+        if let Some(data_dir) = dirs::data_dir() {
+            let env_path = data_dir.join("jarvis").join(".env");
+            if env_path.exists() {
+                dotenvy::from_path(&env_path).ok();
+            }
         }
+        dotenvy::dotenv().ok();
     }
-    dotenvy::dotenv().ok();
     env_logger::init();
 
     tauri::Builder::default()
@@ -45,6 +52,11 @@ pub fn run() {
             let db = match Database::new() {
                 Ok(db) => db,
                 Err(e) => {
+                    #[cfg(feature = "native-qa")]
+                    let db_path = std::env::var("JARVIS_NATIVE_QA_DIR")
+                        .map(|d| std::path::PathBuf::from(d).join("jarvis.db").display().to_string())
+                        .unwrap_or_else(|_| "JARVIS_NATIVE_QA_DIR is not configured".to_string());
+                    #[cfg(not(feature = "native-qa"))]
                     let db_path = dirs::data_dir()
                         .map(|d| d.join("jarvis").join("jarvis.db").display().to_string())
                         .unwrap_or_else(|| "~/Library/Application Support/jarvis/jarvis.db".to_string());
@@ -76,6 +88,9 @@ pub fn run() {
             log::info!("Provider chain: {} entries, {} local endpoints",
                 router.provider_chain().len(), router.local_endpoints().len());
 
+            #[cfg(feature = "native-qa")]
+            let google_auth = auth::google::GoogleAuth::new_empty();
+            #[cfg(not(feature = "native-qa"))]
             let google_auth = auth::google::GoogleAuth::new()
                 .unwrap_or_else(|| {
                     log::warn!("Google credentials not configured");
@@ -295,6 +310,7 @@ pub fn run() {
             app.manage(voice_engine);
             app.manage(std::sync::Arc::clone(&wake_service));
             app.manage(commands::model_pull::ModelPullState::new());
+            app.manage(mail::sync::MailSyncState::new());
             app.manage(std::sync::Arc::clone(&scheduler_handle));
             // A tray that fails to build is a missing menu bar icon, not a
             // reason to abort startup with an invisible panic.
@@ -380,6 +396,22 @@ pub fn run() {
             }
         })
         .invoke_handler(tauri::generate_handler![
+            commands::mail::mail_workspace,
+            commands::mail::mail_connect_account,
+            commands::mail::mail_disconnect_account,
+            commands::mail::mail_remove_account,
+            commands::mail::mail_sync_account,
+            commands::mail::mail_restart_sync,
+            commands::mail::mail_list_messages,
+            commands::mail::mail_get_message,
+            commands::mail::mail_save_group,
+            commands::mail::mail_delete_group,
+            commands::mail::mail_set_group_members,
+            commands::mail::mail_list_memories,
+            commands::mail::mail_save_memory,
+            commands::mail::mail_delete_memory,
+            commands::mail::mail_save_settings,
+            commands::mail::mail_analyze_group,
             commands::tasks::get_tasks,
             commands::tasks::create_task,
             commands::tasks::update_task,
@@ -392,6 +424,7 @@ pub fn run() {
             commands::chat::send_message,
             commands::chat::get_conversations,
             commands::chat::clear_conversations,
+            commands::chat::list_chat_sessions,
             commands::cost::get_cost_stats,
             commands::cost::get_blended_cost,
             commands::dashboard::get_dashboard_data,
@@ -410,6 +443,9 @@ pub fn run() {
             commands::cron::get_cron_jobs,
             commands::cron::get_cron_runs,
             commands::cron::create_custom_cron,
+            commands::cron::preview_custom_cron,
+            commands::cron::create_reviewed_cron,
+            commands::cron::set_cron_job_status,
             commands::cron::delete_cron_job,
             commands::cron::toggle_cron_job,
             commands::cron::get_upcoming_runs,

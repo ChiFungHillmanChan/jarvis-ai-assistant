@@ -33,14 +33,14 @@ export default class ErrorBoundary extends Component<
     return (
       <div data-tauri-drag-region style={styles.container}>
         <div style={styles.panel}>
-          <div style={styles.label}>SYSTEM FAULT</div>
+          <div style={styles.label}>This workspace could not load</div>
           <div style={styles.message}>{error.message || String(error)}</div>
           <button
             type="button"
             style={styles.button}
-            onClick={() => window.location.reload()}
+            onClick={() => this.setState({ error: null })}
           >
-            RELOAD
+            Try again
           </button>
         </div>
       </div>
@@ -66,32 +66,31 @@ const styles: Record<string, React.CSSProperties> = {
     gap: 12,
     padding: 20,
     borderRadius: 12,
-    border: "1px solid rgba(0, 180, 255, 0.25)",
-    background: "rgba(0, 180, 255, 0.04)",
+    border: "1px solid var(--border-primary)",
+    background: "var(--surface)",
   },
   label: {
-    fontFamily: "var(--font-mono)",
-    fontSize: 10,
-    letterSpacing: 3,
-    color: "rgba(0, 180, 255, 0.5)",
+    fontFamily: "var(--font-sans)",
+    fontSize: 17,
+    fontWeight: 600,
+    color: "var(--text-primary)",
   },
   message: {
-    fontFamily: "var(--font-mono)",
+    fontFamily: "var(--font-sans)",
     fontSize: 12,
     lineHeight: 1.6,
-    color: "rgba(0, 180, 255, 0.8)",
+    color: "var(--text-secondary)",
     wordBreak: "break-word",
   },
   button: {
     alignSelf: "flex-start",
-    background: "rgba(0, 180, 255, 0.12)",
-    border: "1px solid rgba(0, 180, 255, 0.3)",
+    background: "var(--surface-solid)",
+    border: "1px solid var(--border-strong)",
     borderRadius: 8,
     padding: "6px 14px",
-    color: "rgba(0, 180, 255, 0.85)",
-    fontFamily: "var(--font-mono)",
-    fontSize: 11,
-    letterSpacing: 1,
+    color: "var(--text-primary)",
+    fontFamily: "var(--font-sans)",
+    fontSize: 13,
     cursor: "pointer",
   },
 };

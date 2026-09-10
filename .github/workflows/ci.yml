@@ -44,6 +44,9 @@ jobs:
       - name: Type-check and build the frontend
         run: npm run build
 
+      - name: Frontend workspace tests
+        run: npm run test:frontend
+
       # Same command a developer runs locally: see package.json "test".
       - name: Rust tests
         run: npm test

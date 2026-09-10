@@ -40,12 +40,14 @@ import type { VoiceSettings, WakeWordStatus, VoiceState, LocalEndpoint, LocalMod
 import { GOOGLE_ALREADY_CONNECTED } from "../lib/types";
 import { useVoiceState } from "../hooks/useVoiceState";
 import LocalAiSetup from "../components/LocalAiSetup";
+import { useWorkspace, useWorkspaceValue } from "../workspace/WorkspaceContext";
+import "./settings-workspace.css";
 import { Cpu, Key, Globe, Gem, Mic, Bot, Palette, GithubMark, NotionMark } from "../components/icons";
 
 const API_KEY_PROVIDERS = [
-  { id: "gemini", label: "Google Gemini", help: "Recommended -- fastest replies" },
-  { id: "claude", label: "Anthropic Claude", help: "Optional fallback" },
-  { id: "openai", label: "OpenAI", help: "Optional fallback" },
+  { id: "gemini", label: "Google Gemini", help: "Gemini chat and speech-to-text" },
+  { id: "claude", label: "Anthropic Claude", help: "Claude chat and fallback" },
+  { id: "openai", label: "OpenAI", help: "OpenAI chat and Mail analysis" },
 ] as const;
 
 // Must match gemini::MODEL_PRO / MODEL_FLASH in src-tauri/src/ai/gemini.rs. A
@@ -64,13 +66,15 @@ function clearApiKey(provider: string): Promise<void> {
 }
 
 export default function Settings() {
+  const { appearance, setAppearance, open } = useWorkspace();
   const [aiProvider, setAiProvider] = useState("gemini_primary");
   const [autoBriefing, setAutoBriefing] = useState(false);
   const [apiKeyDrafts, setApiKeyDrafts] = useState<Record<string, string>>({});
   const [apiKeyStatus, setApiKeyStatus] = useState<Record<string, boolean>>({});
   const [apiKeyError, setApiKeyError] = useState<string | null>(null);
   const [loaded, setLoaded] = useState(false);
-  const [googleConnected, setGoogleConnected] = useState(false);
+  const [loadError, setLoadError] = useState(false);
+  const [googleConnected, setGoogleConnected] = useState<boolean | null>(null);
   const [googleAccount, setGoogleAccount] = useState<string | null>(null);
   const [connecting, setConnecting] = useState(false);
   const [disconnecting, setDisconnecting] = useState(false);
@@ -82,6 +86,7 @@ export default function Settings() {
   const [githubSaved, setGithubSaved] = useState(false);
   const [obsidianKey, setObsidianKey] = useState("");
   const [obsidianSaved, setObsidianSaved] = useState(false);
+  const [integrationError, setIntegrationError] = useState<string | null>(null);
   const [obsidianBaseUrl, setObsidianBaseUrl] = useState("");
   const [voiceSettings, setVoiceSettingsState] = useState<VoiceSettings | null>(null);
   const [ttsVoices, setTtsVoices] = useState<string[]>([]);
@@ -91,6 +96,7 @@ export default function Settings() {
   const { state: voiceState } = useVoiceState();
   const [wallpaperActive, setWallpaperActive] = useState(false);
   const [wallpaperBusy, setWallpaperBusy] = useState(false);
+  const [wallpaperError, setWallpaperError] = useState<string | null>(null);
 
   useEffect(() => {
     getApiKeyStatus().then(setApiKeyStatus).catch(() => {});
@@ -156,24 +162,30 @@ export default function Settings() {
   const [endpointModels, setEndpointModels] = useState<Record<string, LocalModel[]>>({});
   const [endpointHealth, setEndpointHealth] = useState<Record<string, EndpointHealth>>({});
   const [llmError, setLlmError] = useState<string | null>(null);
-  const [section, setSection] = useState<string>("ai");
+  const [section, setSection] = useWorkspaceValue<string>("section", "ai");
 
-  useEffect(() => {
-    getSettings().then((s) => {
+  async function refreshSettings() {
+    setLoadError(false);
+    try {
+      const s = await getSettings();
       setAiProvider(s.values["ai_provider"] || "gemini_primary");
       // Same rule as the startup reader in lib.rs: an absent row means off.
       setAutoBriefing(s.values["auto_briefing"] === "true");
       setLoaded(true);
-    });
-  }, []);
+    } catch {
+      setLoadError(true);
+    }
+  }
+
+  useEffect(() => { void refreshSettings(); }, []);
 
   useEffect(() => {
     void refreshGoogle();
   }, []);
 
   useEffect(() => {
-    getVoiceSettings().then(setVoiceSettingsState);
-    listTtsVoices().then(setTtsVoices);
+    getVoiceSettings().then(setVoiceSettingsState).catch(() => setWakeError("Could not load voice settings."));
+    listTtsVoices().then(setTtsVoices).catch(() => setWakeError("Could not load the available voices."));
     void refreshWakeStatus();
   }, []);
 
@@ -338,6 +350,9 @@ export default function Settings() {
       connected = await googleStatus();
     } catch (e) {
       setGoogleError(String(e));
+      setGoogleConnected(null);
+      setGoogleAccount(null);
+      return;
     }
     setGoogleConnected(connected);
     if (!connected) {
@@ -356,7 +371,7 @@ export default function Settings() {
     // Switching revokes the current grant and wipes the cached mail before the
     // new flow starts, so it gets the same confirm-then-act treatment as CLEAR.
     if (force && !window.confirm(
-      "Switch Google account? This revokes JARVIS's access to the account linked now and deletes the mail, events and briefings cached on this Mac."
+      "Switch Assistant Google account? This revokes this Google access and deletes the Assistant mail cache, Calendar events and briefings on this Mac. Mail workspace copies are kept."
     )) {
       return;
     }
@@ -367,7 +382,7 @@ export default function Settings() {
       const result = await googleConnect(force);
       setGoogleNotice(
         result === GOOGLE_ALREADY_CONNECTED
-          ? "That account is already linked. Use SWITCH ACCOUNT to change it."
+          ? "That account is already linked. Use Switch account to change it."
           : result
       );
     } catch (e) {
@@ -380,7 +395,7 @@ export default function Settings() {
 
   async function handleGoogleDisconnect() {
     if (!window.confirm(
-      "Disconnect Google? This revokes JARVIS's access at Google and deletes the mail, events and briefings cached on this Mac. You can reconnect at any time."
+      "Disconnect Assistant Google? This revokes this Google access and deletes the Assistant mail cache, Calendar events and briefings on this Mac. Mail workspace copies are kept. You can reconnect later."
     )) {
       return;
     }
@@ -401,20 +416,32 @@ export default function Settings() {
 
   async function handleSaveNotion() {
     if (!notionToken.trim()) return;
-    await saveNotionToken(notionToken);
-    setNotionSaved(true);
+    setIntegrationError(null);
+    try {
+      await saveNotionToken(notionToken.trim());
+      setNotionToken("");
+      setNotionSaved(true);
+    } catch (e) { setIntegrationError(String(e)); }
   }
 
   async function handleSaveGitHub() {
     if (!githubToken.trim()) return;
-    await saveGitHubToken(githubToken);
-    setGithubSaved(true);
+    setIntegrationError(null);
+    try {
+      await saveGitHubToken(githubToken.trim());
+      setGithubToken("");
+      setGithubSaved(true);
+    } catch (e) { setIntegrationError(String(e)); }
   }
 
   async function handleSaveObsidian() {
     if (!obsidianKey.trim()) return;
-    await saveObsidianKey(obsidianKey);
-    setObsidianSaved(true);
+    setIntegrationError(null);
+    try {
+      await saveObsidianKey(obsidianKey.trim());
+      setObsidianKey("");
+      setObsidianSaved(true);
+    } catch (e) { setIntegrationError(String(e)); }
   }
 
   async function handleWakeToggle(enabled: boolean) {
@@ -436,6 +463,7 @@ export default function Settings() {
 
   async function handleWallpaperToggle(enabled: boolean) {
     setWallpaperBusy(true);
+    setWallpaperError(null);
     try {
       if (enabled) {
         await enableWallpaper();
@@ -445,7 +473,7 @@ export default function Settings() {
       setWallpaperActive(enabled);
       await updateSetting("wallpaper_mode_enabled", String(enabled));
     } catch (e) {
-      console.error("Wallpaper toggle failed:", e);
+      setWallpaperError(String(e));
     } finally {
       setWallpaperBusy(false);
     }
@@ -487,14 +515,17 @@ export default function Settings() {
     if (state === "WakeWordDetected") return "Wake word detected";
     if (state === "WakeWordProcessing") return "Processing wake-word request";
     if (state === "WakeWordSpeaking") return "Speaking wake-word response";
-    if (wakeStatus?.model_downloaded) return "Local model ready";
+    if (wakeStatus?.model_downloaded) return "Local speech model ready";
     return "Model required before wake-word listening can start";
   }
 
   if (!loaded) {
     return (
       <div style={{ padding: 24 }}>
-        <div className="system-text animate-glow">LOADING SETTINGS...</div>
+        {loadError ? <>
+          <p role="alert" className="settings-help">Could not load settings. Open the desktop app and try again.</p>
+          <button style={styles.actionBtn} onClick={() => { void refreshSettings(); }}>Retry</button>
+        </> : <p role="status" className="settings-help">Loading settings…</p>}
       </div>
     );
   }
@@ -514,9 +545,9 @@ export default function Settings() {
   const voiceInputReady = Boolean(apiKeyStatus["gemini"] || wakeStatus?.model_downloaded);
 
   const SECTIONS = [
-    { id: "ai", label: "AI Providers", Icon: () => <Cpu size={17} /> },
-    { id: "keys", label: "API Keys", Icon: () => <Key size={17} /> },
-    { id: "google", label: "Google", Icon: () => <Globe size={17} /> },
+    { id: "ai", label: "Models", Icon: () => <Cpu size={17} /> },
+    { id: "keys", label: "API keys", Icon: () => <Key size={17} /> },
+    { id: "google", label: "Assistant Google", Icon: () => <Globe size={17} /> },
     { id: "notion", label: "Notion", Icon: () => <NotionMark size={17} /> },
     { id: "github", label: "GitHub", Icon: () => <GithubMark size={17} /> },
     { id: "obsidian", label: "Obsidian", Icon: () => <Gem size={17} /> },
@@ -526,83 +557,35 @@ export default function Settings() {
   ];
 
   return (
-    <div style={styles.page}>
-      <aside style={styles.nav}>
-        <div className="label" style={{ padding: "0 10px", marginBottom: 12 }}>SETTINGS</div>
+    <div className="settings-workspace">
+      <nav className="settings-nav" aria-label="Settings categories">
+        <div className="settings-nav-title">Settings</div>
         {SECTIONS.map((s) => {
           const active = section === s.id;
           return (
             <button key={s.id} onClick={() => setSection(s.id)}
-              style={{ ...styles.navItem, ...(active ? styles.navItemActive : {}) }}
+              className={`settings-nav-item${active ? " is-active" : ""}`}
               aria-current={active ? "page" : undefined}>
               <s.Icon /> <span>{s.label}</span>
             </button>
           );
         })}
-      </aside>
-      <div style={styles.content}>
+      </nav>
+      <div className="settings-content">
+        <header className="settings-page-header">
+          <h1>{SECTIONS.find((item) => item.id === section)?.label ?? "Settings"}</h1>
+          <p>Manage how JARVIS works on this Mac.</p>
+        </header>
+        {integrationError && ["notion", "github", "obsidian"].includes(section) && <p role="alert" style={styles.errorText}>{integrationError}</p>}
         {section === "ai" && (<>
-          <LocalAiSetup
-            endpoints={endpoints}
-            onEndpointAdded={(ep) => setEndpoints((prev) => [...prev, ep])}
-            onModelsLoaded={(eid, models) => setEndpointModels((prev) => ({ ...prev, [eid]: models }))}
-            onAddToChain={handleAddToChain}
-          />
-          <div className="panel" style={styles.panel}>
-            <div className="label" style={styles.sectionTitle}>LOCAL LLM ENDPOINTS</div>
-            <div style={styles.hint}>Connect to Ollama, vLLM, or any compatible server</div>
-
-            {endpoints.map((ep) => (
-              <div key={ep.id} style={{ background: "rgba(0, 180, 255, 0.03)", border: "1px solid rgba(0, 180, 255, 0.1)", borderRadius: 6, padding: 10, marginBottom: 8 }}>
-                <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center" }}>
-                  <div>
-                    <span style={{ color: "rgba(0, 180, 255, 0.8)", fontSize: 12, fontWeight: 600 }}>{ep.name}</span>
-                    <span style={{ color: "rgba(0, 180, 255, 0.4)", fontSize: 10, marginLeft: 8 }}>{ep.backend_type.toUpperCase()}</span>
-                  </div>
-                  <div style={{ display: "flex", gap: 4, alignItems: "center" }}>
-                    <span style={{ width: 8, height: 8, borderRadius: "50%", background: ep.last_health_status ? "rgba(16, 185, 129, 0.7)" : "rgba(255, 100, 100, 0.7)" }} />
-                  </div>
-                </div>
-                <div style={{ color: "rgba(0, 180, 255, 0.4)", fontSize: 10, fontFamily: "var(--font-mono)", marginTop: 4 }}>{ep.url}</div>
-                {endpointHealth[ep.id] && (
-                  <div style={{ color: "rgba(0, 180, 255, 0.5)", fontSize: 10, marginTop: 4 }}>
-                    {endpointHealth[ep.id].reachable ? `${endpointHealth[ep.id].model_count} models, ${endpointHealth[ep.id].latency_ms}ms` : "Unreachable"}
-                  </div>
-                )}
-                {endpointModels[ep.id] && endpointModels[ep.id].length > 0 && (
-                  <div style={{ marginTop: 6 }}>
-                    <div style={{ color: "rgba(0, 180, 255, 0.4)", fontSize: 9 }}>MODELS:</div>
-                    {endpointModels[ep.id].map((m) => (
-                      <div key={m.id} style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginTop: 2 }}>
-                        <span style={{ color: "rgba(0, 180, 255, 0.6)", fontSize: 10, fontFamily: "var(--font-mono)" }}>{m.id}</span>
-                        <div style={{ display: "flex", gap: 4, alignItems: "center" }}>
-                          <span style={{ color: "rgba(0, 180, 255, 0.3)", fontSize: 9 }}>{m.supports_tools === "native" ? "tools" : m.supports_tools === "prompt_injected" ? "prompt-tools" : "chat"}</span>
-                          <button onClick={() => handleAddToChain("local", ep.id, m.id)} style={{ ...styles.saveBtn, fontSize: 9, padding: "2px 6px" }}>+ CHAIN</button>
-                        </div>
-                      </div>
-                    ))}
-                  </div>
-                )}
-                <div style={{ display: "flex", gap: 6, marginTop: 8 }}>
-                  <button onClick={() => handleTestEndpoint(ep.id)} style={{ ...styles.saveBtn, fontSize: 9 }}>TEST</button>
-                  <button onClick={() => handleRemoveEndpoint(ep.id)} style={{ ...styles.saveBtn, fontSize: 9, borderColor: "rgba(255, 100, 100, 0.3)", color: "rgba(255, 100, 100, 0.7)" }}>REMOVE</button>
-                </div>
-              </div>
-            ))}
-
-            <div style={{ display: "flex", gap: 6, marginTop: 8, flexDirection: "column" as const }}>
-              <input value={newEndpointName} onChange={(e) => setNewEndpointName(e.target.value)} placeholder="Name (optional)" style={styles.tokenInput} />
-              <div style={{ display: "flex", gap: 6 }}>
-                <input value={newEndpointUrl} onChange={(e) => setNewEndpointUrl(e.target.value)} placeholder="http://localhost:11434" style={{ ...styles.tokenInput, flex: 1 }} />
-                <button onClick={handleAddEndpoint} disabled={endpointBusy} style={styles.saveBtn}>{endpointBusy ? "..." : "ADD"}</button>
-              </div>
-            </div>
-            {llmError && <div style={styles.errorText}>{llmError}</div>}
+          <div className="settings-info-row">
+            <p>These providers handle Assistant conversations. Mail has its own analysis model and uses the API keys saved here.</p>
+            <button style={styles.saveBtn} onClick={() => open("email")}>Mail analysis settings</button>
           </div>
-
-          <div className="panel" style={styles.panel}>
-            <div className="label" style={styles.sectionTitle}>PROVIDER CHAIN</div>
-            <div style={styles.hint}>Priority order for AI providers (drag or use arrows to reorder)</div>
+          {llmError && <p role="alert" style={styles.errorText}>{llmError}</p>}
+          <div className="settings-panel">
+            <h2 className="settings-heading">Provider priority</h2>
+            <div style={styles.hint}>JARVIS tries enabled providers in this order. Use the arrows to change priority.</div>
 
             {chain.map((entry, i) => {
               const label = entry.provider_type === "local"
@@ -617,21 +600,21 @@ export default function Settings() {
                 ? `Bedrock (${entry.model_id || "default"})`
                 : entry.provider_type;
               return (
-                <div key={i} style={{ display: "flex", alignItems: "center", gap: 6, marginBottom: 6, opacity: entry.enabled ? 1 : 0.4 }}>
-                  <span style={{ color: "rgba(0, 180, 255, 0.4)", fontSize: 10, fontFamily: "var(--font-mono)", width: 16 }}>{i + 1}.</span>
-                  <span style={{ color: "rgba(0, 180, 255, 0.8)", fontSize: 11, flex: 1, fontFamily: "var(--font-mono)" }}>{label}</span>
-                  <button onClick={() => handleMoveChainEntry(i, "up")} disabled={i === 0} style={{ ...styles.saveBtn, fontSize: 9, padding: "1px 5px" }}>^</button>
-                  <button onClick={() => handleMoveChainEntry(i, "down")} disabled={i === chain.length - 1} style={{ ...styles.saveBtn, fontSize: 9, padding: "1px 5px" }}>v</button>
+                <div key={i} className="settings-chain-row">
+                  <span style={{ color: "var(--text-muted)", fontSize: 12, fontFamily: "var(--font-mono)", width: 16 }}>{i + 1}.</span>
+                  <span style={{ color: entry.enabled ? "var(--text-primary)" : "var(--text-secondary)", fontSize: 13, minWidth: 0, overflowWrap: "anywhere" }}>{label}</span>
+                  <button aria-label={`Move ${label} up`} onClick={() => handleMoveChainEntry(i, "up")} disabled={i === 0} style={{ ...styles.saveBtn, fontSize: 12, padding: "1px 5px" }}>↑</button>
+                  <button aria-label={`Move ${label} down`} onClick={() => handleMoveChainEntry(i, "down")} disabled={i === chain.length - 1} style={{ ...styles.saveBtn, fontSize: 12, padding: "1px 5px" }}>↓</button>
                   <label style={{ cursor: "pointer" }}>
-                    <input type="checkbox" checked={entry.enabled} onChange={() => handleToggleChainEntry(i)} style={styles.radio} />
+                    <input type="checkbox" aria-label={`Enable ${label}`} checked={entry.enabled} onChange={() => handleToggleChainEntry(i)} style={styles.radio} />
                   </label>
-                  <button onClick={() => handleRemoveFromChain(i)} style={{ ...styles.saveBtn, fontSize: 9, padding: "1px 5px", borderColor: "rgba(255, 100, 100, 0.3)", color: "rgba(255, 100, 100, 0.7)" }}>x</button>
+                  <button aria-label={`Remove ${label} from priority`} onClick={() => handleRemoveFromChain(i)} style={{ ...styles.saveBtn, fontSize: 12, padding: "1px 5px", borderColor: "var(--accent-urgent)", color: "var(--accent-urgent)" }}>Remove</button>
                 </div>
               );
             })}
 
             {chain.length === 0 && (
-              <div style={{ color: "rgba(0, 180, 255, 0.3)", fontSize: 11, marginBottom: 8 }}>No providers configured. Add cloud or local providers below.</div>
+              <div style={{ color: "var(--text-muted)", fontSize: 13, marginBottom: 8 }}>No providers configured. Add cloud or local providers below.</div>
             )}
 
             <div style={{ display: "flex", gap: 6, marginTop: 8, flexWrap: "wrap" }}>
@@ -643,8 +626,8 @@ export default function Settings() {
             </div>
           </div>
 
-          <div className="panel" style={styles.panel}>
-            <div className="label" style={styles.sectionTitle}>AI PROVIDER (LEGACY)</div>
+          <div className="settings-panel">
+            <h2 className="settings-heading">Default provider</h2>
             <div style={styles.hint}>Used when no provider chain is configured</div>
             {options.map((opt) => (
               <label key={opt.value} style={styles.option}>
@@ -653,21 +636,85 @@ export default function Settings() {
               </label>
             ))}
           </div>
+          <details className="settings-local-details">
+            <summary>Local AI setup and endpoints</summary>
+            <p className="settings-help">Optional. Connect a local server or download a model only when you want to use local AI.</p>
+            <div className="settings-local-setup">
+              <LocalAiSetup
+                endpoints={endpoints}
+                onEndpointAdded={(ep) => setEndpoints((prev) => [...prev, ep])}
+                onModelsLoaded={(eid, models) => setEndpointModels((prev) => ({ ...prev, [eid]: models }))}
+                onAddToChain={handleAddToChain}
+              />
+            </div>
+          <div className="settings-panel">
+            <h2 className="settings-heading">Local model endpoints</h2>
+            <div style={styles.hint}>Connect to Ollama, vLLM, or any compatible server</div>
+
+            {endpoints.map((ep) => (
+              <div key={ep.id} style={{ background: "var(--surface)", border: "1px solid var(--border-primary)", borderRadius: 6, padding: 10, marginBottom: 8 }}>
+                <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center" }}>
+                  <div>
+                    <span style={{ color: "var(--text-primary)", fontSize: 12, fontWeight: 600 }}>{ep.name}</span>
+                    <span style={{ color: "var(--text-muted)", fontSize: 12, marginLeft: 8 }}>{ep.backend_type.toUpperCase()}</span>
+                  </div>
+                  <div style={{ display: "flex", gap: 4, alignItems: "center" }}>
+                    <span style={{ width: 8, height: 8, borderRadius: "50%", background: ep.last_health_status ? "var(--text-secondary)" : "var(--accent-urgent)" }} />
+                  </div>
+                </div>
+                <div style={{ color: "var(--text-muted)", fontSize: 12, fontFamily: "var(--font-mono)", marginTop: 4 }}>{ep.url}</div>
+                {endpointHealth[ep.id] && (
+                  <div style={{ color: "var(--text-secondary)", fontSize: 12, marginTop: 4 }}>
+                    {endpointHealth[ep.id].reachable ? `${endpointHealth[ep.id].model_count} models, ${endpointHealth[ep.id].latency_ms}ms` : "Unreachable"}
+                  </div>
+                )}
+                {endpointModels[ep.id] && endpointModels[ep.id].length > 0 && (
+                  <div style={{ marginTop: 6 }}>
+                    <div style={{ color: "var(--text-muted)", fontSize: 12 }}>Available models</div>
+                    {endpointModels[ep.id].map((m) => (
+                      <div key={m.id} style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginTop: 2 }}>
+                        <span style={{ color: "var(--text-secondary)", fontSize: 12, fontFamily: "var(--font-mono)" }}>{m.id}</span>
+                        <div style={{ display: "flex", gap: 4, alignItems: "center" }}>
+                          <span style={{ color: "var(--text-muted)", fontSize: 12 }}>{m.supports_tools === "native" ? "tools" : m.supports_tools === "prompt_injected" ? "prompt-tools" : "chat"}</span>
+                          <button onClick={() => handleAddToChain("local", ep.id, m.id)} style={{ ...styles.saveBtn, fontSize: 12, padding: "2px 6px" }}>Add to priority</button>
+                        </div>
+                      </div>
+                    ))}
+                  </div>
+                )}
+                <div style={{ display: "flex", gap: 6, marginTop: 8 }}>
+                  <button onClick={() => handleTestEndpoint(ep.id)} style={{ ...styles.saveBtn, fontSize: 12 }}>Test connection</button>
+                  <button onClick={() => handleRemoveEndpoint(ep.id)} style={{ ...styles.saveBtn, fontSize: 12, borderColor: "var(--accent-urgent)", color: "var(--accent-urgent)" }}>Remove</button>
+                </div>
+              </div>
+            ))}
+
+            <div style={{ display: "flex", gap: 6, marginTop: 8, flexDirection: "column" as const }}>
+              <input aria-label="Endpoint name" value={newEndpointName} onChange={(e) => setNewEndpointName(e.target.value)} placeholder="Name (optional)" style={styles.tokenInput} />
+              <div style={{ display: "flex", gap: 6 }}>
+                <input aria-label="Endpoint URL" value={newEndpointUrl} onChange={(e) => setNewEndpointUrl(e.target.value)} placeholder="http://localhost:11434" style={{ ...styles.tokenInput, flex: 1 }} />
+                <button onClick={handleAddEndpoint} disabled={endpointBusy} style={styles.saveBtn}>{endpointBusy ? "..." : "Add endpoint"}</button>
+              </div>
+            </div>
+          </div>
+          </details>
         </>)}
 
         {section === "keys" && (
-          <div className="panel" style={styles.panel}>
-            <div className="label" style={styles.sectionTitle}>API KEYS</div>
-            <div style={styles.hint}>Stored in your macOS Keychain, never sent anywhere but the provider.</div>
+          <div className="settings-panel">
+            <h2 className="settings-heading">Provider API keys</h2>
+            <div style={styles.hint}>Keys are stored in macOS Keychain and used to authenticate requests to the selected provider.</div>
             {API_KEY_PROVIDERS.map(({ id, label, help }) => (
               <div key={id} style={{ marginBottom: 12 }}>
                 <div style={styles.hint}>
                   {label}
-                  {apiKeyStatus[id] ? <span style={{ color: "rgba(16, 185, 129, 0.7)" }}> -- configured</span> : null}
+                  {apiKeyStatus[id] ? <span style={{ color: "var(--text-secondary)" }}> · Key available</span> : null}
                 </div>
                 <div style={{ display: "flex", gap: 8 }}>
                   <input
                     type="password"
+                    aria-label={`${label} API key`}
+                    autoComplete="off"
                     style={styles.tokenInput}
                     placeholder={apiKeyStatus[id] ? "Replace saved key" : help}
                     value={apiKeyDrafts[id] ?? ""}
@@ -677,31 +724,36 @@ export default function Settings() {
                     onClick={() => { void handleSaveApiKey(id); }}
                     disabled={!(apiKeyDrafts[id] ?? "").trim()}
                     style={styles.saveBtn}
-                  >SAVE</button>
+                  >Save</button>
                   {apiKeyStatus[id] && (
                     <button
                       onClick={() => { void handleClearApiKey(id, label); }}
-                      style={{ ...styles.saveBtn, borderColor: "rgba(255, 100, 100, 0.3)", color: "rgba(255, 100, 100, 0.7)" }}
-                    >CLEAR</button>
+                      style={{ ...styles.saveBtn, borderColor: "var(--accent-urgent)", color: "var(--accent-urgent)" }}
+                    >Remove key</button>
                   )}
                 </div>
               </div>
             ))}
             <div style={{ ...styles.hint, marginTop: 4, marginBottom: 0 }}>
-              A saved key cannot be read back, so these fields stay empty -- typing a new one
-              replaces it. CLEAR is the only way to remove one.
+              Saved keys are never displayed. Leave a field blank to keep its current key,
+              or enter a new key to replace it. Remove key deletes the saved key.
             </div>
             {apiKeyError && <div style={styles.errorText}>{apiKeyError}</div>}
           </div>
         )}
 
         {section === "google" && (
-          <div className="panel" style={styles.panel}>
-            <div className="label" style={styles.sectionTitle}>GOOGLE SERVICES</div>
-            <div style={styles.hint}>Connect Gmail and Google Calendar</div>
-            {googleConnected ? (
+          <div className="settings-panel">
+            <h2 className="settings-heading">Google for Assistant and Calendar</h2>
+            <div style={styles.hint}>Connect Google for Assistant mail tools, Calendar and briefings. Mail workspaces use a separate Gmail connection.</div>
+            {googleConnected === null ? (
+              <div style={styles.hint}>
+                {googleError ? "Google connection status is unavailable." : "Checking Google connection…"}
+                {googleError && <button style={{ ...styles.saveBtn, marginLeft: 10 }} onClick={() => { setGoogleError(null); void refreshGoogle(); }}>Retry</button>}
+              </div>
+            ) : googleConnected ? (
               <>
-                <div style={{ color: "rgba(16, 185, 129, 0.7)", fontSize: 12, marginBottom: 10 }}>
+                <div style={{ color: "var(--text-secondary)", fontSize: 12, marginBottom: 10 }}>
                   {googleAccount ? `Connected as ${googleAccount}` : "Connected"}
                 </div>
                 <div style={{ display: "flex", gap: 8 }}>
@@ -710,24 +762,24 @@ export default function Settings() {
                     disabled={connecting || disconnecting}
                     style={styles.actionBtn}
                   >
-                    {connecting ? "OPENING..." : "SWITCH ACCOUNT"}
+                    {connecting ? "Opening…" : "Switch account"}
                   </button>
                   <button
                     onClick={() => { void handleGoogleDisconnect(); }}
                     disabled={connecting || disconnecting}
-                    style={{ ...styles.actionBtn, borderColor: "rgba(255, 100, 100, 0.3)", color: "rgba(255, 100, 100, 0.7)" }}
+                    style={{ ...styles.actionBtn, borderColor: "var(--accent-urgent)", color: "var(--accent-urgent)" }}
                   >
-                    {disconnecting ? "DISCONNECTING..." : "DISCONNECT"}
+                    {disconnecting ? "Disconnecting…" : "Disconnect"}
                   </button>
                 </div>
                 <div style={{ ...styles.hint, marginTop: 8, marginBottom: 0 }}>
-                  Disconnecting revokes JARVIS's access at Google and deletes the mail, events and
-                  briefings cached on this Mac.
+                  Disconnecting revokes this Google connection and removes its Assistant mail cache,
+                  Calendar events and briefings. Local copies in the separate Mail workspace are kept.
                 </div>
               </>
             ) : (
               <button onClick={() => { void handleGoogleConnect(false); }} disabled={connecting} style={styles.actionBtn}>
-                {connecting ? "CONNECTING..." : "CONNECT GOOGLE"}
+                {connecting ? "Connecting…" : "Connect Google"}
               </button>
             )}
             {googleNotice && <div style={{ ...styles.hint, marginTop: 10, marginBottom: 0 }}>{googleNotice}</div>}
@@ -736,48 +788,49 @@ export default function Settings() {
         )}
 
         {section === "notion" && (
-          <div className="panel" style={styles.panel}>
-            <div className="label" style={styles.sectionTitle}>NOTION</div>
+          <div className="settings-panel">
+            <h2 className="settings-heading">Notion</h2>
             <div style={styles.hint}>Enter your Notion integration token</div>
             <div style={{ display: "flex", gap: 8 }}>
-              <input type="password" value={notionToken} onChange={(e) => { setNotionToken(e.target.value); setNotionSaved(false); }} placeholder="ntn_..." style={styles.tokenInput} />
-              <button onClick={handleSaveNotion} style={styles.saveBtn}>{notionSaved ? "SAVED" : "SAVE"}</button>
+              <input type="password" aria-label="Notion integration token" autoComplete="off" value={notionToken} onChange={(e) => { setNotionToken(e.target.value); setNotionSaved(false); }} placeholder="ntn_..." style={styles.tokenInput} />
+              <button disabled={!notionToken.trim()} onClick={handleSaveNotion} style={styles.saveBtn}>{notionSaved ? "Saved" : "Save"}</button>
             </div>
           </div>
         )}
 
         {section === "github" && (
-          <div className="panel" style={styles.panel}>
-            <div className="label" style={styles.sectionTitle}>GITHUB</div>
+          <div className="settings-panel">
+            <h2 className="settings-heading">GitHub</h2>
             <div style={styles.hint}>Enter your GitHub personal access token</div>
             <div style={{ display: "flex", gap: 8 }}>
-              <input type="password" value={githubToken} onChange={(e) => { setGithubToken(e.target.value); setGithubSaved(false); }} placeholder="ghp_..." style={styles.tokenInput} />
-              <button onClick={handleSaveGitHub} style={styles.saveBtn}>{githubSaved ? "SAVED" : "SAVE"}</button>
+              <input type="password" aria-label="GitHub personal access token" autoComplete="off" value={githubToken} onChange={(e) => { setGithubToken(e.target.value); setGithubSaved(false); }} placeholder="ghp_..." style={styles.tokenInput} />
+              <button disabled={!githubToken.trim()} onClick={handleSaveGitHub} style={styles.saveBtn}>{githubSaved ? "Saved" : "Save"}</button>
             </div>
           </div>
         )}
 
         {section === "obsidian" && (
-          <div className="panel" style={styles.panel}>
-            <div className="label" style={styles.sectionTitle}>OBSIDIAN</div>
+          <div className="settings-panel">
+            <h2 className="settings-heading">Obsidian</h2>
             <div style={styles.hint}>Connect to Obsidian vault via Local REST API plugin</div>
             <div style={{ display: "flex", gap: 8 }}>
-              <input type="password" value={obsidianKey} onChange={(e) => { setObsidianKey(e.target.value); setObsidianSaved(false); }} placeholder="API key from Obsidian REST API plugin" style={styles.tokenInput} />
-              <button onClick={handleSaveObsidian} style={styles.saveBtn}>{obsidianSaved ? "SAVED" : "SAVE"}</button>
+              <input type="password" aria-label="Obsidian API key" autoComplete="off" value={obsidianKey} onChange={(e) => { setObsidianKey(e.target.value); setObsidianSaved(false); }} placeholder="API key from Obsidian REST API plugin" style={styles.tokenInput} />
+              <button disabled={!obsidianKey.trim()} onClick={handleSaveObsidian} style={styles.saveBtn}>{obsidianSaved ? "Saved" : "Save"}</button>
             </div>
-            <div style={{ color: "rgba(0, 180, 255, 0.3)", fontSize: 9, marginTop: 6 }}>
+            <div style={{ color: "var(--text-muted)", fontSize: 12, marginTop: 6 }}>
               Install "Local REST API" plugin in Obsidian, enable it, copy the API key
             </div>
             <div style={{ marginTop: 12 }}>
-              <div style={{ color: "rgba(0, 180, 255, 0.5)", fontSize: 10, marginBottom: 4 }}>Endpoint</div>
+              <div style={{ color: "var(--text-secondary)", fontSize: 12, marginBottom: 4 }}>Endpoint</div>
               <input
+                aria-label="Obsidian endpoint URL"
                 value={obsidianBaseUrl}
                 onChange={(e) => setObsidianBaseUrl(e.target.value)}
                 onBlur={() => { void setPreference("obsidian_base_url", obsidianBaseUrl.trim()); }}
                 placeholder="https://127.0.0.1:27124"
                 style={styles.tokenInput}
               />
-              <div style={{ color: "rgba(0, 180, 255, 0.3)", fontSize: 9, marginTop: 6 }}>
+              <div style={{ color: "var(--text-muted)", fontSize: 12, marginTop: 6 }}>
                 Leave blank for the plugin default (HTTPS on 27124). Set this only if you changed
                 the port, or enabled the plugin's non-encrypted server on http://127.0.0.1:27123.
               </div>
@@ -786,26 +839,26 @@ export default function Settings() {
         )}
 
         {section === "ai" && (
-          <div className="panel" style={styles.panel}>
-            <div className="label" style={styles.sectionTitle}>AWS BEDROCK</div>
+          <div className="settings-panel">
+            <h2 className="settings-heading">AWS Bedrock</h2>
             <div style={styles.hint}>
               Used for Claude (Haiku 4.5 / Sonnet 4.6) and Amazon Nova models via the
               apac. inference profile (Singapore region).
               {awsStatus.configured && (
-                <> Currently configured for <code style={{ fontFamily: "var(--font-mono)", color: "rgba(0, 180, 255, 0.8)" }}>{awsStatus.region}</code>.</>
+                <> Currently configured for <code style={{ fontFamily: "var(--font-mono)", color: "var(--text-primary)" }}>{awsStatus.region}</code>.</>
               )}
             </div>
             <div style={{ marginBottom: 8 }}>
-              <div style={{ color: "rgba(0, 180, 255, 0.5)", fontSize: 10, marginBottom: 4 }}>Access Key ID</div>
-              <input value={awsAccessKey} onChange={(e) => setAwsAccessKey(e.target.value)} placeholder="AKIA..." style={styles.tokenInput} />
+              <div style={{ color: "var(--text-secondary)", fontSize: 12, marginBottom: 4 }}>Access Key ID</div>
+              <input aria-label="AWS access key ID" value={awsAccessKey} onChange={(e) => setAwsAccessKey(e.target.value)} placeholder="AKIA..." style={styles.tokenInput} />
             </div>
             <div style={{ marginBottom: 8 }}>
-              <div style={{ color: "rgba(0, 180, 255, 0.5)", fontSize: 10, marginBottom: 4 }}>Secret Access Key</div>
-              <input type="password" value={awsSecret} onChange={(e) => setAwsSecret(e.target.value)} placeholder="Secret key" style={styles.tokenInput} />
+              <div style={{ color: "var(--text-secondary)", fontSize: 12, marginBottom: 4 }}>Secret Access Key</div>
+              <input type="password" aria-label="AWS secret access key" autoComplete="off" value={awsSecret} onChange={(e) => setAwsSecret(e.target.value)} placeholder="Secret key" style={styles.tokenInput} />
             </div>
             <div style={{ marginBottom: 12 }}>
-              <div style={{ color: "rgba(0, 180, 255, 0.5)", fontSize: 10, marginBottom: 4 }}>Region</div>
-              <select value={awsRegion} onChange={(e) => setAwsRegion(e.target.value)} style={styles.select}>
+              <div style={{ color: "var(--text-secondary)", fontSize: 12, marginBottom: 4 }}>Region</div>
+              <select aria-label="AWS region" value={awsRegion} onChange={(e) => setAwsRegion(e.target.value)} style={styles.select}>
                 <option value="ap-southeast-1">Singapore (ap-southeast-1) -- recommended</option>
                 <option value="ap-northeast-1">Tokyo (ap-northeast-1) -- fallback</option>
                 <option value="us-east-1">US East (us-east-1) -- high latency from HK</option>
@@ -821,12 +874,12 @@ export default function Settings() {
                 } catch (e) {
                   setAwsError(String(e));
                 }
-              }} style={styles.saveBtn}>SAVE</button>
+              }} style={styles.saveBtn}>Save</button>
               {awsStatus.configured && (
                 <button onClick={async () => {
                   await clearAwsCredentials();
                   setAwsStatus({ configured: false, region: null });
-                }} style={{ ...styles.saveBtn, borderColor: "rgba(255, 100, 100, 0.3)", color: "rgba(255, 100, 100, 0.7)" }}>CLEAR</button>
+                }} style={{ ...styles.saveBtn, borderColor: "var(--accent-urgent)", color: "var(--accent-urgent)" }}>Remove key</button>
               )}
             </div>
             {awsError && <div style={styles.errorText}>{awsError}</div>}
@@ -834,15 +887,15 @@ export default function Settings() {
         )}
 
         {section === "voice" && (<>
-          <div className="panel" style={styles.panel}>
-            <div className="label" style={styles.sectionTitle}>LANGUAGE &amp; VOICE</div>
+          <div className="settings-panel">
+            <h2 className="settings-heading">Language</h2>
             <div style={styles.hint}>
               Controls the assistant's response language and speech-to-text language.
             </div>
 
             <div style={{ marginTop: 12 }}>
-              <div style={{ color: "rgba(0, 180, 255, 0.5)", fontSize: 10, marginBottom: 4 }}>Response language</div>
-              <select value={language} style={styles.select} onChange={async (e) => {
+              <div style={{ color: "var(--text-secondary)", fontSize: 12, marginBottom: 4 }}>Response language</div>
+              <select aria-label="Response language" value={language} style={styles.select} onChange={async (e) => {
                 const v = e.target.value;
                 setLanguage(v);
                 await setPreference("language", v);
@@ -854,8 +907,8 @@ export default function Settings() {
             </div>
 
             <div style={{ marginTop: 12 }}>
-              <div style={{ color: "rgba(0, 180, 255, 0.5)", fontSize: 10, marginBottom: 4 }}>Speech-to-text language</div>
-              <select value={sttLanguage} style={styles.select} onChange={async (e) => {
+              <div style={{ color: "var(--text-secondary)", fontSize: 12, marginBottom: 4 }}>Speech-to-text language</div>
+              <select aria-label="Speech-to-text language" value={sttLanguage} style={styles.select} onChange={async (e) => {
                 const v = e.target.value;
                 setSttLanguage(v);
                 await setPreference("stt_language", v);
@@ -867,8 +920,8 @@ export default function Settings() {
             </div>
           </div>
 
-          <div className="panel" style={styles.panel}>
-            <div className="label" style={styles.sectionTitle}>VOICE</div>
+          <div className="settings-panel">
+            <h2 className="settings-heading">Speech</h2>
             <div style={styles.hint}>Cmd+Shift+J to start/stop voice input</div>
             <div style={voiceInputReady ? styles.hint : styles.statusText}>{getVoiceAvailabilityLine()}</div>
             <label style={styles.option}>
@@ -877,25 +930,25 @@ export default function Settings() {
             </label>
             {ttsVoices.length > 0 && (
               <div style={{ marginTop: 8 }}>
-                <div style={{ color: "rgba(0, 180, 255, 0.5)", fontSize: 10, marginBottom: 4 }}>TTS Voice</div>
-                <select value={voiceSettings?.tts_voice ?? "Samantha"} onChange={(e) => { void setVoiceSetting("tts_voice", e.target.value); setVoiceSettingsState((prev) => prev ? { ...prev, tts_voice: e.target.value } : prev); }} style={styles.select}>
+                <div style={{ color: "var(--text-secondary)", fontSize: 12, marginBottom: 4 }}>TTS Voice</div>
+                <select aria-label="Speech voice" value={voiceSettings?.tts_voice ?? "Samantha"} onChange={(e) => { void setVoiceSetting("tts_voice", e.target.value); setVoiceSettingsState((prev) => prev ? { ...prev, tts_voice: e.target.value } : prev); }} style={styles.select}>
                   {ttsVoices.map((voice) => <option key={voice} value={voice}>{voice}</option>)}
                 </select>
               </div>
             )}
             {ttsVoices.length > 0 && (
               <div style={{ marginTop: 8 }}>
-                <div style={{ color: "rgba(0, 180, 255, 0.5)", fontSize: 10, marginBottom: 4 }}>Cantonese voice</div>
-                <select value={ttsVoiceYue} onChange={(e) => { void setVoiceSetting("tts_voice_yue", e.target.value); setTtsVoiceYue(e.target.value); }} style={styles.select}>
+                <div style={{ color: "var(--text-secondary)", fontSize: 12, marginBottom: 4 }}>Cantonese voice</div>
+                <select aria-label="Cantonese voice" value={ttsVoiceYue} onChange={(e) => { void setVoiceSetting("tts_voice_yue", e.target.value); setTtsVoiceYue(e.target.value); }} style={styles.select}>
                   {ttsVoices.map((voice) => <option key={voice} value={voice}>{voice}</option>)}
                 </select>
               </div>
             )}
           </div>
 
-          <div className="panel" style={styles.panel}>
-            <div className="label" style={styles.sectionTitle}>WAKE WORD (EXPERIMENTAL)</div>
-            <div style={styles.hint}>Always-on local wake-word detection for "Hey Jarvis"</div>
+          <div className="settings-panel">
+            <h2 className="settings-heading">Wake word</h2>
+            <div style={styles.hint}>Experimental. Listen locally for "Hey Jarvis" to start voice input.</div>
             <label style={styles.option}>
               <input type="checkbox" checked={wakeStatus?.enabled ?? false} disabled={!wakeCanEnable || wakeBusy || modelDownloading !== null} onChange={(e) => { void handleWakeToggle(e.target.checked); }} style={styles.radio} />
               <span style={styles.optionLabel}>Enable wake word</span>
@@ -903,11 +956,11 @@ export default function Settings() {
             <div style={styles.statusText}>{getWakeStatusLine(voiceState)}</div>
             <div style={{ display: "flex", gap: 8 }}>
               <button onClick={() => { void handleDownloadModel(false); }} disabled={wakeBusy || modelDownloading !== null || wakeStatus?.model_downloaded} style={styles.actionBtn}>
-                {modelDownloading !== null ? "DOWNLOADING..." : wakeStatus?.model_downloaded ? "MODEL READY" : "DOWNLOAD MODEL"}
+                {modelDownloading !== null ? "Downloading…" : wakeStatus?.model_downloaded ? "Model ready" : "Download model"}
               </button>
               {wakeStatus?.model_downloaded && (
                 <button onClick={() => { void handleDownloadModel(true); }} disabled={wakeBusy || modelDownloading !== null} style={styles.actionBtn}>
-                  RE-DOWNLOAD MODEL
+                  Download again
                 </button>
               )}
             </div>
@@ -919,7 +972,7 @@ export default function Settings() {
             {wakeStatus?.model_downloaded && modelDownloading === null && (
               <div style={{ ...styles.hint, marginTop: 8 }}>
                 Model file: ~/Library/Application Support/jarvis/models/ggml-base.bin. If transcription keeps
-                failing to load the model, that file is damaged: RE-DOWNLOAD MODEL replaces it in place.
+                failing to load the model, that file is damaged: Download again replaces it in place.
               </div>
             )}
             <div style={styles.privacyText}>
@@ -930,8 +983,8 @@ export default function Settings() {
         </>)}
 
         {section === "assistant" && (
-          <div className="panel" style={styles.panel}>
-            <div className="label" style={styles.sectionTitle}>ASSISTANT</div>
+          <div className="settings-panel">
+            <h2 className="settings-heading">Briefing</h2>
             <label style={styles.option}>
               <input type="checkbox" checked={autoBriefing} onChange={(e) => { setAutoBriefing(e.target.checked); void updateSetting("auto_briefing", String(e.target.checked)); }} style={styles.radio} />
               <span style={styles.optionLabel}>Speak morning briefing on startup (once per day)</span>
@@ -939,9 +992,25 @@ export default function Settings() {
           </div>
         )}
 
-        {section === "appearance" && (
-          <div className="panel" style={styles.panel}>
-            <div className="label" style={styles.sectionTitle}>WALLPAPER MODE</div>
+        {section === "appearance" && (<>
+          <div className="settings-panel">
+            <h2 className="settings-heading">Colour theme</h2>
+            <p style={styles.hint}>Choose a light or dark workspace, or follow your Mac.</p>
+            <div className="settings-appearance-options" role="group" aria-label="Colour theme">
+              {([
+                { value: "light", label: "Light", help: "A bright workspace" },
+                { value: "dark", label: "Dark", help: "A darker workspace" },
+                { value: "system", label: "System", help: "Follow macOS appearance" },
+              ] as const).map((mode) => (
+                <button key={mode.value} className={appearance === mode.value ? "is-selected" : ""}
+                  aria-pressed={appearance === mode.value} onClick={() => setAppearance(mode.value)}>
+                  <strong>{mode.label}</strong><span>{mode.help}</span>
+                </button>
+              ))}
+            </div>
+          </div>
+          <div className="settings-panel">
+            <h2 className="settings-heading">Desktop wallpaper</h2>
             <div style={styles.hint}>
               Turn the full JARVIS app into a live macOS desktop wallpaper.
               The entire UI renders behind all windows and desktop icons.
@@ -953,6 +1022,7 @@ export default function Settings() {
             <div style={styles.statusText}>
               {wallpaperBusy ? "Toggling..." : wallpaperActive ? "Wallpaper active -- full JARVIS on desktop" : "Wallpaper inactive"}
             </div>
+            {wallpaperError && <p role="alert" style={styles.errorText}>{wallpaperError}</p>}
             <div style={styles.privacyText}>
               When active, JARVIS goes fullscreen behind all windows.
               After enabling, it stays interactive until you send it to the background.
@@ -960,7 +1030,7 @@ export default function Settings() {
               Closing the window sends it back to the background.
             </div>
           </div>
-        )}
+        </>)}
 
       </div>
     </div>
@@ -968,25 +1038,17 @@ export default function Settings() {
 }
 
 const styles: Record<string, React.CSSProperties> = {
-  page: { display: "flex", height: "100%", overflow: "hidden" },
-  nav: { width: 210, flexShrink: 0, borderRight: "1px solid var(--border-primary)", background: "var(--surface)", backdropFilter: "blur(12px)", padding: "18px 12px", overflowY: "auto" },
-  navItem: { display: "flex", alignItems: "center", gap: 11, width: "100%", textAlign: "left" as const, padding: "9px 11px", marginBottom: 2, borderRadius: 9, border: "1px solid transparent", background: "transparent", color: "var(--muted)", fontSize: 13, cursor: "pointer" },
-  navItemActive: { background: "rgba(0,180,255,0.12)", color: "var(--text-primary)", boxShadow: "inset 0 0 0 1px var(--border-strong)" },
-  content: { flex: 1, overflowY: "auto", padding: "24px 30px", display: "flex", flexDirection: "column" as const, gap: 12 },
-  panel: { padding: 16 },
-  sectionTitle: { marginBottom: 12 },
-  option: { display: "flex", alignItems: "center", gap: 8, marginBottom: 10, cursor: "pointer" },
-  radio: { accentColor: "rgba(0, 180, 255, 0.8)" },
-  optionLabel: { color: "rgba(0, 180, 255, 0.7)", fontSize: 13 },
-  hint: { color: "rgba(0, 180, 255, 0.5)", fontSize: 12, marginBottom: 8 },
-  code: { display: "block", color: "rgba(0, 180, 255, 0.6)", fontFamily: "var(--font-mono)", fontSize: 11, background: "rgba(0, 180, 255, 0.04)", padding: "4px 8px", borderRadius: 4, marginBottom: 4 },
-  tokenInput: { flex: 1, background: "rgba(0, 180, 255, 0.03)", border: "1px solid rgba(0, 180, 255, 0.15)", borderRadius: 6, padding: "6px 10px", color: "rgba(0, 180, 255, 0.8)", fontSize: 11, fontFamily: "var(--font-mono)", outline: "none" },
-  saveBtn: { background: "rgba(0, 180, 255, 0.08)", border: "1px solid rgba(0, 180, 255, 0.3)", borderRadius: 6, padding: "6px 12px", color: "rgba(0, 180, 255, 0.8)", cursor: "pointer", fontFamily: "var(--font-mono)", fontSize: 10 },
-  actionBtn: { background: "rgba(0, 180, 255, 0.08)", border: "1px solid rgba(0, 180, 255, 0.3)", borderRadius: 6, padding: "8px 16px", color: "rgba(0, 180, 255, 0.8)", cursor: "pointer", fontFamily: "var(--font-mono)", fontSize: 11 },
-  select: { background: "rgba(0, 180, 255, 0.03)", border: "1px solid rgba(0, 180, 255, 0.15)", borderRadius: 6, padding: "4px 8px", color: "rgba(0, 180, 255, 0.8)", fontSize: 11, fontFamily: "var(--font-mono)" },
-  statusText: { color: "rgba(255, 180, 0, 0.85)", fontSize: 11, fontFamily: "var(--font-mono)", marginBottom: 10 },
-  progressShell: { marginTop: 12, width: "100%", height: 8, borderRadius: 999, overflow: "hidden", background: "rgba(0, 180, 255, 0.08)", border: "1px solid rgba(0, 180, 255, 0.15)" },
-  progressFill: { height: "100%", background: "linear-gradient(90deg, rgba(0, 180, 255, 0.65), rgba(96, 165, 250, 0.95))", transition: "width 180ms ease-out" },
-  privacyText: { color: "rgba(0, 180, 255, 0.4)", fontSize: 10, marginTop: 12, lineHeight: 1.5 },
-  errorText: { color: "rgba(255, 100, 100, 0.85)", fontSize: 11, marginTop: 10 },
+  option: { display: "flex", alignItems: "center", gap: 10, marginBottom: 12, cursor: "pointer", lineHeight: 1.5 },
+  radio: { accentColor: "var(--cyan)", width: 16, height: 16, flexShrink: 0 },
+  optionLabel: { color: "var(--text-primary)", fontSize: 13 },
+  hint: { color: "var(--text-secondary)", fontSize: 13, marginBottom: 12, lineHeight: 1.6, maxWidth: "72ch" },
+  tokenInput: { flex: 1, minWidth: 0, width: "100%", background: "var(--bg-primary)", border: "1px solid var(--border-primary)", borderRadius: 6, padding: "9px 11px", color: "var(--text-primary)", fontSize: 13, fontFamily: "inherit" },
+  saveBtn: { background: "var(--surface-solid)", border: "1px solid var(--border-primary)", borderRadius: 6, padding: "8px 12px", color: "var(--text-primary)", cursor: "pointer", fontFamily: "inherit", fontSize: 13, whiteSpace: "nowrap" },
+  actionBtn: { background: "var(--surface-solid)", border: "1px solid var(--border-primary)", borderRadius: 6, padding: "9px 14px", color: "var(--text-primary)", cursor: "pointer", fontFamily: "inherit", fontSize: 13 },
+  select: { maxWidth: "100%", background: "var(--bg-primary)", border: "1px solid var(--border-primary)", borderRadius: 6, padding: "8px 10px", color: "var(--text-primary)", fontSize: 13, fontFamily: "inherit" },
+  statusText: { color: "var(--text-secondary)", fontSize: 13, marginBottom: 12, lineHeight: 1.6 },
+  progressShell: { marginTop: 12, width: "100%", height: 6, borderRadius: 4, overflow: "hidden", background: "var(--border-primary)" },
+  progressFill: { height: "100%", background: "var(--cyan)", transition: "width 180ms ease-out" },
+  privacyText: { color: "var(--text-secondary)", fontSize: 13, marginTop: 12, lineHeight: 1.6, maxWidth: "72ch" },
+  errorText: { color: "var(--accent-urgent)", fontSize: 13, marginTop: 12, lineHeight: 1.5 },
 };

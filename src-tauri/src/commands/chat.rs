@@ -5,7 +5,8 @@ use crate::voice::VoiceEngine;
 use serde::{Deserialize, Serialize};
 use serde_json::json;
 use std::sync::{Arc, Mutex};
-use tauri::{Emitter, State};
+use tauri::State;
+use crate::chat_session::{self, ScopedEmitter};
 
 /// Whether a message is asking about the user's own data, in which case it is
 /// worth the tokens to inject day context.
@@ -47,6 +48,29 @@ pub async fn send_message(
     engine: State<'_, Arc<VoiceEngine>>,
     message: String,
     workload: Option<String>,
+    session_id: Option<String>,
+    run_id: Option<String>,
+) -> Result<ChatMessage, String> {
+    let session_id = chat_session::identity(session_id, "legacy")?;
+    let run_id = chat_session::identity(run_id, &uuid::Uuid::new_v4().to_string())?;
+    let _guard = chat_session::FOREGROUND.try_lock().map_err(|_| "另一個助理任務進行中，請等完成後再試。".to_string())?;
+    let context = chat_session::Context { session_id: session_id.clone(), run_id, app: app_handle.clone() };
+    chat_session::CONTEXT.scope(context, async {
+    let result = send_scoped(&app_handle, &db, &router, &google_auth, &engine, message, workload, session_id).await;
+    let _ = app_handle.emit("chat-state", json!({"state":"idle"}));
+    result
+    }).await
+}
+
+async fn send_scoped(
+    app_handle: &tauri::AppHandle,
+    db: &Arc<Database>,
+    router: &Mutex<AiRouter>,
+    google_auth: &Arc<crate::auth::google::GoogleAuth>,
+    engine: &Arc<VoiceEngine>,
+    message: String,
+    workload: Option<String>,
+    session_id: String,
 ) -> Result<ChatMessage, String> {
     let selected_workload = classify_workload(&message, workload.as_deref() == Some("premium"));
     // Cancel any in-progress TTS and emit thinking state FIRST for immediate UI feedback
@@ -66,9 +90,10 @@ pub async fn send_message(
 
     // Run DB insert + conversation fetch + context gathering on a blocking thread
     // to avoid starving tokio's async worker pool when the mutex is contended.
-    let db_arc = db.inner().clone();
+    let db_arc = db.clone();
     let msg_clone = message.clone();
     let msg_lower = message.to_lowercase();
+    let history_session = session_id.clone();
 
     let (history, context_messages) = tokio::task::spawn_blocking(
         move || -> Result<(Vec<(String, String)>, Vec<(String, String)>), String> {
@@ -76,8 +101,8 @@ pub async fn send_message(
             {
                 let conn = db_arc.conn.lock().map_err(|e| e.to_string())?;
                 conn.execute(
-                    "INSERT INTO conversations (role, content) VALUES ('user', ?1)",
-                    rusqlite::params![msg_clone],
+                    "INSERT INTO conversations (role, content, session_id) VALUES ('user', ?1, ?2)",
+                    rusqlite::params![msg_clone, history_session],
                 )
                 .map_err(|e| e.to_string())?;
             }
@@ -86,10 +111,10 @@ pub async fn send_message(
             let history = {
                 let conn = db_arc.conn.lock().map_err(|e| e.to_string())?;
                 let mut stmt = conn
-                    .prepare("SELECT role, content FROM conversations ORDER BY id DESC LIMIT 20")
+                    .prepare("SELECT role, content FROM conversations WHERE session_id = ?1 ORDER BY id DESC LIMIT 20")
                     .map_err(|e| e.to_string())?;
                 let mut msgs: Vec<(String, String)> = stmt
-                    .query_map([], |row| {
+                    .query_map([&history_session], |row| {
                         Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
                     })
                     .map_err(|e| e.to_string())?
@@ -140,15 +165,16 @@ pub async fn send_message(
             .to_string();
 
         if !topic.is_empty() {
-            let db_arc2 = db.inner().clone();
+            let db_arc2 = db.clone();
+            let search_session = session_id.clone();
             let results: Vec<String> = tokio::task::spawn_blocking(move || -> Result<Vec<String>, String> {
                 let conn = db_arc2.conn.lock().map_err(|e| e.to_string())?;
                 let mut stmt = conn.prepare(
-                    "SELECT role, content, created_at FROM conversations WHERE content LIKE ?1 ORDER BY created_at DESC LIMIT 10"
+                    "SELECT role, content, created_at FROM conversations WHERE content LIKE ?1 AND session_id = ?2 ORDER BY created_at DESC LIMIT 10"
                 ).map_err(|e| e.to_string())?;
                 let pattern = format!("%{}%", topic);
                 let collected = stmt
-                    .query_map(rusqlite::params![pattern], |row| {
+                    .query_map(rusqlite::params![pattern, search_session], |row| {
                         let role: String = row.get(0)?;
                         let content: String = row.get(1)?;
                         let date: Option<String> = row.get(2)?;
@@ -175,7 +201,7 @@ pub async fn send_message(
                     }),
                 );
                 let search_response = match router
-                    .send(search_messages, &db, &google_auth, &app_handle, None, Workload::Volume)
+                    .send_with_untrusted_context(search_messages, &db, &google_auth, &app_handle, None, Workload::Volume)
                     .await
                 {
                     Ok(r) => r,
@@ -187,7 +213,7 @@ pub async fn send_message(
 
                 {
                     let conn3 = db.conn.lock().map_err(|e| e.to_string())?;
-                    persist_assistant_reply(&conn3, &search_response)
+                    persist_scoped_reply(&conn3, &search_response, &session_id)
                         .map_err(|e| e.to_string())?;
                 }
 
@@ -314,6 +340,12 @@ pub async fn send_message(
             .send(messages, &db, &google_auth, &app_handle, tts_tx, selected_workload)
             .await
     };
+    // Join the task-owned consumer before releasing the foreground gate on
+    // every path, including provider and persistence errors.
+    if sent.is_err() {
+        if let Ok(tts) = engine.tts.lock() { tts.cancel(); }
+    }
+    streaming_tts.finish().await;
     let response_text = match sent {
         Ok(r) => r,
         Err(e) => {
@@ -324,12 +356,9 @@ pub async fn send_message(
     let final_response = response_text;
     {
         let conn = db.conn.lock().map_err(|e| e.to_string())?;
-        persist_assistant_reply(&conn, &final_response).map_err(|e| e.to_string())?;
+        persist_scoped_reply(&conn, &final_response, &session_id).map_err(|e| e.to_string())?;
     }
 
-    // Finish streaming TTS -- speaks any remaining buffered text
-    log::debug!("[chat] TTS finish, len={}", final_response.len());
-    streaming_tts.finish().await;
     // Unconditional: the HUD must return to idle here regardless of whether
     // the streaming consumer's own "idle" emit ran.
     let _ = app_handle.emit("chat-state", json!({"state": "idle"}));
@@ -340,6 +369,23 @@ pub async fn send_message(
         content: final_response,
         created_at: None,
     })
+}
+
+fn persist_scoped_reply(conn: &rusqlite::Connection, content: &str, session: &str) -> rusqlite::Result<()> {
+    if !content.trim().is_empty() {
+        conn.execute("INSERT INTO conversations(role,content,session_id) VALUES ('assistant',?1,?2)", rusqlite::params![content,session])?;
+    }
+    Ok(())
+}
+
+#[derive(Serialize)]
+pub struct ChatSession { pub id: String, pub title: String, pub updated_at: String }
+#[tauri::command]
+pub fn list_chat_sessions(db: State<Arc<Database>>) -> Result<Vec<ChatSession>, String> {
+    let conn = db.conn.lock().map_err(|e| e.to_string())?;
+    let mut stmt = conn.prepare("SELECT c.session_id, COALESCE((SELECT substr(content,1,60) FROM conversations WHERE session_id=c.session_id AND role='user' ORDER BY id LIMIT 1),'對話'), COALESCE(MAX(c.created_at),'') FROM conversations c GROUP BY c.session_id ORDER BY MAX(c.id) DESC").map_err(|e| e.to_string())?;
+    let rows = stmt.query_map([], |r| Ok(ChatSession {id:r.get(0)?,title:r.get(1)?,updated_at:r.get(2)?})).map_err(|e| e.to_string())?.collect::<Result<Vec<_>,_>>().map_err(|e| e.to_string());
+    rows
 }
 
 /// Persist the assistant's turn. A blank reply is not stored: the next turn
@@ -360,11 +406,17 @@ pub(crate) fn persist_assistant_reply(
 }
 
 #[tauri::command]
-pub fn clear_conversations(db: State<Arc<Database>>) -> Result<(), String> {
+pub fn clear_conversations(db: State<Arc<Database>>, session_id: Option<String>) -> Result<(), String> {
+    let session_id = chat_session::identity(session_id, "legacy")?;
+    let _guard = chat_session::FOREGROUND.try_lock().map_err(|_| "助理任務進行中，暫時無法清除記錄。".to_string())?;
     let conn = db.conn.lock().map_err(|e| e.to_string())?;
-    conn.execute("DELETE FROM conversations", [])
-        .map_err(|e| e.to_string())?;
+    clear_session(&conn, &session_id)?;
     log::info!("Conversations cleared");
+    Ok(())
+}
+
+fn clear_session(conn: &rusqlite::Connection, session_id: &str) -> Result<(), String> {
+    conn.execute("DELETE FROM conversations WHERE session_id = ?1", [session_id]).map_err(|e| e.to_string())?;
     Ok(())
 }
 
@@ -374,7 +426,7 @@ pub fn clear_conversations(db: State<Arc<Database>>) -> Result<(), String> {
 /// key backwards for the most recent window and reverse it back into the
 /// oldest-first order the UI appends to.
 const CONVERSATION_WINDOW_QUERY: &str =
-    "SELECT id, role, content, created_at FROM conversations ORDER BY id DESC LIMIT ?1";
+    "SELECT id, role, content, created_at FROM conversations WHERE session_id = ?2 ORDER BY id DESC LIMIT ?1";
 const DEFAULT_CONVERSATION_LIMIT: i64 = 200;
 const MAX_CONVERSATION_LIMIT: i64 = 1000;
 
@@ -390,13 +442,19 @@ fn conversation_limit(requested: Option<i64>) -> i64 {
 pub fn get_conversations(
     db: State<Arc<Database>>,
     limit: Option<i64>,
+    session_id: Option<String>,
 ) -> Result<Vec<ChatMessage>, String> {
+    let session_id = chat_session::identity(session_id, "legacy")?;
     let conn = db.conn.lock().map_err(|e| e.to_string())?;
+    history(&conn, &session_id, limit)
+}
+
+fn history(conn: &rusqlite::Connection, session_id: &str, limit: Option<i64>) -> Result<Vec<ChatMessage>, String> {
     let mut stmt = conn
         .prepare(CONVERSATION_WINDOW_QUERY)
         .map_err(|e| e.to_string())?;
     let mut messages = stmt
-        .query_map(rusqlite::params![conversation_limit(limit)], |row| {
+        .query_map(rusqlite::params![conversation_limit(limit),session_id], |row| {
             Ok(ChatMessage {
                 id: row.get(0)?,
                 role: row.get(1)?,
@@ -415,6 +473,36 @@ pub fn get_conversations(
 mod tests {
     use super::*;
     use rusqlite::Connection;
+
+    #[test]
+    fn chat_session_history_and_clear_are_isolated() {
+        let db = crate::db::test_database();
+        let conn = db.conn.lock().unwrap();
+        conn.execute("INSERT INTO conversations(role,content) VALUES ('user','legacy')", []).unwrap();
+        conn.execute("INSERT INTO conversations(role,content,session_id) VALUES ('user','Alpha','task-a'),('user','Beta','task-b')", []).unwrap();
+        assert_eq!(history(&conn, "task-a", None).unwrap()[0].content, "Alpha");
+        assert_eq!(history(&conn, "task-b", None).unwrap().len(), 1);
+        persist_scoped_reply(&conn, "Reply A", "task-a").unwrap();
+        persist_scoped_reply(&conn, " ", "task-b").unwrap();
+        assert_eq!(history(&conn, "task-a", None).unwrap().len(), 2);
+        assert_eq!(history(&conn, "task-b", None).unwrap().len(), 1);
+        clear_session(&conn, "task-a").unwrap();
+        assert!(history(&conn, "task-a", None).unwrap().is_empty());
+        assert_eq!(history(&conn, "legacy", None).unwrap()[0].content, "legacy");
+        let remaining: i64 = conn.query_row("SELECT COUNT(*) FROM conversations WHERE session_id IN ('task-b','legacy')", [], |r| r.get(0)).unwrap();
+        assert_eq!(remaining, 2);
+    }
+
+    #[test]
+    fn session_migration_retains_existing_legacy_rows() {
+        let conn = Connection::open_in_memory().unwrap();
+        conn.execute_batch("CREATE TABLE conversations(id INTEGER PRIMARY KEY, role TEXT NOT NULL, content TEXT NOT NULL, created_at TEXT DEFAULT CURRENT_TIMESTAMP); INSERT INTO conversations(role,content) VALUES('user','Before migration');").unwrap();
+        conn.execute_batch(include_str!("../../migrations/V24__chat_sessions.sql")).unwrap();
+        let messages = history(&conn, "legacy", None).unwrap();
+        assert_eq!(messages.len(),1);
+        assert_eq!(messages[0].content,"Before migration");
+        assert!(history(&conn,"task-new",None).unwrap().is_empty());
+    }
 
     fn asks(msg: &str) -> bool {
         needs_personal_context(&msg.to_lowercase(), msg)
@@ -455,7 +543,7 @@ mod tests {
                  id INTEGER PRIMARY KEY AUTOINCREMENT,
                  role TEXT NOT NULL,
                  content TEXT NOT NULL,
-                 created_at TEXT DEFAULT CURRENT_TIMESTAMP);",
+                 created_at TEXT DEFAULT CURRENT_TIMESTAMP, session_id TEXT NOT NULL DEFAULT 'legacy');",
         )
         .unwrap();
         for i in 1..=10 {
@@ -468,7 +556,7 @@ mod tests {
 
         let mut stmt = conn.prepare(CONVERSATION_WINDOW_QUERY).unwrap();
         let mut contents: Vec<String> = stmt
-            .query_map(rusqlite::params![conversation_limit(Some(3))], |r| {
+            .query_map(rusqlite::params![conversation_limit(Some(3)),"legacy"], |r| {
                 r.get::<_, String>(2)
             })
             .unwrap()
@@ -489,7 +577,7 @@ mod tests {
                  id INTEGER PRIMARY KEY AUTOINCREMENT,
                  role TEXT NOT NULL,
                  content TEXT NOT NULL,
-                 created_at TEXT DEFAULT CURRENT_TIMESTAMP);",
+                 created_at TEXT DEFAULT CURRENT_TIMESTAMP, session_id TEXT NOT NULL DEFAULT 'legacy');",
         )
         .unwrap();
         persist_assistant_reply(&conn, "").unwrap();

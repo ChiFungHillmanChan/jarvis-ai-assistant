@@ -11,7 +11,7 @@ use aws_sdk_bedrockruntime::types::{
 use aws_smithy_types::{Document, Number};
 use serde_json::json;
 use std::collections::{HashMap, HashSet};
-use tauri::Emitter;
+use crate::chat_session::ScopedEmitter;
 
 /// Legacy default model id used as a last-resort fallback when no per-workload
 /// routing entry is configured.  New code paths look up the model via

@@ -5,7 +5,7 @@ use reqwest::Client;
 use serde::{Deserialize, Serialize};
 use serde_json::json;
 use std::collections::{HashMap, HashSet};
-use tauri::Emitter;
+use crate::chat_session::ScopedEmitter;
 
 #[derive(Serialize)]
 struct OpenAIRequest {

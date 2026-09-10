@@ -333,6 +333,10 @@ async fn handle_wake_word_detection(
     token: CancellationToken,
     local_transcriber: LocalTranscriber,
 ) -> Result<(), String> {
+    let _assistant_guard = match crate::chat_session::FOREGROUND.try_lock() {
+        Ok(guard) => guard,
+        Err(_) => return Ok(()),
+    };
     voice_engine.set_state_and_emit(VoiceState::WakeWordDetected);
     show_main_window(&app_handle);
 
@@ -568,7 +572,7 @@ fn save_message(db: &Database, role: &str, content: &str) -> Result<(), String> 
 fn load_recent_messages(db: &Database) -> Result<Vec<(String, String)>, String> {
     let conn = db.conn.lock().map_err(|e| e.to_string())?;
     let mut stmt = conn
-        .prepare("SELECT role, content FROM conversations ORDER BY id DESC LIMIT 20")
+        .prepare("SELECT role, content FROM conversations WHERE session_id = 'legacy' ORDER BY id DESC LIMIT 20")
         .map_err(|e| e.to_string())?;
     let mut messages = stmt
         .query_map([], |row| {

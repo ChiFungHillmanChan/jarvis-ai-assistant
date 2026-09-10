@@ -29,11 +29,14 @@ export async function createTask(title: string, description: string | null, dead
 export async function updateTask(id: number, status: string): Promise<void> {
   return invoke("update_task", { id, status });
 }
-export async function sendMessage(message: string, workload?: "tools" | "premium"): Promise<ChatMessage> {
-  return invoke("send_message", { message, workload });
+export async function sendMessage(message: string, workload?: "tools" | "premium", sessionId?: string, runId?: string): Promise<ChatMessage> {
+  return invoke("send_message", { message, workload, sessionId, runId });
 }
-export async function getConversations(): Promise<ChatMessage[]> {
-  return invoke("get_conversations");
+export async function getConversations(sessionId?: string): Promise<ChatMessage[]> {
+  return invoke("get_conversations", { sessionId });
+}
+export async function listChatSessions(): Promise<{ id: string; title: string; updated_at: string }[]> {
+  return invoke("list_chat_sessions");
 }
 export async function getDashboardData(): Promise<DashboardData> {
   return invoke("get_dashboard_data");
@@ -69,7 +72,7 @@ export async function archiveEmail(gmailId: string): Promise<void> { return invo
 export async function getEmailStats(): Promise<EmailStats> { return invoke("get_email_stats"); }
 
 // Calendar
-export async function getEvents(days?: number): Promise<CalendarEventView[]> { return invoke("get_events", { days }); }
+export async function getEvents(days?: number, dateFrom?: string, dateTo?: string): Promise<CalendarEventView[]> { return invoke("get_events", { days, dateFrom, dateTo }); }
 export async function syncCalendar(): Promise<string> { return invoke("sync_calendar"); }
 export async function createEvent(summary: string, start: string, end: string, description?: string): Promise<string> { return invoke("create_event", { summary, start, end, description }); }
 export async function getTodaysEvents(): Promise<CalendarEventView[]> { return invoke("get_todays_events"); }
@@ -77,6 +80,10 @@ export async function getTodaysEvents(): Promise<CalendarEventView[]> { return i
 // Cron
 export async function getCronJobs(): Promise<CronJobView[]> { return invoke("get_cron_jobs"); }
 export async function getCronRuns(jobId: number, limit?: number): Promise<CronRunView[]> { return invoke("get_cron_runs", { jobId, limit }); }
+export interface CronInterpretation { name: string; schedule: string; action_type: string; description: string; }
+export async function previewCustomCron(description: string): Promise<CronInterpretation> { return invoke("preview_custom_cron", { description }); }
+export async function createReviewedCron(interpretation: CronInterpretation): Promise<CronJobView> { return invoke("create_reviewed_cron", { interpretation }); }
+export async function setCronJobStatus(jobId: number, status: "active" | "paused"): Promise<string> { return invoke("set_cron_job_status", { jobId, status }); }
 
 // Google Auth
 // `force` is how the user switches accounts: the backend revokes the current

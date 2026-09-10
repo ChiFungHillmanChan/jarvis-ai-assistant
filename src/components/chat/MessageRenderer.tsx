@@ -266,33 +266,33 @@ export default MessageRenderer;
 
 const containerStyle: React.CSSProperties = {
   lineHeight: 1.55,
-  fontSize: 13,
+  fontSize: 14,
   fontFamily: "var(--font-sans)",
-  color: "rgba(0, 180, 255, 0.8)",
+  color: "var(--text-primary)",
 };
 
 const inlineStyles: Record<string, React.CSSProperties> = {
   bold: {
     fontWeight: 600,
-    color: "rgba(0, 180, 255, 0.95)",
+    color: "var(--text-primary)",
   },
   italic: {
     fontStyle: "italic",
-    color: "rgba(0, 180, 255, 0.75)",
+    color: "var(--text-secondary)",
   },
   code: {
     fontFamily: "var(--font-mono)",
     fontSize: 12,
-    background: "rgba(0, 180, 255, 0.08)",
-    border: "1px solid rgba(0, 180, 255, 0.12)",
+    background: "var(--surface-solid)",
+    border: "1px solid var(--border-primary)",
     borderRadius: 3,
     padding: "1px 5px",
-    color: "rgba(0, 180, 255, 0.9)",
+    color: "var(--text-primary)",
   },
   link: {
-    color: "rgba(0, 180, 255, 0.95)",
+    color: "var(--cyan)",
     textDecoration: "underline",
-    textDecorationColor: "rgba(0, 180, 255, 0.3)",
+    textDecorationColor: "var(--border-primary)",
   },
 };
 
@@ -300,7 +300,7 @@ const mdStyles: Record<string, React.CSSProperties> = {
   h1: {
     fontSize: 17,
     fontWeight: 600,
-    color: "rgba(0, 180, 255, 0.95)",
+    color: "var(--text-primary)",
     marginBottom: 6,
     marginTop: 8,
     fontFamily: "var(--font-sans)",
@@ -308,7 +308,7 @@ const mdStyles: Record<string, React.CSSProperties> = {
   h2: {
     fontSize: 15,
     fontWeight: 600,
-    color: "rgba(0, 180, 255, 0.9)",
+    color: "var(--text-primary)",
     marginBottom: 4,
     marginTop: 6,
     fontFamily: "var(--font-sans)",
@@ -316,7 +316,7 @@ const mdStyles: Record<string, React.CSSProperties> = {
   h3: {
     fontSize: 14,
     fontWeight: 600,
-    color: "rgba(0, 180, 255, 0.85)",
+    color: "var(--text-primary)",
     marginBottom: 4,
     marginTop: 4,
     fontFamily: "var(--font-sans)",
@@ -333,6 +333,6 @@ const mdStyles: Record<string, React.CSSProperties> = {
   listItem: {
     marginBottom: 4,
     lineHeight: 1.65,
-    color: "rgba(0, 180, 255, 0.8)",
+    color: "var(--text-primary)",
   },
 };

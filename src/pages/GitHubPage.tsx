@@ -1,78 +1,22 @@
 import { useState } from "react";
 import { useTauriCommand } from "../hooks/useTauriCommand";
 import type { GitHubItemView } from "../lib/types";
-import { syncGitHub } from "../lib/commands";
-import { showToast } from "../components/Toast";
+import { openUrl, syncGitHub } from "../lib/commands";
+import { useWorkspaceValue } from "../workspace/WorkspaceContext";
+import "./tool-pages.css";
+
+const typeName = (type: string) => type === "pr_review" ? "Review requested" : type === "pr" ? "Pull request" : "Issue";
 
 export default function GitHubPage() {
-  const { data: items, error, refetch } = useTauriCommand<GitHubItemView[]>("get_github_items");
-  const [syncing, setSyncing] = useState(false);
-
-  async function handleSync() {
-    setSyncing(true);
-    try { const result = await syncGitHub(); showToast(result, "success"); refetch(); }
-    catch (e) { showToast(String(e), "error"); }
-    finally { setSyncing(false); }
-  }
-
-  const prs = items?.filter(i => i.item_type === "pr" || i.item_type === "pr_review") ?? [];
-  const issues = items?.filter(i => i.item_type === "issue") ?? [];
-
-  return (
-    <div style={styles.container}>
-      <div style={styles.header}>
-        <span className="system-text">GITHUB</span>
-        <button onClick={handleSync} disabled={syncing} style={styles.syncBtn}>
-          {syncing ? "SYNCING..." : "SYNC NOW"}
-        </button>
-      </div>
-      {(!items || items.length === 0) ? (
-        <div style={{ ...styles.empty, ...(error ? styles.errorText : {}) }}>{error ?? "No GitHub items. Add your token in Settings, then sync."}</div>
-      ) : (
-        <div style={styles.list}>
-          {prs.length > 0 && (
-            <div>
-              <div className="label" style={{ marginBottom: 8 }}>PULL REQUESTS</div>
-              {prs.map(pr => (
-                <div key={pr.id} style={styles.item}>
-                  <div style={styles.itemHeader}>
-                    <span style={styles.itemTitle}>{pr.title}</span>
-                    <span style={{ ...styles.badge, color: pr.item_type === "pr_review" ? "rgba(255, 180, 0, 0.8)" : "rgba(16, 185, 129, 0.8)" }}>
-                      {pr.item_type === "pr_review" ? "REVIEW" : "OPEN"}
-                    </span>
-                  </div>
-                  <div style={styles.itemMeta}>{pr.repo} #{pr.number}</div>
-                </div>
-              ))}
-            </div>
-          )}
-          {issues.length > 0 && (
-            <div style={{ marginTop: 16 }}>
-              <div className="label" style={{ marginBottom: 8 }}>ISSUES</div>
-              {issues.map(issue => (
-                <div key={issue.id} style={styles.item}>
-                  <div style={styles.itemTitle}>{issue.title}</div>
-                  <div style={styles.itemMeta}>{issue.repo} #{issue.number}</div>
-                </div>
-              ))}
-            </div>
-          )}
-        </div>
-      )}
-    </div>
-  );
+  const { data, error: loadError, loading, refetch } = useTauriCommand<GitHubItemView[]>("get_github_items");
+  const [selectedId, setSelectedId] = useWorkspaceValue<number | null>("githubItemId", null);
+  const [syncing, setSyncing] = useState(false); const [actionError, setActionError] = useState<string | null>(null); const [notice, setNotice] = useState<string | null>(null);
+  const selected = (data ?? []).find(item => item.id === selectedId) ?? null;
+  async function sync() { setSyncing(true); setActionError(null); try { setNotice(await syncGitHub()); refetch(); } catch (e) { setActionError(String(e)); } finally { setSyncing(false); } }
+  async function openSelected() { if (!selected?.url) return; setActionError(null); try { await openUrl(selected.url); } catch (e) { setActionError(String(e)); } }
+  return <main className="tool-page"><header className="tool-page__header"><div><p className="tool-page__eyebrow">GitHub</p><h1>Review and issue inbox</h1><p>Assigned work and review requests from your latest sync.</p></div><button className="tool-button" onClick={sync} disabled={syncing}>{syncing ? "Syncing…" : "Sync GitHub"}</button></header>
+    {(loadError || actionError || notice) && <div className={loadError || actionError ? "tool-alert tool-alert--error" : "tool-alert"} role="status">{actionError || loadError || notice}</div>}
+    <div className="tool-split"><section className="tool-panel tool-list-pane" aria-busy={loading}><div className="tool-panel__heading"><h2>Items</h2><span>{data?.length ?? 0} synced</span></div>{loading && !data ? <p className="tool-empty">Loading GitHub items…</p> : !data?.length ? <p className="tool-empty">No synced items. Add a GitHub token in Settings, then sync.</p> : data.map(item => <button key={item.id} className={`tool-list-row${item.id === selectedId ? " is-selected" : ""}`} onClick={() => setSelectedId(item.id)}><span><strong>{item.title}</strong><small>{item.repo}{item.number != null ? ` #${item.number}` : ""}</small></span><span className="tool-status">{typeName(item.item_type)}</span></button>)}</section>
+    <aside className="tool-panel tool-detail-pane">{selected ? <><div className="tool-panel__heading"><h2>Item details</h2><span>{selected.state}</span></div><h3>{selected.title}</h3><dl className="tool-details"><dt>Type</dt><dd>{typeName(selected.item_type)}</dd><dt>Repository</dt><dd>{selected.repo}</dd>{selected.number != null && <><dt>Number</dt><dd>#{selected.number}</dd></>}{selected.author && <><dt>Author</dt><dd>{selected.author}</dd></>}{selected.updated_at && <><dt>Updated</dt><dd>{new Date(selected.updated_at).toLocaleString()}</dd></>}</dl>{selected.url ? <button className="tool-button" onClick={openSelected}>Open on GitHub</button> : <p className="tool-help">No provider link was included in this sync.</p>}</> : <p className="tool-empty">Select an item to inspect its real synced metadata.</p>}</aside></div>
+  </main>;
 }
-
-const styles: Record<string, React.CSSProperties> = {
-  container: { padding: 24, height: "100%", display: "flex", flexDirection: "column" },
-  header: { display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 16 },
-  syncBtn: { background: "rgba(0, 180, 255, 0.08)", border: "1px solid rgba(0, 180, 255, 0.3)", borderRadius: 6, padding: "6px 12px", color: "rgba(0, 180, 255, 0.8)", cursor: "pointer", fontFamily: "var(--font-mono)", fontSize: 10 },
-  list: { flex: 1, overflowY: "auto" },
-  empty: { color: "rgba(0, 180, 255, 0.3)", fontSize: 12, fontStyle: "italic", padding: 20 },
-  errorText: { color: "rgba(255, 100, 100, 0.85)", fontStyle: "normal" },
-  item: { padding: "10px 0", borderBottom: "1px solid rgba(0, 180, 255, 0.08)" },
-  itemHeader: { display: "flex", justifyContent: "space-between", alignItems: "center" },
-  itemTitle: { color: "rgba(0, 180, 255, 0.8)", fontSize: 12 },
-  itemMeta: { color: "rgba(0, 180, 255, 0.4)", fontSize: 10, fontFamily: "var(--font-mono)", marginTop: 2 },
-  badge: { fontSize: 8, fontFamily: "var(--font-mono)", letterSpacing: 1 },
-};

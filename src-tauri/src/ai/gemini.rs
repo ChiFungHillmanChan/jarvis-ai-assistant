@@ -5,7 +5,7 @@ use reqwest::Client;
 use serde::{Deserialize, Serialize};
 use serde_json::json;
 use std::collections::HashSet;
-use tauri::Emitter;
+use crate::chat_session::ScopedEmitter;
 
 pub const API_BASE: &str = "https://generativelanguage.googleapis.com/v1beta";
 pub const MODEL_PRO: &str = "gemini-3.1-pro-preview";

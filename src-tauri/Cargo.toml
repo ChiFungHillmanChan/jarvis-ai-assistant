@@ -9,6 +9,10 @@ edition = "2021"
 name = "jarvis_lib"
 crate-type = ["lib", "cdylib", "staticlib"]
 
+[features]
+# Explicit, debug-only desktop QA with synthetic mail and no login Keychain.
+native-qa = []
+
 [build-dependencies]
 tauri-build = { version = "2", features = [] }
 

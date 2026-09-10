@@ -34,18 +34,18 @@ impl SecretBackend for RealKeychain {
     }
 }
 
-#[cfg(not(test))]
+#[cfg(not(any(test, feature = "native-qa")))]
 fn backend() -> impl SecretBackend {
     RealKeychain
 }
 
-#[cfg(test)]
+#[cfg(any(test, feature = "native-qa"))]
 fn backend() -> impl SecretBackend {
     memory::MemoryKeychain
 }
 
 /// Process-local stand-in for the login Keychain, used only in test builds.
-#[cfg(test)]
+#[cfg(any(test, feature = "native-qa"))]
 mod memory {
     use super::SecretBackend;
     use std::collections::HashMap;

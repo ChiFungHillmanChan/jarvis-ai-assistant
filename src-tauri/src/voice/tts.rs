@@ -1,7 +1,7 @@
 use serde_json::json;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, OnceLock};
-use tauri::Emitter;
+use crate::chat_session::ScopedEmitter;
 use tokio::io::AsyncWriteExt;
 use tokio::process::Command;
 use tokio::sync::mpsc;
@@ -175,7 +175,12 @@ pub struct StreamingTts {
 impl StreamingTts {
     pub fn new(tts: TextToSpeech, app_handle: tauri::AppHandle) -> Self {
         let (tx, rx) = mpsc::channel::<TtsCommand>(200);
-        let handle = tokio::spawn(streaming_tts_consumer(tts, app_handle, rx));
+        let context = crate::chat_session::CONTEXT.try_with(Clone::clone).ok();
+        let handle = tokio::spawn(async move {
+            let consumer = streaming_tts_consumer(tts, app_handle, rx);
+            if let Some(context) = context { crate::chat_session::CONTEXT.scope(context, consumer).await }
+            else { consumer.await }
+        });
         StreamingTts { tx, handle }
     }
 

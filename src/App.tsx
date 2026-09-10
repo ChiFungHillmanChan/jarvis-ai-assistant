@@ -1,409 +1,160 @@
-import { useState, useCallback, useEffect, useRef, useMemo, lazy, Suspense } from "react";
-import { invoke } from "@tauri-apps/api/core";
-import { listen } from "@tauri-apps/api/event";
-import Sidebar from "./components/Sidebar";
-import ChatPanel from "./components/ChatPanel";
-import CommandBar from "./components/CommandBar";
-import Dashboard from "./pages/Dashboard";
-import OnboardingWizard from "./pages/OnboardingWizard";
-import UpdateButton from "./components/UpdateButton";
-import ErrorBoundary from "./components/ErrorBoundary";
-import { checkOnboardingStatus, stopSpeaking } from "./lib/commands";
-const Settings = lazy(() => import("./pages/Settings"));
-const CronDashboard = lazy(() => import("./pages/CronDashboard"));
-const EmailPage = lazy(() => import("./pages/EmailPage"));
-const CalendarPage = lazy(() => import("./pages/CalendarPage"));
-const GitHubPage = lazy(() => import("./pages/GitHubPage"));
-const NotionPage = lazy(() => import("./pages/NotionPage"));
-import { useKeyboard } from "./hooks/useKeyboard";
-import VoiceIndicator from "./components/VoiceIndicator";
-import { useVoiceState } from "./hooks/useVoiceState";
-import ToastContainer, { showToast } from "./components/Toast";
-import WindowControls from "./components/WindowControls";
-import { Minimize2 } from "./components/icons";
-import JarvisScene from "./components/3d/JarvisScene";
-import AssistantHud from "./components/AssistantHud";
-import { ChatProvider, useChatContext } from "./hooks/ChatContext";
-import ChatMessageComponent from "./components/ChatMessage";
-import ModelPullToast from "./components/ModelPullToast";
-import type { AssistantPhase, ChatStatusPayload, ChatThinkingPayload, ChatTokenPayload, ChatStatePayload, ModelPullProgress } from "./lib/types";
+import { useState, useEffect, useRef, useCallback, lazy, Suspense } from 'react';
+import { invoke } from '@tauri-apps/api/core';
+import { listen } from '@tauri-apps/api/event';
+import { MessageSquare, Search, Minimize2, X, Command } from 'lucide-react';
+import Sidebar from './components/Sidebar';
+import OnboardingWizard from './pages/OnboardingWizard';
+import UpdateButton from './components/UpdateButton';
+import ErrorBoundary from './components/ErrorBoundary';
+import { checkOnboardingStatus, stopSpeaking, listChatSessions } from './lib/commands';
+import { useVoiceState } from './hooks/useVoiceState';
+import ToastContainer, { showToast } from './components/Toast';
+import WindowControls from './components/WindowControls';
+import { ChatProvider, useChatContext } from './hooks/ChatContext';
+import ModelPullToast from './components/ModelPullToast';
+import type { ModelPullProgress } from './lib/types';
+import { WorkspaceProvider, WorkspaceTabScope, useWorkspace } from './workspace/WorkspaceContext';
+import WorkspaceTabs from './workspace/WorkspaceTabs';
+import AssistantPanel from './workspace/AssistantPanel';
+import AutomationOverview from './workspace/AutomationOverview';
+import { useAssistantActivity } from './workspace/useAssistantActivity';
+import { shouldFocusResult, viewNames, type WorkspaceTab, type WorkspaceView } from './workspace/model';
+import { resultIdentity, resultTitle, validResult } from './workspace/results';
+import './styles/workspace.css';
+const Settings = lazy(() => import('./pages/Settings'));
+const CronDashboard = lazy(() => import('./pages/CronDashboard'));
+const EmailPage = lazy(() => import('./pages/EmailPage'));
+const CalendarPage = lazy(() => import('./pages/CalendarPage'));
+const GitHubPage = lazy(() => import('./pages/GitHubPage'));
+const NotionPage = lazy(() => import('./pages/NotionPage'));
+const ConnectionsPage = lazy(() => import('./workspace/ConnectionsPage'));
+const ResultWorkspace = lazy(() => import('./workspace/ResultWorkspace'));
 
-function ChatFullView() {
-  const { messages, loading, error, send, clearChat, streamingText } = useChatContext();
-  const [input, setInput] = useState("");
-  const messagesEndRef = useRef<HTMLDivElement>(null);
-  const inputRef = useRef<HTMLTextAreaElement>(null);
-
-  useEffect(() => { messagesEndRef.current?.scrollIntoView({ behavior: "smooth" }); }, [messages]);
-  useEffect(() => { inputRef.current?.focus(); }, []);
-
-  const handleSubmit = (e: React.FormEvent) => {
-    e.preventDefault();
-    if (input.trim()) { send(input); setInput(""); }
-  };
-
-  return (
-    <div style={{ display: "flex", flexDirection: "column", height: "100%", padding: 24 }}>
-      <div style={{ display: "flex", justifyContent: "space-between", marginBottom: 16 }}>
-        <span className="system-text">JARVIS CHAT</span>
-        <button onClick={clearChat} style={{ background: "transparent", border: "none", color: "rgba(0, 180, 255, 0.5)", fontFamily: "var(--font-mono)", fontSize: 11, cursor: "pointer" }}>NEW</button>
-      </div>
-      <div style={{ flex: 1, overflowY: "auto", maxWidth: 700 }}>
-        {messages.map((msg, i) => <ChatMessageComponent key={msg.id != null ? `db-${msg.id}` : `local-${i}`} message={msg} />)}
-        {loading && streamingText && (
-          <div style={{ padding: "12px 14px", color: "rgba(0, 180, 255, 0.85)", fontSize: 13, lineHeight: 1.6, whiteSpace: "pre-wrap" as const }}>
-            {streamingText}<span style={{ color: "rgba(0, 180, 255, 0.5)", animation: "blink 1s step-end infinite" }}>|</span>
-          </div>
-        )}
-        {error && <div style={{ color: "var(--accent-urgent)", fontSize: 12, padding: 8 }}>{error}</div>}
-        <div ref={messagesEndRef} />
-      </div>
-      <form onSubmit={handleSubmit} style={{ maxWidth: 700, paddingTop: 12, borderTop: "1px solid rgba(0, 180, 255, 0.08)" }}>
-        <div style={{ display: "flex", alignItems: "flex-end", gap: 8 }}>
-          <textarea ref={inputRef} value={input} onChange={(e) => setInput(e.target.value)}
-            onKeyDown={(e) => { if (e.key === "Enter" && !e.shiftKey) { e.preventDefault(); handleSubmit(e); } }}
-            placeholder="Talk to JARVIS..." rows={1}
-            style={{ flex: 1, background: "rgba(0, 180, 255, 0.04)", border: "1px solid rgba(0, 180, 255, 0.18)", borderRadius: 12, padding: "10px 14px", color: "rgba(0, 180, 255, 0.8)", fontSize: 13, fontFamily: "var(--font-sans)", outline: "none", resize: "none" as const, overflow: "hidden", lineHeight: 1.5, boxSizing: "border-box" as const }} />
-          <button type="submit" style={{ width: 34, height: 34, borderRadius: "50%", background: "rgba(0, 180, 255, 0.12)", border: "1px solid rgba(0, 180, 255, 0.25)", display: "flex", alignItems: "center", justifyContent: "center", cursor: "pointer", flexShrink: 0 }}>
-            <svg width="14" height="14" viewBox="0 0 14 14"><path d="M3 7h8M8 4l3 3-3 3" fill="none" stroke="rgba(0, 180, 255, 0.7)" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round" /></svg>
-          </button>
-        </div>
-      </form>
-    </div>
-  );
+function CommandPicker({ onClose }: { onClose: () => void }) {
+  const { state, dispatch, open, newTask } = useWorkspace();
+  const [query, setQuery] = useState('');
+  const [savedTasks, setSavedTasks] = useState<{ id: string; title: string }[]>([]);
+  const [historyError, setHistoryError] = useState(false);
+  useEffect(() => { void listChatSessions().then(setSavedTasks).catch(() => setHistoryError(true)); }, []);
+  const [selected, setSelected] = useState(0);
+  const dialog = useRef<HTMLDialogElement>(null);
+  const restoreFocus = useRef(document.activeElement as HTMLElement | null);
+  const choices = [
+    { id: 'new', title: 'New task', hint: '⌘N', action: () => newTask() },
+    ...(['home', 'email', 'calendar', 'notion', 'github', 'cron', 'connections', 'settings'] as WorkspaceView[]).map(view => ({ id: view, title: viewNames[view], hint: 'Workspace', action: () => open(view) })),
+    { id: 'legacy', title: 'Voice and earlier conversations', hint: 'History', action: () => dispatch({ type: 'open' as const, view: 'chat', id: 'task:legacy', sessionId: 'legacy', title: 'Voice and earlier conversations' }) },
+    ...savedTasks.filter(t => t.id !== 'legacy' && ![...state.tabs, ...state.history].some(tab => tab.sessionId === t.id && tab.view === 'chat')).map(t => ({ id: `saved:${t.id}`, title: t.title, hint: 'Saved task', action: () => dispatch({ type: 'open' as const, view: 'chat', id: `task:${t.id}`, sessionId: t.id, title: t.title }) })),
+    ...[...state.tabs, ...state.history].filter(t => t.view === 'chat' || t.view === 'result').map(t => ({ id: t.id, title: t.title, hint: t.view === 'chat' ? 'Task' : 'Result', action: () => dispatch({ type: 'open' as const, view: t.view, id: t.id, sessionId: t.sessionId, title: t.title }) })),
+  ].filter(c => c.title.toLowerCase().includes(query.toLowerCase()));
+  useEffect(() => { dialog.current?.showModal(); return () => restoreFocus.current?.focus(); }, []);
+  function choose(index: number) { choices[index]?.action(); onClose(); }
+  return <dialog className="command-picker" ref={dialog} aria-label="Search workspaces and tasks" onCancel={onClose} onClick={e => { if (e.target === dialog.current) onClose(); }}>
+    <div className="command-picker-inner"><div className="command-search"><Search size={19} /><input aria-label="Search workspaces and tasks" placeholder="Find a workspace or task…" autoFocus value={query} onChange={e => { setQuery(e.target.value); setSelected(0); }} onKeyDown={e => { if (e.key === 'ArrowDown' || e.key === 'ArrowUp') { e.preventDefault(); setSelected(v => Math.max(0, Math.min(choices.length - 1, v + (e.key === 'ArrowDown' ? 1 : -1)))); } if (e.key === 'Enter') { e.preventDefault(); choose(selected); } }} /><button className="icon-button" aria-label="Close search" onClick={onClose}><X size={18} /></button></div>
+    <div className="command-results">{historyError && <p className="workspace-error">Saved task history could not be loaded.</p>}{choices.map((choice, i) => <button key={choice.id} className={i === selected ? 'is-selected' : ''} onMouseMove={() => setSelected(i)} onClick={() => choose(i)}><span>{choice.title}</span><small>{choice.hint}</small></button>)}{!choices.length && <p className="workspace-empty">No matching workspaces or tasks.</p>}</div><footer>↑ ↓ to move · Enter to open · Esc to close</footer></div>
+  </dialog>;
 }
 
+function AppShell() {
+  const { state, ready, saveError, dispatch, writeValue, readValue } = useWorkspace();
+  const chat = useChatContext();
+  const activity = useAssistantActivity();
+  const [sidebar, setSidebar] = useState(true);
+  const [search, setSearch] = useState(false);
+  const [assistant, setAssistant] = useState(false);
+  const [wallpaper, setWallpaper] = useState(false);
+  const [raised, setRaised] = useState(false);
+  const [progress, setProgress] = useState<ModelPullProgress | null>(null);
+  const voice = useVoiceState();
+  const activeTab = state.tabs.find(t => t.id === state.activeId) || state.tabs[0];
+  const stateRef = useRef(state); stateRef.current = state;
+  const seenResults = useRef(new Set<string>());
+  const focusedRuns = useRef(new Set<string>());
+  const listening = voice.state === 'Listening' || voice.state === 'WakeWordListening';
+  useEffect(() => { if ((activeTab.view === 'chat' || activeTab.view === 'result') && activeTab.sessionId) chat.selectSession(activeTab.sessionId); }, [activeTab.id, activeTab.view, activeTab.sessionId, chat.selectSession]);
+  useEffect(() => { if (voice.error) showToast(voice.error, 'error'); }, [voice.error]);
+  const toggleVoice = useCallback(() => {
+    if (voice.state === 'Listening') void voice.stopVoice();
+    else if (!chat.busy && (voice.state === 'Idle' || voice.state === 'WakeWordListening' || typeof voice.state === 'object' && 'Error' in voice.state)) { chat.selectSession('legacy'); dispatch({ type: 'open', view: 'chat', id: 'task:legacy', sessionId: 'legacy', title: 'Voice and earlier conversations', background: stateRef.current.tabs.find(t => t.id === stateRef.current.activeId)?.view !== 'chat' }); setAssistant(true); void voice.startVoice(); }
+  }, [voice.state, voice.startVoice, voice.stopVoice, chat.busy, chat.selectSession, dispatch]);
+  useEffect(() => {
+    const listener = listen<unknown>('chat-tool-result', ({ payload }) => {
+      if (!validResult(payload) || !chat.acceptsRun(payload)) return;
+      const key = `${payload.run_id}:${payload.tool_call_id}`;
+      if (seenResults.current.has(key)) return;
+      seenResults.current.add(key);
+      const current = stateRef.current;
+      const originId = `task:${payload.session_id}`;
+      const currentView = current.tabs.find(t => t.id === current.activeId)?.view || 'home';
+      const focus = !focusedRuns.current.has(payload.run_id) && shouldFocusResult(current.activeId, originId, currentView);
+      if (focus) focusedRuns.current.add(payload.run_id);
+      const matching = [...current.tabs, ...current.history].find(tab => {
+        if (tab.view !== 'result') return false;
+        const previous = readValue(tab.id, 'toolResult', null);
+        return validResult(previous) && resultIdentity(previous) === resultIdentity(payload);
+      });
+      const id = matching?.id || `result:${crypto.randomUUID()}`;
+      writeValue(id, 'toolResult', payload);
+      dispatch({ type: 'open', id, view: 'result', title: resultTitle(payload), sessionId: payload.session_id, background: !focus });
+      dispatch({ type: 'notice', id: originId });
+      if (focus) setAssistant(true);
+    });
+    return () => { void listener.then(fn => fn()).catch(() => {}); };
+  }, [chat.acceptsRun, dispatch, writeValue, readValue]);
+  useEffect(() => {
+    void invoke<boolean>('get_wallpaper_status').then(setWallpaper).catch(() => {});
+    void invoke<boolean>('is_wallpaper_raised').then(setRaised).catch(() => {});
+    let timer: ReturnType<typeof setTimeout>;
+    const listeners = [
+      listen<boolean>('wallpaper-status', e => setWallpaper(e.payload)),
+      listen<boolean>('wallpaper-raised', e => setRaised(e.payload)),
+      listen<ModelPullProgress>('model-pull-progress', ({ payload }) => { clearTimeout(timer); setProgress(payload); if (payload.status === 'complete' || payload.status === 'error') timer = setTimeout(() => setProgress(null), 3000); }),
+    ];
+    return () => { clearTimeout(timer); listeners.forEach(p => { void p.then(fn => fn()).catch(() => {}); }); };
+  }, []);
+  useEffect(() => {
+    function key(e: KeyboardEvent) {
+      if (document.querySelector('dialog[open]')) return;
+      const command = e.metaKey || e.ctrlKey;
+      if (e.key === 'Escape') { if (activity.state === 'speaking') void stopSpeaking(); else if (assistant) setAssistant(false); else if (wallpaper && raised) void invoke('lower_wallpaper'); return; }
+      if (command && e.key.toLowerCase() === 'k') { e.preventDefault(); setSearch(true); }
+      else if (command && e.key.toLowerCase() === 'n') { e.preventDefault(); const sessionId = crypto.randomUUID(); dispatch({ type: 'open', view: 'chat', id: `task:${sessionId}`, sessionId, title: 'New task' }); }
+      else if (command && e.key.toLowerCase() === 'w') { e.preventDefault(); dispatch({ type: 'close', id: state.activeId }); }
+      else if (command && /^[1-9]$/.test(e.key)) { e.preventDefault(); const tab = state.tabs[Number(e.key) - 1]; if (tab) dispatch({ type: 'activate', id: tab.id }); }
+      else if (e.ctrlKey && e.key === 'Tab') { e.preventDefault(); const i = state.tabs.findIndex(t => t.id === state.activeId); const next = (i + (e.shiftKey ? -1 : 1) + state.tabs.length) % state.tabs.length; dispatch({ type: 'activate', id: state.tabs[next].id }); }
+      else if (command && e.shiftKey && e.key.toLowerCase() === 'j') { e.preventDefault(); toggleVoice(); }
+    }
+    window.addEventListener('keydown', key); return () => window.removeEventListener('keydown', key);
+  }, [state, dispatch, toggleVoice, activity.state, assistant, wallpaper, raised]);
+  function render(tab: WorkspaceTab) {
+    switch (tab.view) {
+      case 'home': return <AutomationOverview activity={activity} onVoice={toggleVoice} listening={listening} />;
+      case 'chat': return chat.sessionId === tab.sessionId ? <AssistantPanel full onVoice={toggleVoice} /> : <div className="workspace-loading">Opening task…</div>;
+      case 'email': return <EmailPage />;
+      case 'calendar': return <CalendarPage />;
+      case 'github': return <GitHubPage />;
+      case 'notion': return <NotionPage />;
+      case 'cron': return <CronDashboard />;
+      case 'settings': return <Settings />;
+      case 'connections': return <ConnectionsPage />;
+      case 'result': return <ResultWorkspace />;
+    }
+  }
+  if (!ready) return <div className="workspace-loading" role="status">Restoring your workspace…</div>;
+  return <div className="workspace-app">
+    <header className="workspace-titlebar" data-tauri-drag-region><WindowControls /><span data-tauri-drag-region>JARVIS Workspace</span><div><UpdateButton />{wallpaper && raised && <button className="icon-button" aria-label="Return to desktop" onClick={() => void invoke('lower_wallpaper')}><Minimize2 size={15} /></button>}<button className="icon-button" aria-label="Search workspaces" onClick={() => setSearch(true)}><Search size={16} /></button><button className="workspace-button assistant-toggle" aria-pressed={assistant || activeTab.view === 'chat'} disabled={activeTab.view === 'chat'} onClick={() => setAssistant(v => !v)}><MessageSquare size={15} />Assistant</button></div></header>
+    <div className="workspace-body">{sidebar && <Sidebar onSearch={() => setSearch(true)} onCollapse={() => setSidebar(false)} />}<main className="workspace-main"><WorkspaceTabs sidebarVisible={sidebar} onShowSidebar={() => setSidebar(true)} />{saveError && <p className="workspace-error" role="alert">{saveError}</p>}<div className="workspace-content"><div className="workspace-pages">{state.tabs.map(tab => {
+      const active = tab.id === state.activeId;
+      // The sphere and task composer exist only in their active view. Tool work stays mounted.
+      if ((tab.view === 'home' || tab.view === 'chat') && !active) return null;
+      return <section className={`workspace-page view-${tab.view}`} key={tab.id} id={`page-${tab.id}`} role="tabpanel" aria-labelledby={`tab-${tab.id}`} hidden={!active}><WorkspaceTabScope id={tab.id}><ErrorBoundary><Suspense fallback={<div className="workspace-loading">Opening workspace…</div>}>{render(tab)}</Suspense></ErrorBoundary></WorkspaceTabScope></section>;
+    })}</div>{assistant && activeTab.view !== 'chat' && <div className="workspace-assistant-dock"><WorkspaceTabScope key={chat.sessionId} id={`task:${chat.sessionId}`}><AssistantPanel onClose={() => setAssistant(false)} onVoice={toggleVoice} /></WorkspaceTabScope></div>}</div><footer className="workspace-statusbar"><span className={`status-dot ${chat.busy || listening ? 'is-working' : ''}`} /><span>{listening ? 'Listening · Press ⌘⇧J to finish' : chat.busy ? 'Assistant working · You can keep using your tools' : 'Ready'}</span>{chat.busy && <button className="text-button" onClick={() => dispatch({ type: 'open', view: 'chat', id: `task:${chat.runningSessionId}`, sessionId: chat.runningSessionId!, title: 'Assistant' })}>View task</button>}<span className="grow" /><button className="text-button" onClick={() => setSearch(true)}><Command size={12} />K Search</button></footer></main></div>
+    {search && <CommandPicker onClose={() => setSearch(false)} />}<ToastContainer /><ModelPullToast progress={progress} visible={progress !== null} />
+  </div>;
+}
 export default function App() {
-  const [activeView, setActiveView] = useState("home");
-  const [chatOpen, setChatOpen] = useState(false);
-  const [wallpaperActive, setWallpaperActive] = useState(false);
-  const [wallpaperRaised, setWallpaperRaised] = useState(false);
-  const [aiState, setAiState] = useState<"idle" | "thinking" | "speaking">("idle");
-  const [pageTransition, setPageTransition] = useState(false);
-  const [assistantPhase, setAssistantPhase] = useState<AssistantPhase>("idle");
-  const [assistantStatus, setAssistantStatus] = useState<string | null>(null);
-  const [assistantThinking, setAssistantThinking] = useState("");
-  const [assistantResponsePreview, setAssistantResponsePreview] = useState("");
-  const [voiceRequestActive, setVoiceRequestActive] = useState(false);
-  const ttsAmplitudeRef = useRef(0);
-  const micAmplitudeRef = useRef(0);
-  const [pendingToolCall, setPendingToolCall] = useState<string | null>(null);
-  const [modelPullProgress, setModelPullProgress] = useState<ModelPullProgress | null>(null);
-  const [onboardingDone, setOnboardingDone] = useState<boolean | null>(null);
-  const prevView = useRef(activeView);
-  const hudResetTimer = useRef<number | null>(null);
-  const aiStateRef = useRef(aiState);
-  const assistantThinkingRef = useRef(assistantThinking);
-  const hudTokenBuffer = useRef("");
-  const hudThinkingBuffer = useRef("");
-  const hudRafId = useRef<number | null>(null);
-
-  useEffect(() => {
-    checkOnboardingStatus()
-      .then(setOnboardingDone)
-      .catch(() => setOnboardingDone(true)); // fail-open: never trap user behind a broken check
-  }, []);
-
-  const toggleChat = useCallback(() => { setChatOpen((prev) => !prev); }, []);
-  const closeChat = useCallback(() => { setChatOpen(false); }, []);
-  const handleToolCallConsumed = useCallback(() => setPendingToolCall(null), []);
-
-  const { state: voiceState, error: voiceError, startVoice, stopVoice } = useVoiceState();
-
-  useEffect(() => {
-    if (voiceError) showToast(voiceError, "error");
-  }, [voiceError]);
-
-  useEffect(() => {
-    aiStateRef.current = aiState;
-  }, [aiState]);
-
-  useEffect(() => {
-    assistantThinkingRef.current = assistantThinking;
-  }, [assistantThinking]);
-
-  useEffect(() => {
-    if (voiceState === "Listening" || voiceState === "WakeWordListening") {
-      setAssistantPhase("listening");
-      setAssistantStatus("Listening...");
-    }
-  }, [voiceState]);
-
-  useEffect(() => {
-    invoke<boolean>("get_wallpaper_status").then(setWallpaperActive).catch(() => {});
-    invoke<boolean>("is_wallpaper_raised").then(setWallpaperRaised).catch(() => {});
-
-    const unlistenStatus = listen<boolean>("wallpaper-status", (event) => {
-      setWallpaperActive(event.payload);
-      if (!event.payload) setWallpaperRaised(false);
-    });
-    const unlistenRaised = listen<boolean>("wallpaper-raised", (event) => {
-      setWallpaperRaised(event.payload);
-    });
-    return () => {
-      unlistenStatus.then((fn) => fn());
-      unlistenRaised.then((fn) => fn());
-    };
-  }, []);
-
-  // Listen for AI chat state changes
-  useEffect(() => {
-    const unlistenAi = listen<ChatStatePayload>("chat-state", (event) => {
-      if (hudResetTimer.current) {
-        window.clearTimeout(hudResetTimer.current);
-        hudResetTimer.current = null;
-      }
-      setAiState(event.payload.state);
-      if (event.payload.state === "speaking") {
-        setAssistantPhase("speaking");
-        setAssistantStatus((prev) => prev || "Speaking...");
-      } else if (event.payload.state === "thinking") {
-        setAssistantThinking("");
-        setAssistantResponsePreview("");
-        setAssistantPhase((prev) => (prev === "idle" ? "thinking" : prev));
-      } else {
-        hudResetTimer.current = window.setTimeout(() => {
-          setAssistantPhase("idle");
-          setAssistantStatus(null);
-          setAssistantThinking("");
-          setAssistantResponsePreview("");
-        }, 900);
-      }
-    });
-    return () => {
-      if (hudResetTimer.current) {
-        window.clearTimeout(hudResetTimer.current);
-      }
-      unlistenAi.then((fn) => fn());
-    };
-  }, []);
-
-  // Listen for TTS amplitude, mic amplitude, and tool call events
-  useEffect(() => {
-    const appendTail = (prev: string, next: string, max: number) => {
-      const merged = `${prev}${next}`;
-      return merged.length <= max ? merged : merged.slice(-max);
-    };
-
-    const unlistenAmp = listen<{ amplitude: number }>("tts-amplitude", (event) => {
-      // Write to ref instead of state -- JarvisScene reads via ref, no re-render cascade
-      ttsAmplitudeRef.current = event.payload.amplitude;
-    });
-    const unlistenMic = listen<{ amplitude: number }>("mic-amplitude", (event) => {
-      micAmplitudeRef.current = event.payload.amplitude;
-    });
-    const unlistenTool = listen<{ tool_name: string }>("chat-tool-call", (event) => {
-      setPendingToolCall(event.payload.tool_name);
-    });
-    const unlistenStatus = listen<ChatStatusPayload>("chat-status", (event) => {
-      setAssistantStatus(event.payload.status);
-      if (event.payload.phase) {
-        setAssistantPhase(event.payload.phase);
-      }
-      if (event.payload.phase === "responding" && assistantThinkingRef.current) {
-        setAssistantThinking("");
-      }
-    });
-    const flushHudBuffers = () => {
-      if (hudTokenBuffer.current) {
-        const tokens = hudTokenBuffer.current;
-        hudTokenBuffer.current = "";
-        setAssistantResponsePreview((prev) => appendTail(prev, tokens, 260));
-      }
-      if (hudThinkingBuffer.current) {
-        const text = hudThinkingBuffer.current;
-        hudThinkingBuffer.current = "";
-        setAssistantThinking((prev) => appendTail(prev, text, 220));
-      }
-      hudRafId.current = null;
-    };
-    const scheduleHudFlush = () => {
-      if (!hudRafId.current) {
-        hudRafId.current = requestAnimationFrame(flushHudBuffers);
-      }
-    };
-    const unlistenToken = listen<ChatTokenPayload>("chat-token", (event) => {
-      if (event.payload.done) return;
-      hudTokenBuffer.current += event.payload.token;
-      scheduleHudFlush();
-    });
-    const unlistenThinking = listen<ChatThinkingPayload>("chat-thinking", (event) => {
-      if (event.payload.done) return;
-      hudThinkingBuffer.current += event.payload.text;
-      scheduleHudFlush();
-    });
-    const unlistenVoiceRequest = listen<{ active: boolean }>("chat-voice-active", (event) => {
-      setVoiceRequestActive(event.payload.active);
-      if (!event.payload.active && aiStateRef.current === "idle") {
-        setAssistantPhase("idle");
-      } else if (event.payload.active) {
-        setAssistantThinking("");
-        setAssistantResponsePreview("");
-      }
-    });
-    return () => {
-      if (hudRafId.current) cancelAnimationFrame(hudRafId.current);
-      unlistenAmp.then((fn) => fn());
-      unlistenMic.then((fn) => fn());
-      unlistenTool.then((fn) => fn());
-      unlistenStatus.then((fn) => fn());
-      unlistenToken.then((fn) => fn());
-      unlistenThinking.then((fn) => fn());
-      unlistenVoiceRequest.then((fn) => fn());
-    };
-  }, []);
-
-  // Listen for model pull progress (for background toast)
-  useEffect(() => {
-    const unlisten = listen<ModelPullProgress>("model-pull-progress", (event) => {
-      const p = event.payload;
-      if (p.status === "complete" || p.status === "error") {
-        setModelPullProgress(p);
-        setTimeout(() => setModelPullProgress(null), 3000);
-      } else {
-        setModelPullProgress(p);
-      }
-    });
-    return () => { unlisten.then((fn) => fn()); };
-  }, []);
-
-  // Page transition pulse
-  useEffect(() => {
-    if (prevView.current !== activeView) {
-      prevView.current = activeView;
-      setPageTransition(true);
-      const timer = setTimeout(() => setPageTransition(false), 250);
-      return () => clearTimeout(timer);
-    }
-  }, [activeView]);
-
-  const activityLevel = useMemo((): "idle" | "listening" | "processing" | "active" => {
-    if (pageTransition) return "processing";
-    if (aiState === "speaking") return "active";
-    if (aiState === "thinking") return "processing";
-    if (voiceState === "Speaking" || voiceState === "WakeWordSpeaking") return "active";
-    if (voiceState === "Processing" || voiceState === "WakeWordDetected" || voiceState === "WakeWordProcessing" || (typeof voiceState === "object" && "ModelDownloading" in voiceState)) return "processing";
-    if (voiceState === "Listening" || voiceState === "WakeWordListening") return "listening";
-    return "idle";
-  }, [pageTransition, aiState, voiceState]);
-
-  const handleLowerToBackground = useCallback(async () => {
-    await invoke("lower_wallpaper");
-    setWallpaperRaised(false);
-  }, []);
-
-  const shortcuts = useMemo(() => ({
-    "cmd+k": toggleChat,
-    escape: () => {
-      if (aiState === "speaking") {
-        void stopSpeaking();
-        return;
-      }
-      if (wallpaperActive && wallpaperRaised) {
-        void handleLowerToBackground();
-      } else {
-        closeChat();
-      }
-    },
-    "cmd+shift+j": () => {
-      if (voiceState === "Listening") { stopVoice(); }
-      else if (
-        voiceState === "Idle" ||
-        voiceState === "WakeWordListening" ||
-        (typeof voiceState === "object" && "Error" in voiceState)
-      ) { startVoice(); }
-    },
-  }), [toggleChat, closeChat, wallpaperActive, wallpaperRaised, handleLowerToBackground, voiceState, startVoice, stopVoice, aiState]);
-
-  useKeyboard(shortcuts);
-
-  function renderView() {
-    switch (activeView) {
-      case "chat": return <ChatFullView />;
-      case "email": return <EmailPage />;
-      case "calendar": return <CalendarPage />;
-      case "github": return <GitHubPage />;
-      case "notion": return <NotionPage />;
-      case "cron": return <CronDashboard />;
-      case "settings": return <Settings />;
-      case "home": default: return <Dashboard />;
-    }
-  }
-
-  if (onboardingDone === null) {
-    return <div style={{ padding: 32, color: "rgba(0,180,255,0.5)" }}>Loading...</div>;
-  }
-
-  if (!onboardingDone) {
-    return <OnboardingWizard onComplete={() => setOnboardingDone(true)} />;
-  }
-
-  return (
-    <>
-      <ChatProvider>
-      <div style={styles.root}>
-      <JarvisScene activityLevel={activityLevel} assistantPhase={assistantPhase} ttsAmplitudeRef={ttsAmplitudeRef} micAmplitudeRef={micAmplitudeRef} pendingToolCall={pendingToolCall} onToolCallConsumed={handleToolCallConsumed} />
-
-      <div style={styles.uiLayer}>
-        <div data-tauri-drag-region style={styles.titleBar}>
-          <span data-tauri-drag-region style={styles.titleText}>JARVIS{wallpaperActive ? " / WALLPAPER" : ""}</span>
-          <div data-tauri-drag-region="false" style={{ display: "flex", alignItems: "center", gap: 10 }}>
-            <UpdateButton />
-            {wallpaperActive && wallpaperRaised && (
-              <button
-                onClick={handleLowerToBackground}
-                style={styles.lowerBtn}
-                title="Send to background"
-                aria-label="Send to background"
-              >
-                <Minimize2 size={13} /> Background
-              </button>
-            )}
-            <WindowControls />
-          </div>
-        </div>
-        <div style={styles.layout}>
-          <Sidebar activeView={activeView} onNavigate={setActiveView} onChatToggle={toggleChat} />
-          <div style={styles.content}>
-            <div style={styles.mainArea}>
-              {/* Keyed on the view so navigating away resets the boundary --
-                  without the key a crashed view latches the whole shell. */}
-              <ErrorBoundary key={activeView}>
-                <Suspense fallback={<div style={{ display: "flex", alignItems: "center", justifyContent: "center", height: "100%" }}><span className="system-text animate-glow">LOADING...</span></div>}>
-                  {renderView()}
-                </Suspense>
-              </ErrorBoundary>
-            </div>
-            <CommandBar onActivate={toggleChat} />
-          </div>
-        </div>
-        {activeView !== "chat" && (
-          <ChatPanel isOpen={chatOpen} onClose={closeChat} onNavigateToChat={() => { setChatOpen(false); setActiveView("chat"); }} />
-        )}
-        <AssistantHud
-          visible={voiceRequestActive || aiState !== "idle" || assistantPhase !== "idle" || Boolean(assistantStatus) || Boolean(assistantThinking) || Boolean(assistantResponsePreview)}
-          phase={assistantPhase}
-          status={assistantStatus}
-          thinking={assistantThinking}
-          responsePreview={assistantResponsePreview}
-        />
-        <VoiceIndicator state={voiceState} onStop={stopVoice} />
-        <ToastContainer />
-        <ModelPullToast progress={modelPullProgress} visible={activeView !== "settings" && modelPullProgress !== null} />
-      </div>
-    </div>
-      </ChatProvider>
-    </>
-  );
+  const [onboarding, setOnboarding] = useState<boolean | null>(null);
+  useEffect(() => { void checkOnboardingStatus().then(setOnboarding).catch(() => setOnboarding(true)); }, []);
+  if (onboarding === null) return <div className="workspace-loading" role="status">Opening JARVIS…</div>;
+  if (!onboarding) return <OnboardingWizard onComplete={() => setOnboarding(true)} />;
+  return <WorkspaceProvider><ChatProvider><AppShell /></ChatProvider></WorkspaceProvider>;
 }
-
-const styles: Record<string, React.CSSProperties> = {
-  root: { height: "100vh", overflow: "hidden", position: "relative" as const },
-  uiLayer: { position: "absolute" as const, top: 0, left: 0, right: 0, bottom: 0, zIndex: 2, display: "flex", flexDirection: "column" as const, overflow: "hidden" },
-  titleBar: { height: 36, flexShrink: 0, display: "flex", justifyContent: "space-between", alignItems: "center", padding: "0 12px", background: "rgba(10, 14, 26, 0.4)", backdropFilter: "blur(12px)", borderBottom: "1px solid rgba(0, 180, 255, 0.08)" },
-  titleText: { color: "rgba(0, 180, 255, 0.4)", fontFamily: "var(--font-mono)", fontSize: 10, letterSpacing: 3 },
-  layout: { flex: 1, display: "flex", overflow: "hidden", minHeight: 0 },
-  content: { flex: 1, display: "flex", flexDirection: "column", overflow: "hidden", minHeight: 0 },
-  mainArea: { flex: 1, overflow: "auto", minHeight: 0 },
-  lowerBtn: { display: "flex", alignItems: "center", gap: 6, background: "rgba(0, 180, 255, 0.1)", border: "1px solid var(--border-strong)", borderRadius: 7, padding: "4px 10px", color: "var(--cyan-dim)", cursor: "pointer", fontFamily: "var(--font-mono)", fontSize: 10, letterSpacing: 1 },
-};

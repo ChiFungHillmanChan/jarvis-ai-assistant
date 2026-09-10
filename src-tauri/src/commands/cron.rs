@@ -1,9 +1,21 @@
 use crate::ai::{AiRouter, Workload};
 use crate::db::Database;
 use croner::Cron;
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use std::sync::{Arc, Mutex};
 use tauri::State;
+
+static CRON_MUTATION: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+const VALID_ACTIONS: &[&str] = &["email_sync", "calendar_sync", "deadline_monitor", "notion_sync", "github_digest", "auto_archive_emails"];
+#[derive(Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct CronInterpretation { pub name: String, pub schedule: String, pub action_type: String, pub description: String }
+fn validate_interpretation(value: &CronInterpretation) -> Result<(), String> {
+    if value.name.trim().is_empty() || value.name.len() > 200 || value.description.len() > 4000 || value.schedule.len() > 200 { return Err("Invalid automation name, description or schedule length".into()); }
+    if !VALID_ACTIONS.contains(&value.action_type.as_str()) { return Err("Unsupported automation action".into()); }
+    parse_schedule(&value.schedule)?;
+    Ok(())
+}
 
 /// The one parser. `tokio-cron-scheduler` reads every registration with croner
 /// in exactly this configuration, so validating or previewing with a different
@@ -29,7 +41,7 @@ fn insert_cron_job(
     action_type: &str,
     description: &str,
 ) -> Result<i64, String> {
-    parse_schedule(schedule)?;
+    validate_interpretation(&CronInterpretation { name:name.into(),schedule:schedule.into(),action_type:action_type.into(),description:description.into() })?;
     conn.execute(
         "INSERT INTO cron_jobs (name, schedule, action_type, status, description) VALUES (?1, ?2, ?3, 'active', ?4)",
         rusqlite::params![name, schedule, action_type, description],
@@ -71,6 +83,19 @@ pub async fn create_custom_cron(
     scheduler: State<'_, Arc<crate::scheduler::SchedulerHandle>>,
     description: String,
 ) -> Result<CronJobView, String> {
+    let interpretation = preview_custom_cron(app_handle, db.clone(), router, google_auth, description).await?;
+    save_interpretation(&db, &scheduler, interpretation).await
+}
+
+#[tauri::command]
+pub async fn preview_custom_cron(
+    app_handle: tauri::AppHandle,
+    db: State<'_, Arc<Database>>,
+    router: State<'_, Mutex<AiRouter>>,
+    google_auth: State<'_, Arc<crate::auth::google::GoogleAuth>>,
+    description: String,
+) -> Result<CronInterpretation, String> {
+    if description.trim().is_empty() || description.len() > 4000 { return Err("Describe an automation in at most 4000 bytes".into()); }
     // Ask AI to parse natural language into cron schedule + action
     let prompt = format!(
         "Parse this scheduling request into a JSON object. Supported schedule patterns: daily, weekly, monthly, every N hours/days. \
@@ -82,23 +107,37 @@ pub async fn create_custom_cron(
 
     let messages = vec![("user".to_string(), prompt)];
     let router = router.lock().map_err(|e| e.to_string())?.clone();
-    let response = router.send(messages, &db, &google_auth, &app_handle, None, Workload::Tools).await?;
+    let _guard = crate::chat_session::FOREGROUND.try_lock().map_err(|_| "另一個助理任務進行中，請等完成後再試。".to_string())?;
+    let response = crate::chat_session::TOOL_EXECUTION_DISABLED.scope(true,
+        router.send(messages, &db, &google_auth, &app_handle, None, Workload::Volume)).await?;
 
-    // Parse AI response as JSON
-    let parsed: serde_json::Value = serde_json::from_str(response.trim().trim_start_matches("```json").trim_end_matches("```").trim())
-        .map_err(|e| format!("Failed to parse AI response as JSON: {}. Response was: {}", e, response))?;
+    parse_interpretation(&response)
+}
 
-    let name = parsed["name"].as_str().ok_or("Missing 'name' in AI response")?.to_string();
-    let schedule = parsed["schedule"].as_str().ok_or("Missing 'schedule' in AI response")?.to_string();
-    let action_type = parsed["action_type"].as_str().ok_or("Missing 'action_type' in AI response")?.to_string();
-    let desc = parsed["description"].as_str().unwrap_or("").to_string();
+fn parse_interpretation(response: &str) -> Result<CronInterpretation, String> {
+    let value: CronInterpretation = serde_json::from_str(response.trim().trim_start_matches("```json").trim_end_matches("```").trim())
+        .map_err(|_| "Could not interpret this schedule. Please clarify the timing and action.".to_string())?;
+    validate_interpretation(&value)?;
+    Ok(value)
+}
 
-    // Validate action_type
-    let valid_actions = ["email_sync", "calendar_sync", "deadline_monitor", "notion_sync", "github_digest", "auto_archive_emails"];
-    if !valid_actions.contains(&action_type.as_str()) {
-        return Err(format!("Invalid action_type '{}'. Must be one of: {}", action_type, valid_actions.join(", ")));
-    }
+#[tauri::command]
+pub async fn create_reviewed_cron(
+    db: State<'_, Arc<Database>>,
+    scheduler: State<'_, Arc<crate::scheduler::SchedulerHandle>>,
+    interpretation: CronInterpretation,
+) -> Result<CronJobView, String> {
+    validate_interpretation(&interpretation)?;
+    save_interpretation(&db, &scheduler, interpretation).await
+}
 
+async fn save_interpretation(
+    db: &Database,
+    scheduler: &crate::scheduler::SchedulerHandle,
+    interpretation: CronInterpretation,
+) -> Result<CronJobView, String> {
+    let _guard = CRON_MUTATION.lock().await;
+    let CronInterpretation {name,schedule,action_type,description:desc} = interpretation;
     // Validate the model-produced schedule, then insert
     let job_id = {
         let conn = db.conn.lock().map_err(|e| e.to_string())?;
@@ -150,6 +189,7 @@ pub async fn delete_cron_job(
     scheduler: State<'_, Arc<crate::scheduler::SchedulerHandle>>,
     job_id: i64,
 ) -> Result<(), String> {
+    let _guard = CRON_MUTATION.lock().await;
     {
         let conn = db.conn.lock().map_err(|e| e.to_string())?;
         // Delete child run rows before the parent job: cron_runs.job_id has a
@@ -178,6 +218,22 @@ pub async fn toggle_cron_job(
     scheduler: State<'_, Arc<crate::scheduler::SchedulerHandle>>,
     job_id: i64,
 ) -> Result<String, String> {
+    change_cron_status(&db, &scheduler, job_id, None).await
+}
+
+#[tauri::command]
+pub async fn set_cron_job_status(
+    db: State<'_, Arc<Database>>,
+    scheduler: State<'_, Arc<crate::scheduler::SchedulerHandle>>,
+    job_id: i64,
+    status: String,
+) -> Result<String, String> {
+    if status != "active" && status != "paused" { return Err("Status must be active or paused".into()); }
+    change_cron_status(&db, &scheduler, job_id, Some(status)).await
+}
+
+async fn change_cron_status(db: &Database, scheduler: &crate::scheduler::SchedulerHandle, job_id: i64, desired: Option<String>) -> Result<String, String> {
+    let _guard = CRON_MUTATION.lock().await;
     let (new_status, name, schedule, action_type) = {
         let conn = db.conn.lock().map_err(|e| e.to_string())?;
         let (current, name, schedule, action_type): (String, String, String, String) = conn.query_row(
@@ -186,7 +242,8 @@ pub async fn toggle_cron_job(
             |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
         ).map_err(|e| e.to_string())?;
 
-        let new_status = if current == "active" { "paused" } else { "active" };
+        let new_status = desired.as_deref().unwrap_or(if current == "active" { "paused" } else { "active" });
+        if new_status == current { return Ok(current); }
         conn.execute(
             "UPDATE cron_jobs SET status = ?1 WHERE id = ?2",
             rusqlite::params![new_status, job_id],
@@ -264,6 +321,39 @@ mod tests {
 
         let id = insert_cron_job(&conn, "Friday digest", "0 0 9 * * 5", "email_sync", "Fridays at 9am").unwrap();
         assert_eq!(id, 1, "a schedule the scheduler accepts is still inserted");
+    }
+
+    #[test]
+    fn unsupported_reviewed_action_is_rejected_before_insert() {
+        let db = crate::db::test_database();
+        let conn = db.conn.lock().unwrap();
+        assert!(insert_cron_job(&conn,"Bad","0 0 9 * * *","send_email","Bad").is_err());
+        let count: i64 = conn.query_row("SELECT COUNT(*) FROM cron_jobs WHERE name='Bad'",[],|r|r.get(0)).unwrap();
+        assert_eq!(count,0);
+    }
+
+    #[tokio::test]
+    async fn reviewed_schedule_is_not_saved_until_create_and_status_is_idempotent() {
+        let db = crate::db::test_database();
+        let scheduler = crate::scheduler::SchedulerHandle::new();
+        let before: i64 = db.conn.lock().unwrap().query_row("SELECT COUNT(*) FROM cron_jobs",[],|r|r.get(0)).unwrap();
+        let interpretation = parse_interpretation(r#"{"name":"Reviewed","schedule":"0 0 9 * * 1","action_type":"calendar_sync","description":"Monday at 9"}"#).unwrap();
+        assert_eq!(db.conn.lock().unwrap().query_row("SELECT COUNT(*) FROM cron_jobs",[],|r|r.get::<_,i64>(0)).unwrap(),before);
+        let job = save_interpretation(&db,&scheduler,interpretation).await.unwrap();
+        assert_eq!(job.schedule,"0 0 9 * * 1");
+        assert_eq!(change_cron_status(&db,&scheduler,job.id,Some("paused".into())).await.unwrap(),"paused");
+        assert_eq!(change_cron_status(&db,&scheduler,job.id,Some("paused".into())).await.unwrap(),"paused");
+        assert_eq!(change_cron_status(&db,&scheduler,job.id,Some("active".into())).await.unwrap(),"active");
+    }
+    #[tokio::test]
+    async fn preview_context_blocks_tools_before_database_side_effects() {
+        let db = crate::db::test_database();
+        let auth = Arc::new(crate::auth::google::GoogleAuth::new_empty());
+        let ledger = crate::ai::SideEffectLedger::new();
+        let output = crate::chat_session::TOOL_EXECUTION_DISABLED.scope(true,
+            crate::ai::tools::execute_tool("create_task",r#"{"title":"Must not exist"}"#,&db,&auth,&ledger)).await;
+        assert!(output.contains("disabled"));
+        assert_eq!(db.conn.lock().unwrap().query_row("SELECT COUNT(*) FROM tasks WHERE title='Must not exist'",[],|r|r.get::<_,i64>(0)).unwrap(),0);
     }
 
     /// The preview and the scheduler must agree on which day fires. The `cron`

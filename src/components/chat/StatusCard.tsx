@@ -21,32 +21,32 @@ interface StatusConfig {
 
 const STATUS_CONFIG: Record<string, StatusConfig> = {
   task_created: {
-    colorBase: "16, 185, 129",
+    colorBase: "var(--accent-success)",
     label: "CREATED",
     icon: "check",
   },
   task_completed: {
-    colorBase: "16, 185, 129",
+    colorBase: "var(--accent-success)",
     label: "COMPLETED",
     icon: "check",
   },
   email_synced: {
-    colorBase: "0, 180, 255",
+    colorBase: "var(--cyan)",
     label: "SYNCED",
     icon: "sync",
   },
   calendar_synced: {
-    colorBase: "0, 180, 255",
+    colorBase: "var(--cyan)",
     label: "SYNCED",
     icon: "sync",
   },
   cron_created: {
-    colorBase: "16, 185, 129",
+    colorBase: "var(--accent-success)",
     label: "SCHEDULED",
     icon: "check",
   },
   action_completed: {
-    colorBase: "16, 185, 129",
+    colorBase: "var(--accent-success)",
     label: "DONE",
     icon: "check",
   },
@@ -121,15 +121,15 @@ function extractDetails(data: Record<string, unknown>): string[] {
 
 function StatusCardInner({ statusType, data }: StatusCardProps) {
   const config = STATUS_CONFIG[statusType] ?? {
-    colorBase: "0, 180, 255",
+    colorBase: "var(--cyan)",
     label: statusType.toUpperCase().replace(/_/g, " "),
     icon: "check" as const,
   };
 
-  const color = `rgba(${config.colorBase}, 0.8)`;
-  const colorDim = `rgba(${config.colorBase}, 0.15)`;
-  const colorFaint = `rgba(${config.colorBase}, 0.06)`;
-  const colorBorder = `rgba(${config.colorBase}, 0.2)`;
+  const color = config.colorBase;
+  const colorDim = "var(--surface-solid)";
+  const colorFaint = "var(--surface)";
+  const colorBorder = "var(--border-primary)";
 
   const title = (data.title as string) || (data.name as string) || statusType.replace(/_/g, " ");
   const details = extractDetails(data);
@@ -199,9 +199,9 @@ const cardStyles: Record<string, React.CSSProperties> = {
     alignItems: "center",
     gap: 10,
     border: "1px solid",
-    borderRadius: 6,
-    padding: "8px 10px",
-    marginTop: 6,
+    borderRadius: 8,
+    padding: "10px 12px",
+    marginTop: 8,
   },
   iconBox: {
     width: 28,
@@ -235,7 +235,7 @@ const cardStyles: Record<string, React.CSSProperties> = {
   detail: {
     fontSize: 10,
     fontFamily: "var(--font-mono)",
-    color: "rgba(0, 180, 255, 0.5)",
+    color: "var(--text-secondary)",
   },
   badge: {
     fontSize: 9,

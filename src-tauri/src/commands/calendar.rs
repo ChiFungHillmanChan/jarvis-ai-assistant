@@ -59,24 +59,48 @@ fn todays_events_query() -> String {
     )
 }
 
+fn date_range_query() -> String {
+    format!("SELECT {} FROM calendar_events WHERE (CASE WHEN length(start_time)=10 THEN start_time ELSE date(start_time,'localtime') END) BETWEEN ?1 AND ?2 ORDER BY datetime(start_time) ASC", EVENT_COLUMNS)
+}
+fn validate_date_range(from: &str, to: &str) -> Result<(), String> {
+    let parse = |value: &str| chrono::NaiveDate::parse_from_str(value, "%Y-%m-%d")
+        .ok().filter(|d| d.format("%Y-%m-%d").to_string() == value);
+    let from = parse(from).ok_or("Invalid start date")?;
+    let to = parse(to).ok_or("Invalid end date")?;
+    if to < from || (to-from).num_days() > 366 { return Err("Date range must be ordered and at most 366 days".into()); }
+    Ok(())
+}
 #[tauri::command]
-pub fn get_events(db: State<Arc<Database>>, days: Option<i32>) -> Result<Vec<CalendarEventView>, String> {
-    let days = days.unwrap_or(7);
-    let conn = db.conn.lock().map_err(|e| e.to_string())?;
-    let param = format!("+{} days", days);
-    let mut stmt = conn.prepare(&upcoming_events_query()).map_err(|e| e.to_string())?;
-    let events = stmt.query_map(rusqlite::params![param], |row| {
+pub fn get_events(db: State<Arc<Database>>, days: Option<i32>, date_from: Option<String>, date_to: Option<String>) -> Result<Vec<CalendarEventView>, String> {
+    let (query, params) = match (date_from, date_to) {
+        (Some(from),Some(to)) => { validate_date_range(&from,&to)?; (date_range_query(),vec![from,to]) },
+        (None,None) => (upcoming_events_query(),vec![format!("+{} days",days.unwrap_or(7))]),
+        _ => return Err("Both dateFrom and dateTo are required".into()),
+    };
+    let conn = db.conn.lock().map_err(|e|e.to_string())?;
+    let mut stmt = conn.prepare(&query).map_err(|e|e.to_string())?;
+    let events = stmt.query_map(rusqlite::params_from_iter(params.iter()), |row| {
         Ok(CalendarEventView { id: row.get(0)?, google_id: row.get(1)?, summary: row.get(2)?, description: row.get(3)?, location: row.get(4)?, start_time: row.get(5)?, end_time: row.get(6)?, attendees: row.get(7)?, status: row.get(8)? })
-    }).map_err(|e| e.to_string())?.collect::<Result<Vec<_>, _>>().map_err(|e| e.to_string())?;
+    }).map_err(|e|e.to_string())?.collect::<Result<Vec<_>,_>>().map_err(|e|e.to_string())?;
     Ok(events)
 }
 
 #[tauri::command]
-pub async fn sync_calendar(db: State<'_, Arc<Database>>, auth: State<'_, Arc<GoogleAuth>>) -> Result<String, String> {
+pub async fn sync_calendar(db: State<'_, Arc<Database>>, auth: State<'_, Arc<GoogleAuth>>, date_from: Option<String>, date_to: Option<String>) -> Result<String, String> {
     let token = auth.ensure_access_token().await?;
-    let now = chrono::Utc::now();
-    let time_min = now.to_rfc3339();
-    let time_max = (now + chrono::TimeDelta::days(7)).to_rfc3339();
+    let (time_min,time_max) = match (date_from,date_to) {
+        (Some(from),Some(to)) => {
+            validate_date_range(&from,&to)?;
+            use chrono::TimeZone;
+            let midnight = |day: chrono::NaiveDate| chrono::Local.from_local_datetime(&day.and_hms_opt(0,0,0).unwrap()).earliest()
+                .map(|v|v.to_rfc3339()).ok_or("Local midnight is unavailable for this date".to_string());
+            let from = chrono::NaiveDate::parse_from_str(&from,"%Y-%m-%d").map_err(|e|e.to_string())?;
+            let to = chrono::NaiveDate::parse_from_str(&to,"%Y-%m-%d").map_err(|e|e.to_string())?.succ_opt().ok_or("Invalid end date")?;
+            (midnight(from)?,midnight(to)?)
+        },
+        (None,None) => { let now = chrono::Utc::now(); (now.to_rfc3339(),(now+chrono::TimeDelta::days(7)).to_rfc3339()) },
+        _ => return Err("Both dateFrom and dateTo are required".into()),
+    };
     let fetched = cal::fetch_events_detailed(&token, &time_min, &time_max).await?;
     let count = fetched.events.len();
     cal::save_to_db(&db, &fetched, &time_min, &time_max)?;
@@ -146,6 +170,17 @@ mod tests {
                  ('timed_tomorrow', 'Mentor sync', '2026-07-28T14:00:00{tz}', '2026-07-28T15:00:00{tz}');",
             tz = tz
         ))
+    }
+
+    #[test]
+    fn selected_date_range_includes_elapsed_and_all_day_events() {
+        let conn = four_shapes("+00:00");
+        let query = date_range_query().replace("'localtime'", "'+0 hours'");
+        assert_eq!(ids(&conn,&query,&[&"2026-07-27",&"2026-07-27"],1),vec!["allday_today","timed_today"]);
+        assert_eq!(ids(&conn,&query,&[&"2026-07-27",&"2026-07-28"],1).len(),4);
+        assert!(validate_date_range("2026-07-27","2026-07-28").is_ok());
+        assert!(validate_date_range("2026-07-28","2026-07-27").is_err());
+        assert!(validate_date_range("2026-02-30","2026-03-01").is_err());
     }
 
     /// The 7-day window must compare instants, not raw text: a meeting that

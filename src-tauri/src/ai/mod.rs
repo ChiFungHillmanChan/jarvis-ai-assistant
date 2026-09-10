@@ -15,7 +15,7 @@ use serde_json::json;
 use std::collections::HashSet;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::Arc;
-use tauri::Emitter;
+use crate::chat_session::ScopedEmitter;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ProviderChainEntry {
@@ -309,6 +309,21 @@ fn has_live_entry_after(
         .iter()
         .skip(idx + 1)
         .any(|next| next.enabled && !dead_credentials.contains(&credential_scope(next)))
+}
+
+// Briefing and other non-chat callers propagate router errors directly. Finish
+// the HUD here on every terminal error and every response without streaming
+// speech; successful streaming speech keeps ownership until its audio finishes.
+async fn finish_request_with_hud<T>(
+    request: impl std::future::Future<Output = Result<T, String>>,
+    streaming_tts: bool,
+    mut emit: impl FnMut(&str, serde_json::Value),
+) -> Result<T, String> {
+    let result = request.await;
+    if result.is_err() || !streaming_tts {
+        emit("chat-state", json!({"state": "idle"}));
+    }
+    result
 }
 
 #[derive(Clone)]
@@ -639,6 +654,35 @@ impl AiRouter {
     }
 
     async fn send_with_ledger(
+        &self,
+        messages: Vec<(String, String)>,
+        db: &crate::db::Database,
+        google_auth: &std::sync::Arc<crate::auth::google::GoogleAuth>,
+        app_handle: &tauri::AppHandle,
+        tts_tx: Option<tokio::sync::mpsc::Sender<TtsCommand>>,
+        workload: Workload,
+        ledger: SideEffectLedger,
+    ) -> Result<String, String> {
+        let streaming_tts = tts_tx.is_some();
+        finish_request_with_hud(
+            self.run_provider_chain(
+                messages,
+                db,
+                google_auth,
+                app_handle,
+                tts_tx,
+                workload,
+                ledger,
+            ),
+            streaming_tts,
+            |event, payload| {
+                let _ = app_handle.emit(event, payload);
+            },
+        )
+        .await
+    }
+
+    async fn run_provider_chain(
         &self,
         messages: Vec<(String, String)>,
         db: &crate::db::Database,
@@ -986,13 +1030,15 @@ impl AiRouter {
                         break;
                     }
 
-                    let _ = app_handle.emit(
-                        "chat-status",
-                        json!({
-                            "status": "Retrying with next provider...",
-                            "phase": "thinking"
-                        }),
-                    );
+                    if will_retry {
+                        let _ = app_handle.emit(
+                            "chat-status",
+                            json!({
+                                "status": "Retrying with next provider...",
+                                "phase": "thinking"
+                            }),
+                        );
+                    }
                 }
             }
         }
@@ -1008,6 +1054,51 @@ impl AiRouter {
 mod tests {
     use super::*;
     use rusqlite::Connection;
+
+    #[tokio::test]
+    async fn failed_request_clears_hud_for_briefing_and_streaming_chat() {
+        for streaming_tts in [false, true] {
+            let mut events = Vec::new();
+            let result: Result<String, String> = finish_request_with_hud(
+                async { Err("All providers failed: No Gemini API key configured".into()) },
+                streaming_tts,
+                |event, payload| events.push((event.to_string(), payload)),
+            )
+            .await;
+
+            assert_eq!(result.unwrap_err(), "All providers failed: No Gemini API key configured");
+            assert_eq!(events, vec![("chat-state".to_string(), json!({"state": "idle"}))],
+                "a terminal failure must clear the global HUD even when the caller only propagates the error");
+        }
+    }
+
+    #[tokio::test]
+    async fn completed_briefing_clears_hud_without_requiring_a_chat_command() {
+        let mut events = Vec::new();
+        let result = finish_request_with_hud(
+            async { Ok("今日摘要".to_string()) },
+            false,
+            |event, payload| events.push((event.to_string(), payload)),
+        )
+        .await;
+
+        assert_eq!(result.unwrap(), "今日摘要");
+        assert_eq!(events, vec![("chat-state".to_string(), json!({"state": "idle"}))]);
+    }
+
+    #[tokio::test]
+    async fn completed_streaming_request_keeps_hud_until_tts_finishes() {
+        let mut events = Vec::new();
+        let result = finish_request_with_hud(
+            async { Ok("still speaking".to_string()) },
+            true,
+            |event, payload| events.push((event.to_string(), payload)),
+        )
+        .await;
+
+        assert_eq!(result.unwrap(), "still speaking");
+        assert!(events.is_empty(), "model completion must not reset a still-speaking HUD");
+    }
 
     #[test]
     fn resolve_key_prefers_env_then_falls_back() {

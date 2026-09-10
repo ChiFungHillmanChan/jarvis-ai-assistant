@@ -9,6 +9,7 @@ pub mod email;
 pub mod github;
 pub mod google_auth;
 pub mod launch;
+pub mod mail;
 pub mod local_llm;
 pub mod model_pull;
 pub mod notion;

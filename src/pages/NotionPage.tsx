@@ -1,53 +1,20 @@
 import { useState } from "react";
 import { useTauriCommand } from "../hooks/useTauriCommand";
 import type { NotionPageView } from "../lib/types";
-import { syncNotion } from "../lib/commands";
-import { showToast } from "../components/Toast";
+import { openUrl, syncNotion } from "../lib/commands";
+import { useWorkspaceValue } from "../workspace/WorkspaceContext";
+import "./tool-pages.css";
 
 export default function NotionPage() {
-  const { data: pages, error, refetch } = useTauriCommand<NotionPageView[]>("get_notion_pages", { limit: 50 });
-  const [syncing, setSyncing] = useState(false);
-
-  async function handleSync() {
-    setSyncing(true);
-    try { const result = await syncNotion(); showToast(result, "success"); refetch(); }
-    catch (e) { showToast(String(e), "error"); }
-    finally { setSyncing(false); }
-  }
-
-  return (
-    <div style={styles.container}>
-      <div style={styles.header}>
-        <span className="system-text">NOTION PAGES</span>
-        <button onClick={handleSync} disabled={syncing} style={styles.syncBtn}>
-          {syncing ? "SYNCING..." : "SYNC NOW"}
-        </button>
-      </div>
-      <div style={styles.list}>
-        {!pages || pages.length === 0 ? (
-          <div style={{ ...styles.empty, ...(error ? styles.errorText : {}) }}>{error ?? "No Notion pages. Add your API key in Settings, then sync."}</div>
-        ) : pages.map((page) => (
-          <div key={page.id} style={styles.pageItem}>
-            <div style={styles.pageTitle}>{page.title}</div>
-            <div style={styles.pageMeta}>
-              {page.parent_type && <span>{page.parent_type}</span>}
-              {page.last_edited && <span> -- edited {new Date(page.last_edited).toLocaleDateString()}</span>}
-            </div>
-          </div>
-        ))}
-      </div>
-    </div>
-  );
+  const { data, error: loadError, loading, refetch } = useTauriCommand<NotionPageView[]>("get_notion_pages", { limit: 50 });
+  const [selectedId, setSelectedId] = useWorkspaceValue<number | null>("notionPageId", null); const [syncing, setSyncing] = useState(false);
+  const [actionError, setActionError] = useState<string | null>(null); const [notice, setNotice] = useState<string | null>(null);
+  const selected = (data ?? []).find(page => page.id === selectedId) ?? null;
+  async function sync() { setSyncing(true); setActionError(null); try { setNotice(await syncNotion()); refetch(); } catch (e) { setActionError(String(e)); } finally { setSyncing(false); } }
+  async function openSelected() { if (!selected?.url) return; setActionError(null); try { await openUrl(selected.url); } catch (e) { setActionError(String(e)); } }
+  return <main className="tool-page"><header className="tool-page__header"><div><p className="tool-page__eyebrow">Notes</p><h1>Notion sources</h1><p>Browse page metadata available from your Notion connection.</p></div><button className="tool-button" onClick={sync} disabled={syncing}>{syncing ? "Syncing…" : "Sync Notion"}</button></header>
+    {(loadError || actionError || notice) && <div className={loadError || actionError ? "tool-alert tool-alert--error" : "tool-alert"} role="status">{actionError || loadError || notice}</div>}
+    <div className="tool-split"><section className="tool-panel tool-list-pane" aria-busy={loading}><div className="tool-panel__heading"><h2>Pages</h2><span>{data?.length ?? 0} synced</span></div>{loading && !data ? <p className="tool-empty">Loading Notion pages…</p> : !data?.length ? <p className="tool-empty">No synced pages. Add a Notion integration key in Settings, then sync.</p> : data.map(page => <button key={page.id} className={`tool-list-row${page.id === selectedId ? " is-selected" : ""}`} onClick={() => setSelectedId(page.id)}><span><strong>{page.title || "Untitled page"}</strong><small>{page.parent_type || "Notion page"}</small></span>{page.last_edited && <span className="tool-status">{new Date(page.last_edited).toLocaleDateString()}</span>}</button>)}</section>
+    <aside className="tool-panel tool-detail-pane">{selected ? <><div className="tool-panel__heading"><h2>Source details</h2><span>Notion</span></div><h3>{selected.title || "Untitled page"}</h3><dl className="tool-details"><dt>Source</dt><dd>Notion</dd><dt>Parent type</dt><dd>{selected.parent_type || "Not provided"}</dd>{selected.last_edited && <><dt>Last edited</dt><dd>{new Date(selected.last_edited).toLocaleString()}</dd></>}</dl><p className="tool-help">JARVIS has synced this page's title and source metadata, not its body content.</p>{selected.url ? <button className="tool-button" onClick={openSelected}>Open in Notion</button> : <p className="tool-help">No provider link was included in this sync.</p>}</> : <p className="tool-empty">Select a page to inspect its source details.</p>}</aside></div>
+  </main>;
 }
-
-const styles: Record<string, React.CSSProperties> = {
-  container: { padding: 24, height: "100%", display: "flex", flexDirection: "column" },
-  header: { display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 16 },
-  syncBtn: { background: "rgba(0, 180, 255, 0.08)", border: "1px solid rgba(0, 180, 255, 0.3)", borderRadius: 6, padding: "6px 12px", color: "rgba(0, 180, 255, 0.8)", cursor: "pointer", fontFamily: "var(--font-mono)", fontSize: 10 },
-  list: { flex: 1, overflowY: "auto" },
-  empty: { color: "rgba(0, 180, 255, 0.3)", fontSize: 12, fontStyle: "italic", padding: 20 },
-  errorText: { color: "rgba(255, 100, 100, 0.85)", fontStyle: "normal" },
-  pageItem: { padding: "10px 0", borderBottom: "1px solid rgba(0, 180, 255, 0.08)" },
-  pageTitle: { color: "rgba(0, 180, 255, 0.8)", fontSize: 13 },
-  pageMeta: { color: "rgba(0, 180, 255, 0.4)", fontSize: 10, marginTop: 2 },
-};

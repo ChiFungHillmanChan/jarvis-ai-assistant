@@ -124,6 +124,16 @@ impl GoogleAuth {
     }
 
     pub async fn start_auth_flow(&self, scopes: Vec<String>) -> Result<(), String> {
+        self.start_auth_flow_with_prompt(scopes, "consent").await
+    }
+
+    /// Separate mailbox grants need an explicit chooser without changing the
+    /// existing Calendar/chat sign-in behavior.
+    pub async fn start_auth_flow_with_account_selection(&self, scopes: Vec<String>) -> Result<(), String> {
+        self.start_auth_flow_with_prompt(scopes, "consent select_account").await
+    }
+
+    async fn start_auth_flow_with_prompt(&self, scopes: Vec<String>, prompt: &str) -> Result<(), String> {
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
             .await.map_err(|e| format!("Failed to bind listener: {}", e))?;
         let port = listener.local_addr().map_err(|e| e.to_string())?.port();
@@ -136,7 +146,7 @@ impl GoogleAuth {
             auth_request = auth_request.add_scope(Scope::new(scope.clone()));
         }
         auth_request = auth_request.add_extra_param("access_type", "offline");
-        auth_request = auth_request.add_extra_param("prompt", "consent");
+        auth_request = auth_request.add_extra_param("prompt", prompt);
 
         let (auth_url, csrf_token) = auth_request.set_pkce_challenge(pkce_challenge).url();
         let expected_state = csrf_token.secret().clone();

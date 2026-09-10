@@ -125,6 +125,14 @@ pub async fn stop_listening(
         return Ok(String::new());
     }
 
+    let _assistant_guard = match crate::chat_session::FOREGROUND.try_lock() {
+        Ok(guard) => guard,
+        Err(_) => {
+            engine.set_state_and_emit(VoiceState::Idle);
+            return Err("另一個助理任務進行中，請等完成後再試。".into());
+        }
+    };
+
     // Signal that voice initiated this AI request (frontend uses this to skip token events)
     let _ = app_handle.emit("chat-voice-active", json!({"active": true}));
 
@@ -171,7 +179,7 @@ pub async fn stop_listening(
     let messages = {
         let conn = db.conn.lock().map_err(|e| e.to_string())?;
         let mut stmt = conn
-            .prepare("SELECT role, content FROM conversations ORDER BY id DESC LIMIT 20")
+            .prepare("SELECT role, content FROM conversations WHERE session_id = 'legacy' ORDER BY id DESC LIMIT 20")
             .map_err(|e| e.to_string())?;
         let mut msgs: Vec<(String, String)> = stmt
             .query_map([], |row| {

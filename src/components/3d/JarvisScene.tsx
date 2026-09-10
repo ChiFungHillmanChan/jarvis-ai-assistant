@@ -128,6 +128,8 @@ function isSceneSurface(target: EventTarget | null, canvas: HTMLCanvasElement): 
 }
 
 interface JarvisSceneProps {
+  contained?: boolean;
+  minimalLabels?: boolean;
   activityLevel?: "idle" | "listening" | "processing" | "active";
   assistantPhase?: string;
   ttsAmplitudeRef?: React.RefObject<number>;
@@ -136,7 +138,7 @@ interface JarvisSceneProps {
   onToolCallConsumed?: () => void;
 }
 
-export default memo(function JarvisScene({ activityLevel = "idle", assistantPhase = "idle", ttsAmplitudeRef, micAmplitudeRef, pendingToolCall = null, onToolCallConsumed }: JarvisSceneProps) {
+export default memo(function JarvisScene({ contained = false, minimalLabels = false, activityLevel = "idle", assistantPhase = "idle", ttsAmplitudeRef, micAmplitudeRef, pendingToolCall = null, onToolCallConsumed }: JarvisSceneProps) {
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const animRef = useRef(0);
   const time = useRef(0);
@@ -375,22 +377,26 @@ export default memo(function JarvisScene({ activityLevel = "idle", assistantPhas
 
     function resize() {
       if (!canvas) return;
-      canvas.width = window.innerWidth;
-      canvas.height = window.innerHeight;
+      const bounds = canvas.getBoundingClientRect();
+      canvas.width = contained ? bounds.width : window.innerWidth;
+      canvas.height = contained ? bounds.height : window.innerHeight;
     }
     resize();
     window.addEventListener("resize", resize);
+    const observer = new ResizeObserver(() => { resize(); resume(); });
+    observer.observe(canvas);
+    const reducedMotion = window.matchMedia("(prefers-reduced-motion: reduce)");
 
     // Load data after dashboard has had time to initialize
-    setTimeout(() => loadData(), 3000);
+    const loadTimer = setTimeout(() => { void loadData().then(() => resume()); }, 300);
     // Refresh data every 60 seconds (reduced from 30s to lower DB contention)
-    const dataInterval = setInterval(() => loadData(), 60000);
+    const dataInterval = setInterval(() => { if (!document.hidden) void loadData(); }, 60000);
 
     // Mouse controls
     function onDown(e: MouseEvent) {
       // Only a press on the scene surface may start a drag. Anywhere else is
       // UI, and preventDefault there kills text selection across the whole app.
-      if (!canvas || !isSceneSurface(e.target, canvas)) return;
+      if (!canvas || (contained ? e.target !== canvas : !isSceneSurface(e.target, canvas))) return;
       e.preventDefault();
       document.body.style.userSelect = "none";
       document.body.style.webkitUserSelect = "none";
@@ -408,7 +414,8 @@ export default memo(function JarvisScene({ activityLevel = "idle", assistantPhas
       document.body.style.cursor = "grabbing";
     }
     function onMove(e: MouseEvent) {
-      mousePos.current = { x: e.clientX, y: e.clientY };
+      const bounds = canvas!.getBoundingClientRect();
+      mousePos.current = { x: e.clientX - bounds.left, y: e.clientY - bounds.top };
       if (!dragging.current) return;
       e.preventDefault();
       targetRY.current += (e.clientX - lastM.current.x) * 0.005;
@@ -416,17 +423,20 @@ export default memo(function JarvisScene({ activityLevel = "idle", assistantPhas
       targetRX.current = Math.max(-1.5, Math.min(1.5, targetRX.current));
       lastM.current = { x: e.clientX, y: e.clientY };
     }
+    let rotateTimer: ReturnType<typeof setTimeout>;
     function onUp() {
+      if (!dragging.current) return;
       dragging.current = false;
       document.body.style.userSelect = "";
       document.body.style.webkitUserSelect = "";
       document.body.style.cursor = "";
-      setTimeout(() => { if (!dragging.current && !focusTarget.current) autoRot.current = true; }, 2000);
+      clearTimeout(rotateTimer);
+      rotateTimer = setTimeout(() => { if (!dragging.current && !focusTarget.current) autoRot.current = true; }, 2000);
     }
     function onWheel(e: WheelEvent) {
       // Same rule as onDown: swallowing wheel events over a panel stops every
       // scrollable region in the app from scrolling.
-      if (!canvas || !isSceneSurface(e.target, canvas)) return;
+      if (!canvas || (contained ? e.target !== canvas : !isSceneSurface(e.target, canvas))) return;
       e.preventDefault();
       targetZoom.current += e.deltaY * 0.8;
       targetZoom.current = Math.max(50, Math.min(2000, targetZoom.current));
@@ -438,7 +448,8 @@ export default memo(function JarvisScene({ activityLevel = "idle", assistantPhas
         autoRot.current = true;
       }
     }
-    function onDblClick() {
+    function onDblClick(e: MouseEvent) {
+      if (contained && e.target !== canvas) return;
       // Double click to unfocus
       if (focusedNode.current) {
         focusedNode.current = null;
@@ -476,6 +487,7 @@ export default memo(function JarvisScene({ activityLevel = "idle", assistantPhas
 
     function animate(timestamp?: number) {
       if (!canvas || !ctx) return;
+      if (document.hidden) { animRef.current = 0; return; }
 
       // Throttle frame rate based on activity
       const now = timestamp || performance.now();
@@ -493,7 +505,7 @@ export default memo(function JarvisScene({ activityLevel = "idle", assistantPhas
 
       try { // --- begin frame ---
       const activity = activityLevelRef.current;
-      time.current += 0.006;
+      time.current += reducedMotion.matches ? 0 : 0.006;
       const w = canvas.width, h = canvas.height;
       const cx = w / 2, cy = h / 2;
 
@@ -534,7 +546,7 @@ export default memo(function JarvisScene({ activityLevel = "idle", assistantPhas
 
       // Smooth zoom + rotation
       zoomRef.current += (targetZoom.current - zoomRef.current) * 0.08;
-      const fov = zoomRef.current;
+      const fov = zoomRef.current * (contained ? Math.max(1, 510 / Math.min(w, h)) : 1);
 
       // Focus animation
       if (focusTarget.current && focusProgress.current < 1) {
@@ -588,7 +600,7 @@ export default memo(function JarvisScene({ activityLevel = "idle", assistantPhas
       }
 
       // Phase-driven auto-rotation speed
-      if (autoRot.current && !seekActive.current) {
+      if (!reducedMotion.matches && autoRot.current && !seekActive.current) {
         let spinSpeed;
         switch (phase) {
           case "thinking": spinSpeed = 0.012; break;   // 6x normal -- visibly fast spin
@@ -609,7 +621,7 @@ export default memo(function JarvisScene({ activityLevel = "idle", assistantPhas
       const ry = rotYRef.current, rx = rotXRef.current;
 
       // === BACKGROUND ===
-      ctx.fillStyle = "#060a14";
+      ctx.fillStyle = contained ? "#101720" : "#060a14";
       ctx.fillRect(0, 0, w, h);
 
       // Rebuild gradient cache on resize
@@ -618,7 +630,7 @@ export default memo(function JarvisScene({ activityLevel = "idle", assistantPhas
       ctx.fillRect(0, 0, w, h);
 
       // === GRID LINES (batched paths, skipped when idle) ===
-      const targetGridOpacity = (activity !== "idle" || dragging.current) ? 1 : 0;
+      const targetGridOpacity = (activity !== "idle" || dragging.current) ? 1 : contained ? 0.7 : 0;
       gridOpacityRef.current += (targetGridOpacity - gridOpacityRef.current) * 0.05;
 
       if (gridOpacityRef.current > 0.01) {
@@ -639,7 +651,7 @@ export default memo(function JarvisScene({ activityLevel = "idle", assistantPhas
             if (s === 0) ctx.moveTo(pr.x, pr.y); else ctx.lineTo(pr.x, pr.y);
           }
         }
-        ctx.strokeStyle = "rgba(0, 160, 255, 0.04)";
+        ctx.strokeStyle = contained ? "rgba(88, 180, 218, 0.15)" : "rgba(0, 160, 255, 0.04)";
         ctx.stroke();
 
         // Equator (brighter)
@@ -654,7 +666,7 @@ export default memo(function JarvisScene({ activityLevel = "idle", assistantPhas
             const pr = project(p, cx, cy, fov);
             if (s === 0) ctx.moveTo(pr.x, pr.y); else ctx.lineTo(pr.x, pr.y);
           }
-          ctx.strokeStyle = "rgba(0, 160, 255, 0.08)";
+          ctx.strokeStyle = contained ? "rgba(100, 197, 229, 0.28)" : "rgba(0, 160, 255, 0.08)";
           ctx.stroke();
         }
 
@@ -670,7 +682,7 @@ export default memo(function JarvisScene({ activityLevel = "idle", assistantPhas
             if (s === 0) ctx.moveTo(pr.x, pr.y); else ctx.lineTo(pr.x, pr.y);
           }
         }
-        ctx.strokeStyle = "rgba(0, 160, 255, 0.03)";
+        ctx.strokeStyle = contained ? "rgba(88, 180, 218, 0.12)" : "rgba(0, 160, 255, 0.03)";
         ctx.lineWidth = 0.4;
         ctx.stroke();
 
@@ -694,7 +706,7 @@ export default memo(function JarvisScene({ activityLevel = "idle", assistantPhas
           const pr = project(p, cx, cy, fov);
           if (s === 0) ctx.moveTo(pr.x, pr.y); else ctx.lineTo(pr.x, pr.y);
         }
-        ctx.strokeStyle = `rgba(0, 180, 255, ${ring.op})`;
+        ctx.strokeStyle = `rgba(0, 180, 255, ${ring.op * (contained ? 2.7 : 1)})`;
         ctx.lineWidth = 0.8;
         ctx.stroke();
 
@@ -755,7 +767,7 @@ export default memo(function JarvisScene({ activityLevel = "idle", assistantPhas
       ];
       const edges = [[0,1],[0,5],[0,7],[0,10],[0,11],[1,5],[1,7],[1,8],[1,9],[2,3],[2,4],[2,6],[2,10],[2,11],[3,4],[3,6],[3,8],[3,9],[4,5],[4,9],[4,11],[5,9],[5,11],[6,7],[6,8],[6,10],[7,8],[7,10],[8,9],[10,11]];
       const coreRot = time.current * (0.3 + act * 0.9);
-      const coreAlpha = 0.2 * (1 - spkAlpha * 0.7);
+      const coreAlpha = (contained ? 0.5 : 0.2) * (1 - spkAlpha * 0.7);
       ctx.strokeStyle = `rgba(100, 220, 255, ${coreAlpha})`;
       ctx.lineWidth = 0.7;
       for (const [a, b] of edges) {
@@ -981,7 +993,7 @@ export default memo(function JarvisScene({ activityLevel = "idle", assistantPhas
         }
 
         // Label for data nodes (only when close enough or hovered/focused)
-        if (node.type !== "particle" && node.label && (pr.scale > 0.5 || isHovered || isFocused)) {
+        if (node.type !== "particle" && node.label && (!minimalLabels || isHovered || isFocused) && (pr.scale > 0.5 || isHovered || isFocused)) {
           const labelAlpha = isHovered || isFocused ? 0.9 : Math.min(pr.scale * 0.8, 0.6);
           const fontSize = isHovered || isFocused ? 11 : Math.max(8, 10 * pr.scale);
 
@@ -1064,7 +1076,7 @@ export default memo(function JarvisScene({ activityLevel = "idle", assistantPhas
       }
 
       // === LEGEND (bottom left) ===
-      if (zoomRef.current > 400) {
+      if (!minimalLabels && zoomRef.current > 400) {
         const legendX = 20, legendY = h - 120;
         ctx.font = "9px 'JetBrains Mono', monospace";
         const types: DataNode["type"][] = ["task", "email", "meeting", "github", "notion", "cron"];
@@ -1165,13 +1177,24 @@ export default memo(function JarvisScene({ activityLevel = "idle", assistantPhas
       } catch (e) {
         console.error("[JarvisScene] Animation error:", e);
       }
-      animRef.current = requestAnimationFrame(animate);
+      animRef.current = reducedMotion.matches ? 0 : requestAnimationFrame(animate);
     }
 
+    const resume = () => { if (!document.hidden && !animRef.current) animRef.current = requestAnimationFrame(animate); };
+    document.addEventListener("visibilitychange", resume);
+    reducedMotion.addEventListener("change", resume);
     animRef.current = requestAnimationFrame(animate);
     return () => {
       cancelAnimationFrame(animRef.current);
       clearInterval(dataInterval);
+      clearTimeout(loadTimer);
+      clearTimeout(rotateTimer);
+      observer.disconnect();
+      document.removeEventListener("visibilitychange", resume);
+      reducedMotion.removeEventListener("change", resume);
+      document.body.style.userSelect = "";
+      document.body.style.webkitUserSelect = "";
+      document.body.style.cursor = "";
       window.removeEventListener("resize", resize);
       window.removeEventListener("mousedown", onDown);
       window.removeEventListener("mousemove", onMove);
@@ -1179,11 +1202,11 @@ export default memo(function JarvisScene({ activityLevel = "idle", assistantPhas
       window.removeEventListener("wheel", onWheel);
       window.removeEventListener("dblclick", onDblClick);
     };
-  }, [loadData, focusOnNode]);
+  }, [loadData, focusOnNode, contained, minimalLabels]);
 
   return (
-    <canvas ref={canvasRef} style={{
-      position: "fixed", top: 0, left: 0, width: "100%", height: "100%", zIndex: 1,
+    <canvas ref={canvasRef} aria-label="JARVIS 3D activity model" role="img" style={{
+      position: contained ? "absolute" : "fixed", top: 0, left: 0, width: "100%", height: "100%", zIndex: 1,
     }} />
   );
 })
