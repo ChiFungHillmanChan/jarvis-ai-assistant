@@ -289,6 +289,8 @@ E 嘅完整時區偏好／結果持久化 migration／獨立語音驗收、F 嘅
 - [x] 真正原生「準備→測試→套用」已顯示成功；同一 QA 目錄重開保留 `qwen3.5:9b`／香港繁體，成功驗證狀態按程序重新檢查。
 - [x] 原生測試發現 Gmail 斷線時導引錯誤停用本機副本分析；先重現回歸失敗，再移除即時連線門檻，保留 AI ready 同選信要求。
 - [x] 六個版本 metadata 已統一為 0.3.0，繁體更新說明已準備；正式 DB／v0.2.0 App 已建立一致備份。
-- [ ] 最終發行包 Apple 公證／Gatekeeper、正式安裝、S3、官網 manifest、Git tag 同 GitHub release：自動審批要求用戶明確批准 DMG 上傳 Apple，待回覆；唔以本機 build／已 push 代替公開發行。
+- [x] 用戶其後明確批准 DMG 上傳 Apple。公證 Accepted、DMG staple／Gatekeeper 通過，正式 App 原生啟動正常；S3、官網 v0.3.0 manifest、Git tag 同 GitHub Latest release 已完成，詳見 `NATIVE_MAIL_TEST_REPORT.md` 最新章節。
 
 本輪下載只喺暫存模型目錄，同正式 GPT／Gmail 分開；冇轉換用戶現有工作區嘅處理方式。公司 pilot、完整 Google 公開驗證、香港網絡／多硬件測試同代管免 key 服務仍未完成，唔列為 v0.3.0 已交付能力。
+
+公開發行於 2026-09-12T20:48:01Z 完成：[JARVIS v0.3.0](https://github.com/ChiFungHillmanChan/jarvis-ai-assistant/releases/tag/v0.3.0)。官網只提交 `public/latest.json`（`c472c1f`），CI/CD `34717975716` 通過，正式 manifest 與已驗證版本完全相符；官網其餘未提交改動保留。

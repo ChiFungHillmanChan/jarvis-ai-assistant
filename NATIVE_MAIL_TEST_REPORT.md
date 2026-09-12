@@ -203,3 +203,20 @@ DMG、tarball 同最終 bundle 內 App 都係 `com.jarvis.app / 0.3.0`，binary 
 封裝未發現 `.env`、資料庫、私匙檔或 QA seed marker；常見 AI／AWS key 格式掃描零命中。呢個係有限模式及檔案檢查，唔等同全面秘密資料審計。上述 DMG hash 係公證 staple 前；成功 staple 後須重新計算，唔重用舊值。
 
 Apple 公證提交被自動審批拒絕，要求用戶明確批准將產品 DMG 上傳 Apple；已發出針對性確認問題。雖然 Desktop OAuth 公開 client 設定與已發行 v0.2.0 相同、亦確認冇 AI key／私人郵件／DB／Keychain，仍唔繞過審批。公證、S3 上架、網站更新 manifest 及 GitHub release 必須以之後實際完成記錄為準；本段唔代表已公開發行。最後讀取正式 `https://jarvis-automation.com/latest.json` 仍為 v0.2.0；官網原有未提交改動保持原狀。
+
+## 2026-09-12：用戶批准後嘅正式發行
+
+用戶回覆「allowed. you can do it for me please」，明確批准之前提出嘅 Apple 公證提交，並要求繼續完成部署及 release。以下更新取代上一節當時嘅公證待批狀態。
+
+- Apple 公證 submission：`92cd90d8-c2a3-4dcb-ad9b-c060ce89b2f7`，2026-09-12T20:41:15.770Z 提交，結果 **Accepted**。
+- DMG `stapler staple`／`stapler validate` 通過。最終 bundle 同 `/Applications/JARVIS.app` 經 `spctl --assess --type execute` 均返回 **accepted / Notarized Developer ID**。
+- 公證後正式 DMG：17,543,853 bytes，SHA-256 `8d24bb683be1acd1a393d7fc736da0396be659dd0f2ccd5370a11e344ed742dd`。前表嘅 DMG hash 只係 staple 前快照；tarball 同 updater signature 冇改動。
+- 已上載三個版本化檔案到既有 `jarvis-releases` bucket；逐個用公開 HTTPS 網址 GET 下載，實際 bytes／SHA-256 與本機公證後檔案完全吻合。再用公開下載嘅 tarball 同 `.sig`、配 App 公鑰驗證成功。
+- `JARVIS_latest_aarch64.dmg` 固定下載別名已更新。冇改 bucket 權限或加入其他私人資料。
+- 官網只修改 `public/latest.json`，提交 `c472c1f5480d78d7f892bd313311265445e5c0ad`，CI/CD run `34717975716`；原本網站嘅其他未提交改動保留。
+
+官網 CI/CD `34717975716` 嘅 Verify 同 production deployment 全部成功，Vercel deployment `dpl_2dAxQFy22a4wXrsfWug8Fft2EUFN` 為 Ready。正式 `https://jarvis-automation.com/latest.json` 返回 HTTP 200／v0.3.0，同已提交 manifest 逐 byte 相同：2,361 bytes，SHA-256 `615303a034c0a5daaf0eb2633903f5700e7b01a2b50b9847485285138df17e22`。英中下載頁 HTTP 200；固定 DMG 下載亦重新 GET 核對，與公證後檔案相同。S3 manifest 副本已同步。
+
+Git tag `v0.3.0` 指向已測試及 CI 通過嘅 `14348d95fa3a55c143e9bc7e92fd259a2f26398f`（主分支 CI `34717741978` 成功）。[GitHub v0.3.0 release](https://github.com/ChiFungHillmanChan/jarvis-ai-assistant/releases/tag/v0.3.0) 已於 **2026-09-12T20:48:01Z** 正式發布並設為 Latest，唔係 draft／prerelease。DMG、updater tarball、`.sig` 同 `SHA256SUMS.txt` 四個附件全部 uploaded；GitHub 回報嘅 bytes 同 SHA-256 digest 逐項同本機發行檔吻合。
+
+正式下載：[v0.3.0 DMG](https://jarvis-releases.s3.ap-east-1.amazonaws.com/JARVIS_0.3.0_aarch64.dmg)。本輪已完成測試、源碼 commit／push、Apple 公證、S3 上架、官網部署、updater manifest 及 GitHub release。公證唔等於 Google OAuth 公開驗證、公司試點或所有硬件準確度驗收；2B／完整廣東話語氣等限制保持原有說明。
