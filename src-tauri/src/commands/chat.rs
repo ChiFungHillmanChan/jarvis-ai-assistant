@@ -259,57 +259,53 @@ async fn send_scoped(
         "cover letter",
     ];
     if obsidian_keywords.iter().any(|kw| msg_lower.contains(kw)) {
-        let obs_key = crate::integration_keys::resolve("obsidian_api_key");
-        if let Some(key) = obs_key {
-            let base_url = crate::integrations::obsidian::resolve_base_url(&db);
-            let search_term = message
-                .split_whitespace()
-                .filter(|w| w.len() > 3)
+        let search_term = message
+            .split_whitespace()
+            .filter(|w| w.len() > 3)
+            .take(3)
+            .collect::<Vec<_>>()
+            .join(" ");
+        // 3-second timeout so Obsidian search doesn't block the response
+        if let Ok(Ok(notes)) = tokio::time::timeout(
+            std::time::Duration::from_secs(3),
+            crate::integrations::obsidian::search_connected(&db, &search_term),
+        )
+        .await
+        {
+            let note_context: String = notes
+                .iter()
                 .take(3)
+                .map(|n| {
+                    format!(
+                        "- {} {}",
+                        n.path,
+                        n.content
+                            .as_deref()
+                            .unwrap_or("")
+                            .chars()
+                            .take(200)
+                            .collect::<String>()
+                    )
+                })
                 .collect::<Vec<_>>()
-                .join(" ");
-            // 3-second timeout so Obsidian search doesn't block the response
-            if let Ok(Ok(notes)) = tokio::time::timeout(
-                std::time::Duration::from_secs(3),
-                crate::integrations::obsidian::search_vault(&base_url, &key, &search_term),
-            )
-            .await
-            {
-                let note_context: String = notes
-                    .iter()
-                    .take(3)
-                    .map(|n| {
-                        format!(
-                            "- {} {}",
-                            n.path,
-                            n.content
-                                .as_deref()
-                                .unwrap_or("")
-                                .chars()
-                                .take(200)
-                                .collect::<String>()
-                        )
-                    })
-                    .collect::<Vec<_>>()
-                    .join("\n");
-                if !note_context.is_empty() {
-                    untrusted_context = true;
-                    let len = all_messages.len();
-                    all_messages.insert(
-                        if len > 0 { len - 1 } else { 0 },
-                        (
-                            "user".to_string(),
-                            format!("[OBSIDIAN NOTES]\n{}", note_context),
-                        ),
-                    );
-                    all_messages.insert(
-                        if len > 0 { len } else { 1 },
-                        (
-                            "assistant".to_string(),
-                            "I see the relevant notes from your Obsidian vault.".to_string(),
-                        ),
-                    );
-                }
+                .join("\n");
+            if !note_context.is_empty() {
+                untrusted_context = true;
+                let len = all_messages.len();
+                all_messages.insert(
+                    if len > 0 { len - 1 } else { 0 },
+                    (
+                        "user".to_string(),
+                        format!("[OBSIDIAN NOTES]\n{}", note_context),
+                    ),
+                );
+                all_messages.insert(
+                    if len > 0 { len } else { 1 },
+                    (
+                        "assistant".to_string(),
+                        "I see the relevant notes from your Obsidian vault.".to_string(),
+                    ),
+                );
             }
         }
     }

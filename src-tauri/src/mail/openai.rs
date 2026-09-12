@@ -125,7 +125,7 @@ pub(super) async fn send(
         }
     }
     if text.trim().is_empty() {
-        return Err("OpenAI 未有文字回覆，請換一個模型或者重試。".into());
+        return Err("OpenAI 沒有文字回覆，請更換模型或重試。".into());
     }
     Ok(text)
 }

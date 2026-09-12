@@ -22,7 +22,7 @@ export function setUiLocale(locale: UiLocale) {
   listeners.forEach(listener => listener());
   void setPreference('ui_locale', locale).catch(() => { if (choiceVersion !== saveVersion) return; saveError = 'Could not save the interface language. Retry before closing JARVIS.'; listeners.forEach(listener => listener()); });
 }
-type LocaleContextValue = { locale: UiLocale; saveError: string | null; retrySave: () => void; setLocale: (locale: UiLocale) => void; t: (key: MessageKey, params?: Record<string, string | number>) => string; text: (english: string, cantonese: string) => string };
+type LocaleContextValue = { locale: UiLocale; saveError: string | null; retrySave: () => void; setLocale: (locale: UiLocale) => void; t: (key: MessageKey, params?: Record<string, string | number>) => string; text: (english: string, traditionalChinese: string) => string };
 const LocaleContext = createContext<LocaleContextValue | null>(null);
 export function UiLocaleProvider({ children }: { children: ReactNode }) {
   const [locale, setLocaleState] = useState<UiLocale>(currentLocale);
@@ -40,7 +40,7 @@ export function UiLocaleProvider({ children }: { children: ReactNode }) {
     }).catch(() => {});
     return () => { active = false; };
   }, []);
-  const value = useMemo<LocaleContextValue>(() => ({ locale, saveError, retrySave: () => setUiLocale(currentLocale), setLocale: setUiLocale, t: (key, params) => translate(locale, key, params), text: (english, cantonese) => locale === 'zh-HK' ? cantonese : english }), [locale, saveError]);
+  const value = useMemo<LocaleContextValue>(() => ({ locale, saveError, retrySave: () => setUiLocale(currentLocale), setLocale: setUiLocale, t: (key, params) => translate(locale, key, params), text: (english, traditionalChinese) => locale === 'zh-HK' ? traditionalChinese : english }), [locale, saveError]);
   return <LocaleContext.Provider value={value}>{children}</LocaleContext.Provider>;
 }
 export function useUiLocale() { const value = useContext(LocaleContext); if (!value) throw new Error('UiLocaleProvider is required'); return value; }

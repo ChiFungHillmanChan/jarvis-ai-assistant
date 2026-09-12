@@ -1,5 +1,7 @@
 # 原生電郵工作區驗收紀錄
 
+> **最新文字規範（2026-09-12）：**使用者已改為要求繁體書面語。本文原有口語、功能狀態及測試結果保留作歷史紀錄；新增介面、AI 中文回覆與交接採用[現行文案手冊](/Users/hillmanchan/Desktop/jarvis-projects/jarvis-ai-assistant/docs/product/2026-09-12-cantonese-copybook.md)，不以本紀錄代表後續版本已驗收或已發行。
+
 日期：2026-09-10。測試版：JARVIS v0.1.3，`feat/local-email-workspace` 工作目錄。
 
 呢輪使用真正打包嘅 macOS `.app`、`tauri://localhost`、正式 React 頁面、Tauri IPC 同 Rust/SQLite 實作。冇替換 `invoke`，亦冇用瀏覽器假後端。先用兩個合成信箱／120 封合成郵件做隔離 QA，再按用戶授權，以一個真實 Gmail 同 OpenAI API 做正式安裝驗收；呢啲係功能測試，唔係客戶市場驗證。

@@ -284,6 +284,13 @@ async fn summarize_with_haiku(
         .collect::<Vec<_>>()
         .join("\n");
 
+    // Keep the stored response-language values compatible with existing profiles.
+    // Chinese output style is independent of the speech-recognition language.
+    let response_language = match language {
+        "yue" => "Traditional Chinese written language（繁體書面語）, not colloquial Cantonese",
+        "bilingual" => "Traditional Chinese written language（繁體書面語）with necessary English names and technical terms; use written grammar for every Chinese passage",
+        other => other,
+    };
     let prompt = format!(
         "You are summarizing today's important emails for the user. Output exactly:\n\
          (1) A 5-bullet markdown summary (one bullet per email, ~15 words each).\n\
@@ -291,7 +298,7 @@ async fn summarize_with_haiku(
          (3) Then a JSON array of up to 3 suggested actions: \
          [{{\"label\": \"...\", \"tool\": \"send_reply|schedule_meeting|create_task\", \
          \"args\": {{}}}}].\n\
-         Respond in {language}.\n\nEmails:\n{email_list}"
+         Respond in {response_language}.\n\nEmails:\n{email_list}"
     );
 
     let chat_messages = vec![("user".to_string(), prompt)];

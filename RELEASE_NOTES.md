@@ -1,5 +1,7 @@
 JARVIS v0.3.0
 
+> **最新文字規範（2026-09-12）：**使用者已改為要求繁體書面語。本文原有口語、功能狀態及測試結果保留作歷史紀錄；新增介面、AI 中文回覆與交接採用[現行文案手冊](/Users/hillmanchan/Desktop/jarvis-projects/jarvis-ai-assistant/docs/product/2026-09-12-cantonese-copybook.md)，不以本紀錄代表後續版本已驗收或已發行。
+
 今次更新簡化電郵 AI 設定，加入香港繁體介面，同埋本機 AI 準備流程。
 
 - 左上視窗按鈕依次為紅色關閉、黃色最小化、綠色放大／還原。關閉視窗保留原有背景運作方式。

@@ -1,5 +1,4 @@
 use crate::db::Database;
-use crate::integrations::github;
 use serde::Serialize;
 use std::sync::Arc;
 use tauri::State;
@@ -25,7 +24,10 @@ pub struct GitHubStats {
 }
 
 #[tauri::command]
-pub fn get_github_items(db: State<Arc<Database>>, item_type: Option<String>) -> Result<Vec<GitHubItemView>, String> {
+pub fn get_github_items(
+    db: State<Arc<Database>>,
+    item_type: Option<String>,
+) -> Result<Vec<GitHubItemView>, String> {
     let conn = db.conn.lock().map_err(|e| e.to_string())?;
     let (sql, params): (&str, Vec<Box<dyn rusqlite::types::ToSql>>) = match item_type.as_deref() {
         Some(t) => (
@@ -39,9 +41,23 @@ pub fn get_github_items(db: State<Arc<Database>>, item_type: Option<String>) -> 
     };
     let mut stmt = conn.prepare(sql).map_err(|e| e.to_string())?;
     let params_refs: Vec<&dyn rusqlite::types::ToSql> = params.iter().map(|p| p.as_ref()).collect();
-    let items = stmt.query_map(params_refs.as_slice(), |row| {
-        Ok(GitHubItemView { id: row.get(0)?, item_type: row.get(1)?, title: row.get(2)?, repo: row.get(3)?, number: row.get(4)?, state: row.get(5)?, url: row.get(6)?, author: row.get(7)?, updated_at: row.get(8)? })
-    }).map_err(|e| e.to_string())?.collect::<Result<Vec<_>, _>>().map_err(|e| e.to_string())?;
+    let items = stmt
+        .query_map(params_refs.as_slice(), |row| {
+            Ok(GitHubItemView {
+                id: row.get(0)?,
+                item_type: row.get(1)?,
+                title: row.get(2)?,
+                repo: row.get(3)?,
+                number: row.get(4)?,
+                state: row.get(5)?,
+                url: row.get(6)?,
+                author: row.get(7)?,
+                updated_at: row.get(8)?,
+            })
+        })
+        .map_err(|e| e.to_string())?
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(|e| e.to_string())?;
     Ok(items)
 }
 
@@ -58,27 +74,77 @@ fn sync_summary(count: usize, warning: Option<&str>) -> String {
 
 #[tauri::command]
 pub async fn sync_github(db: State<'_, Arc<Database>>) -> Result<String, String> {
-    let token = crate::integration_keys::resolve("github_token")
-        .ok_or_else(|| "GitHub token not configured".to_string())?;
-    let fetched = github::fetch_assigned_items_detailed(&token).await?;
+    let fetched = crate::integrations::github_auth::sync_connected(&db).await?;
     let count = fetched.items.len();
-    github::save_to_db(&db, &fetched)?;
     Ok(sync_summary(count, fetched.warning.as_deref()))
 }
 
 #[tauri::command]
-pub fn save_github_token(db: State<Arc<Database>>, token: String) -> Result<(), String> {
-    // Keychain, not user_preferences -- the row keeps only a marker.
-    crate::integration_keys::store(&db, "github_token", &token)
+pub async fn save_github_token(db: State<'_, Arc<Database>>, token: String) -> Result<(), String> {
+    crate::integrations::github_auth::save_manual(&db, &token).await
+}
+
+#[tauri::command]
+pub async fn github_begin_connect(
+    db: State<'_, Arc<Database>>,
+) -> Result<crate::integrations::github_auth::DevicePrompt, String> {
+    crate::integrations::github_auth::begin(&db).await
+}
+#[tauri::command]
+pub async fn github_complete_connect(
+    db: State<'_, Arc<Database>>,
+    flow_id: String,
+) -> Result<crate::integrations::github_auth::ConnectionStatus, String> {
+    crate::integrations::github_auth::complete(&db, &flow_id).await
+}
+#[tauri::command]
+pub fn github_cancel_connect() -> Result<(), String> {
+    crate::integrations::github_auth::cancel()
+}
+#[tauri::command]
+pub async fn github_connection_status(
+    db: State<'_, Arc<Database>>,
+) -> Result<crate::integrations::github_auth::ConnectionStatus, String> {
+    crate::integrations::github_auth::status(&db).await
+}
+#[tauri::command]
+pub async fn github_disconnect(db: State<'_, Arc<Database>>) -> Result<(), String> {
+    crate::integrations::github_auth::disconnect(&db).await
+}
+#[tauri::command]
+pub fn github_set_client_id(db: State<Arc<Database>>, client_id: String) -> Result<(), String> {
+    crate::integrations::github_auth::configure_client(&db, &client_id)
 }
 
 #[tauri::command]
 pub fn get_github_stats(db: State<Arc<Database>>) -> Result<GitHubStats, String> {
     let conn = db.conn.lock().map_err(|e| e.to_string())?;
-    let open_prs: i64 = conn.query_row("SELECT COUNT(*) FROM github_items WHERE item_type = 'pr' AND state = 'open'", [], |r| r.get(0)).unwrap_or(0);
-    let assigned_issues: i64 = conn.query_row("SELECT COUNT(*) FROM github_items WHERE item_type = 'issue' AND state = 'open'", [], |r| r.get(0)).unwrap_or(0);
-    let review_requested: i64 = conn.query_row("SELECT COUNT(*) FROM github_items WHERE item_type = 'pr_review'", [], |r| r.get(0)).unwrap_or(0);
-    Ok(GitHubStats { open_prs, assigned_issues, review_requested })
+    let open_prs: i64 = conn
+        .query_row(
+            "SELECT COUNT(*) FROM github_items WHERE item_type = 'pr' AND state = 'open'",
+            [],
+            |r| r.get(0),
+        )
+        .unwrap_or(0);
+    let assigned_issues: i64 = conn
+        .query_row(
+            "SELECT COUNT(*) FROM github_items WHERE item_type = 'issue' AND state = 'open'",
+            [],
+            |r| r.get(0),
+        )
+        .unwrap_or(0);
+    let review_requested: i64 = conn
+        .query_row(
+            "SELECT COUNT(*) FROM github_items WHERE item_type = 'pr_review'",
+            [],
+            |r| r.get(0),
+        )
+        .unwrap_or(0);
+    Ok(GitHubStats {
+        open_prs,
+        assigned_issues,
+        review_requested,
+    })
 }
 
 #[cfg(test)]
