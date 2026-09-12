@@ -149,7 +149,7 @@ macOS 報告 `jarvis-2026-09-10-192007.ips` 同 `jarvis-2026-09-10-192010.ips` �
 | Rust suite | 371 通過、0 失敗、8 ignored；HTTP fixtures 喺允許 loopback 嘅環境執行 |
 | Frontend suite | 19 通過；斷線分析門檻回歸先重現失敗，再修正通過 |
 | TypeScript／Vite | 通過 |
-| GitHub CI | 功能提交 run `34716529668` 成功，包含 build、frontend、Rust 及 advisory clippy |
+| GitHub CI | 功能提交 run `34716529668` 同最終源碼 `1de57cc` 嘅 run `34717493041` 均成功，包含 build、frontend、Rust 及 advisory clippy |
 | 真實 Gemini | 明確執行模型供應清單檢查成功；唔等同今輪測試所有聊天／語音流程 |
 | 真實 GPT | `gpt-5.6-luna` 經 production analysis entry point 分析合成郵件，1 項通過、4.17 秒；日期、HK$1,000、毋須付款／開會及來源正確 |
 | 真實 Ollama 9B | `qwen3.5:9b` 嘅 production analysis 同設定 synthetic probe 兩項通過，共 11.59 秒；核對兩封合成郵件，來源 #101／#102，未納入 0 封 |
@@ -182,6 +182,24 @@ macOS 報告 `jarvis-2026-09-10-192007.ips` 同 `jarvis-2026-09-10-192010.ips` �
 
 生成摘要仍可能偏書面中文、夾英文或模型自加格式，唔代表完整廣東話語氣品質已達標。呢次合成案例驗收亦唔代替香港公司 20 組評估。
 
-版本 metadata 已統一為 0.3.0。正式發行前保留 `/Applications/JARVIS.app` v0.2.0，並用 SQLite backup API 建立一致副本；正式 DB 當時 1 帳戶、50 郵件、1 群組、1 記憶，`processing_mode=openai`，完整性正常。備份目錄：`~/Library/Application Support/jarvis/backups/before-v0.3.0-20260912T200510Z`。
+版本 metadata 已統一為 0.3.0。開始驗收時，已為 `/Applications/JARVIS.app` v0.2.0 同正式 DB 建立備份；SQLite 用 backup API 建一致副本。正式 DB 當時 1 帳戶、50 郵件、1 群組、1 記憶，`processing_mode=openai`，完整性正常。備份目錄：`~/Library/Application Support/jarvis/backups/before-v0.3.0-20260912T200510Z`。
 
-Apple 公證提交被自動審批拒絕，要求用戶明確批准將產品 DMG 上傳 Apple；已發出針對性確認問題。雖然 Desktop OAuth 公開 client 設定與已發行 v0.2.0 相同、亦確認冇 AI key／私人郵件／DB／Keychain，仍唔繞過審批。公證、正式安裝替換、S3 上架、網站更新 manifest 及 GitHub release 必須以之後實際完成記錄為準；本段唔代表已公開發行。
+稍後原生核對 `/Applications/JARVIS.app` 已顯示 v0.3.0，正常載入新設定導引；當次 binary SHA-256 與剛編譯嘅候選相同。導引沿用 `openai / gpt-5.6-luna`，冇重新儲存密鑰、改用本機模型或重做 Gmail 授權；正式 DB 再查仍為上述計數，完整性正常。呢個係本機啟動結果，唔等於 Apple 公證或公開更新已完成。
+
+最後一般 DMG 封裝喺 Finder 外觀步驟失敗；卸載本次暫存卷後，以官方 `tauri bundle --ci --target aarch64-apple-darwin` 重用相同 binary 成功產生 Developer ID 簽署 App／DMG／updater tarball／signature。CI 模式略過 Finder 背景及圖示座標排版，唔改 App 功能。隔離 Ollama server 同所屬 runner 已全部停止，11434 已釋放，暫存測試模型及報告保留供重現。
+
+### 最終發行檔獨立核對
+
+| 檔案 | Bytes | SHA-256 |
+|---|---:|---|
+| `JARVIS_0.3.0_aarch64.dmg` | 17,542,163 | `18ca236c6a62bed86d59e46381c532afd9a01ac5687577284ae428c66423f8e0` |
+| `JARVIS.app.tar.gz` | 15,580,494 | `ba3a93a95b8bc22af853ef895fe83d83e4d1ae42ffe996a6053990110aebc44f` |
+| `JARVIS.app.tar.gz.sig` | 404 | `04fbc334222c47393ea2ddb3fd7a355aa73fc450d8dae192c7b8ed6417dd3c29` |
+
+檔案喺 `src-tauri/target/aarch64-apple-darwin/release/bundle/` 下嘅 `dmg/` 同 `macos/`。已用 Tauri 設定內嘅公鑰實際驗證最新 updater 簽名，唔係只檢查 `.sig` 非空；DMG `hdiutil verify` 通過，唯讀掛載核對後已卸載。
+
+DMG、tarball 同最終 bundle 內 App 都係 `com.jarvis.app / 0.3.0`，binary SHA-256 同為 `5db984c3f697639407b378948d38228a43cb79247ce6cd35ea897d4a9d39b4a4`。三者同已安裝 App strict codesign 驗證通過；已原生驗收嘅安裝版本同最終 bundle 完整 CodeDirectory hash 均為 `075e2768795f9cbea423f09cc8dfbc04befc7491261556552028905d1366d333`，只因重新簽署時間而有 binary 檔案 hash 差異。
+
+封裝未發現 `.env`、資料庫、私匙檔或 QA seed marker；常見 AI／AWS key 格式掃描零命中。呢個係有限模式及檔案檢查，唔等同全面秘密資料審計。上述 DMG hash 係公證 staple 前；成功 staple 後須重新計算，唔重用舊值。
+
+Apple 公證提交被自動審批拒絕，要求用戶明確批准將產品 DMG 上傳 Apple；已發出針對性確認問題。雖然 Desktop OAuth 公開 client 設定與已發行 v0.2.0 相同、亦確認冇 AI key／私人郵件／DB／Keychain，仍唔繞過審批。公證、S3 上架、網站更新 manifest 及 GitHub release 必須以之後實際完成記錄為準；本段唔代表已公開發行。最後讀取正式 `https://jarvis-automation.com/latest.json` 仍為 v0.2.0；官網原有未提交改動保持原狀。
