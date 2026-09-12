@@ -68,7 +68,7 @@ export default function OnboardingWizard({ onComplete }: { onComplete: () => voi
   const readiness = sameSettings && !credentialDirty ? status?.mail.state || 'not_configured' : 'saved_unverified';
   const savedModel = workspace?.settings.processing_mode === 'local' ? workspace.settings.local_model : workspace?.settings.processing_mode === 'openai' ? workspace.settings.openai_model : workspace?.settings.bedrock_model;
   function goStep(next: number) { setError(''); setNotice(''); setStep(next); }
-  const canAnalyze = canStartFirstAnalysis(readiness, status?.gmail.connectedAccounts || 0, selected.length);
+  const canAnalyze = canStartFirstAnalysis(readiness, selected.length);
 
   async function testAndSave() {
     if (!settings) return;

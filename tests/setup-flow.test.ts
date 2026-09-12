@@ -34,9 +34,8 @@ test('failure to start unsubscribes and does not leave a pending operation', asy
   assert.equal(cleaned, true);
 });
 
-test('saved keys or connected Gmail alone never make first analysis ready', () => {
-  assert.equal(canStartFirstAnalysis('saved_unverified', 2, 3), false);
-  assert.equal(canStartFirstAnalysis('ready', 0, 3), false);
-  assert.equal(canStartFirstAnalysis('ready', 1, 0), false);
-  assert.equal(canStartFirstAnalysis('ready', 1, 3), true);
+test('first analysis requires a tested AI and selected local mail, not a live Gmail connection', () => {
+  assert.equal(canStartFirstAnalysis('saved_unverified', 3), false);
+  assert.equal(canStartFirstAnalysis('ready', 3), true, 'downloaded mail remains usable after Gmail disconnects');
+  assert.equal(canStartFirstAnalysis('ready', 0), false);
 });

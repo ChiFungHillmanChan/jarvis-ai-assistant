@@ -1,5 +1,5 @@
-export function canStartFirstAnalysis(readiness: string, connectedAccounts: number, selectedMessages: number) {
-  return readiness === 'ready' && connectedAccounts > 0 && selectedMessages > 0;
+export function canStartFirstAnalysis(readiness: string, selectedMessages: number) {
+  return readiness === 'ready' && selectedMessages > 0;
 }
 
 /** Subscribe before starting; only this operation's terminal event may complete it. */

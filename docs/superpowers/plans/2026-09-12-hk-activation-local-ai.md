@@ -277,3 +277,18 @@ python3 native-mail-qa.py
 E 嘅完整時區偏好／結果持久化 migration／獨立語音驗收、F 嘅多款硬件及真實供應商測試／Google 公開驗證／公司試點／正式簽署公證，同 G 免 key 代管付費服務仍未完成。今輪冇覆蓋 `/Applications/JARVIS.app`，冇讀寫正式郵件庫或改現有 GPT key／Gmail 授權，亦冇改官網。
 
 往後先補本機模型嘅合成 end-to-end 真機驗收及公司允許嘅雲端測試，再決定正式安裝／發行。單一 JSON 合成測試成功只係最低連接及格式門檻，唔代表 20 組香港案例或真實公司準確度已達標。
+
+## 2026-09-12 後續：v0.3.0 發行準備
+
+用戶其後明確要求測試、commit、push、deploy 同 release；上一節「未提交／未啟動本機模型」係當時快照，唔係後續狀態。功能提交 `b0854d7` 已推送 `feat/hk-activation-local-ai`，GitHub CI run `34716529668` 通過。詳細證據及之後發行狀態以根目錄 `NATIVE_MAIL_TEST_REPORT.md` 最新章節為準。
+
+- [x] Rust 371 通過、frontend 19 通過、TypeScript／Vite build 通過。
+- [x] 合成真實 GPT 測試、Gemini 模型供應檢查通過。
+- [x] 隔離 Ollama 9B 經 production analysis 同 setup probe 兩項通過；已修正 Qwen thinking 輸出額度、單一 JSON fence 容錯及 probe citation 指示。
+- [x] 2B 嘅引用失敗限制已如實加入 UI 及驗證報告，冇放寬正常引用檢查。
+- [x] 真正原生「準備→測試→套用」已顯示成功；同一 QA 目錄重開保留 `qwen3.5:9b`／香港繁體，成功驗證狀態按程序重新檢查。
+- [x] 原生測試發現 Gmail 斷線時導引錯誤停用本機副本分析；先重現回歸失敗，再移除即時連線門檻，保留 AI ready 同選信要求。
+- [x] 六個版本 metadata 已統一為 0.3.0，繁體更新說明已準備；正式 DB／v0.2.0 App 已建立一致備份。
+- [ ] 最終發行包 Apple 公證／Gatekeeper、正式安裝、S3、官網 manifest、Git tag 同 GitHub release：自動審批要求用戶明確批准 DMG 上傳 Apple，待回覆；唔以本機 build／已 push 代替公開發行。
+
+本輪下載只喺暫存模型目錄，同正式 GPT／Gmail 分開；冇轉換用戶現有工作區嘅處理方式。公司 pilot、完整 Google 公開驗證、香港網絡／多硬件測試同代管免 key 服務仍未完成，唔列為 v0.3.0 已交付能力。
