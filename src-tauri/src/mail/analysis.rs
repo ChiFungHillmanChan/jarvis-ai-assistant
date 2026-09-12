@@ -31,6 +31,8 @@ struct OllamaRequest<'a> {
     model: &'a str,
     messages: Vec<OllamaMessage<'a>>,
     stream: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    think: Option<bool>,
     options: OllamaOptions,
 }
 
@@ -389,7 +391,7 @@ async fn send_to_ollama(model: &str, prompt: &str, port: u16) -> Result<String, 
     if populated(&show.remote_model) || populated(&show.remote_host) {
         return Err("所選模型會轉送至 Ollama 雲端，為保障私隱已停止分析。".into());
     }
-    let num_ctx = context_window(&show.model_info)?;
+    let num_ctx = cap_approved_local_context(&canonical_model, context_window(&show.model_info)?);
     ensure_prompt_fits(prompt, num_ctx)?;
 
     let response = client
@@ -426,6 +428,10 @@ fn native_chat_request<'a>(model: &'a str, prompt: &'a str, num_ctx: usize) -> O
             content: prompt,
         }],
         stream: false,
+        // These small Qwen models otherwise spend the bounded output budget
+        // in message.thinking and can return no answer, including for setup.
+        think: matches!(model, "qwen3.5:2b" | "qwen3.5:4b" | "qwen3.5:9b")
+            .then_some(false),
         options: OllamaOptions {
             num_ctx,
             num_predict: 1_024,
@@ -447,6 +453,15 @@ fn context_window(model_info: &serde_json::Value) -> Result<usize, String> {
         .filter(|value| *value > LOCAL_OUTPUT_RESERVE)
         .ok_or_else(|| "本機模型可處理範圍太小或資料不完整，未有傳送郵件內容。".to_string())?;
     Ok(reported.min(32_768))
+}
+
+fn cap_approved_local_context(model: &str, reported: usize) -> usize {
+    let limit = match model {
+        "qwen3.5:2b" | "qwen3.5:4b" => 4_096,
+        "qwen3.5:9b" => 8_192,
+        _ => return reported,
+    };
+    reported.min(limit)
 }
 
 fn ensure_prompt_fits(prompt: &str, num_ctx: usize) -> Result<(), String> {
@@ -531,6 +546,29 @@ fn decorate_output(text: &str, notices: &[String]) -> String {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn approved_qwen35_tags_have_conservative_context_limits() {
+        assert_eq!(
+            super::cap_approved_local_context("qwen3.5:2b", 32_768),
+            4_096
+        );
+        assert_eq!(
+            super::cap_approved_local_context("qwen3.5:4b", 8_192),
+            4_096
+        );
+        assert_eq!(
+            super::cap_approved_local_context("qwen3.5:9b", 32_768),
+            8_192
+        );
+        assert_eq!(
+            super::cap_approved_local_context("qwen3.5:9b", 4_096),
+            4_096
+        );
+        assert_eq!(
+            super::cap_approved_local_context("other:latest", 32_768),
+            32_768
+        );
+    }
     use super::*;
     use crate::mail::models::{MailContext, MailGroup, MailMemory, MailMessage, MailSettings};
     use chrono::{TimeZone, Utc};
@@ -1817,6 +1855,23 @@ mod tests {
         assert!(context_window(&serde_json::json!({})).is_err());
         assert!(ensure_prompt_fits(&"郵".repeat(7_000), 8_192).is_err());
         assert!(ensure_prompt_fits("短摘要", 8_192).is_ok());
+    }
+
+    #[test]
+    fn approved_qwen35_requests_reserve_output_for_the_answer() {
+        // Live qwen3.5:2b exhausted all 1,024 tokens in message.thinking,
+        // returning done_reason=length with empty content for the setup probe.
+        for model in ["qwen3.5:2b", "qwen3.5:4b", "qwen3.5:9b"] {
+            let wire = serde_json::to_value(native_chat_request(model, "合成測試", 4_096))
+                .expect("serialize native payload");
+            assert_eq!(wire.get("think"), Some(&serde_json::json!(false)), "{model}");
+            assert_eq!(wire["options"]["num_predict"], 1_024);
+        }
+        for model in ["qwen3:latest", "gpt-oss:20b", "custom:latest"] {
+            let wire = serde_json::to_value(native_chat_request(model, "合成測試", 4_096))
+                .expect("serialize native payload");
+            assert!(wire.get("think").is_none(), "preserve other model protocols: {model}");
+        }
     }
 
     #[test]

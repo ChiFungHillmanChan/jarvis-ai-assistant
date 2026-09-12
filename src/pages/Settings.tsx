@@ -39,6 +39,7 @@ import { invoke } from "@tauri-apps/api/core";
 import type { VoiceSettings, WakeWordStatus, VoiceState, LocalEndpoint, LocalModel, ProviderChainEntry, EndpointHealth } from "../lib/types";
 import { GOOGLE_ALREADY_CONNECTED } from "../lib/types";
 import { useVoiceState } from "../hooks/useVoiceState";
+import { useUiLocale } from "../i18n";
 import LocalAiSetup from "../components/LocalAiSetup";
 import { useWorkspace, useWorkspaceValue } from "../workspace/WorkspaceContext";
 import "./settings-workspace.css";
@@ -67,6 +68,7 @@ function clearApiKey(provider: string): Promise<void> {
 
 export default function Settings() {
   const { appearance, setAppearance, open } = useWorkspace();
+  const { locale, setLocale, saveError: localeSaveError, retrySave: retryLocaleSave, t, text } = useUiLocale();
   const [aiProvider, setAiProvider] = useState("gemini_primary");
   const [autoBriefing, setAutoBriefing] = useState(false);
   const [apiKeyDrafts, setApiKeyDrafts] = useState<Record<string, string>>({});
@@ -127,7 +129,7 @@ export default function Settings() {
 
   async function handleClearApiKey(provider: string, label: string) {
     setApiKeyError(null);
-    if (!window.confirm(`Remove the saved ${label} key from your Keychain? This cannot be undone.`)) {
+    if (!window.confirm(`${text("Remove the saved", "要移除已儲存嘅")} ${label} ${text("key from your Keychain? This cannot be undone.", "密鑰？呢個操作無法復原。")}`)) {
       return;
     }
     try {
@@ -371,7 +373,7 @@ export default function Settings() {
     // Switching revokes the current grant and wipes the cached mail before the
     // new flow starts, so it gets the same confirm-then-act treatment as CLEAR.
     if (force && !window.confirm(
-      "Switch Assistant Google account? This revokes this Google access and deletes the Assistant mail cache, Calendar events and briefings on this Mac. Mail workspace copies are kept."
+      text("Switch Assistant Google account? This revokes this Google access and deletes the Assistant mail cache, Calendar events and briefings on this Mac. Mail workspace copies are kept.", "要切換助手 Google 帳戶？呢個操作會撤銷目前嘅 Google 連接，並刪除呢部 Mac 上嘅助手郵件快取、日曆活動同簡報；郵件工作區副本會保留。")
     )) {
       return;
     }
@@ -382,7 +384,7 @@ export default function Settings() {
       const result = await googleConnect(force);
       setGoogleNotice(
         result === GOOGLE_ALREADY_CONNECTED
-          ? "That account is already linked. Use Switch account to change it."
+          ? text("That account is already linked. Use Switch account to change it.", "呢個帳戶已連接。請用「切換帳戶」更換。")
           : result
       );
     } catch (e) {
@@ -395,7 +397,7 @@ export default function Settings() {
 
   async function handleGoogleDisconnect() {
     if (!window.confirm(
-      "Disconnect Assistant Google? This revokes this Google access and deletes the Assistant mail cache, Calendar events and briefings on this Mac. Mail workspace copies are kept. You can reconnect later."
+      text("Disconnect Assistant Google? This revokes this Google access and deletes the Assistant mail cache, Calendar events and briefings on this Mac. Mail workspace copies are kept. You can reconnect later.", "要斷開助手 Google 帳戶？呢個操作會撤銷 Google 連接，並刪除呢部 Mac 上嘅助手郵件快取、日曆活動同簡報；郵件工作區副本會保留。你之後可以再連接。")
     )) {
       return;
     }
@@ -498,43 +500,43 @@ export default function Settings() {
   function getVoiceAvailabilityLine(): string {
     const cloud = Boolean(apiKeyStatus["gemini"]);
     const local = Boolean(wakeStatus?.model_downloaded);
-    if (cloud && local) return "Speech-to-text ready -- cloud Gemini, with the local Whisper model as fallback.";
-    if (cloud) return "Speech-to-text ready -- cloud Gemini.";
-    if (local) return "Speech-to-text ready -- local Whisper model.";
-    return "Speech-to-text needs one of two things: a Gemini API key saved under API Keys, or the local Whisper model downloaded under Wake Word.";
+    if (cloud && local) return text("Speech-to-text ready -- cloud Gemini, with the local Whisper model as fallback.", "語音辨識可用：雲端 Gemini，並以本機 Whisper 作後備。");
+    if (cloud) return text("Speech-to-text ready -- cloud Gemini.", "語音辨識可用：雲端 Gemini。");
+    if (local) return text("Speech-to-text ready -- local Whisper model.", "語音辨識可用：本機 Whisper 模型。");
+    return text("Speech-to-text needs one of two things: a Gemini API key saved under API Keys, or the local Whisper model downloaded under Wake Word.", "語音辨識需要喺「API 密鑰」儲存 Gemini 密鑰，或者喺「喚醒詞」下載本機 Whisper 模型。");
   }
 
   function getWakeStatusLine(state: VoiceState): string {
     if (typeof state === "object" && "ModelDownloading" in state) {
-      return `Downloading local model: ${state.ModelDownloading}%`;
+      return `${text("Downloading local model", "下載本機模型緊")}：${state.ModelDownloading}%`;
     }
     if (typeof state === "object" && "Error" in state) {
-      return `Error: ${state.Error}`;
+      return `${text("Error", "錯誤")}：${state.Error}`;
     }
-    if (state === "WakeWordListening") return "Wake word listening is active";
-    if (state === "WakeWordDetected") return "Wake word detected";
-    if (state === "WakeWordProcessing") return "Processing wake-word request";
-    if (state === "WakeWordSpeaking") return "Speaking wake-word response";
-    if (wakeStatus?.model_downloaded) return "Local speech model ready";
-    return "Model required before wake-word listening can start";
+    if (state === "WakeWordListening") return text("Wake word listening is active", "喚醒詞聆聽緊");
+    if (state === "WakeWordDetected") return text("Wake word detected", "偵測到喚醒詞");
+    if (state === "WakeWordProcessing") return text("Processing wake-word request", "處理喚醒詞指示緊");
+    if (state === "WakeWordSpeaking") return text("Speaking wake-word response", "朗讀回覆緊");
+    if (wakeStatus?.model_downloaded) return text("Local speech model ready", "本機語音模型已準備好");
+    return text("Model required before wake-word listening can start", "啟動喚醒詞聆聽前需要先下載模型");
   }
 
   if (!loaded) {
     return (
       <div style={{ padding: 24 }}>
         {loadError ? <>
-          <p role="alert" className="settings-help">Could not load settings. Open the desktop app and try again.</p>
-          <button style={styles.actionBtn} onClick={() => { void refreshSettings(); }}>Retry</button>
-        </> : <p role="status" className="settings-help">Loading settings…</p>}
+          <p role="alert" className="settings-help">{text('Could not load settings. Open the desktop app and try again.', '未能載入設定。請開啟桌面 App 再試。')}</p>
+          <button style={styles.actionBtn} onClick={() => { void refreshSettings(); }}>{text('Retry', '重試')}</button>
+        </> : <p role="status" className="settings-help">{text('Loading settings…', '載入設定緊…')}</p>}
       </div>
     );
   }
 
   const options = [
-    { value: "gemini_primary", label: "Gemini Flash (routine) + Gemini Pro (fallback)" },
-    { value: "gemini_flash", label: "Gemini Flash (primary) + Pro (fallback)" },
-    { value: "gemini_pro_only", label: "Gemini Pro only" },
-    { value: "gemini_flash_only", label: "Gemini Flash only" },
+    { value: "gemini_primary", label: text("Gemini Flash (routine) + Gemini Pro (fallback)", "Gemini Flash（日常）＋Gemini Pro（後備）") },
+    { value: "gemini_flash", label: text("Gemini Flash (primary) + Pro (fallback)", "Gemini Flash（主要）＋Pro（後備）") },
+    { value: "gemini_pro_only", label: text("Gemini Pro only", "只用 Gemini Pro") },
+    { value: "gemini_flash_only", label: text("Gemini Flash only", "只用 Gemini Flash") },
   ];
 
   const modelDownloading =
@@ -545,21 +547,21 @@ export default function Settings() {
   const voiceInputReady = Boolean(apiKeyStatus["gemini"] || wakeStatus?.model_downloaded);
 
   const SECTIONS = [
-    { id: "ai", label: "Models", Icon: () => <Cpu size={17} /> },
-    { id: "keys", label: "API keys", Icon: () => <Key size={17} /> },
-    { id: "google", label: "Assistant Google", Icon: () => <Globe size={17} /> },
+    { id: "ai", label: text("Models", "模型"), Icon: () => <Cpu size={17} /> },
+    { id: "keys", label: t("apiKeys"), Icon: () => <Key size={17} /> },
+    { id: "google", label: text("Assistant Google", "助手 Google"), Icon: () => <Globe size={17} /> },
     { id: "notion", label: "Notion", Icon: () => <NotionMark size={17} /> },
     { id: "github", label: "GitHub", Icon: () => <GithubMark size={17} /> },
     { id: "obsidian", label: "Obsidian", Icon: () => <Gem size={17} /> },
-    { id: "voice", label: "Voice", Icon: () => <Mic size={17} /> },
-    { id: "assistant", label: "Assistant", Icon: () => <Bot size={17} /> },
-    { id: "appearance", label: "Appearance", Icon: () => <Palette size={17} /> },
+    { id: "voice", label: text("Voice", "語音"), Icon: () => <Mic size={17} /> },
+    { id: "assistant", label: t("navAssistant"), Icon: () => <Bot size={17} /> },
+    { id: "appearance", label: text("Appearance", "外觀"), Icon: () => <Palette size={17} /> },
   ];
 
   return (
     <div className="settings-workspace">
-      <nav className="settings-nav" aria-label="Settings categories">
-        <div className="settings-nav-title">Settings</div>
+      <nav className="settings-nav" aria-label={text('Settings categories', '設定分類')}>
+        <div className="settings-nav-title">{t("navSettings")}</div>
         {SECTIONS.map((s) => {
           const active = section === s.id;
           return (
@@ -573,48 +575,48 @@ export default function Settings() {
       </nav>
       <div className="settings-content">
         <header className="settings-page-header">
-          <h1>{SECTIONS.find((item) => item.id === section)?.label ?? "Settings"}</h1>
-          <p>Manage how JARVIS works on this Mac.</p>
+          <h1>{SECTIONS.find((item) => item.id === section)?.label ?? t("navSettings")}</h1>
+          <p>{text("Manage how JARVIS works on this Mac.", "管理 JARVIS 喺呢部 Mac 點樣運作。")}</p>
         </header>
         {integrationError && ["notion", "github", "obsidian"].includes(section) && <p role="alert" style={styles.errorText}>{integrationError}</p>}
         {section === "ai" && (<>
           <div className="settings-info-row">
-            <p>These providers handle Assistant conversations. Mail has its own analysis model and uses the API keys saved here.</p>
-            <button style={styles.saveBtn} onClick={() => open("email")}>Mail analysis settings</button>
+            <p>{text('These providers handle Assistant conversations. Mail has its own analysis model and uses the API keys saved here.', '呢啲供應商處理助手對話。郵件分析有獨立模型設定，但會使用喺度儲存嘅 API 密鑰。')}</p>
+            <button style={styles.saveBtn} onClick={() => open("email")}>{text('Mail analysis settings', '郵件分析設定')}</button>
           </div>
           {llmError && <p role="alert" style={styles.errorText}>{llmError}</p>}
           <div className="settings-panel">
-            <h2 className="settings-heading">Provider priority</h2>
-            <div style={styles.hint}>JARVIS tries enabled providers in this order. Use the arrows to change priority.</div>
+            <h2 className="settings-heading">{text('Provider priority', '供應商優先次序')}</h2>
+            <div style={styles.hint}>{text('JARVIS tries enabled providers in this order. Use the arrows to change priority.', 'JARVIS 會按呢個次序嘗試已啟用供應商。可用箭咀調整。')}</div>
 
             {chain.map((entry, i) => {
               const label = entry.provider_type === "local"
-                ? `${entry.model_id || "unknown"} (local)`
+                ? `${entry.model_id || text("unknown", "未知")} (${text("local", "本機")})`
                 : entry.provider_type === "gemini"
-                ? `Gemini (${entry.model_id || "default"})`
+                ? `Gemini (${entry.model_id || text("default", "預設")})`
                 : entry.provider_type === "claude"
-                ? `Claude (${entry.model_id || "default"})`
+                ? `Claude (${entry.model_id || text("default", "預設")})`
                 : entry.provider_type === "openai"
-                ? `OpenAI (${entry.model_id || "default"})`
+                ? `OpenAI (${entry.model_id || text("default", "預設")})`
                 : entry.provider_type === "bedrock"
-                ? `Bedrock (${entry.model_id || "default"})`
+                ? `Bedrock (${entry.model_id || text("default", "預設")})`
                 : entry.provider_type;
               return (
                 <div key={i} className="settings-chain-row">
                   <span style={{ color: "var(--text-muted)", fontSize: 12, fontFamily: "var(--font-mono)", width: 16 }}>{i + 1}.</span>
                   <span style={{ color: entry.enabled ? "var(--text-primary)" : "var(--text-secondary)", fontSize: 13, minWidth: 0, overflowWrap: "anywhere" }}>{label}</span>
-                  <button aria-label={`Move ${label} up`} onClick={() => handleMoveChainEntry(i, "up")} disabled={i === 0} style={{ ...styles.saveBtn, fontSize: 12, padding: "1px 5px" }}>↑</button>
-                  <button aria-label={`Move ${label} down`} onClick={() => handleMoveChainEntry(i, "down")} disabled={i === chain.length - 1} style={{ ...styles.saveBtn, fontSize: 12, padding: "1px 5px" }}>↓</button>
+                  <button aria-label={`${text("Move", "上移")} ${label}`} onClick={() => handleMoveChainEntry(i, "up")} disabled={i === 0} style={{ ...styles.saveBtn, fontSize: 12, padding: "1px 5px" }}>↑</button>
+                  <button aria-label={`${text("Move down", "下移")} ${label}`} onClick={() => handleMoveChainEntry(i, "down")} disabled={i === chain.length - 1} style={{ ...styles.saveBtn, fontSize: 12, padding: "1px 5px" }}>↓</button>
                   <label style={{ cursor: "pointer" }}>
-                    <input type="checkbox" aria-label={`Enable ${label}`} checked={entry.enabled} onChange={() => handleToggleChainEntry(i)} style={styles.radio} />
+                    <input type="checkbox" aria-label={`${text("Enable", "啟用")} ${label}`} checked={entry.enabled} onChange={() => handleToggleChainEntry(i)} style={styles.radio} />
                   </label>
-                  <button aria-label={`Remove ${label} from priority`} onClick={() => handleRemoveFromChain(i)} style={{ ...styles.saveBtn, fontSize: 12, padding: "1px 5px", borderColor: "var(--accent-urgent)", color: "var(--accent-urgent)" }}>Remove</button>
+                  <button aria-label={`${text("Remove from priority", "從優先次序移除")} ${label}`} onClick={() => handleRemoveFromChain(i)} style={{ ...styles.saveBtn, fontSize: 12, padding: "1px 5px", borderColor: "var(--accent-urgent)", color: "var(--accent-urgent)" }}>{text('Remove', '移除')}</button>
                 </div>
               );
             })}
 
             {chain.length === 0 && (
-              <div style={{ color: "var(--text-muted)", fontSize: 13, marginBottom: 8 }}>No providers configured. Add cloud or local providers below.</div>
+              <div style={{ color: "var(--text-muted)", fontSize: 13, marginBottom: 8 }}>{text('No providers configured. Add cloud or local providers below.', '未設定供應商。請喺下方加入雲端或者本機供應商。')}</div>
             )}
 
             <div style={{ display: "flex", gap: 6, marginTop: 8, flexWrap: "wrap" }}>
@@ -627,8 +629,8 @@ export default function Settings() {
           </div>
 
           <div className="settings-panel">
-            <h2 className="settings-heading">Default provider</h2>
-            <div style={styles.hint}>Used when no provider chain is configured</div>
+            <h2 className="settings-heading">{text('Default provider', '預設供應商')}</h2>
+            <div style={styles.hint}>{text('Used when no provider chain is configured', '未設定供應商次序時使用')}</div>
             {options.map((opt) => (
               <label key={opt.value} style={styles.option}>
                 <input type="radio" name="ai_provider" value={opt.value} checked={aiProvider === opt.value} onChange={() => handleProviderChange(opt.value)} style={styles.radio} />
@@ -637,8 +639,8 @@ export default function Settings() {
             ))}
           </div>
           <details className="settings-local-details">
-            <summary>Local AI setup and endpoints</summary>
-            <p className="settings-help">Optional. Connect a local server or download a model only when you want to use local AI.</p>
+            <summary>{text('Local AI setup and endpoints', '本機 AI 設定同端點')}</summary>
+            <p className="settings-help">{text('Optional. Connect a local server or download a model only when you want to use local AI.', '呢項係可選設定。只喺你想用本機 AI 時先連接伺服器或者下載模型。')}</p>
             <div className="settings-local-setup">
               <LocalAiSetup
                 endpoints={endpoints}
@@ -648,8 +650,8 @@ export default function Settings() {
               />
             </div>
           <div className="settings-panel">
-            <h2 className="settings-heading">Local model endpoints</h2>
-            <div style={styles.hint}>Connect to Ollama, vLLM, or any compatible server</div>
+            <h2 className="settings-heading">{text('Local model endpoints', '本機模型端點')}</h2>
+            <div style={styles.hint}>{text('Connect to Ollama, vLLM, or any compatible server', '連接 Ollama、vLLM 或者相容伺服器')}</div>
 
             {endpoints.map((ep) => (
               <div key={ep.id} style={{ background: "var(--surface)", border: "1px solid var(--border-primary)", borderRadius: 6, padding: 10, marginBottom: 8 }}>
@@ -665,35 +667,35 @@ export default function Settings() {
                 <div style={{ color: "var(--text-muted)", fontSize: 12, fontFamily: "var(--font-mono)", marginTop: 4 }}>{ep.url}</div>
                 {endpointHealth[ep.id] && (
                   <div style={{ color: "var(--text-secondary)", fontSize: 12, marginTop: 4 }}>
-                    {endpointHealth[ep.id].reachable ? `${endpointHealth[ep.id].model_count} models, ${endpointHealth[ep.id].latency_ms}ms` : "Unreachable"}
+                    {endpointHealth[ep.id].reachable ? `${endpointHealth[ep.id].model_count} ${text("models", "個模型")}，${endpointHealth[ep.id].latency_ms}ms` : text("Unreachable", "無法連接")}
                   </div>
                 )}
                 {endpointModels[ep.id] && endpointModels[ep.id].length > 0 && (
                   <div style={{ marginTop: 6 }}>
-                    <div style={{ color: "var(--text-muted)", fontSize: 12 }}>Available models</div>
+                    <div style={{ color: "var(--text-muted)", fontSize: 12 }}>{text('Available models', '可用模型')}</div>
                     {endpointModels[ep.id].map((m) => (
                       <div key={m.id} style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginTop: 2 }}>
                         <span style={{ color: "var(--text-secondary)", fontSize: 12, fontFamily: "var(--font-mono)" }}>{m.id}</span>
                         <div style={{ display: "flex", gap: 4, alignItems: "center" }}>
-                          <span style={{ color: "var(--text-muted)", fontSize: 12 }}>{m.supports_tools === "native" ? "tools" : m.supports_tools === "prompt_injected" ? "prompt-tools" : "chat"}</span>
-                          <button onClick={() => handleAddToChain("local", ep.id, m.id)} style={{ ...styles.saveBtn, fontSize: 12, padding: "2px 6px" }}>Add to priority</button>
+                          <span style={{ color: "var(--text-muted)", fontSize: 12 }}>{m.supports_tools === "native" ? text("tools", "工具") : m.supports_tools === "prompt_injected" ? text("prompt-tools", "提示工具") : text("chat", "對話")}</span>
+                          <button onClick={() => handleAddToChain("local", ep.id, m.id)} style={{ ...styles.saveBtn, fontSize: 12, padding: "2px 6px" }}>{text('Add to priority', '加入優先次序')}</button>
                         </div>
                       </div>
                     ))}
                   </div>
                 )}
                 <div style={{ display: "flex", gap: 6, marginTop: 8 }}>
-                  <button onClick={() => handleTestEndpoint(ep.id)} style={{ ...styles.saveBtn, fontSize: 12 }}>Test connection</button>
-                  <button onClick={() => handleRemoveEndpoint(ep.id)} style={{ ...styles.saveBtn, fontSize: 12, borderColor: "var(--accent-urgent)", color: "var(--accent-urgent)" }}>Remove</button>
+                  <button onClick={() => handleTestEndpoint(ep.id)} style={{ ...styles.saveBtn, fontSize: 12 }}>{text('Test connection', '測試連接')}</button>
+                  <button onClick={() => handleRemoveEndpoint(ep.id)} style={{ ...styles.saveBtn, fontSize: 12, borderColor: "var(--accent-urgent)", color: "var(--accent-urgent)" }}>{text('Remove', '移除')}</button>
                 </div>
               </div>
             ))}
 
             <div style={{ display: "flex", gap: 6, marginTop: 8, flexDirection: "column" as const }}>
-              <input aria-label="Endpoint name" value={newEndpointName} onChange={(e) => setNewEndpointName(e.target.value)} placeholder="Name (optional)" style={styles.tokenInput} />
+              <input aria-label={text('Endpoint name', '端點名稱')} value={newEndpointName} onChange={(e) => setNewEndpointName(e.target.value)} placeholder={text('Name (optional)', '名稱（可選）')} style={styles.tokenInput} />
               <div style={{ display: "flex", gap: 6 }}>
-                <input aria-label="Endpoint URL" value={newEndpointUrl} onChange={(e) => setNewEndpointUrl(e.target.value)} placeholder="http://localhost:11434" style={{ ...styles.tokenInput, flex: 1 }} />
-                <button onClick={handleAddEndpoint} disabled={endpointBusy} style={styles.saveBtn}>{endpointBusy ? "..." : "Add endpoint"}</button>
+                <input aria-label={text('Endpoint URL', '端點網址')} value={newEndpointUrl} onChange={(e) => setNewEndpointUrl(e.target.value)} placeholder="http://localhost:11434" style={{ ...styles.tokenInput, flex: 1 }} />
+                <button onClick={handleAddEndpoint} disabled={endpointBusy} style={styles.saveBtn}>{endpointBusy ? "..." : text('Add endpoint', '加入端點')}</button>
               </div>
             </div>
           </div>
@@ -702,21 +704,21 @@ export default function Settings() {
 
         {section === "keys" && (
           <div className="settings-panel">
-            <h2 className="settings-heading">Provider API keys</h2>
-            <div style={styles.hint}>Keys are stored in macOS Keychain and used to authenticate requests to the selected provider.</div>
+            <h2 className="settings-heading">{text("Provider API keys", "供應商 API 密鑰")}</h2>
+            <div style={styles.hint}>{t("keyHelp")}</div>
             {API_KEY_PROVIDERS.map(({ id, label, help }) => (
               <div key={id} style={{ marginBottom: 12 }}>
                 <div style={styles.hint}>
                   {label}
-                  {apiKeyStatus[id] ? <span style={{ color: "var(--text-secondary)" }}> · Key available</span> : null}
+                  {apiKeyStatus[id] ? <span style={{ color: "var(--text-secondary)" }}> · {t("keyAvailable")}</span> : null}
                 </div>
                 <div style={{ display: "flex", gap: 8 }}>
                   <input
                     type="password"
-                    aria-label={`${label} API key`}
+                    aria-label={`${label} ${text("API key", "API 密鑰")}`}
                     autoComplete="off"
                     style={styles.tokenInput}
-                    placeholder={apiKeyStatus[id] ? "Replace saved key" : help}
+                    placeholder={apiKeyStatus[id] ? text("Replace saved key", "取代已儲存密鑰") : text(help, id === "gemini" ? "Gemini 對話同語音辨識" : id === "claude" ? "Claude 對話同後備供應商" : "OpenAI 對話同郵件分析")}
                     value={apiKeyDrafts[id] ?? ""}
                     onChange={(e) => setApiKeyDrafts((d) => ({ ...d, [id]: e.target.value }))}
                   />
@@ -724,19 +726,18 @@ export default function Settings() {
                     onClick={() => { void handleSaveApiKey(id); }}
                     disabled={!(apiKeyDrafts[id] ?? "").trim()}
                     style={styles.saveBtn}
-                  >Save</button>
+                  >{t("save")}</button>
                   {apiKeyStatus[id] && (
                     <button
                       onClick={() => { void handleClearApiKey(id, label); }}
                       style={{ ...styles.saveBtn, borderColor: "var(--accent-urgent)", color: "var(--accent-urgent)" }}
-                    >Remove key</button>
+                    >{text("Remove key", "移除密鑰")}</button>
                   )}
                 </div>
               </div>
             ))}
             <div style={{ ...styles.hint, marginTop: 4, marginBottom: 0 }}>
-              Saved keys are never displayed. Leave a field blank to keep its current key,
-              or enter a new key to replace it. Remove key deletes the saved key.
+              {text("Saved keys are never displayed. Leave a field blank to keep the current key, or enter a new one to replace it. Removing deletes the saved key.", "已儲存嘅密鑰唔會顯示。留空會保留現有密鑰；輸入新密鑰會取代佢。移除會刪除已儲存密鑰。")}
             </div>
             {apiKeyError && <div style={styles.errorText}>{apiKeyError}</div>}
           </div>
@@ -744,17 +745,17 @@ export default function Settings() {
 
         {section === "google" && (
           <div className="settings-panel">
-            <h2 className="settings-heading">Google for Assistant and Calendar</h2>
-            <div style={styles.hint}>Connect Google for Assistant mail tools, Calendar and briefings. Mail workspaces use a separate Gmail connection.</div>
+            <h2 className="settings-heading">{text('Google for Assistant and Calendar', '助手同日曆嘅 Google 連接')}</h2>
+            <div style={styles.hint}>{text('Connect Google for Assistant mail tools, Calendar and briefings. Mail workspaces use a separate Gmail connection.', '連接 Google 俾助手郵件工具、日曆同簡報使用。郵件工作區會用獨立 Gmail 連接。')}</div>
             {googleConnected === null ? (
               <div style={styles.hint}>
-                {googleError ? "Google connection status is unavailable." : "Checking Google connection…"}
-                {googleError && <button style={{ ...styles.saveBtn, marginLeft: 10 }} onClick={() => { setGoogleError(null); void refreshGoogle(); }}>Retry</button>}
+                {googleError ? text('Google connection status is unavailable.', '未能取得 Google 連接狀態。') : text('Checking Google connection…', '檢查 Google 連接緊…')}
+                {googleError && <button style={{ ...styles.saveBtn, marginLeft: 10 }} onClick={() => { setGoogleError(null); void refreshGoogle(); }}>{text('Retry', '重試')}</button>}
               </div>
             ) : googleConnected ? (
               <>
                 <div style={{ color: "var(--text-secondary)", fontSize: 12, marginBottom: 10 }}>
-                  {googleAccount ? `Connected as ${googleAccount}` : "Connected"}
+                  {googleAccount ? `${text("Connected as", "已連接帳戶：")} ${googleAccount}` : text('Connected', '已連接')}
                 </div>
                 <div style={{ display: "flex", gap: 8 }}>
                   <button
@@ -762,24 +763,23 @@ export default function Settings() {
                     disabled={connecting || disconnecting}
                     style={styles.actionBtn}
                   >
-                    {connecting ? "Opening…" : "Switch account"}
+                    {connecting ? text('Opening…', '開啟緊…') : text('Switch account', '切換帳戶')}
                   </button>
                   <button
                     onClick={() => { void handleGoogleDisconnect(); }}
                     disabled={connecting || disconnecting}
                     style={{ ...styles.actionBtn, borderColor: "var(--accent-urgent)", color: "var(--accent-urgent)" }}
                   >
-                    {disconnecting ? "Disconnecting…" : "Disconnect"}
+                    {disconnecting ? text('Disconnecting…', '斷開緊…') : text('Disconnect', '斷開')}
                   </button>
                 </div>
                 <div style={{ ...styles.hint, marginTop: 8, marginBottom: 0 }}>
-                  Disconnecting revokes this Google connection and removes its Assistant mail cache,
-                  Calendar events and briefings. Local copies in the separate Mail workspace are kept.
+                  {text("Disconnecting revokes this Google connection and removes its Assistant mail cache, Calendar events and briefings. Local copies in the separate Mail workspace are kept.", "斷開會撤銷呢個 Google 連接，並刪除助手郵件快取、日曆活動同簡報；獨立郵件工作區嘅本機副本會保留。")}
                 </div>
               </>
             ) : (
               <button onClick={() => { void handleGoogleConnect(false); }} disabled={connecting} style={styles.actionBtn}>
-                {connecting ? "Connecting…" : "Connect Google"}
+                {connecting ? text('Connecting…', '連接緊…') : text('Connect Google', '連接 Google')}
               </button>
             )}
             {googleNotice && <div style={{ ...styles.hint, marginTop: 10, marginBottom: 0 }}>{googleNotice}</div>}
@@ -790,10 +790,10 @@ export default function Settings() {
         {section === "notion" && (
           <div className="settings-panel">
             <h2 className="settings-heading">Notion</h2>
-            <div style={styles.hint}>Enter your Notion integration token</div>
+            <div style={styles.hint}>{text('Enter your Notion integration token', '輸入 Notion integration token')}</div>
             <div style={{ display: "flex", gap: 8 }}>
-              <input type="password" aria-label="Notion integration token" autoComplete="off" value={notionToken} onChange={(e) => { setNotionToken(e.target.value); setNotionSaved(false); }} placeholder="ntn_..." style={styles.tokenInput} />
-              <button disabled={!notionToken.trim()} onClick={handleSaveNotion} style={styles.saveBtn}>{notionSaved ? "Saved" : "Save"}</button>
+              <input type="password" aria-label={text('Notion integration token', 'Notion integration token')} autoComplete="off" value={notionToken} onChange={(e) => { setNotionToken(e.target.value); setNotionSaved(false); }} placeholder="ntn_..." style={styles.tokenInput} />
+              <button disabled={!notionToken.trim()} onClick={handleSaveNotion} style={styles.saveBtn}>{notionSaved ? t("saved") : t("save")}</button>
             </div>
           </div>
         )}
@@ -801,10 +801,10 @@ export default function Settings() {
         {section === "github" && (
           <div className="settings-panel">
             <h2 className="settings-heading">GitHub</h2>
-            <div style={styles.hint}>Enter your GitHub personal access token</div>
+            <div style={styles.hint}>{text('Enter your GitHub personal access token', '輸入 GitHub personal access token')}</div>
             <div style={{ display: "flex", gap: 8 }}>
-              <input type="password" aria-label="GitHub personal access token" autoComplete="off" value={githubToken} onChange={(e) => { setGithubToken(e.target.value); setGithubSaved(false); }} placeholder="ghp_..." style={styles.tokenInput} />
-              <button disabled={!githubToken.trim()} onClick={handleSaveGitHub} style={styles.saveBtn}>{githubSaved ? "Saved" : "Save"}</button>
+              <input type="password" aria-label={text('GitHub personal access token', 'GitHub personal access token')} autoComplete="off" value={githubToken} onChange={(e) => { setGithubToken(e.target.value); setGithubSaved(false); }} placeholder="ghp_..." style={styles.tokenInput} />
+              <button disabled={!githubToken.trim()} onClick={handleSaveGitHub} style={styles.saveBtn}>{githubSaved ? t("saved") : t("save")}</button>
             </div>
           </div>
         )}
@@ -812,18 +812,18 @@ export default function Settings() {
         {section === "obsidian" && (
           <div className="settings-panel">
             <h2 className="settings-heading">Obsidian</h2>
-            <div style={styles.hint}>Connect to Obsidian vault via Local REST API plugin</div>
+            <div style={styles.hint}>{text('Connect to Obsidian vault via Local REST API plugin', '透過 Local REST API 外掛連接 Obsidian 資料庫')}</div>
             <div style={{ display: "flex", gap: 8 }}>
-              <input type="password" aria-label="Obsidian API key" autoComplete="off" value={obsidianKey} onChange={(e) => { setObsidianKey(e.target.value); setObsidianSaved(false); }} placeholder="API key from Obsidian REST API plugin" style={styles.tokenInput} />
-              <button disabled={!obsidianKey.trim()} onClick={handleSaveObsidian} style={styles.saveBtn}>{obsidianSaved ? "Saved" : "Save"}</button>
+              <input type="password" aria-label={text('Obsidian API key', 'Obsidian API 密鑰')} autoComplete="off" value={obsidianKey} onChange={(e) => { setObsidianKey(e.target.value); setObsidianSaved(false); }} placeholder="API key from Obsidian REST API plugin" style={styles.tokenInput} />
+              <button disabled={!obsidianKey.trim()} onClick={handleSaveObsidian} style={styles.saveBtn}>{obsidianSaved ? t("saved") : t("save")}</button>
             </div>
             <div style={{ color: "var(--text-muted)", fontSize: 12, marginTop: 6 }}>
               Install "Local REST API" plugin in Obsidian, enable it, copy the API key
             </div>
             <div style={{ marginTop: 12 }}>
-              <div style={{ color: "var(--text-secondary)", fontSize: 12, marginBottom: 4 }}>Endpoint</div>
+              <div style={{ color: "var(--text-secondary)", fontSize: 12, marginBottom: 4 }}>{text('Endpoint', '端點')}</div>
               <input
-                aria-label="Obsidian endpoint URL"
+                aria-label={text('Obsidian endpoint URL', 'Obsidian 端點網址')}
                 value={obsidianBaseUrl}
                 onChange={(e) => setObsidianBaseUrl(e.target.value)}
                 onBlur={() => { void setPreference("obsidian_base_url", obsidianBaseUrl.trim()); }}
@@ -831,8 +831,7 @@ export default function Settings() {
                 style={styles.tokenInput}
               />
               <div style={{ color: "var(--text-muted)", fontSize: 12, marginTop: 6 }}>
-                Leave blank for the plugin default (HTTPS on 27124). Set this only if you changed
-                the port, or enabled the plugin's non-encrypted server on http://127.0.0.1:27123.
+                {text("Leave blank for the plugin default (HTTPS on port 27124). Change this only if you configured a different local endpoint.", "留空會用外掛預設 HTTPS 27124 連接埠。只有你設定咗其他本機端點時先更改。")}
               </div>
             </div>
           </div>
@@ -842,26 +841,25 @@ export default function Settings() {
           <div className="settings-panel">
             <h2 className="settings-heading">AWS Bedrock</h2>
             <div style={styles.hint}>
-              Used for Claude (Haiku 4.5 / Sonnet 4.6) and Amazon Nova models via the
-              apac. inference profile (Singapore region).
+              {text("Use a model and region available to your AWS account. Mail analysis has its own model setting. Saving credentials does not test access.", "請用你 AWS 帳戶可用嘅模型同地區。電郵分析有獨立模型設定；儲存憑證唔代表已測通。")}
               {awsStatus.configured && (
-                <> Currently configured for <code style={{ fontFamily: "var(--font-mono)", color: "var(--text-primary)" }}>{awsStatus.region}</code>.</>
+                <> {text("Saved region", "已儲存地區")} <code style={{ fontFamily: "var(--font-mono)", color: "var(--text-primary)" }}>{awsStatus.region}</code>.</>
               )}
             </div>
             <div style={{ marginBottom: 8 }}>
-              <div style={{ color: "var(--text-secondary)", fontSize: 12, marginBottom: 4 }}>Access Key ID</div>
-              <input aria-label="AWS access key ID" value={awsAccessKey} onChange={(e) => setAwsAccessKey(e.target.value)} placeholder="AKIA..." style={styles.tokenInput} />
+              <div style={{ color: "var(--text-secondary)", fontSize: 12, marginBottom: 4 }}>{text('Access Key ID', '存取密鑰 ID')}</div>
+              <input aria-label={text('AWS access key ID', 'AWS 存取密鑰 ID')} value={awsAccessKey} onChange={(e) => setAwsAccessKey(e.target.value)} placeholder="AKIA..." style={styles.tokenInput} />
             </div>
             <div style={{ marginBottom: 8 }}>
-              <div style={{ color: "var(--text-secondary)", fontSize: 12, marginBottom: 4 }}>Secret Access Key</div>
-              <input type="password" aria-label="AWS secret access key" autoComplete="off" value={awsSecret} onChange={(e) => setAwsSecret(e.target.value)} placeholder="Secret key" style={styles.tokenInput} />
+              <div style={{ color: "var(--text-secondary)", fontSize: 12, marginBottom: 4 }}>{text('Secret Access Key', '秘密存取密鑰')}</div>
+              <input type="password" aria-label={text('AWS secret access key', 'AWS 秘密存取密鑰')} autoComplete="off" value={awsSecret} onChange={(e) => setAwsSecret(e.target.value)} placeholder="Secret key" style={styles.tokenInput} />
             </div>
             <div style={{ marginBottom: 12 }}>
-              <div style={{ color: "var(--text-secondary)", fontSize: 12, marginBottom: 4 }}>Region</div>
-              <select aria-label="AWS region" value={awsRegion} onChange={(e) => setAwsRegion(e.target.value)} style={styles.select}>
-                <option value="ap-southeast-1">Singapore (ap-southeast-1) -- recommended</option>
-                <option value="ap-northeast-1">Tokyo (ap-northeast-1) -- fallback</option>
-                <option value="us-east-1">US East (us-east-1) -- high latency from HK</option>
+              <div style={{ color: "var(--text-secondary)", fontSize: 12, marginBottom: 4 }}>{text('Region', '地區')}</div>
+              <select aria-label={text("AWS region", "AWS 地區")} value={awsRegion} onChange={(e) => setAwsRegion(e.target.value)} style={styles.select}>
+                <option value="ap-southeast-1">{text("Singapore (ap-southeast-1)", "新加坡（ap-southeast-1）")}</option>
+                <option value="ap-northeast-1">{text("Tokyo (ap-northeast-1)", "東京（ap-northeast-1）")}</option>
+                <option value="us-east-1">{text("US East (us-east-1)", "美國東部（us-east-1）")}</option>
               </select>
             </div>
             <div style={{ display: "flex", gap: 8 }}>
@@ -874,12 +872,12 @@ export default function Settings() {
                 } catch (e) {
                   setAwsError(String(e));
                 }
-              }} style={styles.saveBtn}>Save</button>
+              }} style={styles.saveBtn}>{t("save")}</button>
               {awsStatus.configured && (
                 <button onClick={async () => {
                   await clearAwsCredentials();
                   setAwsStatus({ configured: false, region: null });
-                }} style={{ ...styles.saveBtn, borderColor: "var(--accent-urgent)", color: "var(--accent-urgent)" }}>Remove key</button>
+                }} style={{ ...styles.saveBtn, borderColor: "var(--accent-urgent)", color: "var(--accent-urgent)" }}>{text("Remove key", "移除密鑰")}</button>
               )}
             </div>
             {awsError && <div style={styles.errorText}>{awsError}</div>}
@@ -888,32 +886,32 @@ export default function Settings() {
 
         {section === "voice" && (<>
           <div className="settings-panel">
-            <h2 className="settings-heading">Language</h2>
+            <h2 className="settings-heading">{text("Assistant language", "助手語言")}</h2>
             <div style={styles.hint}>
-              Controls the assistant's response language and speech-to-text language.
+              {text("Controls the assistant's response language and speech-to-text language.", "以下分別設定助手回覆同語音辨識語言。")}
             </div>
 
             <div style={{ marginTop: 12 }}>
-              <div style={{ color: "var(--text-secondary)", fontSize: 12, marginBottom: 4 }}>Response language</div>
-              <select aria-label="Response language" value={language} style={styles.select} onChange={async (e) => {
+              <div style={{ color: "var(--text-secondary)", fontSize: 12, marginBottom: 4 }}>{text("Response language", "回覆語言")}</div>
+              <select aria-label={text("Response language", "回覆語言")} value={language} style={styles.select} onChange={async (e) => {
                 const v = e.target.value;
                 setLanguage(v);
                 await setPreference("language", v);
               }}>
                 <option value="en">English</option>
-                <option value="yue">廣東話 (Cantonese)</option>
-                <option value="bilingual">Bilingual (code-mix)</option>
+                <option value="yue">{text("Cantonese", "廣東話")}</option>
+                <option value="bilingual">{text("Bilingual (code-mix)", "雙語混合")}</option>
               </select>
             </div>
 
             <div style={{ marginTop: 12 }}>
-              <div style={{ color: "var(--text-secondary)", fontSize: 12, marginBottom: 4 }}>Speech-to-text language</div>
-              <select aria-label="Speech-to-text language" value={sttLanguage} style={styles.select} onChange={async (e) => {
+              <div style={{ color: "var(--text-secondary)", fontSize: 12, marginBottom: 4 }}>{text("Speech-to-text language", "語音辨識語言")}</div>
+              <select aria-label={text("Speech-to-text language", "語音辨識語言")} value={sttLanguage} style={styles.select} onChange={async (e) => {
                 const v = e.target.value;
                 setSttLanguage(v);
                 await setPreference("stt_language", v);
               }}>
-                <option value="auto">Auto-detect</option>
+                <option value="auto">{text("Auto-detect", "自動偵測")}</option>
                 <option value="en">English</option>
                 <option value="yue">廣東話</option>
               </select>
@@ -921,25 +919,25 @@ export default function Settings() {
           </div>
 
           <div className="settings-panel">
-            <h2 className="settings-heading">Speech</h2>
-            <div style={styles.hint}>Cmd+Shift+J to start/stop voice input</div>
+            <h2 className="settings-heading">{text('Speech', '語音')}</h2>
+            <div style={styles.hint}>{text('Cmd+Shift+J to start/stop voice input', '按 Cmd+Shift+J 開始或結束語音輸入')}</div>
             <div style={voiceInputReady ? styles.hint : styles.statusText}>{getVoiceAvailabilityLine()}</div>
             <label style={styles.option}>
               <input type="checkbox" checked={voiceSettings?.tts_enabled ?? true} onChange={(e) => { void setVoiceSetting("tts_enabled", String(e.target.checked)); setVoiceSettingsState((prev) => prev ? { ...prev, tts_enabled: e.target.checked } : prev); }} style={styles.radio} />
-              <span style={styles.optionLabel}>Enable text-to-speech</span>
+              <span style={styles.optionLabel}>{text('Enable text-to-speech', '啟用文字朗讀')}</span>
             </label>
             {ttsVoices.length > 0 && (
               <div style={{ marginTop: 8 }}>
-                <div style={{ color: "var(--text-secondary)", fontSize: 12, marginBottom: 4 }}>TTS Voice</div>
-                <select aria-label="Speech voice" value={voiceSettings?.tts_voice ?? "Samantha"} onChange={(e) => { void setVoiceSetting("tts_voice", e.target.value); setVoiceSettingsState((prev) => prev ? { ...prev, tts_voice: e.target.value } : prev); }} style={styles.select}>
+                <div style={{ color: "var(--text-secondary)", fontSize: 12, marginBottom: 4 }}>{text('TTS Voice', '朗讀聲線')}</div>
+                <select aria-label={text('Speech voice', '朗讀聲線')} value={voiceSettings?.tts_voice ?? "Samantha"} onChange={(e) => { void setVoiceSetting("tts_voice", e.target.value); setVoiceSettingsState((prev) => prev ? { ...prev, tts_voice: e.target.value } : prev); }} style={styles.select}>
                   {ttsVoices.map((voice) => <option key={voice} value={voice}>{voice}</option>)}
                 </select>
               </div>
             )}
             {ttsVoices.length > 0 && (
               <div style={{ marginTop: 8 }}>
-                <div style={{ color: "var(--text-secondary)", fontSize: 12, marginBottom: 4 }}>Cantonese voice</div>
-                <select aria-label="Cantonese voice" value={ttsVoiceYue} onChange={(e) => { void setVoiceSetting("tts_voice_yue", e.target.value); setTtsVoiceYue(e.target.value); }} style={styles.select}>
+                <div style={{ color: "var(--text-secondary)", fontSize: 12, marginBottom: 4 }}>{text('Cantonese voice', '廣東話聲線')}</div>
+                <select aria-label={text('Cantonese voice', '廣東話聲線')} value={ttsVoiceYue} onChange={(e) => { void setVoiceSetting("tts_voice_yue", e.target.value); setTtsVoiceYue(e.target.value); }} style={styles.select}>
                   {ttsVoices.map((voice) => <option key={voice} value={voice}>{voice}</option>)}
                 </select>
               </div>
@@ -947,16 +945,16 @@ export default function Settings() {
           </div>
 
           <div className="settings-panel">
-            <h2 className="settings-heading">Wake word</h2>
-            <div style={styles.hint}>Experimental. Listen locally for "Hey Jarvis" to start voice input.</div>
+            <h2 className="settings-heading">{text('Wake word', '喚醒詞')}</h2>
+            <div style={styles.hint}>{text('Experimental. Listen locally for "Hey Jarvis" to start voice input.', '實驗功能：喺本機偵測「Hey Jarvis」以開始語音輸入。')}</div>
             <label style={styles.option}>
               <input type="checkbox" checked={wakeStatus?.enabled ?? false} disabled={!wakeCanEnable || wakeBusy || modelDownloading !== null} onChange={(e) => { void handleWakeToggle(e.target.checked); }} style={styles.radio} />
-              <span style={styles.optionLabel}>Enable wake word</span>
+              <span style={styles.optionLabel}>{text('Enable wake word', '啟用喚醒詞')}</span>
             </label>
             <div style={styles.statusText}>{getWakeStatusLine(voiceState)}</div>
             <div style={{ display: "flex", gap: 8 }}>
               <button onClick={() => { void handleDownloadModel(false); }} disabled={wakeBusy || modelDownloading !== null || wakeStatus?.model_downloaded} style={styles.actionBtn}>
-                {modelDownloading !== null ? "Downloading…" : wakeStatus?.model_downloaded ? "Model ready" : "Download model"}
+                {modelDownloading !== null ? text('Downloading…', '下載緊…') : wakeStatus?.model_downloaded ? text('Model ready', '模型已準備好') : text('Download model', '下載模型')}
               </button>
               {wakeStatus?.model_downloaded && (
                 <button onClick={() => { void handleDownloadModel(true); }} disabled={wakeBusy || modelDownloading !== null} style={styles.actionBtn}>
@@ -971,12 +969,11 @@ export default function Settings() {
             )}
             {wakeStatus?.model_downloaded && modelDownloading === null && (
               <div style={{ ...styles.hint, marginTop: 8 }}>
-                Model file: ~/Library/Application Support/jarvis/models/ggml-base.bin. If transcription keeps
-                failing to load the model, that file is damaged: Download again replaces it in place.
+                {text("Model file: ~/Library/Application Support/jarvis/models/ggml-base.bin. If transcription keeps failing to load the model, that file is damaged: Download again replaces it in place.", "模型檔案：~/Library/Application Support/jarvis/models/ggml-base.bin。如果語音辨識持續無法載入模型，檔案可能已損壞；「重新下載」會取代原檔。")}
               </div>
             )}
             <div style={styles.privacyText}>
-              Wake-word audio is processed locally for detection. After activation, full commands use cloud speech-to-text first when a Gemini API key is saved under API Keys, then fall back to local Whisper.
+              {text("Wake-word audio is processed locally for detection. After activation, full commands use cloud speech-to-text first when a Gemini API key is saved under API Keys, then fall back to local Whisper.", "喚醒詞偵測會喺本機處理音訊。啟動後，如果已儲存 Gemini API 密鑰，完整指示會先用雲端語音辨識，再以本機 Whisper 作後備。")}
             </div>
             {wakeError && <div style={styles.errorText}>{wakeError}</div>}
           </div>
@@ -984,23 +981,34 @@ export default function Settings() {
 
         {section === "assistant" && (
           <div className="settings-panel">
-            <h2 className="settings-heading">Briefing</h2>
+            <h2 className="settings-heading">{text('Briefing', '簡報')}</h2>
             <label style={styles.option}>
               <input type="checkbox" checked={autoBriefing} onChange={(e) => { setAutoBriefing(e.target.checked); void updateSetting("auto_briefing", String(e.target.checked)); }} style={styles.radio} />
-              <span style={styles.optionLabel}>Speak morning briefing on startup (once per day)</span>
+              <span style={styles.optionLabel}>{text('Speak morning briefing on startup (once per day)', '啟動時朗讀晨早簡報（每日一次）')}</span>
             </label>
           </div>
         )}
 
         {section === "appearance" && (<>
           <div className="settings-panel">
-            <h2 className="settings-heading">Colour theme</h2>
-            <p style={styles.hint}>Choose a light or dark workspace, or follow your Mac.</p>
-            <div className="settings-appearance-options" role="group" aria-label="Colour theme">
+            <h2 className="settings-heading">{t("uiLanguage")}</h2>
+            <label style={{ display: "block", marginTop: 12 }}>
+              <span style={{ display: "block", color: "var(--text-secondary)", fontSize: 12, marginBottom: 4 }}>{t("uiLanguage")}</span>
+              <select aria-label={t("uiLanguage")} value={locale} style={styles.select} onChange={(e) => setLocale(e.target.value as "en" | "zh-HK")}>
+                <option value="en">English</option><option value="zh-HK">繁體中文（香港）</option>
+              </select>
+            </label>
+            <div style={styles.hint}>{t("uiLanguageHelp")}</div>
+            {localeSaveError && <p role="alert" style={styles.errorText}>{text(localeSaveError, "未能儲存介面語言。關閉 JARVIS 前請重試。")} <button onClick={retryLocaleSave}>{t("retry")}</button></p>}
+          </div>
+          <div className="settings-panel">
+            <h2 className="settings-heading">{text('Colour theme', '色彩主題')}</h2>
+            <p style={styles.hint}>{text('Choose a light or dark workspace, or follow your Mac.', '選擇淺色、深色，或者跟隨 Mac 外觀。')}</p>
+            <div className="settings-appearance-options" role="group" aria-label={text('Colour theme', '色彩主題')}>
               {([
-                { value: "light", label: "Light", help: "A bright workspace" },
-                { value: "dark", label: "Dark", help: "A darker workspace" },
-                { value: "system", label: "System", help: "Follow macOS appearance" },
+                { value: "light", label: text('Light', '淺色'), help: text('A bright workspace', '淺色工作區') },
+                { value: "dark", label: text('Dark', '深色'), help: text('A darker workspace', '深色工作區') },
+                { value: "system", label: text('System', '系統'), help: text('Follow macOS appearance', '跟隨 macOS 外觀') },
               ] as const).map((mode) => (
                 <button key={mode.value} className={appearance === mode.value ? "is-selected" : ""}
                   aria-pressed={appearance === mode.value} onClick={() => setAppearance(mode.value)}>
@@ -1010,24 +1018,20 @@ export default function Settings() {
             </div>
           </div>
           <div className="settings-panel">
-            <h2 className="settings-heading">Desktop wallpaper</h2>
+            <h2 className="settings-heading">{text('Desktop wallpaper', '桌面背景')}</h2>
             <div style={styles.hint}>
-              Turn the full JARVIS app into a live macOS desktop wallpaper.
-              The entire UI renders behind all windows and desktop icons.
+              {text("Turn the full JARVIS app into a live macOS desktop wallpaper. The entire UI renders behind all windows and desktop icons.", "將完整 JARVIS App 顯示為 macOS 動態桌面背景。介面會呈現喺其他視窗同桌面圖示後面。")}
             </div>
             <label style={styles.option}>
               <input type="checkbox" checked={wallpaperActive} disabled={wallpaperBusy} onChange={(e) => { void handleWallpaperToggle(e.target.checked); }} style={styles.radio} />
-              <span style={styles.optionLabel}>Enable wallpaper mode</span>
+              <span style={styles.optionLabel}>{text('Enable wallpaper mode', '啟用桌面背景模式')}</span>
             </label>
             <div style={styles.statusText}>
-              {wallpaperBusy ? "Toggling..." : wallpaperActive ? "Wallpaper active -- full JARVIS on desktop" : "Wallpaper inactive"}
+              {wallpaperBusy ? text("Switching…", "切換緊…") : wallpaperActive ? text("Wallpaper active — full JARVIS on desktop", "桌面背景已啟用 — 完整 JARVIS 介面") : text("Wallpaper inactive", "桌面背景未啟用")}
             </div>
             {wallpaperError && <p role="alert" style={styles.errorText}>{wallpaperError}</p>}
             <div style={styles.privacyText}>
-              When active, JARVIS goes fullscreen behind all windows.
-              After enabling, it stays interactive until you send it to the background.
-              To bring it back later, say "Hey Jarvis", click the tray icon, or press Cmd+Shift+W.
-              Closing the window sends it back to the background.
+              {text("When active, JARVIS goes fullscreen behind all windows. After enabling, it stays interactive until you send it to the background. To bring it back later, say Hey Jarvis, click the tray icon, or press Cmd+Shift+W. Closing the window sends it back to the background.", "啟用後，JARVIS 會全螢幕顯示喺其他視窗後面，直到你將佢送返背景。之後可講「Hey Jarvis」、按選單列圖示，或者按 Cmd+Shift+W 叫返佢。關閉視窗會將佢送返背景。")}
             </div>
           </div>
         </>)}

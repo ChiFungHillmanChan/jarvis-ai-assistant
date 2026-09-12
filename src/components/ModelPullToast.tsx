@@ -1,3 +1,4 @@
+import { useUiLocale } from '../i18n';
 import type { ModelPullProgress } from "../lib/types";
 
 interface ModelPullToastProps {
@@ -6,12 +7,13 @@ interface ModelPullToastProps {
 }
 
 export default function ModelPullToast({ progress, visible }: ModelPullToastProps) {
+  const { text } = useUiLocale();
   if (!visible || !progress) return null;
 
   return (
     <div style={styles.container} className="animate-fade-in">
       <div style={styles.label}>
-        Pulling {progress.model}... {progress.percent}%
+        {text("Downloading", "下載緊")} {progress.model}... {progress.percent}%
       </div>
       <div style={styles.progressShell}>
         <div style={{ ...styles.progressFill, width: `${progress.percent}%` }} />

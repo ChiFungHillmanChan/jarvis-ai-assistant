@@ -22,3 +22,6 @@ pub mod system;
 pub mod system_check;
 pub mod tasks;
 pub mod voice_setup;
+
+pub mod setup;
+pub mod local_setup;

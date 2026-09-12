@@ -310,6 +310,7 @@ pub fn run() {
             app.manage(voice_engine);
             app.manage(std::sync::Arc::clone(&wake_service));
             app.manage(commands::model_pull::ModelPullState::new());
+            app.manage(commands::local_setup::LocalSetupState::new());
             app.manage(mail::sync::MailSyncState::new());
             app.manage(std::sync::Arc::clone(&scheduler_handle));
             // A tray that fails to build is a missing menu bar icon, not a
@@ -518,6 +519,12 @@ pub fn run() {
             commands::system_check::check_backend_prerequisites,
             commands::system_check::get_recommended_models,
             commands::model_pull::pull_model,
+            commands::setup::get_setup_status,
+            commands::setup::test_mail_ai_connection,
+            commands::setup::apply_tested_mail_settings,
+            commands::local_setup::probe_local_setup,
+            commands::local_setup::prepare_local_ai,
+            commands::local_setup::cancel_local_setup,
             commands::model_pull::cancel_model_pull,
             commands::scheduler::trigger_daily_briefing,
             commands::voice_setup::enable_offline_voice,

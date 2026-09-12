@@ -1,0 +1,30 @@
+.setup-screen { height: 100vh; display: flex; flex-direction: column; color: var(--text-primary, #e4edf6); background: var(--bg-primary, #10141b); overflow: hidden; }
+.setup-titlebar { display: flex; align-items: center; gap: 20px; min-height: 46px; padding: 0 18px; border-bottom: 1px solid rgba(130,160,190,.18); flex-shrink: 0; }
+.setup-titlebar > span { font-size: 12px; letter-spacing: 2px; opacity: .7; }
+.setup-content { width: min(780px, 100%); padding: 28px 32px 56px; margin: 0 auto; overflow-y: auto; }
+.setup-content h1 { font-size: 26px; letter-spacing: -.5px; margin: 22px 0 12px; }
+.setup-content h2, .setup-local h3 { font-size: 16px; margin: 0 0 12px; }
+.setup-content p, .setup-local p { line-height: 1.7; font-size: 13px; }
+.setup-topline, .setup-actions, .setup-footer { display: flex; gap: 10px; align-items: center; flex-wrap: wrap; }
+.setup-topline { justify-content: space-between; color: #9fb3c8; font-size: 12px; }
+.setup-fields { border: 0; margin: 0; padding: 0; min-width: 0; }
+.setup-content label:not(.setup-checkbox), .setup-local label:not(.setup-checkbox) { display: flex; flex-direction: column; gap: 7px; font-size: 13px; margin: 14px 0; }
+.setup-content input:not([type=checkbox]), .setup-content select, .setup-content textarea, .setup-local select { width: 100%; padding: 10px 12px; border-radius: 6px; border: 1px solid rgba(130,160,190,.3); color: inherit; background: var(--bg-secondary, #181e28); font: inherit; }
+.setup-content select option, .setup-local select option { background: #181e28; color: #e4edf6; }
+.setup-content button, .setup-local button { border: 1px solid rgba(130,160,190,.3); border-radius: 6px; padding: 9px 13px; color: inherit; background: transparent; font: inherit; font-size: 12px; cursor: pointer; }
+.setup-content button:disabled, .setup-local button:disabled { opacity: .45; cursor: default; }
+.setup-content .setup-primary, .setup-local .setup-primary { background: rgba(0,180,255,.12); border-color: rgba(0,180,255,.5); color: #77d5ff; }
+.setup-current, .setup-local, .setup-result { padding: 18px; border: 1px solid rgba(130,160,190,.22); border-radius: 10px; margin: 18px 0; }
+.setup-current { background: rgba(130,160,190,.04); }
+.setup-hint { color: #9fb3c8; }
+.setup-error { padding: 12px; border: 1px solid #9c4949; color: #f5aaaa; border-radius: 6px; }
+.setup-notice { color: #8ed7b8; }
+.setup-checkbox { display: flex; gap: 10px; align-items: flex-start; line-height: 1.6; font-size: 13px; margin: 14px 0; }
+.setup-checkbox input { margin-top: 4px; flex-shrink: 0; }
+.setup-mail-list { max-height: 260px; overflow-y: auto; }
+.setup-mail-list small { display: block; color: #9fb3c8; }
+.setup-result pre { white-space: pre-wrap; overflow-wrap: anywhere; line-height: 1.7; font: inherit; font-size: 13px; }
+.setup-footer { margin-top: 26px; padding-top: 20px; border-top: 1px solid rgba(130,160,190,.2); }
+.setup-content details { margin: 18px 0; }
+.setup-content :focus-visible, .setup-local :focus-visible { outline: 2px solid #43b4ed; outline-offset: 3px; }
+@media(max-width:600px) { .setup-content { padding: 20px 18px 36px; } .setup-topline { align-items: flex-start; } }

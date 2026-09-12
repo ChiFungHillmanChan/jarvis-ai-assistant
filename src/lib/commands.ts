@@ -191,8 +191,8 @@ export async function checkBackendPrerequisites(backendType: string, url?: strin
 export async function getRecommendedModels(endpointId?: string): Promise<RecommendedModel[]> { return invoke("get_recommended_models", { endpointId }); }
 
 // Model Pull
-export async function pullModel(endpointId: string, modelName: string): Promise<void> { return invoke("pull_model", { endpointId, modelName }); }
-export async function cancelModelPull(): Promise<void> { return invoke("cancel_model_pull"); }
+export async function pullModel(endpointId: string, modelName: string, jobId?: string): Promise<string> { return invoke("pull_model", { endpointId, modelName, jobId }); }
+export async function cancelModelPull(jobId?: string): Promise<void> { return invoke("cancel_model_pull", { jobId }); }
 
 // Onboarding
 export async function checkOnboardingStatus(): Promise<boolean> {

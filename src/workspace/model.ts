@@ -1,3 +1,4 @@
+import { translate, type UiLocale } from '../i18n/catalog.ts';
 export const views = ['home', 'chat', 'email', 'calendar', 'github', 'notion', 'cron', 'connections', 'settings', 'result'] as const;
 export type WorkspaceView = typeof views[number];
 export const viewNames: Record<WorkspaceView, string> = { home: 'Automation', chat: 'Assistant', email: 'Mail', calendar: 'Calendar', github: 'GitHub', notion: 'Notes', cron: 'Automations', connections: 'Connections', settings: 'Settings', result: 'Result' };
@@ -59,3 +60,7 @@ export function restoreWorkspace(raw: string | undefined): WorkspaceState {
   } catch { return initialWorkspace(); }
 }
 export function shouldFocusResult(activeId: string, originId: string, activeView: WorkspaceView): boolean { return activeId === originId && activeView === 'chat'; }
+
+const viewKeys = { home: 'navAutomation', chat: 'navAssistant', email: 'navMail', calendar: 'navCalendar', github: 'navGitHub', notion: 'navNotes', cron: 'navAutomations', connections: 'navConnections', settings: 'navSettings', result: 'navResult' } as const;
+export function viewName(view: WorkspaceView, locale: UiLocale) { return translate(locale, viewKeys[view]); }
+export function displayTabTitle(tab: WorkspaceTab, locale: UiLocale) { return tab.title === viewNames[tab.view] || (tab.view === 'chat' && tab.title === 'New task') ? (tab.view === 'chat' && tab.title === 'New task' ? (locale === 'zh-HK' ? '新工作' : 'New task') : viewName(tab.view, locale)) : tab.title; }

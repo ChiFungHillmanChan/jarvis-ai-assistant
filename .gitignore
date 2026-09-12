@@ -7,6 +7,18 @@ superpowers/
 scripts/
 docs/*
 !docs/screenshots/
+# 只收錄今輪香港版研究交付，其他本機文件沿用原有忽略規則。
+!docs/business/
+docs/business/*
+!docs/business/2026-09-12-hk-launch-affordable-ai-report.md
+!docs/product/
+docs/product/*
+!docs/product/2026-09-12-cantonese-copybook.md
+!docs/superpowers/
+docs/superpowers/*
+!docs/superpowers/plans/
+docs/superpowers/plans/*
+!docs/superpowers/plans/2026-09-12-hk-activation-local-ai.md
 .env
 .env.*
 src-tauri/.env.*

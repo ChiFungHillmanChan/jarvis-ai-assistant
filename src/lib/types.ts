@@ -315,6 +315,7 @@ export interface RecommendedModel {
 }
 
 export interface ModelPullProgress {
+  jobId: string;
   endpoint_id: string;
   model: string;
   status: "downloading" | "verifying" | "complete" | "error";

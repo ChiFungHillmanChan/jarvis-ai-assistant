@@ -1,5 +1,6 @@
 import { Component } from "react";
 import type { ErrorInfo, ReactNode } from "react";
+import { getUiLocale } from "../i18n";
 
 interface ErrorBoundaryProps {
   children: ReactNode;
@@ -33,14 +34,14 @@ export default class ErrorBoundary extends Component<
     return (
       <div data-tauri-drag-region style={styles.container}>
         <div style={styles.panel}>
-          <div style={styles.label}>This workspace could not load</div>
+          <div style={styles.label}>{getUiLocale() === "zh-HK" ? "未能載入呢個工作區" : "This workspace could not load"}</div>
           <div style={styles.message}>{error.message || String(error)}</div>
           <button
             type="button"
             style={styles.button}
             onClick={() => this.setState({ error: null })}
           >
-            Try again
+            {getUiLocale() === "zh-HK" ? "重試" : "Try again"}
           </button>
         </div>
       </div>

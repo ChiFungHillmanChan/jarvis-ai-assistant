@@ -36,6 +36,7 @@ pub struct SystemCompatibility {
     pub ollama: OllamaStatus,
     pub vllm: VllmStatus,
     pub recommended_max_params: String,
+    pub available_disk_gb: Option<f64>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -76,19 +77,24 @@ pub fn ram_to_recommendation(total_ram_gb: f64) -> &'static str {
 /// Curated model list for Ollama recommendations.
 const CURATED_MODELS: &[(&str, &str, &str, f64, u32, bool, &str)] = &[
     // (id, name, param_size, download_gb, min_ram_gb, tool_capable, description)
+    ("qwen3.5:2b", "Qwen 3.5 2B", "2B", 2.7, 8, true, "Lightweight local assistant"),
     ("llama3.2:3b", "Llama 3.2 3B", "3B", 2.0, 8, true, "Fast, good for chat and basic tasks"),
     ("qwen2.5:7b", "Qwen 2.5 7B", "7B", 4.7, 8, true, "Strong tool use, multilingual"),
-    ("llama3.2:latest", "Llama 3.2 8B", "8B", 4.9, 8, true, "Balanced general-purpose"),
+    ("qwen3.5:4b", "Qwen 3.5 4B", "4B", 3.4, 16, true, "Multilingual local assistant"),
+    ("qwen3.5:9b", "Qwen 3.5 9B", "9B", 6.6, 24, true, "Multilingual local assistant"),
     ("mistral:7b", "Mistral 7B", "7B", 4.1, 8, true, "Fast reasoning and tool use"),
-    ("qwen3:8b", "Qwen 3 8B", "8B", 4.9, 8, true, "Latest Qwen, strong tool calling"),
+    ("qwen3:8b", "Qwen 3 8B", "8B", 5.2, 8, true, "Qwen multilingual model"),
     ("deepseek-r1:7b", "DeepSeek R1 7B", "7B", 4.7, 8, false, "Deep reasoning, no tool support"),
     ("qwen2.5:14b", "Qwen 2.5 14B", "14B", 9.0, 16, true, "Higher quality tool use"),
-    ("llama3.3:latest", "Llama 3.3 13B", "13B", 8.0, 16, true, "Strong all-around"),
     ("deepseek-r1:14b", "DeepSeek R1 14B", "14B", 9.0, 16, false, "Strong reasoning at 14B"),
     ("qwen2.5:32b", "Qwen 2.5 32B", "32B", 20.0, 32, true, "Near-cloud quality"),
     ("deepseek-r1:32b", "DeepSeek R1 32B", "32B", 20.0, 32, false, "Best local reasoning"),
-    ("llama3.1:70b", "Llama 3.1 70B", "70B", 40.0, 64, true, "Cloud-tier quality, needs heavy hardware"),
+    ("llama3.3:70b", "Llama 3.3 70B", "70B", 43.0, 64, true, "Large general-purpose model"),
 ];
+
+pub fn curated_model_size(id: &str) -> Option<f64> {
+    CURATED_MODELS.iter().find(|entry| entry.0 == id).map(|entry| entry.3)
+}
 
 /// Get curated models filtered by available RAM.
 /// `pulled_ids` is a list of model IDs already present on the endpoint.
@@ -97,7 +103,7 @@ pub fn get_curated_models(total_ram_gb: f64, pulled_ids: &[String]) -> Vec<Recom
         .iter()
         .filter(|(_, _, _, _, min_ram, _, _)| (*min_ram as f64) <= total_ram_gb)
         .map(|(id, name, param_size, dl_gb, min_ram, tools, desc)| {
-            let already_pulled = pulled_ids.iter().any(|p| p.contains(id.split(':').next().unwrap_or(id)));
+            let already_pulled = pulled_ids.iter().any(|p| p == id);
             RecommendedModel {
                 id: id.to_string(),
                 name: name.to_string(),
@@ -156,23 +162,42 @@ fn detect_gpu() -> GpuInfo {
 
 /// Detect Ollama installation and running status.
 async fn detect_ollama() -> OllamaStatus {
-    let installed = binary_exists("ollama");
-    let version = run_command("ollama", &["--version"]);
+    let app_installed = std::env::consts::OS == "macos"
+        && std::path::Path::new("/Applications/Ollama.app").exists();
+    let installed = binary_exists("ollama") || app_installed;
+    let version = if binary_exists("ollama") { run_command("ollama", &["--version"]) } else { None };
 
-    let running = if installed {
-        let client = reqwest::Client::builder()
-            .timeout(std::time::Duration::from_secs(3))
-            .build()
-            .unwrap_or_default();
-        client.get("http://localhost:11434/")
-            .send().await
-            .map(|r| r.status().is_success())
-            .unwrap_or(false)
-    } else {
-        false
-    };
+    let running = ollama_server_ready().await;
 
     OllamaStatus { installed, running, version }
+}
+
+pub async fn ollama_server_ready() -> bool {
+    let Ok(client) = reqwest::Client::builder()
+        .timeout(std::time::Duration::from_secs(3))
+        .no_proxy()
+        .redirect(reqwest::redirect::Policy::none())
+        .build() else { return false };
+    let Ok(response) = client.get("http://127.0.0.1:11434/api/version").send().await else { return false };
+    if !response.status().is_success() { return false; }
+    response.json::<serde_json::Value>().await.ok()
+        .and_then(|value| value.get("version").and_then(|v| v.as_str()).map(str::to_string))
+        .is_some_and(|version| !version.is_empty() && version.chars().all(|c| c.is_ascii_digit() || c == '.'))
+}
+
+pub fn available_disk_gb() -> Option<f64> {
+    #[cfg(target_os = "macos")]
+    {
+        let model_dir = std::env::var("OLLAMA_MODELS").ok()
+            .or_else(|| std::env::var("HOME").ok().map(|home| format!("{home}/.ollama")))?;
+        let path = std::path::Path::new(&model_dir);
+        let probe_path = if path.exists() { path } else { path.parent()? };
+        let output = run_command("df", &["-k", probe_path.to_str()?])?;
+        let fields: Vec<_> = output.lines().nth(1)?.split_whitespace().collect();
+        return fields.get(3)?.parse::<f64>().ok().map(|kb| kb / 1024.0 / 1024.0);
+    }
+    #[cfg(not(target_os = "macos"))]
+    { None }
 }
 
 /// True when the macOS Command Line Tools are actually installed.
@@ -231,6 +256,7 @@ pub async fn check_system_compatibility() -> Result<SystemCompatibility, String>
         ollama,
         vllm,
         recommended_max_params,
+        available_disk_gb: available_disk_gb(),
     })
 }
 
@@ -244,7 +270,7 @@ pub async fn check_backend_prerequisites(
 
     match backend_type.as_str() {
         "ollama" => {
-            let installed = binary_exists("ollama");
+            let installed = binary_exists("ollama") || (os == "macos" && std::path::Path::new("/Applications/Ollama.app").is_dir());
             let install_cmd = if os == "macos" {
                 "brew install ollama"
             } else {
@@ -259,15 +285,7 @@ pub async fn check_backend_prerequisites(
                 fix_label: Some("Install Ollama".to_string()),
             });
 
-            let running = if installed {
-                let client = reqwest::Client::builder()
-                    .timeout(std::time::Duration::from_secs(3))
-                    .build().unwrap_or_default();
-                client.get("http://localhost:11434/").send().await
-                    .map(|r| r.status().is_success()).unwrap_or(false)
-            } else {
-                false
-            };
+            let running = ollama_server_ready().await;
             checks.push(PrerequisiteCheck {
                 name: "Ollama running".to_string(),
                 description: "Ollama server responding on localhost:11434".to_string(),
@@ -428,6 +446,22 @@ mod tests {
     use super::*;
 
     #[test]
+    fn exact_tag_is_required_for_pulled_model() {
+        let models = get_curated_models(16.0, &["qwen2.5:7b".into()]);
+        assert!(!models.iter().find(|m| m.id == "qwen2.5:14b").unwrap().already_pulled);
+    }
+
+    #[test]
+    fn qwen35_recommendations_match_ram() {
+        assert!(get_curated_models(8.0, &[]).iter().any(|m| m.id == "qwen3.5:2b"));
+        assert!(!get_curated_models(8.0, &[]).iter().any(|m| m.id == "qwen3.5:4b"));
+        assert!(get_curated_models(16.0, &[]).iter().any(|m| m.id == "qwen3.5:4b"));
+        assert!(!get_curated_models(16.0, &[]).iter().any(|m| m.id == "qwen3.5:9b"));
+        assert!(get_curated_models(24.0, &[]).iter().any(|m| m.id == "qwen3.5:9b"));
+        assert!(!get_curated_models(16.0, &[]).iter().any(|m| m.id == "qwen3.5:27b"));
+    }
+
+    #[test]
     fn test_ram_to_recommendation_boundaries() {
         assert_eq!(ram_to_recommendation(4.0), "3B");
         assert_eq!(ram_to_recommendation(7.9), "3B");
@@ -459,9 +493,9 @@ mod tests {
     #[test]
     fn test_curated_models_32gb() {
         let models = get_curated_models(32.0, &[]);
-        assert_eq!(models.len(), 11);
+        assert_eq!(models.len(), 12);
         assert!(models.iter().any(|m| m.id == "qwen2.5:32b"));
-        assert!(!models.iter().any(|m| m.id == "llama3.1:70b"));
+        assert!(!models.iter().any(|m| m.id == "llama3.3:70b"));
     }
 
     #[test]
@@ -471,7 +505,7 @@ mod tests {
         let llama = models.iter().find(|m| m.id == "llama3.2:3b").unwrap();
         assert!(llama.already_pulled);
         let mistral = models.iter().find(|m| m.id == "mistral:7b").unwrap();
-        assert!(mistral.already_pulled);
+        assert!(!mistral.already_pulled);
         let qwen = models.iter().find(|m| m.id == "qwen2.5:7b").unwrap();
         assert!(!qwen.already_pulled);
     }

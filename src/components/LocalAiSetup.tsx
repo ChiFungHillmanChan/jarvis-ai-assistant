@@ -1,4 +1,7 @@
 import { useState, useEffect } from "react";
+import LocalMailSetup from "./LocalMailSetup";
+import { useUiLocale } from "../i18n";
+import "../styles/setup.css";
 import { listen } from "@tauri-apps/api/event";
 import {
   checkSystemCompatibility,
@@ -28,6 +31,8 @@ interface LocalAiSetupProps {
 type BackendTab = "ollama" | "vllm" | "generic";
 
 export default function LocalAiSetup({ endpoints, onEndpointAdded, onModelsLoaded, onAddToChain }: LocalAiSetupProps) {
+  const { text } = useUiLocale();
+  const [mailSetupBusy, setMailSetupBusy] = useState(false);
   const [system, setSystem] = useState<SystemCompatibility | null>(null);
   const [tab, setTab] = useState<BackendTab>("ollama");
   const [checks, setChecks] = useState<PrerequisiteCheck[]>([]);
@@ -135,11 +140,14 @@ export default function LocalAiSetup({ endpoints, onEndpointAdded, onModelsLoade
     ? "Apple Silicon (Metal)"
     : system?.gpu.has_cuda
     ? `NVIDIA (CUDA ${system.gpu.cuda_version || ""})`
-    : "No GPU acceleration";
+    : text("No GPU acceleration", "未有 GPU 加速");
 
   return (
     <div className="panel" style={styles.panel}>
-      <div className="label" style={styles.sectionTitle}>LOCAL AI SETUP</div>
+      <LocalMailSetup onBusyChange={setMailSetupBusy} />
+      <details><summary>{text("Advanced engines for Assistant", "AI 助理進階引擎設定")}</summary>
+      <fieldset disabled={mailSetupBusy} style={{ border: 0, padding: 0, margin: 0, minWidth: 0 }}>
+      <div className="label" style={styles.sectionTitle}>{text("LOCAL AI SETUP", "本機 AI 設定")}</div>
 
       {system && (
         <div style={styles.systemBar}>
@@ -147,7 +155,7 @@ export default function LocalAiSetup({ endpoints, onEndpointAdded, onModelsLoade
           <span style={styles.systemDivider}>|</span>
           <span style={styles.systemStat}>{gpuLabel}</span>
           <span style={styles.systemDivider}>|</span>
-          <span style={styles.systemStat}>Up to {system.recommended_max_params} models</span>
+          <span style={styles.systemStat}>{text("Suggested upper model size", "建議模型大小上限")} {system.recommended_max_params}</span>
         </div>
       )}
 
@@ -162,7 +170,7 @@ export default function LocalAiSetup({ endpoints, onEndpointAdded, onModelsLoade
           </button>
         ))}
         <button onClick={handleRefreshPrereqs} disabled={checkingPrereqs} style={styles.refreshBtn}>
-          {checkingPrereqs ? "..." : "REFRESH"}
+          {checkingPrereqs ? "..." : text("REFRESH", "重新檢查")}
         </button>
       </div>
 
@@ -175,7 +183,7 @@ export default function LocalAiSetup({ endpoints, onEndpointAdded, onModelsLoade
               {!check.passed && check.fix_command && (
                 <div style={styles.fixRow}>
                   <code style={styles.fixCode}>{check.fix_command}</code>
-                  <button onClick={() => navigator.clipboard.writeText(check.fix_command!)} style={styles.copyBtn}>COPY</button>
+                  <button onClick={() => navigator.clipboard.writeText(check.fix_command!)} style={styles.copyBtn}>{text("COPY", "複製")}</button>
                 </div>
               )}
               {!check.passed && !check.fix_command && check.fix_label && (
@@ -185,29 +193,29 @@ export default function LocalAiSetup({ endpoints, onEndpointAdded, onModelsLoade
           </div>
         ))}
         {checks.length === 0 && !checkingPrereqs && (
-          <div style={styles.emptyText}>Click REFRESH to check prerequisites</div>
+          <div style={styles.emptyText}>{text("Click REFRESH to check prerequisites", "撳「重新檢查」核對所需條件")}</div>
         )}
       </div>
 
       {tab === "ollama" && models.length > 0 && (
         <div style={styles.modelsSection}>
-          <div style={styles.modelsLabel}>RECOMMENDED MODELS</div>
+          <div style={styles.modelsLabel}>{text("RECOMMENDED MODELS", "模型建議")}</div>
           {models.map((m) => (
             <div key={m.id} style={styles.modelCard}>
               <div style={styles.modelHeader}>
                 <span style={styles.modelName}>{m.name}</span>
                 <span style={styles.modelSize}>{m.download_size_gb} GB</span>
-                {m.tool_capable && <span style={styles.toolBadge}>tools</span>}
+                {m.tool_capable && <span style={styles.toolBadge}>{text("tools", "工具")}</span>}
               </div>
               <div style={styles.modelDesc}>{m.description}</div>
               <div style={styles.modelActions}>
                 {m.already_pulled ? (
                   <>
-                    <span style={styles.readyBadge}>READY</span>
+                    <span style={styles.readyBadge}>{text("READY", "已下載")}</span>
                     <button onClick={() => {
                       const ep = endpoints.find((e) => e.backend_type === "ollama");
                       if (ep) onAddToChain("local", ep.id, m.id);
-                    }} style={styles.chainBtn}>+ CHAIN</button>
+                    }} style={styles.chainBtn}>{text("+ CHAIN", "加入助理模型鏈")}</button>
                   </>
                 ) : (
                   <button
@@ -215,7 +223,7 @@ export default function LocalAiSetup({ endpoints, onEndpointAdded, onModelsLoade
                     disabled={pulling !== null}
                     style={styles.pullBtn}
                   >
-                    {pulling?.model === m.id ? `${pulling.percent}%` : "PULL"}
+                    {pulling?.model === m.id ? `${pulling.percent}%` : text("PULL", "下載")}
                   </button>
                 )}
               </div>
@@ -226,11 +234,11 @@ export default function LocalAiSetup({ endpoints, onEndpointAdded, onModelsLoade
 
       {pulling && (
         <div style={styles.pullProgress}>
-          <div style={styles.pullLabel}>Pulling {pulling.model}... {pulling.percent}%</div>
+          <div style={styles.pullLabel}>{text("Downloading", "下載緊")} {pulling.model}... {pulling.percent}%</div>
           <div style={styles.progressShell}>
             <div style={{ ...styles.progressFill, width: `${pulling.percent}%` }} />
           </div>
-          <button onClick={() => cancelModelPull()} style={styles.cancelBtn}>CANCEL</button>
+          <button onClick={() => cancelModelPull(pulling?.jobId)} style={styles.cancelBtn}>{text("CANCEL", "取消")}</button>
         </div>
       )}
 
@@ -244,13 +252,14 @@ export default function LocalAiSetup({ endpoints, onEndpointAdded, onModelsLoade
               style={styles.urlInput}
             />
             <button onClick={() => handleConnect(tab)} disabled={connectBusy} style={styles.connectBtn}>
-              {connectBusy ? "..." : "CONNECT"}
+              {connectBusy ? "..." : text("CONNECT", "連接")}
             </button>
           </div>
         </div>
       )}
 
       {error && <div style={styles.errorText}>{error}</div>}
+      </fieldset></details>
     </div>
   );
 }

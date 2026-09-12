@@ -4,15 +4,18 @@ import { getCronJobs, getCronRuns, getUpcomingRuns, setCronJobStatus } from "../
 import ConversionFlow from "../components/cron/ConversionFlow";
 import { useWorkspace, useWorkspaceValue } from "../workspace/WorkspaceContext";
 import "./tool-pages.css";
+import { useUiLocale } from "../i18n";
 
 const HAS_ZONE = /(?:Z|[+-]\d{2}:?\d{2})$/;
-function backendDate(value: string | null) {
-  if (!value) return "Never";
+function backendDate(value: string | null, locale: string) {
+  if (!value) return locale === "zh-HK" ? "從未執行" : "Never";
   const parsed = HAS_ZONE.test(value) ? value : `${value.replace(" ", "T")}Z`;
-  return new Date(parsed).toLocaleString();
+  return new Date(parsed).toLocaleString(locale);
 }
 
 export default function CronDashboard() {
+  const { locale, text } = useUiLocale();
+  const statusLabel = (status: string) => status === "active" ? text("Active", "運行中") : status === "paused" ? text("Paused", "已暫停") : status === "failed" ? text("Failed", "失敗") : status === "running" ? text("Running", "執行緊") : status === "completed" ? text("Completed", "已完成") : status;
   const [jobs, setJobs] = useState<CronJobView[]>([]);
   const [selectedId, setSelectedId] = useWorkspaceValue<number | null>("selectedJobId", null);
   const [runs, setRuns] = useState<CronRunView[]>([]);
@@ -22,7 +25,7 @@ export default function CronDashboard() {
   const [refreshCounter, setRefreshCounter] = useState(0);
   const [mutatingId, setMutatingId] = useState<number | null>(null);
   const [error, setError] = useState<string | null>(null);
-  const timezone = Intl.DateTimeFormat().resolvedOptions().timeZone || "Local time";
+  const timezone = Intl.DateTimeFormat().resolvedOptions().timeZone || text("Local time", "本機時間");
   const { state } = useWorkspace();
   const activeView = state.tabs.find(tab => tab.id === state.activeId)?.view;
 
@@ -66,12 +69,12 @@ export default function CronDashboard() {
   }, [fetchJobs, setSelectedId]);
 
   return <main className="tool-page automation-tool-page">
-    <header className="tool-page__header"><div><p className="tool-page__eyebrow">Automations</p><h1>Schedules and run history</h1><p>Schedules run in {timezone}. Select an automation to inspect generated results.</p></div><button className="tool-button tool-button--quiet" onClick={fetchJobs} disabled={loading}>{loading ? "Refreshing…" : "Refresh"}</button></header>
+    <header className="tool-page__header"><div><p className="tool-page__eyebrow">{text("Automations", "自動排程")}</p><h1>{text("Schedules and run history", "排程同執行紀錄")}</h1><p>{locale === "zh-HK" ? `排程按 ${timezone} 執行。選取自動排程查看產生嘅結果。` : `Schedules run in ${timezone}. Select an automation to inspect generated results.`}</p></div><button className="tool-button tool-button--quiet" onClick={fetchJobs} disabled={loading}>{loading ? text("Refreshing…", "重新整理緊…") : text("Refresh", "重新整理")}</button></header>
     {error && <div className="tool-alert tool-alert--error" role="alert">{error}</div>}
     <ConversionFlow onJobCreated={handleCreated} />
-    <div className="tool-split"><section className="tool-panel tool-list-pane"><div className="tool-panel__heading"><h2>Automations</h2><span>{jobs.length} total</span></div>
-      {loading && jobs.length === 0 ? <p className="tool-empty">Loading automations…</p> : jobs.length === 0 ? <p className="tool-empty">No automations yet. Describe one above to create it.</p> : <div className="automation-table" role="table"><div className="automation-table__head" role="row"><span>Name</span><span>Schedule</span><span>Next run</span><span>Status</span></div>{jobs.map(job => <div className={`automation-row${selectedId === job.id ? " is-selected" : ""}`} role="row" key={job.id}><button className="automation-row__select" onClick={() => setSelectedId(job.id)}><strong>{job.name}</strong><small>Last: {backendDate(job.last_run)}</small></button><span>{job.description || job.schedule}</span><span>{job.status === "paused" ? "Paused" : job.next_run ? backendDate(job.next_run) : "Calculated from schedule"}</span><button className="tool-button tool-button--quiet" disabled={mutatingId !== null} onClick={() => toggle(job)}>{mutatingId === job.id ? "Updating…" : job.status === "active" ? "Pause" : "Enable"} <small>{job.status}</small></button></div>)}</div>}
+    <div className="tool-split"><section className="tool-panel tool-list-pane"><div className="tool-panel__heading"><h2>{text("Automations", "自動排程")}</h2><span>{locale === "zh-HK" ? `共 ${jobs.length} 項` : `${jobs.length} total`}</span></div>
+      {loading && jobs.length === 0 ? <p className="tool-empty">{text("Loading automations…", "載入自動排程緊…")}</p> : jobs.length === 0 ? <p className="tool-empty">{text("No automations yet. Describe one above to create it.", "未有自動排程。可以喺上方描述你想建立嘅排程。")}</p> : <div className="automation-table" role="table"><div className="automation-table__head" role="row"><span>{text("Name", "名稱")}</span><span>{text("Schedule", "排程")}</span><span>{text("Next run", "下次執行")}</span><span>{text("Status", "狀態")}</span></div>{jobs.map(job => <div className={`automation-row${selectedId === job.id ? " is-selected" : ""}`} role="row" key={job.id}><button className="automation-row__select" onClick={() => setSelectedId(job.id)}><strong>{job.name}</strong><small>{text("Last", "上次執行")}：{backendDate(job.last_run, locale)}</small></button><span>{job.description || job.schedule}</span><span>{job.status === "paused" ? text("Paused", "已暫停") : job.next_run ? backendDate(job.next_run, locale) : text("Calculated from schedule", "按排程計算")}</span><button className="tool-button tool-button--quiet" disabled={mutatingId !== null} onClick={() => toggle(job)}>{mutatingId === job.id ? text("Updating…", "更新緊…") : job.status === "active" ? text("Pause", "暫停") : text("Enable", "啟用")} <small>{statusLabel(job.status)}</small></button></div>)}</div>}
     </section>
-    <aside className="tool-panel tool-detail-pane">{selected ? <><div className="tool-panel__heading"><h2>{selected.name}</h2><span>{selected.status}</span></div><dl className="tool-details"><dt>Instructions</dt><dd>{selected.description || selected.action_type}</dd><dt>Schedule</dt><dd>{selected.schedule}</dd><dt>Last run</dt><dd>{backendDate(selected.last_run)}</dd><dt>{selected.status === "paused" ? "Schedule preview" : "Next runs"}</dt><dd>{detailLoading ? "Loading…" : upcoming.length ? `${upcoming.join(", ")}${selected.status === "paused" ? " (hypothetical while paused)" : ""}` : selected.status === "paused" ? "Paused" : "Unavailable"}</dd></dl><h3 className="tool-subheading">Run history</h3>{detailLoading ? <p className="tool-empty">Loading run history…</p> : runs.length === 0 ? <p className="tool-empty">This automation has no recorded runs.</p> : <div className="run-list">{runs.map(run => <article key={run.id} className="run-item"><div><strong>{run.status}</strong><time>{backendDate(run.started_at)}</time></div>{run.result && <p>{run.result}</p>}{run.error && <p className="run-item__error">{run.error}</p>}</article>)}</div>}</> : <p className="tool-empty">Select an automation to see its schedule and real run output.</p>}</aside></div>
+    <aside className="tool-panel tool-detail-pane">{selected ? <><div className="tool-panel__heading"><h2>{selected.name}</h2><span>{statusLabel(selected.status)}</span></div><dl className="tool-details"><dt>{text("Instructions", "指示")}</dt><dd>{selected.description || selected.action_type}</dd><dt>{text("Schedule", "排程")}</dt><dd>{selected.schedule}</dd><dt>{text("Last run", "上次執行")}</dt><dd>{backendDate(selected.last_run, locale)}</dd><dt>{selected.status === "paused" ? text("Schedule preview", "排程預覽") : text("Next runs", "未來執行時間")}</dt><dd>{detailLoading ? text("Loading…", "載入緊…") : upcoming.length ? `${upcoming.join(", ")}${selected.status === "paused" ? text(" (hypothetical while paused)", "（暫停期間嘅預覽）") : ""}` : selected.status === "paused" ? text("Paused", "已暫停") : text("Unavailable", "未能取得")}</dd></dl><h3 className="tool-subheading">{text("Run history", "執行紀錄")}</h3>{detailLoading ? <p className="tool-empty">{text("Loading run history…", "載入執行紀錄緊…")}</p> : runs.length === 0 ? <p className="tool-empty">{text("This automation has no recorded runs.", "呢項自動排程未有執行紀錄。")}</p> : <div className="run-list">{runs.map(run => <article key={run.id} className="run-item"><div><strong>{statusLabel(run.status)}</strong><time>{backendDate(run.started_at, locale)}</time></div>{run.result && <p>{run.result}</p>}{run.error && <p className="run-item__error">{run.error}</p>}</article>)}</div>}</> : <p className="tool-empty">{text("Select an automation to see its schedule and real run output.", "選取自動排程查看時間表同實際執行結果。")}</p>}</aside></div>
   </main>;
 }

@@ -358,14 +358,28 @@ pub fn settings(db: &Database) -> Result<MailSettings, String> {
     settings_conn(&conn)
 }
 pub fn save_settings(db: &Database, input: &MailSettings) -> Result<(), String> {
+    let (local, bedrock, openai) = validated_settings(input)?;
+    db.conn.lock().map_err(err)?.execute("UPDATE mail_settings SET processing_mode=?1,local_model=?2,bedrock_model=?3,openai_model=?4 WHERE id=1",params![input.processing_mode,local,bedrock,openai]).map_err(err)?;
+    Ok(())
+}
+
+fn validated_settings(input: &MailSettings) -> Result<(&str, &str, &str), String> {
     if !["local", "bedrock", "openai"].contains(&input.processing_mode.as_str()) {
         return Err("請選擇本機、AWS Bedrock 或 OpenAI。".into());
     }
     let local = text(&input.local_model, 200, true)?;
     let bedrock = text(&input.bedrock_model, 256, true)?;
     let openai = text(&input.openai_model, 200, true)?;
-    db.conn.lock().map_err(err)?.execute("UPDATE mail_settings SET processing_mode=?1,local_model=?2,bedrock_model=?3,openai_model=?4 WHERE id=1",params![input.processing_mode,local,bedrock,openai]).map_err(err)?;
-    Ok(())
+    Ok((local, bedrock, openai))
+}
+
+pub fn save_settings_if_unchanged(db: &Database, input: &MailSettings, expected: &MailSettings) -> Result<(), String> {
+    let (local, bedrock, openai) = validated_settings(input)?;
+    let changed = db.conn.lock().map_err(err)?.execute(
+        "UPDATE mail_settings SET processing_mode=?1,local_model=?2,bedrock_model=?3,openai_model=?4 WHERE id=1 AND processing_mode=?5 AND local_model=?6 AND bedrock_model=?7 AND openai_model=?8",
+        params![input.processing_mode,local,bedrock,openai,expected.processing_mode,expected.local_model,expected.bedrock_model,expected.openai_model],
+    ).map_err(err)?;
+    if changed == 1 { Ok(()) } else { Err("settings_changed".into()) }
 }
 pub fn context(db: &Database, group_id: i64) -> Result<MailContext, String> {
     let conn = db.conn.lock().map_err(err)?;

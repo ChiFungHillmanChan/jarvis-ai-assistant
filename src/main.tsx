@@ -3,6 +3,7 @@ import ReactDOM from "react-dom/client";
 import "./styles/global.css";
 import "./styles/animations.css";
 import App from "./App";
+import { UiLocaleProvider } from "./i18n";
 import ErrorBoundary from "./components/ErrorBoundary";
 
 if (import.meta.env.DEV && new URLSearchParams(location.search).has("workspace-preview")) {
@@ -12,8 +13,10 @@ if (import.meta.env.DEV && new URLSearchParams(location.search).has("workspace-p
 
 ReactDOM.createRoot(document.getElementById("root") as HTMLElement).render(
   <React.StrictMode>
-    <ErrorBoundary>
-      <App />
-    </ErrorBoundary>
+    <UiLocaleProvider>
+      <ErrorBoundary>
+        <App />
+      </ErrorBoundary>
+    </UiLocaleProvider>
   </React.StrictMode>,
 );

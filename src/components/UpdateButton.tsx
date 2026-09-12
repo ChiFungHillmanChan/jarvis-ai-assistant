@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useState } from "react";
 import { check, type Update, type DownloadEvent } from "@tauri-apps/plugin-updater";
 import { relaunch } from "@tauri-apps/plugin-process";
+import { useUiLocale } from "../i18n";
 
 type Phase = "idle" | "downloading" | "error";
 
@@ -13,6 +14,7 @@ const RECHECK_MS = 6 * 60 * 60 * 1000;
  * to download, install, and relaunch into the new version.
  */
 export default function UpdateButton() {
+  const { text } = useUiLocale();
   const [update, setUpdate] = useState<Update | null>(null);
   const [phase, setPhase] = useState<Phase>("idle");
   const [progress, setProgress] = useState(0);
@@ -67,17 +69,17 @@ export default function UpdateButton() {
 
   const label =
     phase === "downloading"
-      ? `Updating ${progress}%`
+      ? `${text("Updating", "更新緊")} ${progress}%`
       : phase === "error"
-        ? "Retry update"
-        : `Update to v${update.version}`;
+        ? text("Retry update", "重試更新")
+        : `${text("Update to", "更新至")} v${update.version}`;
 
   return (
     <div style={styles.wrap}>
       <button
         onClick={install}
         disabled={phase === "downloading"}
-        title={phase === "error" && message ? message : update.body?.trim() || `Install JARVIS v${update.version}`}
+        title={phase === "error" && message ? message : update.body?.trim() || `${text("Install JARVIS", "安裝 JARVIS")} v${update.version}`}
         style={{ ...styles.btn, ...(phase === "error" ? styles.errBtn : {}) }}
       >
         <span
