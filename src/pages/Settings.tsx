@@ -33,10 +33,14 @@ import {
   setPreference,
   setApiKey,
   getApiKeyStatus,
+  getStorageUsage,
+  runStorageSweep,
+  purgeStorage,
+  setRetentionPolicy,
 } from "../lib/commands";
 import { listen } from "@tauri-apps/api/event";
 import { invoke } from "@tauri-apps/api/core";
-import type { VoiceSettings, WakeWordStatus, VoiceState, LocalEndpoint, LocalModel, ProviderChainEntry, EndpointHealth } from "../lib/types";
+import type { VoiceSettings, WakeWordStatus, VoiceState, LocalEndpoint, LocalModel, ProviderChainEntry, EndpointHealth, StorageUsage, StorageScope } from "../lib/types";
 import { GOOGLE_ALREADY_CONNECTED } from "../lib/types";
 import { useVoiceState } from "../hooks/useVoiceState";
 import { useUiLocale } from "../i18n";
@@ -45,7 +49,7 @@ import { connectionsChanged } from "../lib/connections";
 import LocalAiSetup from "../components/LocalAiSetup";
 import { useWorkspace, useWorkspaceValue } from "../workspace/WorkspaceContext";
 import "./settings-workspace.css";
-import { Cpu, Key, Globe, Gem, Mic, Bot, Palette, GithubMark, NotionMark } from "../components/icons";
+import { Cpu, Key, Globe, Gem, Mic, Bot, Palette, HardDrive, GithubMark, NotionMark } from "../components/icons";
 
 const API_KEY_PROVIDERS = [
   { id: "gemini", label: "Google Gemini", help: "Gemini chat and speech-to-text" },
@@ -168,6 +172,12 @@ export default function Settings() {
   const [llmError, setLlmError] = useState<string | null>(null);
   const [section, setSection] = useWorkspaceValue<string>("section", "ai");
 
+  // Storage state
+  const [storage, setStorage] = useState<StorageUsage | null>(null);
+  const [storageBusy, setStorageBusy] = useState("");
+  const [storageNotice, setStorageNotice] = useState("");
+  const [storageError, setStorageError] = useState("");
+
   async function refreshSettings() {
     setLoadError(false);
     try {
@@ -197,6 +207,68 @@ export default function Settings() {
     listLocalEndpoints().then(setEndpoints).catch(() => {});
     getProviderChain().then(setChain).catch(() => {});
   }, []);
+
+  // Reading the storage report walks the models and cache directories, so it is
+  // deferred until the panel is actually opened rather than run on every mount.
+  useEffect(() => {
+    if (section !== "storage" || storage) return;
+    void refreshStorage();
+  }, [section]);
+
+  async function refreshStorage() {
+    try {
+      setStorage(await getStorageUsage());
+      setStorageError("");
+    } catch (reason) {
+      setStorageError(text("Could not read local storage usage.", "未能讀取本機儲存用量。"));
+      void reason;
+    }
+  }
+
+  async function runStorageAction(label: string, action: () => Promise<string>) {
+    if (storageBusy) return;
+    setStorageBusy(label); setStorageError(""); setStorageNotice("");
+    try {
+      setStorageNotice(await action());
+      await refreshStorage();
+    } catch (reason) {
+      setStorageError(reason instanceof Error ? reason.message : String(reason));
+    } finally {
+      setStorageBusy("");
+    }
+  }
+
+  function handleSweep() {
+    void runStorageAction(text("Sweeping", "正在清理"), async () => {
+      const report = await runStorageSweep();
+      const rows = report.mailBodiesCleared + report.conversationsDeleted
+        + report.emailsDeleted + report.metricsDeleted + report.briefingsDeleted;
+      return rows === 0
+        ? text("Nothing was old enough to remove.", "沒有超過保留期限的資料。")
+        : text(
+            `Removed ${rows} item(s): ${report.mailBodiesCleared} mail bodies, ${report.conversationsDeleted} chat turns, ${report.emailsDeleted} cached emails.`,
+            `已清理 ${rows} 項：郵件內文 ${report.mailBodiesCleared}、對話記錄 ${report.conversationsDeleted}、快取郵件 ${report.emailsDeleted}。`,
+          );
+    });
+  }
+
+  function handlePurge(scope: StorageScope, label: string) {
+    void runStorageAction(label, async () => {
+      const freed = await purgeStorage(scope);
+      return scope === "conversations"
+        ? text(`Deleted ${freed} chat turn(s).`, `已刪除 ${freed} 項對話記錄。`)
+        : text(`Freed ${formatBytes(freed)}.`, `已釋放 ${formatBytes(freed)}。`);
+    });
+  }
+
+  function handleRetentionChange(days: number, enabled: boolean) {
+    void runStorageAction(text("Saving", "正在儲存"), async () => {
+      await setRetentionPolicy(days, enabled);
+      return enabled
+        ? text(`Retention set to ${days} days.`, `保留期限已設為 ${days} 日。`)
+        : text("Retention switched off. JARVIS will keep everything.", "已關閉自動清理，JARVIS 會保留所有資料。");
+    });
+  }
 
   useEffect(() => {
     getWallpaperStatus().then(setWallpaperActive).catch(() => {});
@@ -561,6 +633,7 @@ export default function Settings() {
     { id: "voice", label: text("Voice", "語音"), Icon: () => <Mic size={17} /> },
     { id: "assistant", label: t("navAssistant"), Icon: () => <Bot size={17} /> },
     { id: "appearance", label: text("Appearance", "外觀"), Icon: () => <Palette size={17} /> },
+    { id: "storage", label: text("Storage", "儲存空間"), Icon: () => <HardDrive size={17} /> },
   ];
 
   return (
@@ -1047,9 +1120,137 @@ export default function Settings() {
           </div>
         </>)}
 
+        {section === "storage" && (<>
+          <div className="settings-panel">
+            <h2 className="settings-heading">{text('On this Mac', '本機用量')}</h2>
+            <p style={styles.hint}>
+              {text(
+                "Everything JARVIS stores stays on this Mac. Nothing here is synced or sent anywhere.",
+                "JARVIS 的所有資料都只保存在本機，不會同步或上載至任何地方。",
+              )}
+            </p>
+            {!storage && !storageError && <div style={styles.statusText}>{text("Reading…", "正在讀取…")}</div>}
+            {storage && (<>
+              <div style={styles.storageTotal}>{formatBytes(storage.totalBytes)}</div>
+              <dl style={styles.storageList}>
+                {([
+                  ["database", text('Database', '資料庫'), storage.databaseBytes + storage.walBytes],
+                  ["models", text('Voice and AI models', '語音及 AI 模型'), storage.modelsBytes],
+                  ["cache", text('Web cache', '網頁快取'), storage.cacheBytes],
+                  ["backups", text('Old backups', '舊備份'), storage.backupsBytes],
+                ] as const).map(([key, label, bytes]) => (
+                  <div key={key} style={styles.storageRow}>
+                    <dt style={styles.storageLabel}>{label}</dt>
+                    <dd style={styles.storageValue}>{formatBytes(bytes)}</dd>
+                  </div>
+                ))}
+              </dl>
+              <div style={styles.hint}>
+                {text(
+                  `${storage.mailMessageCount} mail message(s) holding ${formatBytes(storage.mailBodyBytes)} of message text, and ${storage.conversationCount} chat turn(s).`,
+                  `已儲存 ${storage.mailMessageCount} 封郵件，內文共 ${formatBytes(storage.mailBodyBytes)}；對話記錄 ${storage.conversationCount} 項。`,
+                )}
+              </div>
+              <div style={styles.privacyText}>{storage.dataDir}</div>
+            </>)}
+            {storageError && <p role="alert" style={styles.errorText}>{storageError}</p>}
+            {storageNotice && <p style={styles.statusText}>{storageNotice}</p>}
+          </div>
+
+          <div className="settings-panel">
+            <h2 className="settings-heading">{text('Automatic clean-up', '自動清理')}</h2>
+            <p style={styles.hint}>
+              {text(
+                "JARVIS keeps walking backwards through your mailbox, so without a limit the database only grows. Old message text is dropped while the subject, sender and preview stay; anything you filed into a mail group is never touched.",
+                "JARVIS 會持續向前同步較舊的郵件，若不設限，資料庫只會不斷增大。超過期限的郵件只會移除內文，主旨、寄件人及預覽會保留；已歸入郵件群組的郵件不會被清理。",
+              )}
+            </p>
+            <label style={styles.option}>
+              <input type="checkbox" style={styles.radio}
+                checked={storage?.retentionEnabled ?? true}
+                disabled={!storage || !!storageBusy}
+                onChange={(e) => handleRetentionChange(storage?.retentionDays ?? 90, e.target.checked)} />
+              <span style={styles.optionLabel}>{text('Remove content older than', '自動移除超過此期限的內容')}</span>
+            </label>
+            <label style={{ display: "block", marginTop: 4 }}>
+              <span style={{ display: "block", color: "var(--text-secondary)", fontSize: 12, marginBottom: 4 }}>
+                {text('Retention window', '保留期限')}
+              </span>
+              <select style={styles.select}
+                aria-label={text('Retention window', '保留期限')}
+                value={String(storage?.retentionDays ?? 90)}
+                disabled={!storage || !storage.retentionEnabled || !!storageBusy}
+                onChange={(e) => handleRetentionChange(Number(e.target.value), true)}>
+                <option value="30">{text('30 days', '30 日')}</option>
+                <option value="90">{text('90 days', '90 日')}</option>
+                <option value="180">{text('180 days', '180 日')}</option>
+                <option value="365">{text('1 year', '1 年')}</option>
+              </select>
+            </label>
+            <div style={{ marginTop: 14 }}>
+              <button style={styles.actionBtn} disabled={!storage || !!storageBusy} onClick={handleSweep}>
+                {storageBusy || text('Clean up now', '立即清理')}
+              </button>
+            </div>
+          </div>
+
+          <div className="settings-panel">
+            <h2 className="settings-heading">{text('Free up space', '釋放空間')}</h2>
+            <p style={styles.hint}>
+              {text(
+                "Each of these is safe to remove. Models and caches are re-downloaded or rebuilt when they are next needed.",
+                "以下項目均可安全移除。模型及快取會在下次需要時重新下載或重建。",
+              )}
+            </p>
+            {([
+              { scope: "cache", label: text('Clear web cache', '清除網頁快取'),
+                help: text('Rebuilt automatically.', '會自動重建。'), bytes: storage?.cacheBytes },
+              { scope: "backups", label: text('Delete old backups', '刪除舊備份'),
+                help: text('Copies left behind by earlier versions.', '舊版本遺留的備份副本。'), bytes: storage?.backupsBytes },
+              { scope: "models", label: text('Delete downloaded models', '刪除已下載的模型'),
+                help: text('Offline speech and voice models. Re-downloaded on demand.', '離線語音及聲音模型，需要時會重新下載。'), bytes: storage?.modelsBytes },
+              { scope: "mailBodies", label: text('Drop stored mail text', '移除已儲存的郵件內文'),
+                help: text('Keeps subjects and previews. Grouped mail is kept in full.', '保留主旨及預覽；已分組的郵件會完整保留。'), bytes: storage?.mailBodyBytes },
+            ] as const).map((item) => (
+              <div key={item.scope} style={styles.storagePurgeRow}>
+                <div>
+                  <div style={styles.optionLabel}>{item.label}</div>
+                  <div style={styles.privacyText}>{item.help}</div>
+                </div>
+                <button style={styles.saveBtn} disabled={!storage || !!storageBusy || !item.bytes}
+                  onClick={() => handlePurge(item.scope as StorageScope, item.label)}>
+                  {item.bytes ? formatBytes(item.bytes) : text('Empty', '沒有資料')}
+                </button>
+              </div>
+            ))}
+            <div style={styles.storagePurgeRow}>
+              <div>
+                <div style={styles.optionLabel}>{text('Delete all chat history', '刪除所有對話記錄')}</div>
+                <div style={styles.privacyText}>{text('Cannot be undone.', '此操作無法復原。')}</div>
+              </div>
+              <button style={styles.saveBtn} disabled={!storage || !!storageBusy || !storage?.conversationCount}
+                onClick={() => handlePurge("conversations", text('Delete all chat history', '刪除所有對話記錄'))}>
+                {storage?.conversationCount
+                  ? text(`${storage.conversationCount} turns`, `${storage.conversationCount} 項`)
+                  : text('Empty', '沒有資料')}
+              </button>
+            </div>
+          </div>
+        </>)}
+
       </div>
     </div>
   );
+}
+
+/// Decimal units, matching what Finder reports, so a user comparing the panel
+/// against Get Info sees the same number.
+function formatBytes(bytes: number): string {
+  if (!Number.isFinite(bytes) || bytes <= 0) return "0 MB";
+  const units = ["B", "KB", "MB", "GB", "TB"];
+  const index = Math.min(Math.floor(Math.log10(bytes) / 3), units.length - 1);
+  const value = bytes / 1000 ** index;
+  return `${value >= 100 || index === 0 ? Math.round(value) : value.toFixed(1)} ${units[index]}`;
 }
 
 const styles: Record<string, React.CSSProperties> = {
@@ -1066,4 +1267,10 @@ const styles: Record<string, React.CSSProperties> = {
   progressFill: { height: "100%", background: "var(--cyan)", transition: "width 180ms ease-out" },
   privacyText: { color: "var(--text-secondary)", fontSize: 13, marginTop: 12, lineHeight: 1.6, maxWidth: "72ch" },
   errorText: { color: "var(--accent-urgent)", fontSize: 13, marginTop: 12, lineHeight: 1.5 },
+  storageTotal: { color: "var(--text-primary)", fontSize: 28, lineHeight: 1.2, marginBottom: 14, fontVariantNumeric: "tabular-nums" },
+  storageList: { margin: 0, display: "flex", flexDirection: "column", gap: 8 },
+  storageRow: { display: "flex", alignItems: "baseline", justifyContent: "space-between", gap: 16 },
+  storageLabel: { color: "var(--text-secondary)", fontSize: 13, margin: 0 },
+  storageValue: { color: "var(--text-primary)", fontSize: 13, margin: 0, fontVariantNumeric: "tabular-nums" },
+  storagePurgeRow: { display: "flex", alignItems: "center", justifyContent: "space-between", gap: 16, paddingTop: 12, marginTop: 12, borderTop: "1px solid var(--border-primary)" },
 };

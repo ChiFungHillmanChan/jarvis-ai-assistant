@@ -330,6 +330,33 @@ export interface AwsCredsStatus {
   region: string | null;
 }
 
+/// Matches StorageUsage in src-tauri/src/commands/storage.rs. Byte counts are
+/// what is on disk now; the counts below them are what the retention sweep acts on.
+export interface StorageUsage {
+  databaseBytes: number;
+  walBytes: number;
+  modelsBytes: number;
+  cacheBytes: number;
+  backupsBytes: number;
+  totalBytes: number;
+  mailMessageCount: number;
+  mailBodyBytes: number;
+  conversationCount: number;
+  retentionDays: number;
+  retentionEnabled: boolean;
+  dataDir: string;
+}
+
+export interface SweepReport {
+  mailBodiesCleared: number;
+  conversationsDeleted: number;
+  emailsDeleted: number;
+  metricsDeleted: number;
+  briefingsDeleted: number;
+}
+
+export type StorageScope = "cache" | "backups" | "models" | "mailBodies" | "conversations";
+
 // google_connect and google_disconnect both return a plain status string. This
 // is the one value the UI has to recognise: google_connect returns it verbatim
 // when an account is already linked and the caller did not ask to switch, so it

@@ -93,6 +93,10 @@ fn macos_version() -> Option<String> {
     String::from_utf8(output.stdout).ok().map(|s| s.trim().to_string())
 }
 
+/// Ollama's own floor: its download page states "Requires macOS 14 Sonoma or
+/// later". This is deliberately stricter than the app's own
+/// `minimumSystemVersion` of 12.0 -- JARVIS runs on 12 and 13 with a cloud
+/// provider key, it just cannot drive a local model there.
 fn supported_macos(version: Option<&str>) -> bool {
     version.and_then(|v| v.split('.').next())
         .and_then(|major| major.parse::<u32>().ok()).is_some_and(|major| major >= 14)

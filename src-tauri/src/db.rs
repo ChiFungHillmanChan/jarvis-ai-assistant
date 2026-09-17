@@ -7,6 +7,16 @@ mod embedded {
     embed_migrations!("migrations");
 }
 
+/// WAL mode with no ceiling lets `jarvis.db-wal` outgrow the database itself --
+/// it was already 4 MB against a 768 KB database on the author's machine, and
+/// JARVIS is a login-item process that stays open for days. `journal_size_limit`
+/// truncates the WAL back down after each checkpoint; `wal_autocheckpoint` keeps
+/// those checkpoints frequent enough that the limit is actually reached.
+pub const CONNECTION_PRAGMAS: &str = "PRAGMA journal_mode=WAL; \
+     PRAGMA foreign_keys=ON; \
+     PRAGMA journal_size_limit=67108864; \
+     PRAGMA wal_autocheckpoint=1000;";
+
 pub struct Database {
     pub conn: Mutex<Connection>,
 }
@@ -24,8 +34,7 @@ pub(crate) fn test_database() -> Database {
 #[cfg(test)]
 pub(crate) fn test_database_at(path: &std::path::Path) -> Database {
     let mut conn = Connection::open(path).unwrap();
-    conn.execute_batch("PRAGMA journal_mode=WAL; PRAGMA foreign_keys=ON;")
-        .unwrap();
+    conn.execute_batch(CONNECTION_PRAGMAS).unwrap();
     embedded::migrations::runner().run(&mut conn).unwrap();
     Database {
         conn: Mutex::new(conn),
@@ -53,7 +62,7 @@ impl Database {
             std::fs::create_dir_all(parent)?;
         }
         let mut conn = Connection::open(&db_path)?;
-        conn.execute_batch("PRAGMA journal_mode=WAL; PRAGMA foreign_keys=ON;")?;
+        conn.execute_batch(CONNECTION_PRAGMAS)?;
         embedded::migrations::runner().run(&mut conn)?;
         #[cfg(feature = "native-qa")]
         crate::native_qa::seed_once(&mut conn)?;

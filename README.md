@@ -265,22 +265,19 @@ Full detailed roadmap: [`docs/business/BUSINESS_ROADMAP.md`](docs/business/BUSIN
 
 ## Getting Started
 
-### Prerequisites
-
-- Requires macOS 12 or later on Apple Silicon (uses native APIs: `say`, `mdfind`, `open`,
-  accessibility)
-- Xcode Command Line Tools -- `xcode-select --install`
-- [Rust](https://rustup.rs/) 1.70+
-- [Node.js](https://nodejs.org/) 18+
-- [cmake](https://cmake.org/) -- `brew install cmake` (required for whisper-rs)
-
 ### Install
 
-```bash
-git clone https://github.com/ChiFungHillmanChan/jarvis-ai-assistant.git
-cd jarvis-ai-assistant
-npm install
-```
+Download the signed, notarized build. This is the supported way to install JARVIS and takes
+one click:
+
+**[jarvis-automation.com/download](https://jarvis-automation.com/download)**
+
+Open the DMG, drag JARVIS into Applications, and launch it. There is no `.env` to create and
+no toolchain to install -- the Google sign-in credentials are compiled into the release build.
+
+- Requires macOS 12 or later on Apple Silicon. Local AI additionally needs macOS 14, because
+  Ollama does.
+- The app is about 30 MB installed. See [Local storage](#local-storage) for what it keeps.
 
 ### Configure
 
@@ -292,8 +289,71 @@ file, and you should not go looking for one -- a packaged `.app` has no project 
 keys also work, and JARVIS falls back between whichever you provide; Amazon Bedrock and a
 local Ollama endpoint can also be added and reordered into the fallback chain in Settings.
 
-**If you are building from source,** a `.env` at the repo root is read at startup and takes
-precedence over the Keychain, which is convenient for development:
+### Using a free local model instead
+
+JARVIS can run against a local model with no API key and no data leaving the Mac. Settings ->
+Models -> Local AI checks your memory and free disk, starts Ollama if it is installed, and
+pulls a Qwen model sized to the machine:
+
+| Memory | Model pulled | Download |
+|--------|--------------|----------|
+| 8 GB   | `qwen3.5:2b` | ~2.7 GB  |
+| 16 GB  | `qwen3.5:4b` | ~3.4 GB  |
+| 24 GB+ | `qwen3.5:9b` | ~6.6 GB  |
+
+Install [Ollama](https://ollama.com/download/mac) first -- JARVIS starts it for you but cannot
+install it. vLLM and any OpenAI-compatible endpoint can be added in the same panel.
+
+> Ollama requires macOS 14 or later. On macOS 12 and 13, use a provider API key instead.
+
+---
+
+## Local storage
+
+Everything JARVIS stores stays on the device. **Settings -> Storage** shows the live total,
+broken down by database, models, web cache and old backups, and can reclaim any of them.
+
+A fresh install uses roughly 30 MB for the app and under 5 MB of data. What grows:
+
+| What | Size | Bounded by |
+|------|------|------------|
+| `jarvis.db` + WAL | grows with mail and chat | 90-day retention, WAL capped at 64 MB |
+| Offline speech model | 148 MB | downloaded only if you enable offline speech |
+| Offline voice model | 1.26 GB | downloaded only if you enable offline voice |
+| Ollama models | 2.7-6.6 GB | pulled only if you set up local AI, and stored by Ollama |
+| Web cache | tens of MB | clearable in Settings -> Storage |
+
+Retention defaults to 90 days and runs at startup. It drops the stored text of old mail while
+keeping the subject, sender and preview, and never touches a message you filed into a mail
+group. Turn it off or change the window in Settings -> Storage.
+
+---
+
+## Building from source
+
+Only needed to develop JARVIS. To use it, [download the app](#install).
+
+### Prerequisites
+
+- macOS 12 or later on Apple Silicon (uses native APIs: `say`, `mdfind`, `open`, accessibility)
+- Xcode Command Line Tools -- `xcode-select --install`
+- [Rust](https://rustup.rs/) 1.70+
+- [Node.js](https://nodejs.org/) 18+
+- [cmake](https://cmake.org/) -- `brew install cmake` (required for whisper-rs)
+
+```bash
+git clone https://github.com/ChiFungHillmanChan/jarvis-ai-assistant.git
+cd jarvis-ai-assistant
+npm install
+npm run tauri dev
+```
+
+First build compiles ~530 Rust crates (several minutes). Subsequent builds are incremental.
+A debug build of this dependency tree is several GB of `src-tauri/target`; `cargo clean`
+reclaims it.
+
+A `.env` at the repo root is read at startup and takes precedence over the Keychain, which is
+convenient for development:
 
 ```env
 GEMINI_API_KEY=...               # default provider
@@ -317,15 +377,7 @@ credentials are entered in Settings and stored in the Keychain, not here.
 > **Distribution note.** JARVIS requests `gmail.modify`, a Google *restricted* scope. Until the
 > OAuth app completes verification and a CASA Tier 2 security assessment, it is capped at 100
 > new users for the lifetime of the project and users see an "unverified app" warning. Plan for
-> that lead time before any public launch.
-
-### Run
-
-```bash
-npm run tauri dev
-```
-
-First build compiles ~530 Rust crates (several minutes). Subsequent builds are incremental.
+> that lead time before any public launch. This is why the beta is invite-based.
 
 ---
 
@@ -351,15 +403,10 @@ Full holographic theme, pure CSS -- no UI component library.
 
 ---
 
-## Local Whisper Model (Optional)
+## Offline speech (optional)
 
-For offline speech-to-text fallback:
-
-```bash
-mkdir -p ~/Library/Application\ Support/jarvis/models
-curl -L https://huggingface.co/ggerganov/whisper.cpp/resolve/main/ggml-base.bin \
-  -o ~/Library/Application\ Support/jarvis/models/ggml-base.bin
-```
+Settings -> Voice -> "Download offline model" fetches `ggml-base.bin` (148 MB) with a progress
+bar and verifies its SHA-256 before use. There is nothing to download by hand.
 
 ---
 

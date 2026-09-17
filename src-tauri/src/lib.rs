@@ -75,6 +75,11 @@ pub fn run() {
             // Best effort: an unavailable Keychain must not block startup.
             integration_keys::migrate_plaintext_to_keychain(&db);
 
+            // Bound what JARVIS keeps on disk before anything else starts
+            // writing to it. Mail sync walks backwards through the mailbox
+            // across restarts, so without this the database only ever grows.
+            commands::storage::sweep_on_startup(&db);
+
             let ai_provider = {
                 let conn = db.conn.lock().unwrap();
                 conn.query_row("SELECT value FROM user_preferences WHERE key = 'ai_provider'", [], |row| row.get::<_, String>(0))
@@ -543,6 +548,10 @@ pub fn run() {
             commands::scheduler::trigger_daily_briefing,
             commands::voice_setup::enable_offline_voice,
             commands::voice_setup::check_cosyvoice_binary,
+            commands::storage::get_storage_usage,
+            commands::storage::run_storage_sweep,
+            commands::storage::purge_storage,
+            commands::storage::set_retention_policy,
         ])
         .run(tauri::generate_context!())
         .expect("error while running JARVIS");

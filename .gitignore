@@ -4,7 +4,9 @@ src-tauri/target/
 src-tauri/gen/
 .superpowers/
 superpowers/
-scripts/
+# scripts/ used to be ignored wholesale, which left release.sh -- the entire
+# sign, notarize, upload and publish pipeline -- untracked and unrecoverable.
+# It reads secrets from .env rather than containing any, so it belongs in git.
 docs/*
 !docs/screenshots/
 # 收錄產品研究及連接指引；其他本機文件沿用原有忽略規則。

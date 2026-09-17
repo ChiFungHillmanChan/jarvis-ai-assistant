@@ -39,7 +39,7 @@ export function setupError(code: string | null, text: (en: string, zh: string) =
     case 'ollama_not_installed': return text('Install Ollama from its official site, then return and retry.', '請先從官方網站安裝 Ollama，然後返回此頁重試。');
     case 'insufficient_disk_or_unknown': return text('There is not enough free disk space, or it could not be checked. Free some space and retry.', '磁碟空間不足或未能完成檢查。請騰出空間後重試。');
     case 'insufficient_ram': return text('This model needs more memory. Choose a smaller model.', '此模型需要更多記憶體，請選擇較小的模型。');
-    case 'unsupported_os': case 'unsupported_os_version': return text('This setup requires macOS 14 or newer.', '此設定流程需要 macOS 14 或更新版本。');
+    case 'unsupported_os': case 'unsupported_os_version': return text('Local AI needs macOS 14 or newer, because Ollama does. JARVIS itself runs on macOS 12 and later -- add a provider API key in Settings to keep using it.', '本機 AI 需要 macOS 14 或更新版本，因為 Ollama 有此要求。JARVIS 本身支援 macOS 12 或以上；請在設定中加入供應商 API 密鑰繼續使用。');
     case 'setup_busy': case 'pull_busy': return text('Another setup or download is running. Wait for it to finish.', '另一項設定或下載仍在進行中，請等待完成。');
     case 'credential_unavailable': return text('Saved credentials could not be read. Check Keychain access and retry; do not replace the key just because of this error.', '未能讀取已儲存的憑證。請檢查鑰匙圈存取權限後重試；無須因此重新申請密鑰。');
     case 'credential_missing': case 'missing_credentials': case 'missing_key': return text('Save the credentials for the selected provider, then test again.', '請先儲存所選供應商的憑證，再進行測試。');

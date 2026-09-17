@@ -18,6 +18,7 @@ pub mod onboarding;
 pub mod payments;
 pub mod scheduler;
 pub mod settings;
+pub mod storage;
 pub mod system;
 pub mod system_check;
 pub mod tasks;
