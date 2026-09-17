@@ -18,6 +18,9 @@ docs/product/*
 !docs/product/2026-09-12-cantonese-copybook.md
 !docs/product/2026-09-12-service-connections.md
 !docs/product/2026-09-12-connections-verification.md
+# Source of the PDF handed to beta testers; the PDF itself is published from the
+# website repo's public/ directory.
+!docs/product/2026-09-17-user-guide.html
 !docs/superpowers/
 docs/superpowers/*
 !docs/superpowers/plans/

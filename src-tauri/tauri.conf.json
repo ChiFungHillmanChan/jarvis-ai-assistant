@@ -1,6 +1,6 @@
 {
   "productName": "JARVIS",
-  "version": "0.3.0",
+  "version": "0.4.0",
   "identifier": "com.jarvis.app",
   "build": {
     "frontendDist": "../dist",

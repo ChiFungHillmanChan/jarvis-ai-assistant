@@ -1,0 +1,393 @@
+<!DOCTYPE html>
+<html lang="zh-HK">
+<head>
+<meta charset="utf-8">
+<title>JARVIS 使用指南</title>
+<style>
+  @page { size: A4; margin: 16mm 15mm 18mm; }
+
+  :root {
+    --ink: #10151f;
+    --muted: #5a6474;
+    --line: #d8dee8;
+    --cyan: #00629a;
+    --cyan-soft: #eaf4fb;
+    --panel: #f6f8fb;
+  }
+
+  * { box-sizing: border-box; }
+
+  html { font-size: 10.5pt; }
+
+  body {
+    margin: 0;
+    color: var(--ink);
+    font-family: "Helvetica Neue", "PingFang HK", "Hiragino Sans CNS", sans-serif;
+    line-height: 1.68;
+    -webkit-font-smoothing: antialiased;
+  }
+
+  code, .mono { font-family: "SF Mono", "JetBrains Mono", Menlo, monospace; font-size: 0.88em; }
+
+  /* ---------- cover ---------- */
+  .cover { page-break-after: always; padding-top: 34mm; }
+  .cover img.mark { width: 74px; height: 74px; border-radius: 17px; display: block; }
+  .cover h1 { font-size: 34pt; line-height: 1.1; margin: 22px 0 6px; letter-spacing: -0.5px; }
+  .cover .sub { font-size: 13pt; color: var(--muted); margin: 0 0 30px; }
+  .cover .ver {
+    display: inline-block; border: 1px solid var(--line); border-radius: 999px;
+    padding: 4px 13px; font-size: 9pt; color: var(--muted);
+  }
+  .cover .shot {
+    width: 100%; margin-top: 26px; border: 1px solid var(--line);
+    border-radius: 9px; display: block;
+  }
+  .cover .foot { margin-top: 24px; font-size: 9pt; color: var(--muted); }
+
+  /* ---------- contents ---------- */
+  .toc { page-break-after: always; }
+  .toc ol { list-style: none; counter-reset: toc; padding: 0; margin: 0; }
+  .toc li {
+    counter-increment: toc; display: flex; gap: 12px; align-items: baseline;
+    padding: 9px 0; border-bottom: 1px solid var(--line);
+  }
+  .toc li::before {
+    content: counter(toc); color: var(--cyan); font-weight: 600;
+    min-width: 22px; font-variant-numeric: tabular-nums;
+  }
+  .toc .t { font-weight: 600; }
+  .toc .d { color: var(--muted); font-size: 9.5pt; }
+
+  /* ---------- structure ---------- */
+  section { page-break-inside: auto; }
+  h2 {
+    font-size: 17pt; margin: 0 0 4px; padding-top: 4px;
+    page-break-after: avoid; letter-spacing: -0.2px;
+  }
+  h2 .num { color: var(--cyan); margin-right: 9px; font-variant-numeric: tabular-nums; }
+  h2 + .lede { color: var(--muted); margin: 0 0 16px; page-break-after: avoid; }
+  h3 {
+    font-size: 11.5pt; margin: 20px 0 7px; page-break-after: avoid;
+    border-left: 3px solid var(--cyan); padding-left: 9px;
+  }
+  p { margin: 0 0 10px; }
+  ul, ol { margin: 0 0 12px; padding-left: 20px; }
+  li { margin-bottom: 5px; }
+  hr.rule { border: 0; border-top: 1px solid var(--line); margin: 26px 0 20px; }
+
+  /* ---------- components ---------- */
+  .steps { list-style: none; padding: 0; counter-reset: step; }
+  .steps > li {
+    counter-increment: step; position: relative;
+    padding: 0 0 14px 34px; margin: 0; page-break-inside: avoid;
+  }
+  .steps > li::before {
+    content: counter(step); position: absolute; left: 0; top: 1px;
+    width: 22px; height: 22px; border-radius: 50%;
+    background: var(--cyan); color: #fff; font-size: 9pt; font-weight: 600;
+    display: flex; align-items: center; justify-content: center;
+  }
+  .steps strong { display: block; margin-bottom: 2px; }
+
+  table { width: 100%; border-collapse: collapse; margin: 0 0 14px; font-size: 9.5pt; page-break-inside: avoid; }
+  th, td { text-align: left; padding: 7px 10px; border-bottom: 1px solid var(--line); vertical-align: top; }
+  th { background: var(--panel); font-weight: 600; font-size: 9pt; }
+  td.num, th.num { text-align: right; font-variant-numeric: tabular-nums; white-space: nowrap; }
+
+  .note, .warn {
+    padding: 11px 14px; border-radius: 7px; margin: 0 0 14px;
+    font-size: 9.5pt; page-break-inside: avoid;
+  }
+  .note { background: var(--cyan-soft); border-left: 3px solid var(--cyan); }
+  .warn { background: #fdf3e7; border-left: 3px solid #c07a1d; }
+  .note b, .warn b { display: block; margin-bottom: 2px; }
+
+  kbd {
+    display: inline-block; border: 1px solid var(--line); border-bottom-width: 2px;
+    border-radius: 5px; padding: 1px 6px; background: #fff;
+    font-family: "SF Mono", Menlo, monospace; font-size: 0.84em; white-space: nowrap;
+  }
+  .path {
+    background: var(--panel); border: 1px solid var(--line); border-radius: 5px;
+    padding: 1px 6px; font-family: "SF Mono", Menlo, monospace; font-size: 0.84em;
+    white-space: nowrap;
+  }
+
+  .faq { page-break-inside: avoid; margin-bottom: 15px; }
+  .faq .q { font-weight: 600; margin-bottom: 3px; }
+  .faq .a { color: var(--muted); margin: 0; }
+
+  .end {
+    margin-top: 26px; padding: 16px 18px; border: 1px solid var(--line);
+    border-radius: 9px; background: var(--panel); page-break-inside: avoid;
+  }
+  .end h3 { border: 0; padding: 0; margin: 0 0 6px; font-size: 12pt; }
+  a { color: var(--cyan); text-decoration: none; }
+</style>
+</head>
+<body>
+
+<div class="cover">
+  <img class="mark" src="data:image/png;base64,__ICON__" alt="">
+  <h1>JARVIS 使用指南</h1>
+  <p class="sub">macOS 語音優先 AI 助手，將電郵轉化為行動</p>
+  <span class="ver">版本 0.4.0 &nbsp;·&nbsp; 2026 年 9 月 &nbsp;·&nbsp; Beta</span>
+  <img class="shot" src="data:image/png;base64,__SHOT__" alt="JARVIS 主畫面">
+  <p class="foot">
+    適用於 Apple Silicon Mac，macOS 12 或以上<br>
+    jarvis-automation.com
+  </p>
+</div>
+
+<div class="toc">
+  <h2>目錄</h2>
+  <ol>
+    <li><span><span class="t">安裝</span><br><span class="d">下載、開啟、首次啟動</span></span></li>
+    <li><span><span class="t">首次設定</span><br><span class="d">三步導引：AI、Gmail、第一份分析</span></span></li>
+    <li><span><span class="t">選擇 AI 供應商</span><br><span class="d">API 密鑰或免費本機模型</span></span></li>
+    <li><span><span class="t">設定免費本機模型</span><br><span class="d">Ollama 與 Qwen，無須密鑰</span></span></li>
+    <li><span><span class="t">日常操作</span><br><span class="d">快捷鍵、語音、電郵工作區、自動化</span></span></li>
+    <li><span><span class="t">儲存空間管理</span><br><span class="d">查看用量、自動清理、釋放空間</span></span></li>
+    <li><span><span class="t">私隱與資料</span><br><span class="d">資料存放位置及傳送範圍</span></span></li>
+    <li><span><span class="t">疑難排解</span><br><span class="d">常見問題及處理方法</span></span></li>
+  </ol>
+</div>
+
+<section>
+  <h2><span class="num">1</span>安裝</h2>
+  <p class="lede">整個安裝過程只需一次下載，無須建立 .env 檔案，亦無須安裝任何開發工具。</p>
+
+  <ol class="steps">
+    <li><strong>前往下載頁</strong>開啟 <a href="https://jarvis-automation.com/download">jarvis-automation.com/download</a>，按「Download for Mac」。下載檔案約 18 MB。</li>
+    <li><strong>安裝</strong>開啟下載好的 <span class="path">JARVIS_latest_aarch64.dmg</span>，將 JARVIS 圖示拖入 Applications 資料夾。</li>
+    <li><strong>首次開啟</strong>在「應用程式」中按兩下 JARVIS。此版本已通過 Apple 公證，不會出現「無法打開」的攔截訊息。</li>
+    <li><strong>授權麥克風（可選）</strong>首次使用語音功能時，macOS 會要求麥克風權限。不使用語音則可略過。</li>
+  </ol>
+
+  <div class="note">
+    <b>系統需求</b>
+    Apple Silicon Mac（M1 或更新），macOS 12 或以上。若要使用免費本機模型，需要 macOS 14 或以上，此限制來自 Ollama 而非 JARVIS。
+  </div>
+
+  <h3>安裝後佔用多少空間</h3>
+  <table>
+    <tr><th>項目</th><th class="num">大小</th><th>何時下載</th></tr>
+    <tr><td>JARVIS 應用程式</td><td class="num">約 30 MB</td><td>安裝時</td></tr>
+    <tr><td>本機資料庫</td><td class="num">少於 5 MB</td><td>首次啟動</td></tr>
+    <tr><td>離線語音辨識模型</td><td class="num">148 MB</td><td>僅在啟用離線語音辨識時</td></tr>
+    <tr><td>離線語音合成模型</td><td class="num">1.26 GB</td><td>僅在啟用離線語音合成時</td></tr>
+    <tr><td>Ollama 本機模型</td><td class="num">2.7 - 6.6 GB</td><td>僅在設定本機 AI 時</td></tr>
+  </table>
+  <p>換言之，日常使用 JARVIS 只佔用數十 MB。所有大型下載都必須由你主動啟用，不會在背景自動發生。第 6 節說明如何查看及清理。</p>
+</section>
+
+<hr class="rule">
+
+<section>
+  <h2><span class="num">2</span>首次設定</h2>
+  <p class="lede">首次開啟時會出現三步設定導引。可隨時按「稍後繼續設定」離開，之後從頂欄或電郵頁重新開啟。</p>
+
+  <h3>步驟一：設定電郵 AI</h3>
+  <p>選擇由哪個 AI 處理郵件，然後按測試。JARVIS 只有在測試通過後才會套用設定，避免在未能運作的情況下切換。可選項目包括 OpenAI、Amazon Bedrock，以及本機模型（見第 4 節）。</p>
+
+  <h3>步驟二：連接電郵工作區</h3>
+  <p>按下連接後會開啟瀏覽器進行 Google 授權。JARVIS 只要求 <span class="path">gmail.readonly</span> 唯讀權限，不能代你寄信。</p>
+  <div class="warn">
+    <b>會看到「未經驗證的應用程式」警告</b>
+    JARVIS 的 Google OAuth 驗證仍在審核中，因此測試期間會出現此警告，需要按「進階」再繼續。這亦是 Beta 名額有限的原因：Google 在完成驗證前，限制測試用戶總數為 100 名。
+  </div>
+
+  <h3>步驟三：取得第一份實用結果</h3>
+  <p>從已下載的郵件中揀選數封，建立一個群組並填寫指示（例如「整理客戶查詢並列出待辦」）。JARVIS 會產生分析，每項結論都附有來源郵件引用，可逐項核對。</p>
+
+  <div class="note">
+    <b>沒有 Gmail 也可以</b>
+    略過步驟二仍可使用聊天、語音、日程及自動化功能。電郵工作區則需要連接後才能使用。
+  </div>
+</section>
+
+<hr class="rule">
+
+<section>
+  <h2><span class="num">3</span>選擇 AI 供應商</h2>
+  <p class="lede">JARVIS 需要一個 AI 來源。你可以提供雲端供應商的 API 密鑰，或完全使用免費本機模型。</p>
+
+  <h3>使用 API 密鑰</h3>
+  <p>前往「設定 → API 密鑰」貼上密鑰，即時生效。密鑰儲存在 macOS 鑰匙圈，不會寫入資料庫，亦不會離開這部 Mac。</p>
+  <table>
+    <tr><th>供應商</th><th>說明</th></tr>
+    <tr><td>Gemini</td><td>預設供應商，一般用途使用 Flash 級別以控制成本</td></tr>
+    <tr><td>OpenAI</td><td>可作後備，亦可用於郵件分析</td></tr>
+    <tr><td>Claude</td><td>可作後備</td></tr>
+    <tr><td>Amazon Bedrock</td><td>在設定中輸入 AWS 憑證，適合較複雜的任務</td></tr>
+  </table>
+  <p>只需提供其中一個。若提供多於一個，JARVIS 會按「設定 → 模型 → 供應商優先次序」自動切換後備。</p>
+
+  <div class="note">
+    <b>API 費用由你直接支付</b>
+    JARVIS 目前不提供代管 AI 服務，費用直接來自你的供應商帳戶。「設定 → 成本」可查看實際用量。若不想付費，請使用下一節的本機模型。
+  </div>
+</section>
+
+<hr class="rule">
+
+<section>
+  <h2><span class="num">4</span>設定免費本機模型</h2>
+  <p class="lede">本機模型完全免費，無須 API 密鑰，郵件及對話內容不會離開這部 Mac。代價是需要一次過下載數 GB 模型，速度亦視乎硬件。</p>
+
+  <ol class="steps">
+    <li><strong>安裝 Ollama</strong>前往 <a href="https://ollama.com/download/mac">ollama.com/download/mac</a> 下載並拖入「應用程式」。JARVIS 可以代你啟動 Ollama，但不能代你安裝。</li>
+    <li><strong>開啟本機 AI 設定</strong>在 JARVIS 中前往「設定 → 模型 → 本機模型端點」。JARVIS 會自動檢查 macOS 版本、記憶體及可用磁碟空間。</li>
+    <li><strong>選擇模型</strong>JARVIS 會按記憶體推薦合適的 Qwen 模型。按下下載後會顯示進度，可隨時取消。</li>
+    <li><strong>加入優先次序</strong>下載完成並通過測試後，將本機端點加入供應商優先次序即可使用。</li>
+  </ol>
+
+  <h3>推薦模型</h3>
+  <table>
+    <tr><th>Mac 記憶體</th><th>推薦模型</th><th class="num">下載大小</th><th class="num">建議預留磁碟</th></tr>
+    <tr><td>8 GB</td><td class="mono">qwen3.5:2b</td><td class="num">約 2.7 GB</td><td class="num">8 GB</td></tr>
+    <tr><td>16 GB</td><td class="mono">qwen3.5:4b</td><td class="num">約 3.4 GB</td><td class="num">10 GB</td></tr>
+    <tr><td>24 GB 或以上</td><td class="mono">qwen3.5:9b</td><td class="num">約 6.6 GB</td><td class="num">15 GB</td></tr>
+  </table>
+  <p>Qwen 系列對繁體中文及廣東話的處理明顯優於同等大小的其他模型。同一畫面亦可連接 vLLM 或任何 OpenAI 相容的端點。</p>
+
+  <div class="warn">
+    <b>本機模型不會自動轉交雲端</b>
+    郵件分析使用本機模型時，若本機模型失敗，JARVIS 不會把郵件內容改送雲端，而是顯示錯誤。助手聊天的後備機制是另一套設定，會在設定中清楚標示。
+  </div>
+
+  <div class="note">
+    <b>模型檔案由 Ollama 保管</b>
+    模型儲存在 <span class="path">~/.ollama</span>，不在 JARVIS 的資料夾內，因此不會出現在 JARVIS 的儲存空間統計中。移除模型請使用 Ollama，或執行 <span class="mono">ollama rm qwen3.5:4b</span>。
+  </div>
+</section>
+
+<hr class="rule">
+
+<section>
+  <h2><span class="num">5</span>日常操作</h2>
+
+  <h3>快捷鍵</h3>
+  <table>
+    <tr><th>操作</th><th>快捷鍵</th></tr>
+    <tr><td>開啟聊天</td><td><kbd>Cmd</kbd> + <kbd>K</kbd></td></tr>
+    <tr><td>關閉聊天</td><td><kbd>Esc</kbd></td></tr>
+    <tr><td>按住說話</td><td><kbd>Cmd</kbd> + <kbd>Shift</kbd> + <kbd>J</kbd></td></tr>
+    <tr><td>顯示或隱藏桌面背景模式</td><td><kbd>Cmd</kbd> + <kbd>Shift</kbd> + <kbd>W</kbd></td></tr>
+  </table>
+  <p>亦可說出「Hey Jarvis」喚醒，或按選單列圖示選擇 Show JARVIS。</p>
+
+  <h3>電郵工作區</h3>
+  <p>將相關郵件歸入群組並填寫指示，JARVIS 會產生附來源引用的分析。群組指示可隨時修改後重新分析。歸入群組的郵件會完整保留，不會被自動清理處理。</p>
+
+  <h3>草擬回覆</h3>
+  <p>JARVIS 只會建立 Gmail 草稿，永遠不會代你寄出。所有草稿都要你在 Gmail 中檢視後才發送。</p>
+
+  <h3>自動化</h3>
+  <p>「自動化」頁可建立定時工作，例如每日早上整理收件匣或產生每日簡報。每次執行的結果都有紀錄可供檢視。</p>
+
+  <h3>桌面背景模式</h3>
+  <p>「設定 → 外觀 → 桌面背景」可將 JARVIS 顯示為動態桌面背景，介面會在其他視窗後方。按 <kbd>Cmd</kbd> + <kbd>Shift</kbd> + <kbd>W</kbd> 重新取得操作焦點。</p>
+</section>
+
+<hr class="rule">
+
+<section>
+  <h2><span class="num">6</span>儲存空間管理</h2>
+  <p class="lede">JARVIS 會持續向前同步較舊的郵件，因此本機資料庫會隨時間增大。0.4.0 起提供完整的查看及清理工具。</p>
+
+  <h3>查看用量</h3>
+  <p>前往「設定 → 儲存空間」。畫面會顯示總用量，並分為資料庫、語音及 AI 模型、網頁快取、舊備份四項，同時列出已儲存的郵件數目及對話記錄數目。</p>
+
+  <h3>自動清理</h3>
+  <p>預設保留 90 日，於每次啟動時執行。可在同一畫面改為 30 日、180 日、1 年，或完全關閉。清理規則如下：</p>
+  <ul>
+    <li>超過期限的郵件<strong>只會移除內文</strong>，主旨、寄件人及預覽會保留，郵件列表及引用仍然可用。</li>
+    <li>已歸入郵件群組的郵件<strong>永不清理</strong>，因為歸入群組代表你明確要求保留。</li>
+    <li>超過期限的對話記錄、快取郵件、用量統計及每日簡報會被刪除。</li>
+  </ul>
+
+  <h3>手動釋放空間</h3>
+  <table>
+    <tr><th>項目</th><th>影響</th></tr>
+    <tr><td>清除網頁快取</td><td>安全，會自動重建</td></tr>
+    <tr><td>刪除舊備份</td><td>安全，舊版本遺留的副本</td></tr>
+    <tr><td>刪除已下載的模型</td><td>安全，需要時會重新下載</td></tr>
+    <tr><td>移除已儲存的郵件內文</td><td>保留主旨及預覽，已分組郵件完整保留</td></tr>
+    <tr><td>刪除所有對話記錄</td><td>無法復原</td></tr>
+  </table>
+
+  <div class="note">
+    <b>資料庫位置</b>
+    <span class="path">~/Library/Application Support/jarvis/</span> — 儲存空間畫面底部會顯示實際路徑。
+  </div>
+</section>
+
+<hr class="rule">
+
+<section>
+  <h2><span class="num">7</span>私隱與資料</h2>
+
+  <h3>保存在本機的資料</h3>
+  <p>對話、工作、郵件副本及同步內容全部存放在這部 Mac 的 SQLite 資料庫。JARVIS 沒有伺服器，亦沒有雲端同步。</p>
+
+  <h3>憑證</h3>
+  <p>所有 API 密鑰、Google 更新權杖、GitHub 及 Notion 憑證均存放在 macOS 鑰匙圈，不會以純文字寫入資料庫。</p>
+
+  <h3>會傳送到外部的內容</h3>
+  <div class="warn">
+    <b>使用雲端供應商時，推論並非在本機進行</b>
+    預設供應商是 Gemini。你傳送的訊息及需要分析的郵件內容，會送往該供應商的 API。若要所有內容都留在本機，請按第 4 節設定本機模型，並將本機端點排在供應商優先次序首位。
+  </div>
+
+  <h3>JARVIS 不會做的事</h3>
+  <ul>
+    <li>不會代你寄出郵件，只會建立草稿。</li>
+    <li>不會讓 AI 讀取本機檔案或剪貼簿。</li>
+    <li>建立日曆項目時不會加入與會者，避免內容被自動送往其他人的日曆。</li>
+  </ul>
+</section>
+
+<hr class="rule">
+
+<section>
+  <h2><span class="num">8</span>疑難排解</h2>
+
+  <div class="faq">
+    <p class="q">出現「未經驗證的應用程式」警告</p>
+    <p class="a">屬預期情況。Google OAuth 驗證審核期間會顯示此警告，按「進階」再繼續即可。</p>
+  </div>
+  <div class="faq">
+    <p class="q">本機 AI 顯示需要 macOS 14</p>
+    <p class="a">此限制來自 Ollama。JARVIS 本身支援 macOS 12 及 13，在這些版本請改用 API 密鑰。</p>
+  </div>
+  <div class="faq">
+    <p class="q">Ollama 未能及時啟動</p>
+    <p class="a">手動開啟 Ollama 應用程式，等待選單列圖示出現後返回 JARVIS 重試。</p>
+  </div>
+  <div class="faq">
+    <p class="q">模型下載顯示核對碼不符</p>
+    <p class="a">JARVIS 會核對下載檔案的 SHA-256，不符即棄用。通常是網絡中斷或代理伺服器所致，重試即可。</p>
+  </div>
+  <div class="faq">
+    <p class="q">磁碟空間不斷增加</p>
+    <p class="a">前往「設定 → 儲存空間」查看分項。若自動清理已關閉，重新開啟並按「立即清理」。</p>
+  </div>
+  <div class="faq">
+    <p class="q">JARVIS 無法啟動，提示資料庫錯誤</p>
+    <p class="a">將 <span class="path">~/Library/Application Support/jarvis/jarvis.db</span> 移至其他位置後重新開啟，JARVIS 會以全新資料庫啟動。憑證存放在鑰匙圈，不會因此遺失。</p>
+  </div>
+  <div class="faq">
+    <p class="q">找不到視窗</p>
+    <p class="a">按選單列的 JARVIS 圖示選擇 Show JARVIS。若處於桌面背景模式，按 <kbd>Cmd</kbd> + <kbd>Shift</kbd> + <kbd>W</kbd>。</p>
+  </div>
+
+  <div class="end">
+    <h3>回報問題或申請 Beta 名額</h3>
+    <p>前往 <a href="https://jarvis-automation.com">jarvis-automation.com</a> 頁面底部的申請表格，或使用網站的聯絡頁。Beta 名額上限 100 名，額滿為止。</p>
+    <p style="margin:0;color:var(--muted);font-size:9pt;">回報問題時請附上 JARVIS 版本（設定頁底部）、macOS 版本，以及重現步驟。</p>
+  </div>
+</section>
+
+</body>
+</html>
