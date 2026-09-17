@@ -1,6 +1,8 @@
+import IntegrationConnection from "../components/IntegrationConnection";
 import { useUiLocale } from '../i18n';
 import { useCallback, useEffect, useRef, useState } from "react";
 import { googleStatus } from "../lib/commands";
+import { connectionsChanged } from "../lib/connections";
 import { mailWorkspace, type MailAccount } from "../lib/mail";
 import { useWorkspace } from "./WorkspaceContext";
 import "../pages/settings-workspace.css";
@@ -59,10 +61,10 @@ export default function ConnectionsPage() {
       <header className="connections-header">
         <div>
           <h1>{text('Connections', '連接服務')}</h1>
-          <p>{text('Manage the accounts and services available to JARVIS on this Mac.', '管理 JARVIS 喺呢部 Mac 可用嘅帳戶同服務。')}</p>
+          <p>{text('Manage the accounts and services available to JARVIS on this Mac.', '管理 JARVIS 在此 Mac 上可用的帳戶及服務。')}</p>
         </div>
-        <button onClick={() => { void refresh(); }} disabled={refreshing}>
-          {refreshing ? text("Refreshing…", "重新整理緊…") : text("Refresh status", "重新整理狀態")}
+        <button onClick={() => { void refresh(); connectionsChanged(); }} disabled={refreshing}>
+          {refreshing ? text("Refreshing…", "正在重新整理…") : text("Refresh status", "重新整理狀態")}
         </button>
       </header>
 
@@ -70,14 +72,14 @@ export default function ConnectionsPage() {
         <div className="connections-section-head">
           <div>
             <h2 id="connections-mail-title">{text('Gmail workspaces', 'Gmail 工作區')}</h2>
-            <p>{text('Bring several Gmail accounts into Mail for local copies, groups and source memories. Each account uses read-only Gmail access.', '將多個 Gmail 帳戶加入郵件工作區，建立本機副本、群組同來源記憶。每個帳戶只授權唯讀 Gmail 權限。')}</p>
+            <p>{text('Bring several Gmail accounts into Mail for local copies, groups and source memories. Each account uses read-only Gmail access.', '將多個 Gmail 帳戶加入郵件工作區，建立本機副本、群組及來源記憶。每個帳戶僅授予 Gmail 唯讀權限。')}</p>
           </div>
-          <button className="connections-primary" onClick={() => open("email")}>{text('Manage in Mail', '喺郵件管理')}</button>
+          <button className="connections-primary" onClick={() => open("email")}>{text('Manage in Mail', '在郵件頁管理')}</button>
         </div>
         {mailError ? (
-          <p role="alert" className="connections-message connections-error">{text('Could not read Mail account status. Refresh to try again, or open Mail in the desktop app.', '未能讀取郵件帳戶狀態。請重新整理，或者喺桌面 App 開啟郵件。')}</p>
+          <p role="alert" className="connections-message connections-error">{text('Could not read Mail account status. Refresh to try again, or open Mail in the desktop app.', '未能讀取郵件帳戶狀態。請重新整理，或在桌面 App 開啟郵件頁。')}</p>
         ) : accounts === null ? (
-          <p role="status" className="connections-message">{text('Loading Mail accounts…', '載入郵件帳戶緊…')}</p>
+          <p role="status" className="connections-message">{text('Loading Mail accounts…', '正在載入郵件帳戶…')}</p>
         ) : accounts.length === 0 ? (
           <p className="connections-message">{text('No Gmail accounts added to Mail yet. Open Mail to connect your first account.', '尚未加入 Gmail 帳戶。請開啟郵件連接第一個帳戶。')}</p>
         ) : (
@@ -95,46 +97,42 @@ export default function ConnectionsPage() {
             ))}
           </ul>
         )}
-        <p className="connections-message">{text('Sync, add or disconnect accounts in Mail. Disconnecting keeps local copies; deleting an account is a separate action.', '可以喺郵件同步、加入或者斷開帳戶。斷開會保留本機副本；刪除帳戶係另一項操作。')}</p>
+        <p className="connections-message">{text('Sync, add or disconnect accounts in Mail. Disconnecting keeps local copies; deleting an account is a separate action.', '可以在郵件頁同步、加入或中斷帳戶連接。中斷連接會保留本機副本；刪除帳戶則屬另一項操作。')}</p>
       </section>
 
       <section className="connections-section" aria-labelledby="connections-assistant-title">
         <div className="connections-section-head">
           <div>
-            <h2 id="connections-assistant-title">{text('Google for Assistant and Calendar', '助手同日曆嘅 Google 連接')}</h2>
-            <p>{text('This separate Google connection provides Assistant mail tools, Calendar and briefings. A Gmail account added to Mail does not connect these tools.', '呢個獨立 Google 連接供助手郵件工具、日曆同簡報使用。喺郵件加入 Gmail 帳戶唔會自動連接呢啲工具。')}</p>
+            <h2 id="connections-assistant-title">{text('Google for Assistant and Calendar', '助手及日曆的 Google 連接')}</h2>
+            <p>{text('This separate Google connection provides Assistant mail tools, Calendar and briefings. A Gmail account added to Mail does not connect these tools.', '此獨立 Google 連接供助手郵件工具、日曆及簡報使用。在郵件頁加入 Gmail 帳戶不會自動連接這些工具。')}</p>
           </div>
-          <button onClick={() => open("settings")}>{text('Manage in Settings', '喺設定管理')}</button>
+          <button onClick={() => open("settings")}>{text('Manage in Settings', '在設定頁管理')}</button>
         </div>
         {googleError ? (
           <p role="alert" className="connections-message connections-error">{text('Could not read Assistant Google status. Refresh to try again.', '未能讀取助手 Google 狀態。請重新整理再試。')}</p>
         ) : (
           <p className="connections-message" role="status">
-            {assistantGoogle === null ? text("Loading Google status…", "載入 Google 狀態緊…") : assistantGoogle ? text("Google is connected for Assistant and Calendar.", "Google 已連接到助手同日曆。") : text("Google is not connected for Assistant and Calendar.", "Google 尚未連接到助手同日曆。")}
+            {assistantGoogle === null ? text("Loading Google status…", "正在載入 Google 狀態…") : assistantGoogle ? text("Google is connected for Assistant and Calendar.", "Google 已連接至助手及日曆。") : text("Google is not connected for Assistant and Calendar.", "Google 尚未連接至助手及日曆。")}
           </p>
         )}
-        <p className="connections-message">{text('Choose Assistant Google in Settings to connect, switch or disconnect this account.', '喺設定嘅「助手 Google」連接、切換或者斷開帳戶。')}</p>
+        <p className="connections-message">{text('Choose Assistant Google in Settings to connect, switch or disconnect this account.', '請在設定頁的「助手 Google」連接、切換或中斷帳戶連接。')}</p>
       </section>
 
       <section className="connections-section" aria-labelledby="connections-tools-title">
         <div className="connections-section-head">
           <div>
             <h2 id="connections-tools-title">{text('Other services', '其他服務')}</h2>
-            <p>{text('Manage access tokens and API keys in Settings. Saving a token does not verify access to a service.', '喺設定管理 token 同 API 密鑰。儲存 token 唔代表已驗證服務存取。')}</p>
+            <p>{text('Connect your accounts or select a local vault. First-time authorization requires your confirmation.', '連接帳戶或選取本機資料庫。首次授權需要使用者確認。')}</p>
           </div>
         </div>
         <div className="connections-services">
-          {[
-            { name: "GitHub", detail: text("Personal access token for GitHub tools.", "GitHub 工具嘅個人存取 token。") },
-            { name: "Notion", detail: text("Integration token for pages shared with your integration.", "供應用程式存取已分享頁面嘅 integration token。") },
-            { name: "Obsidian", detail: text("Local REST API key and endpoint for your vault.", "資料庫嘅 Local REST API 密鑰同端點。") },
-            { name: text("AI providers", "AI 供應商"), detail: text("OpenAI, Gemini, Claude and AWS Bedrock credentials.", "OpenAI、Gemini、Claude 同 AWS Bedrock 憑證。") },
-          ].map((service) => (
-            <div key={service.name} className="connections-service">
-              <div><h3>{service.name}</h3><p>{service.detail}</p></div>
-              <button aria-label={locale === "zh-HK" ? `喺設定管理 ${service.name}` : `Manage ${service.name} in Settings`} onClick={() => open("settings")}>{text('Manage in Settings', '喺設定管理')}</button>
-            </div>
-          ))}
+          <IntegrationConnection service="github" />
+          <IntegrationConnection service="notion" />
+          <IntegrationConnection service="obsidian" />
+          <div className="connections-service">
+            <div><h3>{text("AI providers", "AI 供應商")}</h3><p>{text("OpenAI, Gemini, Claude and AWS Bedrock credentials.", "OpenAI、Gemini、Claude 及 AWS Bedrock 憑證。")}</p></div>
+            <button onClick={() => open("settings")}>{text("Manage in Settings", "在設定頁管理")}</button>
+          </div>
         </div>
       </section>
     </div>

@@ -218,7 +218,7 @@ fn synthetic_context(settings: MailSettings) -> MailContext {
         group: MailGroup {
             id: 1,
             name: "合成設定測試".into(),
-            instructions: "呢個係合成設定測試。只回覆一個 JSON 物件，欄位必須係 deadline（YYYY-MM-DD）、currency（ISO 4217）、budget（整數）、paymentRequired（布林值）、citation（字串，必須用方括號格式 [郵件 #原信編號]，唔可以係陣列）；從郵件提取事實，唔好額外文字或 Markdown。".into(),
+            instructions: "這是合成設定測試。只回覆一個 JSON 物件，欄位必須為 deadline（YYYY-MM-DD）、currency（ISO 4217）、budget（整數）、paymentRequired（布林值）、citation（字串，必須使用方括號格式 [郵件 #原信編號]，不可使用陣列）；請從郵件提取事實，不要加入額外文字或 Markdown。".into(),
             message_count: 1,
         },
         messages: vec![MailMessage {

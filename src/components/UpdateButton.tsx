@@ -69,7 +69,7 @@ export default function UpdateButton() {
 
   const label =
     phase === "downloading"
-      ? `${text("Updating", "更新緊")} ${progress}%`
+      ? `${text("Updating", "更新中")} ${progress}%`
       : phase === "error"
         ? text("Retry update", "重試更新")
         : `${text("Update to", "更新至")} v${update.version}`;

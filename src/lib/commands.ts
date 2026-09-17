@@ -1,5 +1,5 @@
 import { invoke as tauriInvoke } from "@tauri-apps/api/core";
-import type { Task, ChatMessage, DashboardData, Settings, EmailSummary, EmailStats, CalendarEventView, CronJobView, CronRunView, NotionPageView, GitHubItemView, GitHubStats, VoiceState, VoiceSettings, WakeWordStatus, EmailRule, BriefingResult, LocalEndpoint, LocalModel, ProviderChainEntry, EndpointHealth, SystemCompatibility, PrerequisiteCheck, RecommendedModel, LaunchReadiness, BetaTesterInput, BetaTesterView, BetaFeedbackInput, AwsCredsStatus } from "./types";
+import type { Task, ChatMessage, DashboardData, Settings, EmailSummary, EmailStats, CalendarEventView, CronJobView, CronRunView, NotionPageView, GitHubItemView, GitHubStats, VoiceState, VoiceSettings, WakeWordStatus, EmailRule, BriefingResult, LocalEndpoint, LocalModel, ProviderChainEntry, EndpointHealth, SystemCompatibility, PrerequisiteCheck, RecommendedModel, LaunchReadiness, BetaTesterInput, BetaTesterView, BetaFeedbackInput, AwsCredsStatus, StorageUsage, SweepReport, StorageScope } from "./types";
 
 // Tauri v2 commands default to rename_all = "camelCase", so a Rust parameter named
 // `gmail_id` is looked up on the IPC boundary as `gmailId`. A required arg sent as
@@ -224,6 +224,21 @@ export async function getPreference(key: string): Promise<string> {
 }
 export async function setPreference(key: string, value: string): Promise<void> {
   await invoke("set_user_preference", { key, value });
+}
+
+// Local storage: what JARVIS keeps on disk, and how to get it back
+export async function getStorageUsage(): Promise<StorageUsage> {
+  return await invoke<StorageUsage>("get_storage_usage");
+}
+export async function runStorageSweep(): Promise<SweepReport> {
+  return await invoke<SweepReport>("run_storage_sweep");
+}
+/** Returns bytes freed, except for "conversations" which returns rows deleted. */
+export async function purgeStorage(scope: StorageScope): Promise<number> {
+  return await invoke<number>("purge_storage", { scope });
+}
+export async function setRetentionPolicy(days: number, enabled: boolean): Promise<void> {
+  await invoke("set_retention_policy", { days, enabled });
 }
 
 // CosyVoice 2 offline TTS

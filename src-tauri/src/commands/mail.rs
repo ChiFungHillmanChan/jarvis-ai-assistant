@@ -140,8 +140,8 @@ pub async fn mail_analyze_group(
             AwsCredsRepo::new(db.inner().clone())
                 .load()
                 .await
-                .map_err(|_| "讀唔到 AWS 憑證，請先喺設定連接你嘅 AWS 帳戶。".to_string())?
-                .ok_or("請先喺設定儲存你嘅 AWS 憑證。")?,
+                .map_err(|_| "未能讀取 AWS 憑證，請先在設定中連接你的 AWS 帳戶。".to_string())?
+                .ok_or("請先在設定中儲存你的 AWS 憑證。")?,
         )
     } else {
         None
@@ -173,7 +173,7 @@ fn select_openai_key(
         .ok()
         .map(|value| value.trim().to_string())
         .filter(|value| !value.is_empty())
-        .ok_or_else(|| "讀唔到 OpenAI API key，請喺設定頁檢查或重新儲存。".to_string())
+        .ok_or_else(|| "未能讀取 OpenAI API 密鑰，請在設定頁檢查或重新儲存。".to_string())
 }
 
 #[cfg(test)]

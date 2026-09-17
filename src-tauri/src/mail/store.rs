@@ -7,7 +7,7 @@ fn err(e: impl std::fmt::Display) -> String {
 }
 fn required(changed: usize) -> Result<(), String> {
     if changed == 0 {
-        Err("搵唔到指定資料，請重新整理。".into())
+        Err("找不到指定資料，請重新整理。".into())
     } else {
         Ok(())
     }
@@ -15,7 +15,7 @@ fn required(changed: usize) -> Result<(), String> {
 fn text(value: &str, max: usize, allow_empty: bool) -> Result<&str, String> {
     let value = value.trim();
     if (!allow_empty && value.is_empty()) || value.chars().count() > max {
-        return Err(format!("內容唔可以空白或超過 {max} 字。"));
+        return Err(format!("內容不可留空或超過 {max} 字。"));
     }
     Ok(value)
 }
@@ -289,7 +289,7 @@ pub fn save_memory(db: &Database, input: &MailMemoryInput) -> Result<MailMemory,
     if !["fact", "preference", "commitment"].contains(&input.kind.as_str())
         || !["active", "done"].contains(&input.status.as_str())
     {
-        return Err("記憶種類或狀態唔正確。".into());
+        return Err("記憶種類或狀態不正確。".into());
     }
     let expires = input.expires_at.as_deref().filter(|s| !s.is_empty());
     if let Some(date) = expires {
@@ -298,7 +298,7 @@ pub fn save_memory(db: &Database, input: &MailMemoryInput) -> Result<MailMemory,
                 .map(|d| d.to_string() != date)
                 .unwrap_or(true)
         {
-            return Err("到期日請用 YYYY-MM-DD。".into());
+            return Err("到期日請使用 YYYY-MM-DD 格式。".into());
         }
     }
     let conn = db.conn.lock().map_err(err)?;
@@ -306,7 +306,7 @@ pub fn save_memory(db: &Database, input: &MailMemoryInput) -> Result<MailMemory,
     if let Some(source) = input.source_message_id {
         let valid:bool=conn.query_row("SELECT EXISTS(SELECT 1 FROM mail_group_members WHERE group_id=?1 AND message_id=?2)",params![input.group_id,source],|r|r.get(0)).map_err(err)?;
         if !valid {
-            return Err("來源郵件必須屬於呢個群組。".into());
+            return Err("來源郵件必須屬於此群組。".into());
         }
     }
     let id = if let Some(id) = input.id {

@@ -30,25 +30,25 @@ fn auth_instance() -> Result<GoogleAuth, String> {
     #[cfg(feature = "native-qa")]
     return Err("原生 QA 停用 Google 登入；請用合成郵件測試。".into());
     #[cfg(not(feature = "native-qa"))]
-    GoogleAuth::new().ok_or_else(|| "呢個版本未設定 Google 登入，請聯絡支援。".to_string())
+    GoogleAuth::new().ok_or_else(|| "此版本尚未設定 Google 登入，請聯絡支援。".to_string())
 }
 
 fn persist_refresh(auth: &GoogleAuth, account_id: &str) -> Result<(), String> {
     let token = auth
         .refresh_token
         .lock()
-        .map_err(|_| "登入狀態暫時讀唔到，請重試。".to_string())?
+        .map_err(|_| "暫時未能讀取登入狀態，請重試。".to_string())?
         .clone()
         .filter(|t| !t.is_empty())
         .ok_or_else(|| "Google 未提供持續登入授權，請重新連接信箱。".to_string())?;
     KeychainStore::put(KEYCHAIN_SERVICE, account_id, &token)
-        .map_err(|_| "信箱憑證儲存唔到，請解鎖 macOS 鑰匙圈再試。".to_string())
+        .map_err(|_| "未能儲存信箱憑證，請解鎖 macOS 鑰匙圈後重試。".to_string())
 }
 
 async fn refresh(auth: &GoogleAuth, account_id: &str) -> Result<String, String> {
     auth.refresh_access_token()
         .await
-        .map_err(|_| "信箱登入更新失敗，請檢查網絡或者重新連接信箱。".to_string())?;
+        .map_err(|_| "信箱登入更新失敗，請檢查網絡或重新連接信箱。".to_string())?;
     // Google can rotate a refresh token; persist before using its access token.
     persist_refresh(auth, account_id)?;
     auth.get_access_token()
@@ -82,7 +82,7 @@ async fn gmail_json<T: DeserializeOwned>(
     let client = reqwest::Client::builder()
         .timeout(std::time::Duration::from_secs(30))
         .build()
-        .map_err(|_| "網絡連線建立唔到，請重試。".to_string())?;
+        .map_err(|_| "未能建立網絡連線，請重試。".to_string())?;
     let mut request = client.get(format!("{GMAIL_API}/{path}")).bearer_auth(token);
     if path == "messages" {
         // No INBOX restriction: archived and sent mail belong in this vault too.
@@ -94,20 +94,20 @@ async fn gmail_json<T: DeserializeOwned>(
     let response = request
         .send()
         .await
-        .map_err(|_| "連唔到 Gmail，請檢查網絡再試。".to_string())?;
+        .map_err(|_| "未能連接 Gmail，請檢查網絡後重試。".to_string())?;
     if response.status() == reqwest::StatusCode::UNAUTHORIZED {
         return Err("UNAUTHORIZED".to_string());
     }
     if !response.status().is_success() {
         return Err(format!(
-            "Gmail 暫時讀取唔到（{}），請稍後重試；如果持續失敗，請重新連接信箱。",
+            "暫時未能讀取 Gmail（{}），請稍後重試；若持續失敗，請重新連接信箱。",
             response.status().as_u16()
         ));
     }
     response
         .json()
         .await
-        .map_err(|_| "Gmail 回覆格式讀唔到，請稍後重試。".to_string())
+        .map_err(|_| "未能解析 Gmail 回覆格式，請稍後重試。".to_string())
 }
 
 pub async fn connect(db: &Database, state: &MailSyncState) -> Result<MailAccount, String> {
@@ -117,14 +117,14 @@ pub async fn connect(db: &Database, state: &MailSyncState) -> Result<MailAccount
         "https://www.googleapis.com/auth/gmail.readonly".to_string(),
     ])
     .await
-    .map_err(|_| "Google 登入未完成或者已取消，請再試。".to_string())?;
+    .map_err(|_| "Google 登入未完成或已取消，請重試。".to_string())?;
     let token = auth
         .ensure_access_token()
         .await
-        .map_err(|_| "Google 登入失敗，請再試。".to_string())?;
+        .map_err(|_| "Google 登入失敗，請重試。".to_string())?;
     let profile: Profile = gmail_json("profile", &token, None)
         .await
-        .map_err(|_| "讀唔到 Gmail 帳戶資料，請重新連接信箱。".to_string())?;
+        .map_err(|_| "未能讀取 Gmail 帳戶資料，請重新連接信箱。".to_string())?;
     let email = profile.email_address.trim().to_lowercase();
     if email.is_empty() {
         return Err("Google 未提供信箱地址，請重新連接。".to_string());
@@ -154,7 +154,7 @@ fn disconnect_locked(db: &Database, account_id: &str) -> Result<(), String> {
     // could also break the separate Calendar/chat integration.
     if let Err(error) = KeychainStore::delete(KEYCHAIN_SERVICE, account_id) {
         if !KeychainStore::is_not_found(&error) {
-            return Err("信箱憑證刪除唔到，請解鎖 macOS 鑰匙圈再試。".to_string());
+            return Err("未能刪除信箱憑證，請解鎖 macOS 鑰匙圈後重試。".to_string());
         }
     }
     store::set_connected(db, account_id, false)
@@ -204,7 +204,7 @@ async fn sync_account_inner(
     let _operation = state.operation.lock().await;
     let account = store::get_account(db, account_id)?;
     if !account.connected {
-        return Err("呢個信箱已斷開，請先重新連接。".to_string());
+        return Err("此信箱已斷開，請先重新連接。".to_string());
     }
     if older && account.last_synced.is_some() && account.next_page_token.is_none() {
         return Ok(MailSyncResult {
@@ -215,11 +215,11 @@ async fn sync_account_inner(
     }
     let auth = auth_instance()?;
     let secret = KeychainStore::get(KEYCHAIN_SERVICE, account_id)
-        .map_err(|_| "讀唔到信箱憑證，請解鎖 macOS 鑰匙圈或者重新連接。".to_string())?;
+        .map_err(|_| "未能讀取信箱憑證，請解鎖 macOS 鑰匙圈或重新連接。".to_string())?;
     *auth
         .refresh_token
         .lock()
-        .map_err(|_| "登入狀態暫時讀唔到，請重試。".to_string())? = Some(secret);
+        .map_err(|_| "暫時未能讀取登入狀態，請重試。".to_string())? = Some(secret);
     let mut token = refresh(&auth, account_id).await?;
     let page_token = if older {
         account.next_page_token.as_deref()
@@ -293,7 +293,7 @@ async fn sync_account_inner(
     Ok(MailSyncResult {
         saved,
         has_more: current.next_page_token.is_some(),
-        warning: (failures > 0).then(|| format!("有 {failures} 封郵件下載唔到，成功下載嘅 {saved} 封已儲存。請重試同一個同步操作；如果持續失敗，請重新連接信箱。")),
+        warning: (failures > 0).then(|| format!("有 {failures} 封郵件未能下載，成功下載的 {saved} 封已儲存。請重試相同的同步操作；若持續失敗，請重新連接信箱。")),
     })
 }
 

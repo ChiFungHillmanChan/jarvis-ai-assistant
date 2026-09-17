@@ -9,6 +9,90 @@ const NOTION_VERSION: &str = "2022-06-28";
 /// unbounded request storm.
 const MAX_SEARCH_PAGES: usize = 10;
 
+/// Explicitly disconnected OAuth/token connections never revive an old
+/// environment credential. MCP credentials are never sent to the REST API.
+fn connection_method(db: &crate::db::Database) -> Result<Option<String>, String> {
+    let method = super::notion_mcp::method(db)?;
+    if method.as_deref() == Some("disconnected") {
+        return Err("Notion 連接已解除，請先重新連接。".into());
+    }
+    if !matches!(method.as_deref(), None | Some("mcp") | Some("token")) {
+        return Err("Notion 連接設定無效，請重新連接。".into());
+    }
+    Ok(method)
+}
+
+fn rest_token() -> Result<String, String> {
+    crate::integration_keys::resolve("notion_api_key")
+        .ok_or_else(|| "尚未連接 Notion，請先在設定中完成授權。".into())
+}
+
+pub async fn search_pages_connected(
+    db: &crate::db::Database,
+    query: Option<&str>,
+    max_pages: usize,
+) -> Result<Vec<NotionPage>, String> {
+    let generation = super::notion_mcp::generation(db)?;
+    let pages = if connection_method(db)?.as_deref() == Some("mcp") {
+        super::notion_mcp::search_pages(db, query).await
+    } else {
+        search_pages_bounded(&rest_token()?, query, max_pages).await
+    }?;
+    super::notion_mcp::ensure_generation(db, &generation)?;
+    Ok(pages)
+}
+
+pub async fn get_page_content_connected(
+    db: &crate::db::Database,
+    page_id: &str,
+) -> Result<String, String> {
+    let generation = super::notion_mcp::generation(db)?;
+    let content = if connection_method(db)?.as_deref() == Some("mcp") {
+        super::notion_mcp::get_page_content(db, page_id).await
+    } else {
+        get_page_content(&rest_token()?, page_id).await
+    }?;
+    super::notion_mcp::ensure_generation(db, &generation)?;
+    Ok(content)
+}
+
+pub async fn create_page_connected(
+    db: &crate::db::Database,
+    parent_page_id: &str,
+    title: &str,
+    content: &str,
+) -> Result<String, String> {
+    if connection_method(db)?.as_deref() == Some("mcp") {
+        Err("此 Notion 連接目前僅支援搜尋及讀取。請在 Notion 建立或編輯頁面。".into())
+    } else {
+        create_page(&rest_token()?, parent_page_id, title, content).await
+    }
+}
+
+pub fn is_configured(db: &crate::db::Database) -> Result<bool, String> {
+    match super::notion_mcp::method(db)?.as_deref() {
+        Some("disconnected") => Ok(false),
+        Some("mcp") => Ok(true),
+        None | Some("token") => Ok(crate::integration_keys::resolve("notion_api_key").is_some()),
+        _ => Err("Notion 連接設定無效，請重新連接。".into()),
+    }
+}
+
+pub async fn sync_connected(db: &crate::db::Database) -> Result<String, String> {
+    let generation = super::notion_mcp::generation(db)?;
+    let pages = search_pages_connected(db, None, MAX_SEARCH_PAGES).await?;
+    let count = pages.len();
+    save_to_db_checked(db, &pages, Some(&generation))?;
+    if super::notion_mcp::method(db)?.as_deref() == Some("mcp") {
+        Ok(format!(
+            "已同步 {} 個 Notion 搜尋結果；每次最多讀取 50 個結果，並非完整工作區備份。",
+            count
+        ))
+    } else {
+        Ok(format!("已同步 {} 個 Notion 頁面。", count))
+    }
+}
+
 /// Page budget for a search issued inside a chat turn. The model-facing
 /// `search_notion` tool truncates its result to a few thousand bytes anyway, so
 /// every page past the first is a sequential round-trip of latency the user
@@ -103,21 +187,23 @@ pub async fn search_pages_bounded(
             .json(&body)
             .send()
             .await
-            .map_err(|e| format!("Notion search error: {}", e))?;
+            .map_err(|_| "無法連線至 Notion 進行搜尋，請檢查網絡後重試。")?;
 
         if resp.status() == 401 {
-            return Err("UNAUTHORIZED: Invalid Notion API key".to_string());
+            return Err("Notion API 權杖無效或已失效，請更新連接設定。".to_string());
         }
         if !resp.status().is_success() {
             let s = resp.status();
-            let t = resp.text().await.unwrap_or_default();
-            return Err(format!("Notion API error {}: {}", s, t));
+            return Err(format!(
+                "Notion 搜尋失敗（HTTP {}）。請確認頁面分享權限。",
+                s.as_u16()
+            ));
         }
 
-        let search: SearchResponse = resp.json().await.map_err(|e| e.to_string())?;
+        let search: SearchResponse = resp.json().await.map_err(|_| "Notion 搜尋回應格式無效。")?;
 
         pages.extend(search.results.into_iter().map(|r| {
-            let title = extract_title(&r.properties).unwrap_or_else(|| "(Untitled)".to_string());
+            let title = extract_title(&r.properties).unwrap_or_else(|| "未命名頁面".to_string());
             NotionPage {
                 notion_id: r.id,
                 title,
@@ -175,20 +261,47 @@ pub async fn create_page(
         .json(&body)
         .send()
         .await
-        .map_err(|e| format!("Notion create error: {}", e))?;
+        .map_err(|_| "無法連線至 Notion 建立頁面。請先檢查 Notion，避免重複建立。")?;
 
     if !resp.status().is_success() {
         let s = resp.status();
-        let t = resp.text().await.unwrap_or_default();
-        return Err(format!("Notion create failed {}: {}", s, t));
+        return Err(format!(
+            "Notion 建立頁面失敗（HTTP {}）。請確認父頁面的寫入權限。",
+            s.as_u16()
+        ));
     }
 
-    let result: serde_json::Value = resp.json().await.map_err(|e| e.to_string())?;
+    let result: serde_json::Value = resp
+        .json()
+        .await
+        .map_err(|_| "Notion 未回傳有效的建立結果。請先檢查 Notion，避免重複建立。")?;
     Ok(result["id"].as_str().unwrap_or("").to_string())
 }
 
 pub fn save_to_db(db: &crate::db::Database, pages: &[NotionPage]) -> Result<(), String> {
+    save_to_db_checked(db, pages, None)
+}
+
+fn save_to_db_checked(
+    db: &crate::db::Database,
+    pages: &[NotionPage],
+    expected: Option<&Option<String>>,
+) -> Result<(), String> {
+    use rusqlite::OptionalExtension;
     let conn = db.conn.lock().map_err(|e| e.to_string())?;
+    if let Some(expected) = expected {
+        let current: Option<String> = conn
+            .query_row(
+                "SELECT value FROM user_preferences WHERE key='notion_connection_generation'",
+                [],
+                |row| row.get(0),
+            )
+            .optional()
+            .map_err(|_| "無法核對 Notion 連接狀態。")?;
+        if &current != expected {
+            return Err("Notion 連接已變更，已停止儲存舊連接的同步結果。".into());
+        }
+    }
     for page in pages {
         conn.execute(
             "INSERT INTO notion_pages (notion_id, title, url, parent_type, parent_title, last_edited, content_snippet)
@@ -205,23 +318,28 @@ pub async fn get_page_content(api_key: &str, page_id: &str) -> Result<String, St
     let client = crate::util::http_client();
 
     let resp = client
-        .get(&format!("{}/blocks/{}/children?page_size=100", NOTION_API, page_id))
+        .get(&format!(
+            "{}/blocks/{}/children?page_size=100",
+            NOTION_API, page_id
+        ))
         .header("Authorization", format!("Bearer {}", api_key))
         .header("Notion-Version", NOTION_VERSION)
         .send()
         .await
-        .map_err(|e| format!("Notion blocks error: {}", e))?;
+        .map_err(|_| "無法連線至 Notion 讀取頁面，請檢查網絡後重試。")?;
 
     if resp.status() == 401 {
-        return Err("UNAUTHORIZED: Invalid Notion API key".to_string());
+        return Err("Notion API 權杖無效或已失效，請更新連接設定。".to_string());
     }
     if !resp.status().is_success() {
         let s = resp.status();
-        let t = resp.text().await.unwrap_or_default();
-        return Err(format!("Notion API error {}: {}", s, t));
+        return Err(format!(
+            "Notion 讀取頁面失敗（HTTP {}）。請確認頁面分享權限。",
+            s.as_u16()
+        ));
     }
 
-    let body: serde_json::Value = resp.json().await.map_err(|e| e.to_string())?;
+    let body: serde_json::Value = resp.json().await.map_err(|_| "Notion 頁面回應格式無效。")?;
     let results = body["results"].as_array().unwrap_or(&Vec::new()).clone();
 
     let mut output = String::new();
@@ -295,10 +413,13 @@ fn extract_title(properties: &Option<serde_json::Value>) -> Option<String> {
     // Try "title" property first (standard for pages)
     if let Some(title_prop) = props.get("title").or_else(|| props.get("Name")) {
         if let Some(arr) = title_prop.get("title").and_then(|t| t.as_array()) {
-            let text: String = arr.iter()
+            let text: String = arr
+                .iter()
                 .filter_map(|item| item.get("plain_text").and_then(|t| t.as_str()))
                 .collect();
-            if !text.is_empty() { return Some(text); }
+            if !text.is_empty() {
+                return Some(text);
+            }
         }
     }
     None
@@ -323,7 +444,10 @@ mod tests {
     fn final_page_stops_the_cursor_loop() {
         let raw = r#"{"results":[],"has_more":false,"next_cursor":null}"#;
         let parsed: SearchResponse = serde_json::from_str(raw).unwrap();
-        assert_eq!(next_search_cursor(parsed.has_more, parsed.next_cursor), None);
+        assert_eq!(
+            next_search_cursor(parsed.has_more, parsed.next_cursor),
+            None
+        );
         // A response that claims more pages but supplies no usable cursor must
         // still terminate rather than repeat the same request forever.
         assert_eq!(next_search_cursor(Some(true), None), None);
@@ -357,5 +481,19 @@ mod tests {
             next_search_cursor(Some(true), Some("cursor-2".to_string())),
             Some("cursor-2".to_string())
         );
+    }
+
+    #[test]
+    fn an_old_sync_cannot_write_into_a_reconnected_workspace() {
+        let conn = rusqlite::Connection::open_in_memory().unwrap();
+        conn.execute_batch("CREATE TABLE user_preferences(key TEXT PRIMARY KEY,value TEXT); CREATE TABLE notion_pages(id INTEGER PRIMARY KEY,notion_id TEXT,title TEXT,url TEXT,parent_type TEXT,parent_title TEXT,last_edited TEXT,content_snippet TEXT,synced_at TEXT);").unwrap();
+        let db = crate::db::Database {
+            conn: std::sync::Mutex::new(conn),
+        };
+        super::super::notion_mcp::set_method(&db, "mcp", false).unwrap();
+        let original = super::super::notion_mcp::generation(&db).unwrap();
+        super::super::notion_mcp::set_method(&db, "mcp", true).unwrap();
+        let error = save_to_db_checked(&db, &[], Some(&original)).unwrap_err();
+        assert!(error.contains("已停止儲存舊連接"));
     }
 }

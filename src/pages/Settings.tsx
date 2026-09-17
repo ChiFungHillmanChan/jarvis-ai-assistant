@@ -33,17 +33,23 @@ import {
   setPreference,
   setApiKey,
   getApiKeyStatus,
+  getStorageUsage,
+  runStorageSweep,
+  purgeStorage,
+  setRetentionPolicy,
 } from "../lib/commands";
 import { listen } from "@tauri-apps/api/event";
 import { invoke } from "@tauri-apps/api/core";
-import type { VoiceSettings, WakeWordStatus, VoiceState, LocalEndpoint, LocalModel, ProviderChainEntry, EndpointHealth } from "../lib/types";
+import type { VoiceSettings, WakeWordStatus, VoiceState, LocalEndpoint, LocalModel, ProviderChainEntry, EndpointHealth, StorageUsage, StorageScope } from "../lib/types";
 import { GOOGLE_ALREADY_CONNECTED } from "../lib/types";
 import { useVoiceState } from "../hooks/useVoiceState";
 import { useUiLocale } from "../i18n";
+import IntegrationConnection from "../components/IntegrationConnection";
+import { connectionsChanged } from "../lib/connections";
 import LocalAiSetup from "../components/LocalAiSetup";
 import { useWorkspace, useWorkspaceValue } from "../workspace/WorkspaceContext";
 import "./settings-workspace.css";
-import { Cpu, Key, Globe, Gem, Mic, Bot, Palette, GithubMark, NotionMark } from "../components/icons";
+import { Cpu, Key, Globe, Gem, Mic, Bot, Palette, HardDrive, GithubMark, NotionMark } from "../components/icons";
 
 const API_KEY_PROVIDERS = [
   { id: "gemini", label: "Google Gemini", help: "Gemini chat and speech-to-text" },
@@ -129,7 +135,7 @@ export default function Settings() {
 
   async function handleClearApiKey(provider: string, label: string) {
     setApiKeyError(null);
-    if (!window.confirm(`${text("Remove the saved", "要移除已儲存嘅")} ${label} ${text("key from your Keychain? This cannot be undone.", "密鑰？呢個操作無法復原。")}`)) {
+    if (!window.confirm(`${text("Remove the saved", "是否移除已儲存的")} ${label} ${text("key from your Keychain? This cannot be undone.", "密鑰？此操作無法復原。")}`)) {
       return;
     }
     try {
@@ -166,6 +172,12 @@ export default function Settings() {
   const [llmError, setLlmError] = useState<string | null>(null);
   const [section, setSection] = useWorkspaceValue<string>("section", "ai");
 
+  // Storage state
+  const [storage, setStorage] = useState<StorageUsage | null>(null);
+  const [storageBusy, setStorageBusy] = useState("");
+  const [storageNotice, setStorageNotice] = useState("");
+  const [storageError, setStorageError] = useState("");
+
   async function refreshSettings() {
     setLoadError(false);
     try {
@@ -195,6 +207,68 @@ export default function Settings() {
     listLocalEndpoints().then(setEndpoints).catch(() => {});
     getProviderChain().then(setChain).catch(() => {});
   }, []);
+
+  // Reading the storage report walks the models and cache directories, so it is
+  // deferred until the panel is actually opened rather than run on every mount.
+  useEffect(() => {
+    if (section !== "storage" || storage) return;
+    void refreshStorage();
+  }, [section]);
+
+  async function refreshStorage() {
+    try {
+      setStorage(await getStorageUsage());
+      setStorageError("");
+    } catch (reason) {
+      setStorageError(text("Could not read local storage usage.", "未能讀取本機儲存用量。"));
+      void reason;
+    }
+  }
+
+  async function runStorageAction(label: string, action: () => Promise<string>) {
+    if (storageBusy) return;
+    setStorageBusy(label); setStorageError(""); setStorageNotice("");
+    try {
+      setStorageNotice(await action());
+      await refreshStorage();
+    } catch (reason) {
+      setStorageError(reason instanceof Error ? reason.message : String(reason));
+    } finally {
+      setStorageBusy("");
+    }
+  }
+
+  function handleSweep() {
+    void runStorageAction(text("Sweeping", "正在清理"), async () => {
+      const report = await runStorageSweep();
+      const rows = report.mailBodiesCleared + report.conversationsDeleted
+        + report.emailsDeleted + report.metricsDeleted + report.briefingsDeleted;
+      return rows === 0
+        ? text("Nothing was old enough to remove.", "沒有超過保留期限的資料。")
+        : text(
+            `Removed ${rows} item(s): ${report.mailBodiesCleared} mail bodies, ${report.conversationsDeleted} chat turns, ${report.emailsDeleted} cached emails.`,
+            `已清理 ${rows} 項：郵件內文 ${report.mailBodiesCleared}、對話記錄 ${report.conversationsDeleted}、快取郵件 ${report.emailsDeleted}。`,
+          );
+    });
+  }
+
+  function handlePurge(scope: StorageScope, label: string) {
+    void runStorageAction(label, async () => {
+      const freed = await purgeStorage(scope);
+      return scope === "conversations"
+        ? text(`Deleted ${freed} chat turn(s).`, `已刪除 ${freed} 項對話記錄。`)
+        : text(`Freed ${formatBytes(freed)}.`, `已釋放 ${formatBytes(freed)}。`);
+    });
+  }
+
+  function handleRetentionChange(days: number, enabled: boolean) {
+    void runStorageAction(text("Saving", "正在儲存"), async () => {
+      await setRetentionPolicy(days, enabled);
+      return enabled
+        ? text(`Retention set to ${days} days.`, `保留期限已設為 ${days} 日。`)
+        : text("Retention switched off. JARVIS will keep everything.", "已關閉自動清理，JARVIS 會保留所有資料。");
+    });
+  }
 
   useEffect(() => {
     getWallpaperStatus().then(setWallpaperActive).catch(() => {});
@@ -373,7 +447,7 @@ export default function Settings() {
     // Switching revokes the current grant and wipes the cached mail before the
     // new flow starts, so it gets the same confirm-then-act treatment as CLEAR.
     if (force && !window.confirm(
-      text("Switch Assistant Google account? This revokes this Google access and deletes the Assistant mail cache, Calendar events and briefings on this Mac. Mail workspace copies are kept.", "要切換助手 Google 帳戶？呢個操作會撤銷目前嘅 Google 連接，並刪除呢部 Mac 上嘅助手郵件快取、日曆活動同簡報；郵件工作區副本會保留。")
+      text("Switch Assistant Google account? This revokes this Google access and deletes the Assistant mail cache, Calendar events and briefings on this Mac. Mail workspace copies are kept.", "是否切換助手 Google 帳戶？此操作會撤銷目前的 Google 連接，並刪除此 Mac 上的助手郵件快取、日曆活動及簡報；郵件工作區副本會保留。")
     )) {
       return;
     }
@@ -384,7 +458,7 @@ export default function Settings() {
       const result = await googleConnect(force);
       setGoogleNotice(
         result === GOOGLE_ALREADY_CONNECTED
-          ? text("That account is already linked. Use Switch account to change it.", "呢個帳戶已連接。請用「切換帳戶」更換。")
+          ? text("That account is already linked. Use Switch account to change it.", "此帳戶已連接。請使用「切換帳戶」更換。")
           : result
       );
     } catch (e) {
@@ -397,7 +471,7 @@ export default function Settings() {
 
   async function handleGoogleDisconnect() {
     if (!window.confirm(
-      text("Disconnect Assistant Google? This revokes this Google access and deletes the Assistant mail cache, Calendar events and briefings on this Mac. Mail workspace copies are kept. You can reconnect later.", "要斷開助手 Google 帳戶？呢個操作會撤銷 Google 連接，並刪除呢部 Mac 上嘅助手郵件快取、日曆活動同簡報；郵件工作區副本會保留。你之後可以再連接。")
+      text("Disconnect Assistant Google? This revokes this Google access and deletes the Assistant mail cache, Calendar events and briefings on this Mac. Mail workspace copies are kept. You can reconnect later.", "是否中斷助手 Google 帳戶連接？此操作會撤銷 Google 連接，並刪除此 Mac 上的助手郵件快取、日曆活動及簡報；郵件工作區副本會保留。之後可以重新連接。")
     )) {
       return;
     }
@@ -423,6 +497,7 @@ export default function Settings() {
       await saveNotionToken(notionToken.trim());
       setNotionToken("");
       setNotionSaved(true);
+      connectionsChanged();
     } catch (e) { setIntegrationError(String(e)); }
   }
 
@@ -433,6 +508,7 @@ export default function Settings() {
       await saveGitHubToken(githubToken.trim());
       setGithubToken("");
       setGithubSaved(true);
+      connectionsChanged();
     } catch (e) { setIntegrationError(String(e)); }
   }
 
@@ -443,6 +519,7 @@ export default function Settings() {
       await saveObsidianKey(obsidianKey.trim());
       setObsidianKey("");
       setObsidianSaved(true);
+      connectionsChanged();
     } catch (e) { setIntegrationError(String(e)); }
   }
 
@@ -503,20 +580,20 @@ export default function Settings() {
     if (cloud && local) return text("Speech-to-text ready -- cloud Gemini, with the local Whisper model as fallback.", "語音辨識可用：雲端 Gemini，並以本機 Whisper 作後備。");
     if (cloud) return text("Speech-to-text ready -- cloud Gemini.", "語音辨識可用：雲端 Gemini。");
     if (local) return text("Speech-to-text ready -- local Whisper model.", "語音辨識可用：本機 Whisper 模型。");
-    return text("Speech-to-text needs one of two things: a Gemini API key saved under API Keys, or the local Whisper model downloaded under Wake Word.", "語音辨識需要喺「API 密鑰」儲存 Gemini 密鑰，或者喺「喚醒詞」下載本機 Whisper 模型。");
+    return text("Speech-to-text needs one of two things: a Gemini API key saved under API Keys, or the local Whisper model downloaded under Wake Word.", "語音辨識需要在「API 密鑰」儲存 Gemini 密鑰，或在「喚醒詞」下載本機 Whisper 模型。");
   }
 
   function getWakeStatusLine(state: VoiceState): string {
     if (typeof state === "object" && "ModelDownloading" in state) {
-      return `${text("Downloading local model", "下載本機模型緊")}：${state.ModelDownloading}%`;
+      return `${text("Downloading local model", "正在下載本機模型")}：${state.ModelDownloading}%`;
     }
     if (typeof state === "object" && "Error" in state) {
       return `${text("Error", "錯誤")}：${state.Error}`;
     }
-    if (state === "WakeWordListening") return text("Wake word listening is active", "喚醒詞聆聽緊");
+    if (state === "WakeWordListening") return text("Wake word listening is active", "正在聆聽喚醒詞");
     if (state === "WakeWordDetected") return text("Wake word detected", "偵測到喚醒詞");
-    if (state === "WakeWordProcessing") return text("Processing wake-word request", "處理喚醒詞指示緊");
-    if (state === "WakeWordSpeaking") return text("Speaking wake-word response", "朗讀回覆緊");
+    if (state === "WakeWordProcessing") return text("Processing wake-word request", "正在處理喚醒詞指示");
+    if (state === "WakeWordSpeaking") return text("Speaking wake-word response", "正在朗讀回覆");
     if (wakeStatus?.model_downloaded) return text("Local speech model ready", "本機語音模型已準備好");
     return text("Model required before wake-word listening can start", "啟動喚醒詞聆聽前需要先下載模型");
   }
@@ -527,7 +604,7 @@ export default function Settings() {
         {loadError ? <>
           <p role="alert" className="settings-help">{text('Could not load settings. Open the desktop app and try again.', '未能載入設定。請開啟桌面 App 再試。')}</p>
           <button style={styles.actionBtn} onClick={() => { void refreshSettings(); }}>{text('Retry', '重試')}</button>
-        </> : <p role="status" className="settings-help">{text('Loading settings…', '載入設定緊…')}</p>}
+        </> : <p role="status" className="settings-help">{text('Loading settings…', '正在載入設定…')}</p>}
       </div>
     );
   }
@@ -556,6 +633,7 @@ export default function Settings() {
     { id: "voice", label: text("Voice", "語音"), Icon: () => <Mic size={17} /> },
     { id: "assistant", label: t("navAssistant"), Icon: () => <Bot size={17} /> },
     { id: "appearance", label: text("Appearance", "外觀"), Icon: () => <Palette size={17} /> },
+    { id: "storage", label: text("Storage", "儲存空間"), Icon: () => <HardDrive size={17} /> },
   ];
 
   return (
@@ -576,18 +654,18 @@ export default function Settings() {
       <div className="settings-content">
         <header className="settings-page-header">
           <h1>{SECTIONS.find((item) => item.id === section)?.label ?? t("navSettings")}</h1>
-          <p>{text("Manage how JARVIS works on this Mac.", "管理 JARVIS 喺呢部 Mac 點樣運作。")}</p>
+          <p>{text("Manage how JARVIS works on this Mac.", "管理 JARVIS 在此 Mac 上的運作方式。")}</p>
         </header>
         {integrationError && ["notion", "github", "obsidian"].includes(section) && <p role="alert" style={styles.errorText}>{integrationError}</p>}
         {section === "ai" && (<>
           <div className="settings-info-row">
-            <p>{text('These providers handle Assistant conversations. Mail has its own analysis model and uses the API keys saved here.', '呢啲供應商處理助手對話。郵件分析有獨立模型設定，但會使用喺度儲存嘅 API 密鑰。')}</p>
+            <p>{text('These providers handle Assistant conversations. Mail has its own analysis model and uses the API keys saved here.', '這些供應商負責處理助手對話。郵件分析設有獨立模型設定，並使用在此儲存的 API 密鑰。')}</p>
             <button style={styles.saveBtn} onClick={() => open("email")}>{text('Mail analysis settings', '郵件分析設定')}</button>
           </div>
           {llmError && <p role="alert" style={styles.errorText}>{llmError}</p>}
           <div className="settings-panel">
             <h2 className="settings-heading">{text('Provider priority', '供應商優先次序')}</h2>
-            <div style={styles.hint}>{text('JARVIS tries enabled providers in this order. Use the arrows to change priority.', 'JARVIS 會按呢個次序嘗試已啟用供應商。可用箭咀調整。')}</div>
+            <div style={styles.hint}>{text('JARVIS tries enabled providers in this order. Use the arrows to change priority.', 'JARVIS 會依此次序嘗試已啟用的供應商。可使用箭頭調整優先次序。')}</div>
 
             {chain.map((entry, i) => {
               const label = entry.provider_type === "local"
@@ -616,7 +694,7 @@ export default function Settings() {
             })}
 
             {chain.length === 0 && (
-              <div style={{ color: "var(--text-muted)", fontSize: 13, marginBottom: 8 }}>{text('No providers configured. Add cloud or local providers below.', '未設定供應商。請喺下方加入雲端或者本機供應商。')}</div>
+              <div style={{ color: "var(--text-muted)", fontSize: 13, marginBottom: 8 }}>{text('No providers configured. Add cloud or local providers below.', '尚未設定供應商。請在下方加入雲端或本機供應商。')}</div>
             )}
 
             <div style={{ display: "flex", gap: 6, marginTop: 8, flexWrap: "wrap" }}>
@@ -639,8 +717,8 @@ export default function Settings() {
             ))}
           </div>
           <details className="settings-local-details">
-            <summary>{text('Local AI setup and endpoints', '本機 AI 設定同端點')}</summary>
-            <p className="settings-help">{text('Optional. Connect a local server or download a model only when you want to use local AI.', '呢項係可選設定。只喺你想用本機 AI 時先連接伺服器或者下載模型。')}</p>
+            <summary>{text('Local AI setup and endpoints', '本機 AI 設定及端點')}</summary>
+            <p className="settings-help">{text('Optional. Connect a local server or download a model only when you want to use local AI.', '此為選用設定。如需使用本機 AI，請連接伺服器或下載模型。')}</p>
             <div className="settings-local-setup">
               <LocalAiSetup
                 endpoints={endpoints}
@@ -718,7 +796,7 @@ export default function Settings() {
                     aria-label={`${label} ${text("API key", "API 密鑰")}`}
                     autoComplete="off"
                     style={styles.tokenInput}
-                    placeholder={apiKeyStatus[id] ? text("Replace saved key", "取代已儲存密鑰") : text(help, id === "gemini" ? "Gemini 對話同語音辨識" : id === "claude" ? "Claude 對話同後備供應商" : "OpenAI 對話同郵件分析")}
+                    placeholder={apiKeyStatus[id] ? text("Replace saved key", "取代已儲存密鑰") : text(help, id === "gemini" ? "Gemini 對話及語音辨識" : id === "claude" ? "Claude 對話及後備供應商" : "OpenAI 對話及郵件分析")}
                     value={apiKeyDrafts[id] ?? ""}
                     onChange={(e) => setApiKeyDrafts((d) => ({ ...d, [id]: e.target.value }))}
                   />
@@ -737,7 +815,7 @@ export default function Settings() {
               </div>
             ))}
             <div style={{ ...styles.hint, marginTop: 4, marginBottom: 0 }}>
-              {text("Saved keys are never displayed. Leave a field blank to keep the current key, or enter a new one to replace it. Removing deletes the saved key.", "已儲存嘅密鑰唔會顯示。留空會保留現有密鑰；輸入新密鑰會取代佢。移除會刪除已儲存密鑰。")}
+              {text("Saved keys are never displayed. Leave a field blank to keep the current key, or enter a new one to replace it. Removing deletes the saved key.", "已儲存的密鑰不會顯示。留空可保留現有密鑰；輸入新密鑰則會取代現有密鑰。移除操作會刪除已儲存的密鑰。")}
             </div>
             {apiKeyError && <div style={styles.errorText}>{apiKeyError}</div>}
           </div>
@@ -745,11 +823,11 @@ export default function Settings() {
 
         {section === "google" && (
           <div className="settings-panel">
-            <h2 className="settings-heading">{text('Google for Assistant and Calendar', '助手同日曆嘅 Google 連接')}</h2>
-            <div style={styles.hint}>{text('Connect Google for Assistant mail tools, Calendar and briefings. Mail workspaces use a separate Gmail connection.', '連接 Google 俾助手郵件工具、日曆同簡報使用。郵件工作區會用獨立 Gmail 連接。')}</div>
+            <h2 className="settings-heading">{text('Google for Assistant and Calendar', '助手及日曆的 Google 連接')}</h2>
+            <div style={styles.hint}>{text('Connect Google for Assistant mail tools, Calendar and briefings. Mail workspaces use a separate Gmail connection.', '連接 Google 供助手郵件工具、日曆及簡報使用。郵件工作區使用獨立的 Gmail 連接。')}</div>
             {googleConnected === null ? (
               <div style={styles.hint}>
-                {googleError ? text('Google connection status is unavailable.', '未能取得 Google 連接狀態。') : text('Checking Google connection…', '檢查 Google 連接緊…')}
+                {googleError ? text('Google connection status is unavailable.', '未能取得 Google 連接狀態。') : text('Checking Google connection…', '正在檢查 Google 連接…')}
                 {googleError && <button style={{ ...styles.saveBtn, marginLeft: 10 }} onClick={() => { setGoogleError(null); void refreshGoogle(); }}>{text('Retry', '重試')}</button>}
               </div>
             ) : googleConnected ? (
@@ -763,23 +841,23 @@ export default function Settings() {
                     disabled={connecting || disconnecting}
                     style={styles.actionBtn}
                   >
-                    {connecting ? text('Opening…', '開啟緊…') : text('Switch account', '切換帳戶')}
+                    {connecting ? text('Opening…', '正在開啟…') : text('Switch account', '切換帳戶')}
                   </button>
                   <button
                     onClick={() => { void handleGoogleDisconnect(); }}
                     disabled={connecting || disconnecting}
                     style={{ ...styles.actionBtn, borderColor: "var(--accent-urgent)", color: "var(--accent-urgent)" }}
                   >
-                    {disconnecting ? text('Disconnecting…', '斷開緊…') : text('Disconnect', '斷開')}
+                    {disconnecting ? text('Disconnecting…', '正在中斷連接…') : text('Disconnect', '斷開')}
                   </button>
                 </div>
                 <div style={{ ...styles.hint, marginTop: 8, marginBottom: 0 }}>
-                  {text("Disconnecting revokes this Google connection and removes its Assistant mail cache, Calendar events and briefings. Local copies in the separate Mail workspace are kept.", "斷開會撤銷呢個 Google 連接，並刪除助手郵件快取、日曆活動同簡報；獨立郵件工作區嘅本機副本會保留。")}
+                  {text("Disconnecting revokes this Google connection and removes its Assistant mail cache, Calendar events and briefings. Local copies in the separate Mail workspace are kept.", "中斷連接會撤銷此 Google 授權，並刪除助手郵件快取、日曆活動及簡報；獨立郵件工作區的本機副本會保留。")}
                 </div>
               </>
             ) : (
               <button onClick={() => { void handleGoogleConnect(false); }} disabled={connecting} style={styles.actionBtn}>
-                {connecting ? text('Connecting…', '連接緊…') : text('Connect Google', '連接 Google')}
+                {connecting ? text('Connecting…', '正在連接…') : text('Connect Google', '連接 Google')}
               </button>
             )}
             {googleNotice && <div style={{ ...styles.hint, marginTop: 10, marginBottom: 0 }}>{googleNotice}</div>}
@@ -789,36 +867,41 @@ export default function Settings() {
 
         {section === "notion" && (
           <div className="settings-panel">
-            <h2 className="settings-heading">Notion</h2>
+            <IntegrationConnection service="notion" />
+            <details className="integration-advanced"><summary>{text("Advanced: use an API token", "進階：使用 Notion 整合權杖")}</summary>
             <div style={styles.hint}>{text('Enter your Notion integration token', '輸入 Notion integration token')}</div>
             <div style={{ display: "flex", gap: 8 }}>
               <input type="password" aria-label={text('Notion integration token', 'Notion integration token')} autoComplete="off" value={notionToken} onChange={(e) => { setNotionToken(e.target.value); setNotionSaved(false); }} placeholder="ntn_..." style={styles.tokenInput} />
               <button disabled={!notionToken.trim()} onClick={handleSaveNotion} style={styles.saveBtn}>{notionSaved ? t("saved") : t("save")}</button>
             </div>
+            </details>
           </div>
         )}
 
         {section === "github" && (
           <div className="settings-panel">
-            <h2 className="settings-heading">GitHub</h2>
+            <IntegrationConnection service="github" />
+            <details className="integration-advanced"><summary>{text("Advanced: use an API token", "進階：使用個人存取權杖")}</summary>
             <div style={styles.hint}>{text('Enter your GitHub personal access token', '輸入 GitHub personal access token')}</div>
             <div style={{ display: "flex", gap: 8 }}>
               <input type="password" aria-label={text('GitHub personal access token', 'GitHub personal access token')} autoComplete="off" value={githubToken} onChange={(e) => { setGithubToken(e.target.value); setGithubSaved(false); }} placeholder="ghp_..." style={styles.tokenInput} />
               <button disabled={!githubToken.trim()} onClick={handleSaveGitHub} style={styles.saveBtn}>{githubSaved ? t("saved") : t("save")}</button>
             </div>
+            </details>
           </div>
         )}
 
         {section === "obsidian" && (
           <div className="settings-panel">
-            <h2 className="settings-heading">Obsidian</h2>
+            <IntegrationConnection service="obsidian" />
+            <details className="integration-advanced"><summary>{text("Advanced: use an API token", "進階：使用 Local REST API 外掛")}</summary>
             <div style={styles.hint}>{text('Connect to Obsidian vault via Local REST API plugin', '透過 Local REST API 外掛連接 Obsidian 資料庫')}</div>
             <div style={{ display: "flex", gap: 8 }}>
               <input type="password" aria-label={text('Obsidian API key', 'Obsidian API 密鑰')} autoComplete="off" value={obsidianKey} onChange={(e) => { setObsidianKey(e.target.value); setObsidianSaved(false); }} placeholder="API key from Obsidian REST API plugin" style={styles.tokenInput} />
               <button disabled={!obsidianKey.trim()} onClick={handleSaveObsidian} style={styles.saveBtn}>{obsidianSaved ? t("saved") : t("save")}</button>
             </div>
             <div style={{ color: "var(--text-muted)", fontSize: 12, marginTop: 6 }}>
-              Install "Local REST API" plugin in Obsidian, enable it, copy the API key
+              {text('Install and enable the "Local REST API" plugin in Obsidian, then copy its API key.', '請在 Obsidian 安裝並啟用「Local REST API」外掛，再複製其 API key。')}
             </div>
             <div style={{ marginTop: 12 }}>
               <div style={{ color: "var(--text-secondary)", fontSize: 12, marginBottom: 4 }}>{text('Endpoint', '端點')}</div>
@@ -826,14 +909,15 @@ export default function Settings() {
                 aria-label={text('Obsidian endpoint URL', 'Obsidian 端點網址')}
                 value={obsidianBaseUrl}
                 onChange={(e) => setObsidianBaseUrl(e.target.value)}
-                onBlur={() => { void setPreference("obsidian_base_url", obsidianBaseUrl.trim()); }}
+                onBlur={() => { void setPreference("obsidian_base_url", obsidianBaseUrl.trim()).then(connectionsChanged).catch(e => setIntegrationError(String(e))); }}
                 placeholder="https://127.0.0.1:27124"
                 style={styles.tokenInput}
               />
               <div style={{ color: "var(--text-muted)", fontSize: 12, marginTop: 6 }}>
-                {text("Leave blank for the plugin default (HTTPS on port 27124). Change this only if you configured a different local endpoint.", "留空會用外掛預設 HTTPS 27124 連接埠。只有你設定咗其他本機端點時先更改。")}
+                {text("Leave blank for the plugin default (HTTPS on port 27124). Change this only if you configured a different local endpoint.", "留空會使用外掛預設的 HTTPS 27124 連接埠。僅在已設定其他本機端點時更改。")}
               </div>
             </div>
+            </details>
           </div>
         )}
 
@@ -841,7 +925,7 @@ export default function Settings() {
           <div className="settings-panel">
             <h2 className="settings-heading">AWS Bedrock</h2>
             <div style={styles.hint}>
-              {text("Use a model and region available to your AWS account. Mail analysis has its own model setting. Saving credentials does not test access.", "請用你 AWS 帳戶可用嘅模型同地區。電郵分析有獨立模型設定；儲存憑證唔代表已測通。")}
+              {text("Use a model and region available to your AWS account. Mail analysis has its own model setting. Saving credentials does not test access.", "請使用 AWS 帳戶可用的模型及地區。電郵分析設有獨立模型設定；儲存憑證不代表已驗證連接。")}
               {awsStatus.configured && (
                 <> {text("Saved region", "已儲存地區")} <code style={{ fontFamily: "var(--font-mono)", color: "var(--text-primary)" }}>{awsStatus.region}</code>.</>
               )}
@@ -888,7 +972,7 @@ export default function Settings() {
           <div className="settings-panel">
             <h2 className="settings-heading">{text("Assistant language", "助手語言")}</h2>
             <div style={styles.hint}>
-              {text("Controls the assistant's response language and speech-to-text language.", "以下分別設定助手回覆同語音辨識語言。")}
+              {text("Controls the assistant's response language and speech-to-text language.", "以下分別設定助手回覆及語音辨識的語言。")}
             </div>
 
             <div style={{ marginTop: 12 }}>
@@ -899,7 +983,7 @@ export default function Settings() {
                 await setPreference("language", v);
               }}>
                 <option value="en">English</option>
-                <option value="yue">{text("Cantonese", "廣東話")}</option>
+                <option value="yue">{text("Traditional Chinese (written)", "繁體書面語")}</option>
                 <option value="bilingual">{text("Bilingual (code-mix)", "雙語混合")}</option>
               </select>
             </div>
@@ -946,7 +1030,7 @@ export default function Settings() {
 
           <div className="settings-panel">
             <h2 className="settings-heading">{text('Wake word', '喚醒詞')}</h2>
-            <div style={styles.hint}>{text('Experimental. Listen locally for "Hey Jarvis" to start voice input.', '實驗功能：喺本機偵測「Hey Jarvis」以開始語音輸入。')}</div>
+            <div style={styles.hint}>{text('Experimental. Listen locally for "Hey Jarvis" to start voice input.', '實驗功能：在本機偵測「Hey Jarvis」以啟動語音輸入。')}</div>
             <label style={styles.option}>
               <input type="checkbox" checked={wakeStatus?.enabled ?? false} disabled={!wakeCanEnable || wakeBusy || modelDownloading !== null} onChange={(e) => { void handleWakeToggle(e.target.checked); }} style={styles.radio} />
               <span style={styles.optionLabel}>{text('Enable wake word', '啟用喚醒詞')}</span>
@@ -954,7 +1038,7 @@ export default function Settings() {
             <div style={styles.statusText}>{getWakeStatusLine(voiceState)}</div>
             <div style={{ display: "flex", gap: 8 }}>
               <button onClick={() => { void handleDownloadModel(false); }} disabled={wakeBusy || modelDownloading !== null || wakeStatus?.model_downloaded} style={styles.actionBtn}>
-                {modelDownloading !== null ? text('Downloading…', '下載緊…') : wakeStatus?.model_downloaded ? text('Model ready', '模型已準備好') : text('Download model', '下載模型')}
+                {modelDownloading !== null ? text('Downloading…', '正在下載…') : wakeStatus?.model_downloaded ? text('Model ready', '模型已準備好') : text('Download model', '下載模型')}
               </button>
               {wakeStatus?.model_downloaded && (
                 <button onClick={() => { void handleDownloadModel(true); }} disabled={wakeBusy || modelDownloading !== null} style={styles.actionBtn}>
@@ -973,7 +1057,7 @@ export default function Settings() {
               </div>
             )}
             <div style={styles.privacyText}>
-              {text("Wake-word audio is processed locally for detection. After activation, full commands use cloud speech-to-text first when a Gemini API key is saved under API Keys, then fall back to local Whisper.", "喚醒詞偵測會喺本機處理音訊。啟動後，如果已儲存 Gemini API 密鑰，完整指示會先用雲端語音辨識，再以本機 Whisper 作後備。")}
+              {text("Wake-word audio is processed locally for detection. After activation, full commands use cloud speech-to-text first when a Gemini API key is saved under API Keys, then fall back to local Whisper.", "喚醒詞偵測會在本機處理音訊。啟動後，如已儲存 Gemini API 密鑰，完整指示會優先使用雲端語音辨識，並以本機 Whisper 作為備援。")}
             </div>
             {wakeError && <div style={styles.errorText}>{wakeError}</div>}
           </div>
@@ -1020,18 +1104,136 @@ export default function Settings() {
           <div className="settings-panel">
             <h2 className="settings-heading">{text('Desktop wallpaper', '桌面背景')}</h2>
             <div style={styles.hint}>
-              {text("Turn the full JARVIS app into a live macOS desktop wallpaper. The entire UI renders behind all windows and desktop icons.", "將完整 JARVIS App 顯示為 macOS 動態桌面背景。介面會呈現喺其他視窗同桌面圖示後面。")}
+              {text("Turn the full JARVIS app into a live macOS desktop wallpaper. The entire UI renders behind all windows and desktop icons.", "將完整 JARVIS App 顯示為 macOS 動態桌面背景。介面會呈現在其他視窗及桌面圖示後方。")}
             </div>
             <label style={styles.option}>
               <input type="checkbox" checked={wallpaperActive} disabled={wallpaperBusy} onChange={(e) => { void handleWallpaperToggle(e.target.checked); }} style={styles.radio} />
               <span style={styles.optionLabel}>{text('Enable wallpaper mode', '啟用桌面背景模式')}</span>
             </label>
             <div style={styles.statusText}>
-              {wallpaperBusy ? text("Switching…", "切換緊…") : wallpaperActive ? text("Wallpaper active — full JARVIS on desktop", "桌面背景已啟用 — 完整 JARVIS 介面") : text("Wallpaper inactive", "桌面背景未啟用")}
+              {wallpaperBusy ? text("Switching…", "正在切換…") : wallpaperActive ? text("Wallpaper active — full JARVIS on desktop", "桌面背景已啟用 — 完整 JARVIS 介面") : text("Wallpaper inactive", "桌面背景未啟用")}
             </div>
             {wallpaperError && <p role="alert" style={styles.errorText}>{wallpaperError}</p>}
             <div style={styles.privacyText}>
-              {text("When active, JARVIS goes fullscreen behind all windows. After enabling, it stays interactive until you send it to the background. To bring it back later, say Hey Jarvis, click the tray icon, or press Cmd+Shift+W. Closing the window sends it back to the background.", "啟用後，JARVIS 會全螢幕顯示喺其他視窗後面，直到你將佢送返背景。之後可講「Hey Jarvis」、按選單列圖示，或者按 Cmd+Shift+W 叫返佢。關閉視窗會將佢送返背景。")}
+              {text("When active, JARVIS goes fullscreen behind all windows. After enabling, it stays interactive until you send it to the background. To bring it back later, say Hey Jarvis, click the tray icon, or press Cmd+Shift+W. Closing the window sends it back to the background.", "啟用後，JARVIS 會以全螢幕顯示在其他視窗後方，並保持可互動狀態，直至移至背景。之後可說出「Hey Jarvis」、按選單列圖示，或按 Cmd+Shift+W 重新開啟。關閉視窗會將 JARVIS 移回背景。")}
+            </div>
+          </div>
+        </>)}
+
+        {section === "storage" && (<>
+          <div className="settings-panel">
+            <h2 className="settings-heading">{text('On this Mac', '本機用量')}</h2>
+            <p style={styles.hint}>
+              {text(
+                "Everything JARVIS stores stays on this Mac. Nothing here is synced or sent anywhere.",
+                "JARVIS 的所有資料都只保存在本機，不會同步或上載至任何地方。",
+              )}
+            </p>
+            {!storage && !storageError && <div style={styles.statusText}>{text("Reading…", "正在讀取…")}</div>}
+            {storage && (<>
+              <div style={styles.storageTotal}>{formatBytes(storage.totalBytes)}</div>
+              <dl style={styles.storageList}>
+                {([
+                  ["database", text('Database', '資料庫'), storage.databaseBytes + storage.walBytes],
+                  ["models", text('Voice and AI models', '語音及 AI 模型'), storage.modelsBytes],
+                  ["cache", text('Web cache', '網頁快取'), storage.cacheBytes],
+                  ["backups", text('Old backups', '舊備份'), storage.backupsBytes],
+                ] as const).map(([key, label, bytes]) => (
+                  <div key={key} style={styles.storageRow}>
+                    <dt style={styles.storageLabel}>{label}</dt>
+                    <dd style={styles.storageValue}>{formatBytes(bytes)}</dd>
+                  </div>
+                ))}
+              </dl>
+              <div style={styles.hint}>
+                {text(
+                  `${storage.mailMessageCount} mail message(s) holding ${formatBytes(storage.mailBodyBytes)} of message text, and ${storage.conversationCount} chat turn(s).`,
+                  `已儲存 ${storage.mailMessageCount} 封郵件，內文共 ${formatBytes(storage.mailBodyBytes)}；對話記錄 ${storage.conversationCount} 項。`,
+                )}
+              </div>
+              <div style={styles.privacyText}>{storage.dataDir}</div>
+            </>)}
+            {storageError && <p role="alert" style={styles.errorText}>{storageError}</p>}
+            {storageNotice && <p style={styles.statusText}>{storageNotice}</p>}
+          </div>
+
+          <div className="settings-panel">
+            <h2 className="settings-heading">{text('Automatic clean-up', '自動清理')}</h2>
+            <p style={styles.hint}>
+              {text(
+                "JARVIS keeps walking backwards through your mailbox, so without a limit the database only grows. Old message text is dropped while the subject, sender and preview stay; anything you filed into a mail group is never touched.",
+                "JARVIS 會持續向前同步較舊的郵件，若不設限，資料庫只會不斷增大。超過期限的郵件只會移除內文，主旨、寄件人及預覽會保留；已歸入郵件群組的郵件不會被清理。",
+              )}
+            </p>
+            <label style={styles.option}>
+              <input type="checkbox" style={styles.radio}
+                checked={storage?.retentionEnabled ?? true}
+                disabled={!storage || !!storageBusy}
+                onChange={(e) => handleRetentionChange(storage?.retentionDays ?? 90, e.target.checked)} />
+              <span style={styles.optionLabel}>{text('Remove content older than', '自動移除超過此期限的內容')}</span>
+            </label>
+            <label style={{ display: "block", marginTop: 4 }}>
+              <span style={{ display: "block", color: "var(--text-secondary)", fontSize: 12, marginBottom: 4 }}>
+                {text('Retention window', '保留期限')}
+              </span>
+              <select style={styles.select}
+                aria-label={text('Retention window', '保留期限')}
+                value={String(storage?.retentionDays ?? 90)}
+                disabled={!storage || !storage.retentionEnabled || !!storageBusy}
+                onChange={(e) => handleRetentionChange(Number(e.target.value), true)}>
+                <option value="30">{text('30 days', '30 日')}</option>
+                <option value="90">{text('90 days', '90 日')}</option>
+                <option value="180">{text('180 days', '180 日')}</option>
+                <option value="365">{text('1 year', '1 年')}</option>
+              </select>
+            </label>
+            <div style={{ marginTop: 14 }}>
+              <button style={styles.actionBtn} disabled={!storage || !!storageBusy} onClick={handleSweep}>
+                {storageBusy || text('Clean up now', '立即清理')}
+              </button>
+            </div>
+          </div>
+
+          <div className="settings-panel">
+            <h2 className="settings-heading">{text('Free up space', '釋放空間')}</h2>
+            <p style={styles.hint}>
+              {text(
+                "Each of these is safe to remove. Models and caches are re-downloaded or rebuilt when they are next needed.",
+                "以下項目均可安全移除。模型及快取會在下次需要時重新下載或重建。",
+              )}
+            </p>
+            {([
+              { scope: "cache", label: text('Clear web cache', '清除網頁快取'),
+                help: text('Rebuilt automatically.', '會自動重建。'), bytes: storage?.cacheBytes },
+              { scope: "backups", label: text('Delete old backups', '刪除舊備份'),
+                help: text('Copies left behind by earlier versions.', '舊版本遺留的備份副本。'), bytes: storage?.backupsBytes },
+              { scope: "models", label: text('Delete downloaded models', '刪除已下載的模型'),
+                help: text('Offline speech and voice models. Re-downloaded on demand.', '離線語音及聲音模型，需要時會重新下載。'), bytes: storage?.modelsBytes },
+              { scope: "mailBodies", label: text('Drop stored mail text', '移除已儲存的郵件內文'),
+                help: text('Keeps subjects and previews. Grouped mail is kept in full.', '保留主旨及預覽；已分組的郵件會完整保留。'), bytes: storage?.mailBodyBytes },
+            ] as const).map((item) => (
+              <div key={item.scope} style={styles.storagePurgeRow}>
+                <div>
+                  <div style={styles.optionLabel}>{item.label}</div>
+                  <div style={styles.privacyText}>{item.help}</div>
+                </div>
+                <button style={styles.saveBtn} disabled={!storage || !!storageBusy || !item.bytes}
+                  onClick={() => handlePurge(item.scope as StorageScope, item.label)}>
+                  {item.bytes ? formatBytes(item.bytes) : text('Empty', '沒有資料')}
+                </button>
+              </div>
+            ))}
+            <div style={styles.storagePurgeRow}>
+              <div>
+                <div style={styles.optionLabel}>{text('Delete all chat history', '刪除所有對話記錄')}</div>
+                <div style={styles.privacyText}>{text('Cannot be undone.', '此操作無法復原。')}</div>
+              </div>
+              <button style={styles.saveBtn} disabled={!storage || !!storageBusy || !storage?.conversationCount}
+                onClick={() => handlePurge("conversations", text('Delete all chat history', '刪除所有對話記錄'))}>
+                {storage?.conversationCount
+                  ? text(`${storage.conversationCount} turns`, `${storage.conversationCount} 項`)
+                  : text('Empty', '沒有資料')}
+              </button>
             </div>
           </div>
         </>)}
@@ -1039,6 +1241,16 @@ export default function Settings() {
       </div>
     </div>
   );
+}
+
+/// Decimal units, matching what Finder reports, so a user comparing the panel
+/// against Get Info sees the same number.
+function formatBytes(bytes: number): string {
+  if (!Number.isFinite(bytes) || bytes <= 0) return "0 MB";
+  const units = ["B", "KB", "MB", "GB", "TB"];
+  const index = Math.min(Math.floor(Math.log10(bytes) / 3), units.length - 1);
+  const value = bytes / 1000 ** index;
+  return `${value >= 100 || index === 0 ? Math.round(value) : value.toFixed(1)} ${units[index]}`;
 }
 
 const styles: Record<string, React.CSSProperties> = {
@@ -1055,4 +1267,10 @@ const styles: Record<string, React.CSSProperties> = {
   progressFill: { height: "100%", background: "var(--cyan)", transition: "width 180ms ease-out" },
   privacyText: { color: "var(--text-secondary)", fontSize: 13, marginTop: 12, lineHeight: 1.6, maxWidth: "72ch" },
   errorText: { color: "var(--accent-urgent)", fontSize: 13, marginTop: 12, lineHeight: 1.5 },
+  storageTotal: { color: "var(--text-primary)", fontSize: 28, lineHeight: 1.2, marginBottom: 14, fontVariantNumeric: "tabular-nums" },
+  storageList: { margin: 0, display: "flex", flexDirection: "column", gap: 8 },
+  storageRow: { display: "flex", alignItems: "baseline", justifyContent: "space-between", gap: 16 },
+  storageLabel: { color: "var(--text-secondary)", fontSize: 13, margin: 0 },
+  storageValue: { color: "var(--text-primary)", fontSize: 13, margin: 0, fontVariantNumeric: "tabular-nums" },
+  storagePurgeRow: { display: "flex", alignItems: "center", justifyContent: "space-between", gap: 16, paddingTop: 12, marginTop: 12, borderTop: "1px solid var(--border-primary)" },
 };

@@ -17,6 +17,7 @@ native-qa = []
 tauri-build = { version = "2", features = [] }
 
 [dependencies]
+libc = "0.2"
 tauri = { version = "2", features = ["macos-private-api", "tray-icon"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
@@ -56,8 +57,19 @@ aws-sdk-bedrockruntime = "1.130.0"
 aws-smithy-types = "1.4.7"
 aws-credential-types = "1.2"
 security-framework = "2.11"
+sha2 = "0.10"
 
 [profile.release]
 opt-level = 3
 lto = true
 codegen-units = 1
+
+# A full-debuginfo dev build of this dependency tree measured 34 GB of
+# `target/debug`, nearly all of it object files for crates nobody steps through.
+# Line tables are enough to read a backtrace from our own code; third-party
+# crates get none at all. Keeps a working tree in single-digit GB.
+[profile.dev]
+debug = 1
+
+[profile.dev.package."*"]
+debug = false

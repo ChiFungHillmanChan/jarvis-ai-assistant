@@ -140,7 +140,7 @@ export default function LocalAiSetup({ endpoints, onEndpointAdded, onModelsLoade
     ? "Apple Silicon (Metal)"
     : system?.gpu.has_cuda
     ? `NVIDIA (CUDA ${system.gpu.cuda_version || ""})`
-    : text("No GPU acceleration", "未有 GPU 加速");
+    : text("No GPU acceleration", "未提供 GPU 加速");
 
   return (
     <div className="panel" style={styles.panel}>
@@ -193,7 +193,7 @@ export default function LocalAiSetup({ endpoints, onEndpointAdded, onModelsLoade
           </div>
         ))}
         {checks.length === 0 && !checkingPrereqs && (
-          <div style={styles.emptyText}>{text("Click REFRESH to check prerequisites", "撳「重新檢查」核對所需條件")}</div>
+          <div style={styles.emptyText}>{text("Click REFRESH to check prerequisites", "按「重新檢查」核對所需條件")}</div>
         )}
       </div>
 
@@ -234,7 +234,7 @@ export default function LocalAiSetup({ endpoints, onEndpointAdded, onModelsLoade
 
       {pulling && (
         <div style={styles.pullProgress}>
-          <div style={styles.pullLabel}>{text("Downloading", "下載緊")} {pulling.model}... {pulling.percent}%</div>
+          <div style={styles.pullLabel}>{text("Downloading", "下載中")} {pulling.model}... {pulling.percent}%</div>
           <div style={styles.progressShell}>
             <div style={{ ...styles.progressFill, width: `${pulling.percent}%` }} />
           </div>

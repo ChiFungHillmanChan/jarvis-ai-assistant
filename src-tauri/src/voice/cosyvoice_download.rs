@@ -5,6 +5,11 @@ pub fn model_dir() -> PathBuf {
     dirs::data_dir().unwrap().join("jarvis/models/cosyvoice2")
 }
 
+/// Total download for the file list below, so the UI can warn before spending
+/// a gigabyte of someone's disk. Sums the blob sizes the Hugging Face API
+/// reports for this repo.
+pub const TOTAL_DOWNLOAD_BYTES: u64 = 1_255_690_000;
+
 #[derive(serde::Serialize, Clone, Debug)]
 pub enum DownloadProgress {
     Started { total_files: usize },
@@ -25,14 +30,20 @@ pub async fn ensure_downloaded(
     }
     tokio::fs::create_dir_all(&dir).await.map_err(|e| format!("mkdir: {e}"))?;
 
-    // File list for the 4-bit quantised CosyVoice3 model.
-    // Verify exact filenames from https://huggingface.co/aufklarer/CosyVoice3-0.5B-MLX-4bit/tree/main
-    // before a production release; this list reflects the expected structure per the B7 spike.
+    // File list for the 4-bit quantised CosyVoice3 model, read from the repo's
+    // own file listing rather than guessed. The B7 spike's placeholder list
+    // (model.safetensors, config.yaml, tokenizer.json, spk_embeddings.safetensors)
+    // named four files that do not exist in this repo, so every download 404'd.
     let files = [
-        "model.safetensors",
-        "config.yaml",
-        "tokenizer.json",
-        "spk_embeddings.safetensors",
+        "config.json",
+        "flow.safetensors",
+        "hifigan.safetensors",
+        "llm.safetensors",
+        "merges.txt",
+        "speech_tokenizer.safetensors",
+        "tokenizer_config.json",
+        "vocab.json",
+        "weight_shapes.json",
     ];
     let _ = progress.send(DownloadProgress::Started { total_files: files.len() }).await;
 

@@ -1,6 +1,6 @@
 use crate::auth::google::GoogleAuth;
 use crate::db::Database;
-use crate::integrations::{calendar, gmail, notion, github};
+use crate::integrations::{calendar, gmail, notion};
 use std::sync::Arc;
 
 /// cron_runs is append-only otherwise: the seeded five-minute jobs add a row on
@@ -137,26 +137,15 @@ pub(crate) async fn run_calendar_sync(db: &Arc<Database>, auth: &Arc<GoogleAuth>
 }
 
 async fn run_notion_sync(db: &Arc<Database>) -> Result<String, String> {
-    let token = match crate::integration_keys::resolve("notion_api_key") {
-        Some(t) => t,
-        None => return Ok("Skipped: Notion API key not configured".to_string()),
-    };
-    let pages = notion::search_pages(&token, None).await?;
-    let count = pages.len();
-    notion::save_to_db(db, &pages)?;
-    Ok(format!("Synced {} Notion pages", count))
+    if !notion::is_configured(db)? { return Ok("已略過：尚未連接 Notion。".into()); }
+    notion::sync_connected(db).await
 }
 
 async fn run_github_digest(db: &Arc<Database>) -> Result<String, String> {
-    let token = match crate::integration_keys::resolve("github_token") {
-        Some(t) => t,
-        None => return Ok("Skipped: GitHub token not configured".to_string()),
-    };
     // The detailed form: `save_to_db` only reconciles the halves of the fetch
     // that actually succeeded, and the warning is what tells it which.
-    let fetched = github::fetch_assigned_items_detailed(&token).await?;
+    let fetched = crate::integrations::github_auth::sync_connected(db).await?;
     let count = fetched.items.len();
-    github::save_to_db(db, &fetched)?;
     Ok(format!("Synced {} GitHub items", count))
 }
 

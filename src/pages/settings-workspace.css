@@ -136,3 +136,20 @@
 @media (prefers-reduced-motion: reduce) {
   .settings-workspace * { transition: none !important; }
 }
+
+.integration-connection { padding: 20px 0; border-bottom: 1px solid var(--border-primary); }
+.integration-connection__heading { display: flex; align-items: center; flex-wrap: wrap; gap: 14px; margin-bottom: 10px; }
+.integration-connection__heading h3 { margin: 0; font-size: 15px; }
+.integration-identity { margin: 8px 0; overflow-wrap: anywhere; color: var(--text-primary); font-size: 13px; }
+.integration-actions { display: flex; flex-wrap: wrap; gap: 8px; margin: 14px 0; }
+.integration-connection button { border: 1px solid var(--border-primary); border-radius: 6px; padding: 8px 12px; background: var(--surface-solid); color: var(--text-primary); font: inherit; font-size: 13px; cursor: pointer; }
+.integration-connection button.connections-primary { border-color: var(--cyan); }
+.integration-connection button:disabled { opacity: .5; cursor: default; }
+.integration-connection input { min-width: 180px; flex: 1; border: 1px solid var(--border-primary); border-radius: 6px; padding: 8px 10px; color: var(--text-primary); background: var(--surface); }
+.integration-connection button:focus-visible, .integration-connection input:focus-visible, .integration-connection summary:focus-visible { outline: 2px solid var(--cyan); outline-offset: 3px; }
+.integration-device { padding: 16px; margin-top: 14px; background: var(--surface); border: 1px solid var(--border-primary); border-radius: 8px; }
+.integration-device p { font-size: 13px; line-height: 1.6; margin-bottom: 10px; }
+.integration-device code { display: block; user-select: text; font: 24px var(--font-mono); letter-spacing: 3px; margin-bottom: 12px; }
+.integration-setup, .integration-advanced { margin-top: 18px; font-size: 13px; }
+.integration-setup summary, .integration-advanced summary { cursor: pointer; margin-bottom: 12px; }
+.integration-connection .settings-help { margin-top: 8px; }

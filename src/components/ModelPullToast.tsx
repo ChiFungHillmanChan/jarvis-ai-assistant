@@ -13,7 +13,7 @@ export default function ModelPullToast({ progress, visible }: ModelPullToastProp
   return (
     <div style={styles.container} className="animate-fade-in">
       <div style={styles.label}>
-        {text("Downloading", "下載緊")} {progress.model}... {progress.percent}%
+        {text("Downloading", "下載中")} {progress.model}... {progress.percent}%
       </div>
       <div style={styles.progressShell}>
         <div style={{ ...styles.progressFill, width: `${progress.percent}%` }} />
