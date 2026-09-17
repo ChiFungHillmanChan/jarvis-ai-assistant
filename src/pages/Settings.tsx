@@ -46,6 +46,7 @@ import { useVoiceState } from "../hooks/useVoiceState";
 import { useUiLocale } from "../i18n";
 import IntegrationConnection from "../components/IntegrationConnection";
 import { connectionsChanged } from "../lib/connections";
+import { DISPLAY_NAME_KEY, displayNameChanged } from "../lib/account";
 import LocalAiSetup from "../components/LocalAiSetup";
 import { useWorkspace, useWorkspaceValue } from "../workspace/WorkspaceContext";
 import "./settings-workspace.css";
@@ -77,6 +78,8 @@ export default function Settings() {
   const { locale, setLocale, saveError: localeSaveError, retrySave: retryLocaleSave, t, text } = useUiLocale();
   const [aiProvider, setAiProvider] = useState("gemini_primary");
   const [autoBriefing, setAutoBriefing] = useState(false);
+  const [displayName, setDisplayName] = useState("");
+  const [displayNameSaved, setDisplayNameSaved] = useState(false);
   const [apiKeyDrafts, setApiKeyDrafts] = useState<Record<string, string>>({});
   const [apiKeyStatus, setApiKeyStatus] = useState<Record<string, boolean>>({});
   const [apiKeyError, setApiKeyError] = useState<string | null>(null);
@@ -185,9 +188,22 @@ export default function Settings() {
       setAiProvider(s.values["ai_provider"] || "gemini_primary");
       // Same rule as the startup reader in lib.rs: an absent row means off.
       setAutoBriefing(s.values["auto_briefing"] === "true");
+      setDisplayName(s.values[DISPLAY_NAME_KEY] ?? "");
       setLoaded(true);
     } catch {
       setLoadError(true);
+    }
+  }
+
+  // Persist on blur and on the button: the sidebar reads the saved row, so an
+  // unsaved edit must never be what the row shows.
+  async function saveDisplayName() {
+    try {
+      await updateSetting(DISPLAY_NAME_KEY, displayName.trim());
+      setDisplayNameSaved(true);
+      displayNameChanged();
+    } catch {
+      setDisplayNameSaved(false);
     }
   }
 
@@ -1074,6 +1090,23 @@ export default function Settings() {
         )}
 
         {section === "appearance" && (<>
+          <div className="settings-panel">
+            <h2 className="settings-heading">{t("displayName")}</h2>
+            <label style={{ display: "block", marginTop: 12 }}>
+              <span style={{ display: "block", color: "var(--text-secondary)", fontSize: 12, marginBottom: 4 }}>{t("displayName")}</span>
+              <input
+                type="text"
+                value={displayName}
+                placeholder={t("displayNamePlaceholder")}
+                aria-label={t("displayName")}
+                style={styles.tokenInput}
+                onChange={(e) => { setDisplayName(e.target.value); setDisplayNameSaved(false); }}
+                onBlur={() => { void saveDisplayName(); }}
+              />
+            </label>
+            <div style={styles.hint}>{t("displayNameHelp")}</div>
+            <button style={{ ...styles.saveBtn, marginTop: 4 }} onClick={() => { void saveDisplayName(); }}>{displayNameSaved ? t("saved") : t("save")}</button>
+          </div>
           <div className="settings-panel">
             <h2 className="settings-heading">{t("uiLanguage")}</h2>
             <label style={{ display: "block", marginTop: 12 }}>

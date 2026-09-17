@@ -7,6 +7,8 @@ const messages = {
   apiKeys: ['API keys', 'API 密鑰'], keyAvailable: ['Key saved; connection not verified', '已儲存密鑰，尚未驗證連接'], keyHelp: ['Keys are stored in macOS Keychain. Saving a key does not verify provider access or available credit.', '密鑰儲存於 macOS 鑰匙圈。儲存密鑰不代表已驗證供應商連接或可用額度。'],
   save: ['Save', '儲存'], saved: ['Saved', '已儲存'], clear: ['Remove', '移除'], loading: ['Loading…', '載入中…'], retry: ['Retry', '重試'], refresh: ['Refresh', '重新整理'], refreshing: ['Refreshing…', '重新整理中…'], syncing: ['Syncing…', '同步中…'], noRun: ['Never', '從未執行'], localTime: ['Local time', '本機時間'], statusActive: ['Active', '運行中'], statusPaused: ['Paused', '已暫停'], statusFailed: ['Failed', '失敗'], statusRunning: ['Running', '執行中'], statusEnabled: ['Enabled', '已啟用'],
   countEvents: ['{count} events', '{count} 個活動'], countSynced: ['{count} synced', '已同步 {count} 項'], countTotal: ['{count} total', '共 {count} 項'],
+  accountMenu: ['Account menu', '帳戶選單'], displayName: ['Display name', '顯示名稱'], displayNameHelp: ['Shown at the bottom of the sidebar. Stored on this Mac only; JARVIS has no account to sign in to.', '顯示於側邊欄底部。只儲存在此 Mac；JARVIS 並無需要登入的帳戶。'], displayNamePlaceholder: ['Your name', '你的名稱'],
+  updateAvailable: ['New version {version}', '有新版本 {version}'], downloadLatest: ['Download latest version', '下載最新版本'], updating: ['Updating {percent}%', '更新中 {percent}%'], updateFailed: ['Update failed', '更新失敗'], dismissUpdate: ['Dismiss until the next check', '暫時關閉，下次檢查再提示'],
 } as const;
 export type MessageKey = keyof typeof messages;
 export const catalog = {

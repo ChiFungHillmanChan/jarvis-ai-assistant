@@ -84,6 +84,30 @@
 .sidebar-history .sidebar-item { font-size:12px; }
 .sidebar-history p { padding:0 10px; font-size:12px; color:var(--text-muted); line-height:1.6; }
 .sidebar-bottom { border-top:1px solid var(--border-primary); padding-top:12px; }
+
+/* Account row: the name from Settings, with its destinations in a menu above. */
+.sidebar-account { position:relative; }
+.sidebar-account-trigger { display:flex; align-items:center; gap:9px; width:100%; padding:7px 8px; border:0; border-radius:6px; background:transparent; color:var(--text-secondary); text-align:left; cursor:pointer; min-width:0; }
+.sidebar-account-trigger:hover, .sidebar-account[data-open="true"] .sidebar-account-trigger { background:var(--surface-hover); color:var(--text-primary); }
+.sidebar-account-trigger:focus-visible { outline:2px solid var(--cyan); outline-offset:-2px; }
+.sidebar-account-avatar { flex-shrink:0; width:26px; height:26px; border-radius:50%; display:inline-flex; align-items:center; justify-content:center; background:var(--accent-wash); color:var(--cyan); font-size:12px; line-height:1; text-transform:uppercase; }
+.sidebar-account-name { overflow:hidden; text-overflow:ellipsis; white-space:nowrap; font-size:13px; }
+.sidebar-account-menu { position:absolute; bottom:calc(100% + 6px); left:0; right:0; z-index:40; padding:5px; border:1px solid var(--border-primary); border-radius:8px; background:var(--surface-solid); box-shadow:0 10px 26px rgba(0,0,0,0.32); }
+.sidebar-account-menu .sidebar-item { margin-bottom:0; font-size:12.5px; }
+
+/* Update notification, bottom left. The only update affordance in the app. */
+.update-toast { position:fixed; left:16px; bottom:16px; z-index:60; display:flex; align-items:flex-start; gap:10px; max-width:300px; padding:11px 12px; border:1px solid rgba(0,180,255,0.45); border-radius:10px; background:var(--surface-solid); box-shadow:0 12px 30px rgba(0,0,0,0.34); }
+.update-toast.is-error { border-color:rgba(255,100,100,0.5); }
+.update-toast-dot { flex-shrink:0; margin-top:5px; width:7px; height:7px; border-radius:50%; background:rgba(0,180,255,0.9); box-shadow:0 0 6px rgba(0,180,255,0.7); }
+.update-toast.is-error .update-toast-dot { background:rgba(255,120,120,0.9); box-shadow:0 0 6px rgba(255,120,120,0.7); }
+.update-toast-body { display:flex; flex-direction:column; gap:5px; min-width:0; flex:1; }
+.update-toast-body strong { font-size:12.5px; font-weight:500; color:var(--text-primary); }
+.update-toast-action { display:inline-flex; align-items:center; gap:6px; align-self:flex-start; padding:4px 10px; border:1px solid rgba(0,180,255,0.5); border-radius:20px; background:rgba(0,180,255,0.14); color:rgba(0,180,255,0.95); font-family:var(--font-mono); font-size:11px; letter-spacing:0.4px; cursor:pointer; white-space:nowrap; }
+.update-toast-action:disabled { cursor:default; opacity:0.75; }
+.update-toast.is-error .update-toast-action { border-color:rgba(255,100,100,0.5); background:rgba(255,100,100,0.12); color:rgba(255,180,180,0.95); }
+.update-toast-error { font-family:var(--font-mono); font-size:9px; line-height:1.35; color:rgba(255,180,180,0.8); overflow-wrap:anywhere; }
+.update-toast-close { flex-shrink:0; width:22px; height:22px; display:inline-flex; align-items:center; justify-content:center; border:0; border-radius:5px; background:transparent; color:var(--text-muted); cursor:pointer; }
+.update-toast-close:hover { background:var(--surface-hover); color:var(--text-primary); }
 .icon-button { width:30px; height:30px; flex-shrink:0; display:inline-flex; align-items:center; justify-content:center; border:0; border-radius:5px; background:transparent; color:var(--text-muted); }
 .icon-button:hover:not(:disabled) { background:var(--surface-hover); color:var(--text-primary); }
 .workspace-main { flex:1; min-width:0; min-height:0; display:flex; flex-direction:column; }
