@@ -34,11 +34,21 @@ SYNC_BUCKET=$(aws cloudformation describe-stacks \
   --stack-name "Jarvis-${ENV}-Data" \
   --query "Stacks[0].Outputs[?ExportName=='Jarvis-${ENV}-SyncBucketName'].OutputValue" \
   --output text --profile jarvis-deploy --region ap-southeast-1 || echo "")
+COGNITO_DOMAIN=$(aws cloudformation describe-stacks \
+  --stack-name "Jarvis-${ENV}-Auth" \
+  --query "Stacks[0].Outputs[?ExportName=='Jarvis-${ENV}-UserPoolDomainUrl'].OutputValue" \
+  --output text --profile jarvis-deploy --region ap-southeast-1 || echo "")
+API_BASE=$(aws cloudformation describe-stacks \
+  --stack-name "Jarvis-${ENV}-Payment" \
+  --query "Stacks[0].Outputs[?ExportName=='Jarvis-${ENV}-ApiBaseUrl'].OutputValue" \
+  --output text --profile jarvis-deploy --region ap-southeast-1 || echo "")
 
 cat >> "$TARGET" <<EOF
 JARVIS_AWS_REGION=ap-southeast-1
 JARVIS_COGNITO_USER_POOL_ID=$USER_POOL_ID
 JARVIS_COGNITO_CLIENT_ID=$CLIENT_ID
+JARVIS_COGNITO_DOMAIN=$COGNITO_DOMAIN
+JARVIS_PAYMENT_API=$API_BASE
 JARVIS_KMS_KEY_ARN=$KEY_ARN
 JARVIS_SYNC_BUCKET=$SYNC_BUCKET
 EOF
