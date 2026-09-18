@@ -9,6 +9,7 @@
   "scripts": {
     "build": "tsc",
     "watch": "tsc -w",
+    "test": "node --experimental-strip-types --test lambda/*/*.test.ts",
     "synth": "cdk synth",
     "diff": "cdk diff",
     "deploy:sandbox": "cdk deploy --profile jarvis --context env=sandbox --require-approval broadening",

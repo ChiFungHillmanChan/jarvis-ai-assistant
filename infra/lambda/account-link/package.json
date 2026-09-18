@@ -1,0 +1,8 @@
+{
+  "name": "jarvis-account-link",
+  "private": true,
+  "version": "1.0.0",
+  "dependencies": {
+    "@aws-sdk/client-cognito-identity-provider": "^3.700.0"
+  }
+}
