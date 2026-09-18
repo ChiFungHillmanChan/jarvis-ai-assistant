@@ -139,11 +139,12 @@ export class PaymentStack extends cdk.Stack {
       throttlingRateLimit: 10,
       throttlingBurstLimit: 20,
     };
+    // routeSettings is untyped JSON passed to CloudFormation verbatim, so its keys must be PascalCase.
     defaultStage.routeSettings = {
       // Real usage is single-digit requests per minute: one click per upgrade.
       'POST /checkout': {
-        throttlingRateLimit: 2,
-        throttlingBurstLimit: 5,
+        ThrottlingRateLimit: 2,
+        ThrottlingBurstLimit: 5,
       },
     };
 
