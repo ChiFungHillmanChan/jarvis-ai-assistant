@@ -43,12 +43,13 @@ export class AuthStack extends cdk.Stack {
       bundling: { minify: true, sourceMap: true },
     });
 
-    this.userPool = new cognito.UserPool(this, 'JarvisUserPool', {
+    this.userPool = new cognito.UserPool(this, 'JarvisUserPoolV2', {
       userPoolName: `jarvis-${props.envName}-users`,
       signInAliases: { email: true },
-      // Both signInCaseSensitive and email.mutable can only be set when creating the pool.
-      // email must be mutable because Google's identity provider maps onto this attribute,
-      // and Cognito fails sign-in when a mapped immutable attribute has changed.
+      // signInCaseSensitive and email.mutable can only change by replacing the pool. email must be
+      // mutable because Google's identity provider maps onto this attribute, and Cognito fails
+      // sign-in when a mapped immutable attribute changes. The id became JarvisUserPoolV2 on
+      // 2026-09-18 to force replacement, since changing these properties alone is planned as in-place.
       signInCaseSensitive: false,
       selfSignUpEnabled: true,
       autoVerify: { email: true },
