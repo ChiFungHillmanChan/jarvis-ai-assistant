@@ -48,6 +48,8 @@ import IntegrationConnection from "../components/IntegrationConnection";
 import { connectionsChanged } from "../lib/connections";
 import { DISPLAY_NAME_KEY, displayNameChanged } from "../lib/account";
 import LocalAiSetup from "../components/LocalAiSetup";
+import AccountPanel from "../components/AccountPanel";
+import { UserRound } from "lucide-react";
 import { useWorkspace, useWorkspaceValue } from "../workspace/WorkspaceContext";
 import "./settings-workspace.css";
 import { Cpu, Key, Globe, Gem, Mic, Bot, Palette, HardDrive, GithubMark, NotionMark } from "../components/icons";
@@ -640,6 +642,7 @@ export default function Settings() {
   const voiceInputReady = Boolean(apiKeyStatus["gemini"] || wakeStatus?.model_downloaded);
 
   const SECTIONS = [
+    { id: "account", label: t("accountSection"), Icon: () => <UserRound size={17} /> },
     { id: "ai", label: text("Models", "模型"), Icon: () => <Cpu size={17} /> },
     { id: "keys", label: t("apiKeys"), Icon: () => <Key size={17} /> },
     { id: "google", label: text("Assistant Google", "助手 Google"), Icon: () => <Globe size={17} /> },
@@ -673,6 +676,7 @@ export default function Settings() {
           <p>{text("Manage how JARVIS works on this Mac.", "管理 JARVIS 在此 Mac 上的運作方式。")}</p>
         </header>
         {integrationError && ["notion", "github", "obsidian"].includes(section) && <p role="alert" style={styles.errorText}>{integrationError}</p>}
+        {section === "account" && <AccountPanel />}
         {section === "ai" && (<>
           <div className="settings-info-row">
             <p>{text('These providers handle Assistant conversations. Mail has its own analysis model and uses the API keys saved here.', '這些供應商負責處理助手對話。郵件分析設有獨立模型設定，並使用在此儲存的 API 密鑰。')}</p>

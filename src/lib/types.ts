@@ -363,3 +363,11 @@ export type StorageScope = "cache" | "backups" | "models" | "mailBodies" | "conv
 // means "nothing happened", not "connected". Must match the value of
 // ALREADY_CONNECTED in src-tauri/src/commands/google_auth.rs.
 export const GOOGLE_ALREADY_CONNECTED = "Already connected to Google";
+
+/** Mirrors auth::cognito::AccountStatus. `tier` is null when signed in but the server was unreachable. */
+export interface AccountStatus {
+  available: boolean;
+  signed_in: boolean;
+  email: string | null;
+  tier: string | null;
+}
