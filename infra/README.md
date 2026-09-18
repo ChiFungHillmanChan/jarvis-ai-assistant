@@ -4,15 +4,25 @@ Cloud control plane for JARVIS. Deploys to account `759626151650` in `ap-southea
 
 ## Stacks
 
-- `Jarvis-<env>-Auth` -- Cognito user pool + KMS CMK
+- `Jarvis-<env>-Auth` -- Cognito user pool (managed login, Google IdP, account-link trigger) + KMS CMK
 - `Jarvis-<env>-Data` -- S3 sync bucket + DynamoDB user meta + plugin registry
 - `Jarvis-<env>-Observability` -- CloudWatch dashboard + budget alarms + SNS
+- `Jarvis-<env>-Payment` -- control-plane HTTP API: Stripe webhook, JWT-authorised `/checkout` and `/me`
+
+Only Auth, Data and Payment are deployed in sandbox; Observability and Audit are not.
 
 `<env>` is one of `sandbox` / `dev` / `prod`.
 
 ## First-time setup
 
 Pre-req: `jarvis-cdk-deployer` IAM user with admin policy（root account 開）。Local profile `jarvis-deploy` configured.
+
+Google sign-in needs a Secrets Manager secret before the Auth stack deploys:
+`jarvis/<env>/google-login` = `{"clientId": "...", "clientSecret": "..."}` from a Google
+Cloud **Web application** client whose redirect URI is
+`https://jarvis-automation-<env>.auth.ap-southeast-1.amazoncognito.com/oauth2/idpresponse`.
+Keep that client in a project with only `openid email profile` scopes, published to
+Production -- not in the Gmail project, whose Testing status caps users at 100.
 
 ```bash
 cd infra
@@ -22,8 +32,8 @@ npm run build
 # Bootstrap once per account/region
 npm run bootstrap
 
-# Deploy sandbox first to test
-npm run deploy:sandbox
+# Deploy sandbox first to test (multi-stack app: name the stack)
+npx cdk deploy --context env=sandbox --profile jarvis-deploy Jarvis-sandbox-Payment
 ```
 
 ## 預估 monthly cost (sandbox / dev)
