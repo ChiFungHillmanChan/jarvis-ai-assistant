@@ -38,9 +38,15 @@ export default function AccountPanel() {
       await action();
     } catch (e) {
       const msg = String(e);
-      if (msg === NOT_SIGNED_IN) await load();
-      // The user closed the browser or let it time out: not an error to report.
-      if (msg !== SIGN_IN_CANCELLED) setError(msg);
+      if (msg === NOT_SIGNED_IN) {
+        // The session expired between actions: reload status and tell the
+        // user in their own language, never the raw error code.
+        await load();
+        setError(t("sessionEnded"));
+      } else if (msg !== SIGN_IN_CANCELLED) {
+        // The user closed the browser or let it time out: not an error to report.
+        setError(msg);
+      }
     } finally {
       setBusy(null);
     }
@@ -65,6 +71,14 @@ export default function AccountPanel() {
   });
 
   if (!status) {
+    if (error) {
+      return (
+        <div className="settings-panel">
+          <p role="alert" style={styles.error}>{error}</p>
+          <button style={styles.button} onClick={() => { setError(null); void load(); }}>{t("retry")}</button>
+        </div>
+      );
+    }
     return <div className="settings-panel"><p style={styles.hint}>{t("loading")}</p></div>;
   }
   if (!status.available) {

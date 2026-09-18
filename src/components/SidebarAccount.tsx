@@ -20,11 +20,14 @@ export default function SidebarAccount({ active, onNavigate }: { active: Workspa
   const { t } = useUiLocale();
   const [name, setName] = useState<string | null>(null);
   const [account, setAccount] = useState<AccountStatus | null>(null);
+  const [accountBusy, setAccountBusy] = useState(false);
 
   const loadAccount = useCallback(async () => {
     try {
       setAccount(await accountStatus());
     } catch {
+      // Same as load() below: an unreadable account status just falls back
+      // to the pre-account display-name row, not an error state.
       setAccount(null);
     }
   }, []);
@@ -86,14 +89,18 @@ export default function SidebarAccount({ active, onNavigate }: { active: Workspa
   const signedIn = Boolean(account?.signed_in);
   const badge = accountLabel(name, signedIn ? account?.email : null, t('navSettings'));
   const signInOrOut = async () => {
+    if (accountBusy) return;
     setOpen(false);
+    setAccountBusy(true);
     try {
       if (signedIn) await accountSignOut();
       else await accountSignIn();
     } catch (e) {
       if (String(e) !== SIGN_IN_CANCELLED) console.warn('account action failed', e);
+    } finally {
+      setAccountBusy(false);
+      accountChanged();
     }
-    accountChanged();
   };
   const go = (view: WorkspaceView) => {
     setOpen(false);
@@ -117,7 +124,7 @@ export default function SidebarAccount({ active, onNavigate }: { active: Workspa
             <Settings2 size={16} /><span>{t('navSettings')}</span>
           </button>
           {account?.available && (
-            <button role="menuitem" className="sidebar-item" onClick={() => void signInOrOut()}>
+            <button role="menuitem" className="sidebar-item" disabled={accountBusy} onClick={() => void signInOrOut()}>
               {signedIn ? <LogOut size={16} /> : <LogIn size={16} />}<span>{signedIn ? t('signOut') : t('signIn')}</span>
             </button>
           )}
