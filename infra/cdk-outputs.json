@@ -1,8 +1,13 @@
 {
   "Jarvis-sandbox-Auth": {
     "ExportsOutputFnGetAttJarvisDataKey335A0D18ArnDA3EBA3C": "arn:aws:kms:ap-southeast-1:759626151650:key/15175008-d7c8-4cc4-82fb-a509306f4c03",
-    "UserPoolClientId": "2th1pmdtckqd2cfe7fa4mrbmiq",
-    "UserPoolId": "ap-southeast-1_W895ypkix",
+    "ExportsOutputFnGetAttJarvisUserPoolV296DCB7C8Arn4CEED1FD": "arn:aws:cognito-idp:ap-southeast-1:759626151650:userpool/ap-southeast-1_2VzUyiQBA",
+    "UserPoolClientId": "2j4trnm470spp8a4sjbm5h5q3e",
+    "UserPoolId": "ap-southeast-1_2VzUyiQBA",
+    "ExportsOutputRefJarvisUserPoolV2JarvisAppClientFC5DE69DF5816FAA": "2j4trnm470spp8a4sjbm5h5q3e",
+    "UserPoolArn": "arn:aws:cognito-idp:ap-southeast-1:759626151650:userpool/ap-southeast-1_2VzUyiQBA",
+    "ExportsOutputRefJarvisUserPoolV296DCB7C8D6D88085": "ap-southeast-1_2VzUyiQBA",
+    "UserPoolDomainUrl": "https://jarvis-automation-sandbox.auth.ap-southeast-1.amazoncognito.com",
     "DataKeyArn": "arn:aws:kms:ap-southeast-1:759626151650:key/15175008-d7c8-4cc4-82fb-a509306f4c03"
   },
   "Jarvis-sandbox-Data": {
@@ -13,6 +18,7 @@
     "UserMetaTableName": "jarvis-sandbox-user-meta"
   },
   "Jarvis-sandbox-Payment": {
+    "ApiBaseUrl": "https://k2jn2wsgee.execute-api.ap-southeast-1.amazonaws.com",
     "StripeWebhookUrl": "https://k2jn2wsgee.execute-api.ap-southeast-1.amazonaws.com/stripe/webhook",
     "CheckoutUrl": "https://k2jn2wsgee.execute-api.ap-southeast-1.amazonaws.com/checkout",
     "StripeSecretArn": "arn:aws:secretsmanager:ap-southeast-1:759626151650:secret:jarvis/sandbox/stripe-6K3fI2"
