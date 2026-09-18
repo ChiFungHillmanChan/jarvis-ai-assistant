@@ -12,6 +12,8 @@ export async function handler(event: PreSignUpTriggerEvent): Promise<PreSignUpTr
   const email = event.request.userAttributes.email;
   if (!email) return event;
 
+  const emailVerified = event.request.userAttributes.email_verified === 'true';
+
   // Quotes and backslashes cannot appear in a valid address; stripping them
   // keeps the filter expression well-formed whatever the provider sends.
   const safeEmail = email.replace(/["\\]/g, '');
@@ -21,9 +23,14 @@ export async function handler(event: PreSignUpTriggerEvent): Promise<PreSignUpTr
   }));
   const existing = (found.Users ?? [])
     .filter((u) => u.Username && u.Username !== event.userName)
-    .map((u) => ({ username: u.Username!, federated: u.UserStatus === 'EXTERNAL_PROVIDER' }));
+    .map((u) => {
+      const federated = u.UserStatus === 'EXTERNAL_PROVIDER';
+      const userEmailVerified = u.Attributes?.find((a) => a.Name === 'email_verified')?.Value === 'true';
+      const verified = userEmailVerified && (federated || u.UserStatus === 'CONFIRMED');
+      return { username: u.Username!, federated, verified };
+    });
 
-  const decision = decide(event.triggerSource, event.userName, existing);
+  const decision = decide(event.triggerSource, event.userName, emailVerified, existing);
   if (decision.action === 'reject') throw new Error(decision.message);
   if (decision.action === 'link') {
     await cognito.send(new AdminLinkProviderForUserCommand({
