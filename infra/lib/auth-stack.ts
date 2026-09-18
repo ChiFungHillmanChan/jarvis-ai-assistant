@@ -42,14 +42,6 @@ export class AuthStack extends cdk.Stack {
       memorySize: 256,
       bundling: { minify: true, sourceMap: true },
     });
-    // Built from the stack, not from the pool: referencing userPool.userPoolArn
-    // here makes the pool depend on the function and the function's policy
-    // depend on the pool, which CloudFormation rejects as a cycle. The handler
-    // only ever acts on event.userPoolId, the pool that invoked it.
-    accountLinkFn.addToRolePolicy(new iam.PolicyStatement({
-      actions: ['cognito-idp:ListUsers', 'cognito-idp:AdminLinkProviderForUser'],
-      resources: [cdk.Stack.of(this).formatArn({ service: 'cognito-idp', resource: 'userpool', resourceName: '*' })],
-    }));
 
     this.userPool = new cognito.UserPool(this, 'JarvisUserPool', {
       userPoolName: `jarvis-${props.envName}-users`,
@@ -76,6 +68,17 @@ export class AuthStack extends cdk.Stack {
       },
       lambdaTriggers: { preSignUp: accountLinkFn },
       removalPolicy: isProd ? cdk.RemovalPolicy.RETAIN : cdk.RemovalPolicy.DESTROY,
+    });
+
+    // A standalone Policy, not addToRolePolicy: the Function depends on its
+    // role's DefaultPolicy but not on this Policy, so scoping the grant to
+    // this pool's ARN (Policy -> Pool -> Function -> Role) has no cycle.
+    new iam.Policy(this, 'AccountLinkPolicy', {
+      roles: [accountLinkFn.role!],
+      statements: [new iam.PolicyStatement({
+        actions: ['cognito-idp:ListUsers', 'cognito-idp:AdminLinkProviderForUser'],
+        resources: [this.userPool.userPoolArn],
+      })],
     });
 
     const googleSecret = sm.Secret.fromSecretNameV2(this, 'GoogleLoginSecret', `jarvis/${props.envName}/google-login`);
