@@ -6,6 +6,8 @@
 // rather than this module importing the catalog, which keeps the rules
 // testable without a locale.
 
+import type { AccountStatus } from './types';
+
 export interface AccountBadge {
   label: string;
   /** A single character for the avatar circle, or null to draw an icon instead. */
@@ -71,4 +73,14 @@ export function tierKey(tier: string | null | undefined): TierKey {
 export function accountLabel(displayName: string | null | undefined, email: string | null | undefined, fallback: string): AccountBadge {
   const name = displayName?.trim() ? displayName : email;
   return accountBadge(name, fallback);
+}
+
+/**
+ * Whether Settings should show its Account section. Mirrors the sidebar's own
+ * `account?.available` check. A status that has not loaded yet (null or
+ * undefined) reads as hidden, never as shown -- the section must not flash
+ * into view only to disappear once the real status arrives.
+ */
+export function accountSectionVisible(status: AccountStatus | null | undefined): boolean {
+  return status?.available === true;
 }
