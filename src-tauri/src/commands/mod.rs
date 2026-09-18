@@ -1,3 +1,4 @@
+pub mod account;
 pub mod assistant;
 pub mod aws;
 pub mod calendar;

@@ -9,11 +9,11 @@ pub enum Tier {
     Team,
 }
 
+/// The server takes the user id from the verified token and the email from
+/// Cognito, so the body carries only the tier.
 #[derive(Debug, Serialize)]
-pub struct CheckoutRequest<'a> {
+pub struct CheckoutRequest {
     pub tier: Tier,
-    pub user_id: &'a str,
-    pub email: &'a str,
 }
 
 #[derive(Debug, Deserialize)]
@@ -30,6 +30,10 @@ pub enum PaymentError {
     Network(#[from] reqwest::Error),
     #[error("checkout failed: {0}")]
     Checkout(String),
+    #[error("not_signed_in")]
+    NotSignedIn,
+    #[error("{0}")]
+    Account(String),
 }
 
 /// The checkout backend endpoint, embedded at compile time. A packaged .app has
@@ -54,16 +58,23 @@ fn payment_api_base() -> Result<String, PaymentError> {
         .ok_or(PaymentError::NotConfigured)
 }
 
-pub async fn create_checkout_session(req: CheckoutRequest<'_>) -> Result<CheckoutResponse, PaymentError> {
+pub async fn create_checkout_session(
+    tier: Tier,
+    session: &crate::auth::cognito::CognitoSession,
+) -> Result<CheckoutResponse, PaymentError> {
+    use crate::auth::cognito::AccountError;
     let base = payment_api_base()?;
     let url = format!("{}/checkout", base.trim_end_matches('/'));
-
+    let body = CheckoutRequest { tier };
     let client = crate::util::http_client();
-    let resp = client
-        .post(&url)
-        .json(&req)
-        .send()
-        .await?;
+
+    let resp = session
+        .send_authed(|token| client.post(&url).bearer_auth(token).json(&body))
+        .await
+        .map_err(|e| match e {
+            AccountError::NotSignedIn => PaymentError::NotSignedIn,
+            other => PaymentError::Account(other.to_string()),
+        })?;
 
     if !resp.status().is_success() {
         let status = resp.status();
@@ -111,5 +122,11 @@ mod tests {
     fn unconfigured_build_resolves_to_none() {
         assert_eq!(resolve_payment_api(None, None), None);
         assert_eq!(resolve_payment_api(Some(String::new()), Some("")), None);
+    }
+
+    #[test]
+    fn checkout_body_carries_only_the_tier() {
+        let body = serde_json::to_value(CheckoutRequest { tier: Tier::Pro }).unwrap();
+        assert_eq!(body, serde_json::json!({ "tier": "pro" }));
     }
 }
