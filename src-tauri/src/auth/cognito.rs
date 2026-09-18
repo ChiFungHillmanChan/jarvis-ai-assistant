@@ -307,6 +307,12 @@ struct Tokens {
     expires_at: i64,
     email: Option<String>,
     me: Option<Me>,
+    /// Bumped by `forget_local`. A write that was started before a sign-out
+    /// (a refresh, a sign-in, or a `/me` fetch that is still in flight)
+    /// captures this before its `.await` and only applies if it is still
+    /// current, so a slow response landing after sign-out cannot resurrect a
+    /// session the user just ended.
+    generation: u64,
 }
 
 pub struct CognitoSession {
@@ -401,6 +407,11 @@ impl CognitoSession {
         self.tokens.lock().unwrap_or_else(|e| e.into_inner())
     }
 
+    /// Snapshot to compare against after an `.await`; see `Tokens::generation`.
+    fn generation(&self) -> u64 {
+        self.tokens().generation
+    }
+
     fn store(&self, set: &TokenSet) {
         let email = set.id_token.as_deref().and_then(id_token_claims).and_then(|c| c.email);
         let mut t = self.tokens();
@@ -421,7 +432,12 @@ impl CognitoSession {
     }
 
     fn forget_local(&self) {
-        *self.tokens() = Tokens::default();
+        {
+            let mut t = self.tokens();
+            let next_generation = t.generation.wrapping_add(1);
+            *t = Tokens::default();
+            t.generation = next_generation;
+        }
         let _ = KeychainStore::delete(KEYCHAIN_SERVICE, KEYCHAIN_ACCOUNT);
     }
 
@@ -452,6 +468,7 @@ impl CognitoSession {
         }
         let refresh = KeychainStore::get(KEYCHAIN_SERVICE, KEYCHAIN_ACCOUNT)
             .map_err(|_| AccountError::NotSignedIn)?;
+        let generation = self.generation();
         match self
             .token_request(&[
                 ("grant_type", "refresh_token"),
@@ -461,7 +478,11 @@ impl CognitoSession {
             .await
         {
             Ok(set) => {
-                self.store(&set);
+                // A sign-out that ran while this refresh was in flight must
+                // not be undone by writing the token it fetched.
+                if self.generation() == generation {
+                    self.store(&set);
+                }
                 Ok(set.access_token)
             }
             Err(TokenError::InvalidGrant) => {
@@ -502,6 +523,7 @@ impl CognitoSession {
     pub async fn fetch_me(&self) -> Result<Me, AccountError> {
         let url = format!("{}/me", self.config()?.api_base);
         let client = crate::util::http_client();
+        let generation = self.generation();
         let resp = self.send_authed(|token| client.get(&url).bearer_auth(token)).await?;
         if !resp.status().is_success() {
             return Err(AccountError::Failed(format!("GET /me returned {}", resp.status())));
@@ -510,7 +532,11 @@ impl CognitoSession {
             .json()
             .await
             .map_err(|e| AccountError::Failed(format!("GET /me: {e}")))?;
-        self.tokens().me = Some(me.clone());
+        // A sign-out that ran while this fetch was in flight must not leave a
+        // cached `me` behind for the next `status(false)` to serve.
+        if self.generation() == generation {
+            self.tokens().me = Some(me.clone());
+        }
         Ok(me)
     }
 
@@ -589,6 +615,7 @@ impl CognitoSession {
     /// hosted page (which offers both email and Google).
     pub async fn sign_in(&self, provider: Option<&str>) -> Result<AccountStatus, AccountError> {
         let cfg = self.config()?.clone();
+        let generation = self.generation();
         let mut result = self.run_browser_flow(&cfg, provider).await;
         if let Err(FlowError::Denied(description)) = &result {
             if is_linked_account_retry(description) {
@@ -602,8 +629,12 @@ impl CognitoSession {
             .clone()
             .ok_or_else(|| AccountError::Failed("Cognito returned no refresh token".to_string()))?;
         KeychainStore::put(KEYCHAIN_SERVICE, KEYCHAIN_ACCOUNT, &refresh).map_err(AccountError::Failed)?;
-        self.store(&set);
-        self.tokens().me = None;
+        // A sign-out that ran while the browser flow was open must not have
+        // this now-stale flow write a token back into memory.
+        if self.generation() == generation {
+            self.store(&set);
+            self.tokens().me = None;
+        }
         Ok(self.status(true).await)
     }
 
@@ -854,5 +885,209 @@ mod tests {
     #[test]
     fn not_signed_in_has_a_stable_message() {
         assert_eq!(AccountError::NotSignedIn.to_string(), NOT_SIGNED_IN);
+    }
+
+    /// Sends one raw HTTP/1.1 request line to a loopback listener under test
+    /// and reads (and discards) whatever comes back, so the caller knows the
+    /// other side has actually read the request before the next one is sent.
+    async fn send_and_drain(port: u16, request: &str) {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        let mut stream = tokio::net::TcpStream::connect(("127.0.0.1", port)).await.unwrap();
+        stream.write_all(request.as_bytes()).await.unwrap();
+        let mut buf = [0u8; 512];
+        let _ = stream.read(&mut buf).await;
+    }
+
+    #[tokio::test]
+    async fn wait_for_code_skips_a_probe_and_a_mismatched_state_then_returns_the_code() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let handle = tokio::spawn(wait_for_code(listener, "s1"));
+
+        send_and_drain(port, &req("/favicon.ico")).await;
+        send_and_drain(port, &req("/callback?code=abc&state=other")).await;
+        send_and_drain(port, &req("/callback?code=abc-123&state=s1")).await;
+
+        match handle.await.unwrap() {
+            Ok(code) => assert_eq!(code, "abc-123"),
+            Err(FlowError::Denied(_)) => panic!("expected a code, got Denied"),
+            Err(FlowError::TimedOut) => panic!("expected a code, got TimedOut"),
+            Err(FlowError::Other(_)) => panic!("expected a code, got Other"),
+        }
+    }
+
+    #[tokio::test]
+    async fn wait_for_code_returns_denied_for_a_matching_state_error() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let handle = tokio::spawn(wait_for_code(listener, "s1"));
+
+        send_and_drain(port, &req("/callback?error=access_denied&state=s1")).await;
+
+        match handle.await.unwrap() {
+            Err(FlowError::Denied(description)) => assert_eq!(description, "access_denied"),
+            Ok(_) => panic!("expected Denied, got a code"),
+            Err(FlowError::TimedOut) => panic!("expected Denied, got TimedOut"),
+            Err(FlowError::Other(_)) => panic!("expected Denied, got Other"),
+        }
+    }
+
+    /// A network failure while refreshing must be reported, not treated as a
+    /// sign-out. Constructed directly rather than through `from_parts` (which
+    /// forces `https://`) so the domain can point at a closed loopback port.
+    #[tokio::test]
+    async fn a_refresh_network_failure_is_reported_and_never_signs_out() {
+        let _guard = KEYCHAIN_GUARD.lock().unwrap_or_else(|e| e.into_inner());
+        let closed_port = {
+            let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+            listener.local_addr().unwrap().port()
+            // `listener` drops here, so the port is bound to nothing by the
+            // time `access_token` connects to it.
+        };
+        let cfg = CognitoConfig {
+            domain: format!("http://127.0.0.1:{closed_port}"),
+            client_id: "client123".into(),
+            api_base: "https://api.example.com".into(),
+        };
+        KeychainStore::put(KEYCHAIN_SERVICE, KEYCHAIN_ACCOUNT, "refresh-token-value").unwrap();
+        let session = CognitoSession::new(Some(cfg));
+
+        let result = session.access_token().await;
+
+        assert!(matches!(result, Err(AccountError::Failed(_))), "got {result:?}");
+        assert_eq!(
+            KeychainStore::get(KEYCHAIN_SERVICE, KEYCHAIN_ACCOUNT).unwrap(),
+            "refresh-token-value"
+        );
+    }
+
+    /// Minimal fake HTTP server for these tests: accepts one connection per
+    /// entry in `responses`, in order, ignores the request content beyond
+    /// reading it off the socket, and writes back the paired canned
+    /// HTTP/1.1 response. The tests that use it know the exact request
+    /// sequence `CognitoSession` will make, so responses are matched
+    /// positionally rather than by path.
+    async fn fake_server(listener: tokio::net::TcpListener, responses: Vec<(u16, &'static str, String)>) {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        for (status, reason, body) in responses {
+            let (mut stream, _) = listener.accept().await.unwrap();
+            let mut buf = [0u8; 8192];
+            let _ = stream.read(&mut buf).await;
+            let response = format!(
+                "HTTP/1.1 {status} {reason}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                body.len()
+            );
+            let _ = stream.write_all(response.as_bytes()).await;
+        }
+    }
+
+    fn token_json() -> String {
+        r#"{"access_token":"fresh-token","expires_in":3600}"#.to_string()
+    }
+
+    #[tokio::test]
+    async fn an_invalid_grant_signs_the_user_out() {
+        let _guard = KEYCHAIN_GUARD.lock().unwrap_or_else(|e| e.into_inner());
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let server = tokio::spawn(fake_server(
+            listener,
+            vec![(400, "Bad Request", r#"{"error":"invalid_grant"}"#.to_string())],
+        ));
+        let cfg = CognitoConfig {
+            domain: format!("http://127.0.0.1:{port}"),
+            client_id: "client123".into(),
+            api_base: "https://api.example.com".into(),
+        };
+        KeychainStore::put(KEYCHAIN_SERVICE, KEYCHAIN_ACCOUNT, "refresh-token-value").unwrap();
+        let session = CognitoSession::new(Some(cfg));
+
+        let result = session.access_token().await;
+
+        assert_eq!(result, Err(AccountError::NotSignedIn));
+        assert!(KeychainStore::get(KEYCHAIN_SERVICE, KEYCHAIN_ACCOUNT).is_err());
+        server.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn two_consecutive_401s_from_me_sign_the_user_out() {
+        let _guard = KEYCHAIN_GUARD.lock().unwrap_or_else(|e| e.into_inner());
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let server = tokio::spawn(fake_server(
+            listener,
+            vec![
+                (200, "OK", token_json()),
+                (401, "Unauthorized", "{}".to_string()),
+                (200, "OK", token_json()),
+                (401, "Unauthorized", "{}".to_string()),
+            ],
+        ));
+        let cfg = CognitoConfig {
+            domain: format!("http://127.0.0.1:{port}"),
+            client_id: "client123".into(),
+            api_base: format!("http://127.0.0.1:{port}"),
+        };
+        KeychainStore::put(KEYCHAIN_SERVICE, KEYCHAIN_ACCOUNT, "refresh-token-value").unwrap();
+        let session = CognitoSession::new(Some(cfg));
+
+        let result = session.fetch_me().await;
+
+        assert_eq!(result, Err(AccountError::NotSignedIn));
+        assert!(KeychainStore::get(KEYCHAIN_SERVICE, KEYCHAIN_ACCOUNT).is_err());
+        server.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn a_500_from_me_keeps_signed_in_true_with_an_unknown_tier() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let server = tokio::spawn(fake_server(
+            listener,
+            vec![(500, "Internal Server Error", "{}".to_string())],
+        ));
+        let cfg = CognitoConfig {
+            domain: "https://auth.example.com".into(),
+            client_id: "client123".into(),
+            api_base: format!("http://127.0.0.1:{port}"),
+        };
+        let session = CognitoSession::new(Some(cfg));
+        session.store(&TokenSet {
+            access_token: "live".into(),
+            id_token: None,
+            refresh_token: None,
+            expires_in: 3600,
+        });
+
+        let status = session.status(true).await;
+
+        assert!(status.signed_in);
+        assert_eq!(status.tier, None);
+        server.await.unwrap();
+    }
+
+    /// Exercises the generation guard directly (no network, no browser): the
+    /// same check `access_token`, `sign_in` and `fetch_me` each do after
+    /// their `.await` before writing a token or `me` back into `Tokens`.
+    #[test]
+    fn a_write_guarded_by_a_stale_generation_is_not_applied() {
+        let _guard = KEYCHAIN_GUARD.lock().unwrap_or_else(|e| e.into_inner());
+        let session = CognitoSession::new(Some(cfg()));
+        let generation = session.generation();
+
+        session.forget_local();
+        assert_ne!(session.generation(), generation);
+
+        // What the guarded call sites do: capture the generation before the
+        // await, then only apply the write if it is still current.
+        if session.generation() == generation {
+            session.store(&TokenSet {
+                access_token: "late".into(),
+                id_token: None,
+                refresh_token: None,
+                expires_in: 3600,
+            });
+        }
+        assert!(session.live_access_token().is_none());
     }
 }
