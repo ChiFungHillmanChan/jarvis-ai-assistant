@@ -454,7 +454,7 @@ impl GoogleAuth {
 }
 
 /// Read one query parameter out of an HTTP request line.
-fn extract_param(request: &str, key: &str) -> Option<String> {
+pub(crate) fn extract_param(request: &str, key: &str) -> Option<String> {
     let first_line = request.lines().next()?;
     let path = first_line.split_whitespace().nth(1)?;
     let query = path.split('?').nth(1)?;
@@ -477,7 +477,7 @@ fn extract_code(request: &str) -> Option<String> {
 
 /// Compare the returned `state` against the one we generated without leaking
 /// the position of the first differing byte through timing.
-fn constant_time_eq(a: &str, b: &str) -> bool {
+pub(crate) fn constant_time_eq(a: &str, b: &str) -> bool {
     let (a, b) = (a.as_bytes(), b.as_bytes());
     if a.len() != b.len() {
         return false;
