@@ -1,5 +1,6 @@
 import { useEffect, useState } from "react";
 import {
+  accountStatus,
   getSettings,
   updateSetting,
   googleConnect,
@@ -40,14 +41,16 @@ import {
 } from "../lib/commands";
 import { listen } from "@tauri-apps/api/event";
 import { invoke } from "@tauri-apps/api/core";
-import type { VoiceSettings, WakeWordStatus, VoiceState, LocalEndpoint, LocalModel, ProviderChainEntry, EndpointHealth, StorageUsage, StorageScope } from "../lib/types";
+import type { AccountStatus, VoiceSettings, WakeWordStatus, VoiceState, LocalEndpoint, LocalModel, ProviderChainEntry, EndpointHealth, StorageUsage, StorageScope } from "../lib/types";
 import { GOOGLE_ALREADY_CONNECTED } from "../lib/types";
 import { useVoiceState } from "../hooks/useVoiceState";
 import { useUiLocale } from "../i18n";
 import IntegrationConnection from "../components/IntegrationConnection";
 import { connectionsChanged } from "../lib/connections";
-import { DISPLAY_NAME_KEY, displayNameChanged } from "../lib/account";
+import { DISPLAY_NAME_KEY, accountSectionVisible, displayNameChanged } from "../lib/account";
 import LocalAiSetup from "../components/LocalAiSetup";
+import AccountPanel from "../components/AccountPanel";
+import { UserRound } from "lucide-react";
 import { useWorkspace, useWorkspaceValue } from "../workspace/WorkspaceContext";
 import "./settings-workspace.css";
 import { Cpu, Key, Globe, Gem, Mic, Bot, Palette, HardDrive, GithubMark, NotionMark } from "../components/icons";
@@ -83,6 +86,10 @@ export default function Settings() {
   const [apiKeyDrafts, setApiKeyDrafts] = useState<Record<string, string>>({});
   const [apiKeyStatus, setApiKeyStatus] = useState<Record<string, boolean>>({});
   const [apiKeyError, setApiKeyError] = useState<string | null>(null);
+  // Whether accounts are available in this build -- unknown until this loads,
+  // and unknown reads as unavailable so the Account section never flashes in
+  // and out. Loaded once; availability does not change while Settings is open.
+  const [accountInfo, setAccountInfo] = useState<AccountStatus | null>(null);
   const [loaded, setLoaded] = useState(false);
   const [loadError, setLoadError] = useState(false);
   const [googleConnected, setGoogleConnected] = useState<boolean | null>(null);
@@ -111,6 +118,10 @@ export default function Settings() {
 
   useEffect(() => {
     getApiKeyStatus().then(setApiKeyStatus).catch(() => {});
+  }, []);
+
+  useEffect(() => {
+    accountStatus().then(setAccountInfo).catch(() => {});
   }, []);
 
   // Absent row throws, which just means "still on the plugin default".
@@ -174,6 +185,15 @@ export default function Settings() {
   const [endpointHealth, setEndpointHealth] = useState<Record<string, EndpointHealth>>({});
   const [llmError, setLlmError] = useState<string | null>(null);
   const [section, setSection] = useWorkspaceValue<string>("section", "ai");
+
+  // A previous session can have left the workspace on "account"; once we know
+  // that section is hidden in this build, land on the section right after it
+  // instead of a nav page nothing renders for.
+  useEffect(() => {
+    if (section === "account" && !accountSectionVisible(accountInfo)) {
+      setSection("ai");
+    }
+  }, [accountInfo, section, setSection]);
 
   // Storage state
   const [storage, setStorage] = useState<StorageUsage | null>(null);
@@ -640,6 +660,7 @@ export default function Settings() {
   const voiceInputReady = Boolean(apiKeyStatus["gemini"] || wakeStatus?.model_downloaded);
 
   const SECTIONS = [
+    { id: "account", label: t("accountSection"), Icon: () => <UserRound size={17} /> },
     { id: "ai", label: text("Models", "模型"), Icon: () => <Cpu size={17} /> },
     { id: "keys", label: t("apiKeys"), Icon: () => <Key size={17} /> },
     { id: "google", label: text("Assistant Google", "助手 Google"), Icon: () => <Globe size={17} /> },
@@ -652,11 +673,15 @@ export default function Settings() {
     { id: "storage", label: text("Storage", "儲存空間"), Icon: () => <HardDrive size={17} /> },
   ];
 
+  // Mirrors the sidebar: the Account section only appears once accounts are
+  // known to be available in this build (see accountSectionVisible).
+  const visibleSections = SECTIONS.filter((s) => s.id !== "account" || accountSectionVisible(accountInfo));
+
   return (
     <div className="settings-workspace">
       <nav className="settings-nav" aria-label={text('Settings categories', '設定分類')}>
         <div className="settings-nav-title">{t("navSettings")}</div>
-        {SECTIONS.map((s) => {
+        {visibleSections.map((s) => {
           const active = section === s.id;
           return (
             <button key={s.id} onClick={() => setSection(s.id)}
@@ -669,10 +694,11 @@ export default function Settings() {
       </nav>
       <div className="settings-content">
         <header className="settings-page-header">
-          <h1>{SECTIONS.find((item) => item.id === section)?.label ?? t("navSettings")}</h1>
+          <h1>{visibleSections.find((item) => item.id === section)?.label ?? t("navSettings")}</h1>
           <p>{text("Manage how JARVIS works on this Mac.", "管理 JARVIS 在此 Mac 上的運作方式。")}</p>
         </header>
         {integrationError && ["notion", "github", "obsidian"].includes(section) && <p role="alert" style={styles.errorText}>{integrationError}</p>}
+        {section === "account" && <AccountPanel />}
         {section === "ai" && (<>
           <div className="settings-info-row">
             <p>{text('These providers handle Assistant conversations. Mail has its own analysis model and uses the API keys saved here.', '這些供應商負責處理助手對話。郵件分析設有獨立模型設定，並使用在此儲存的 API 密鑰。')}</p>

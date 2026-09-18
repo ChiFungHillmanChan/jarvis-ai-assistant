@@ -1,11 +1,22 @@
-import type { APIGatewayProxyEventV2, APIGatewayProxyResultV2 } from 'aws-lambda';
+import type { APIGatewayProxyEventV2WithJWTAuthorizer, APIGatewayProxyResultV2 } from 'aws-lambda';
+import { AdminGetUserCommand, CognitoIdentityProviderClient } from '@aws-sdk/client-cognito-identity-provider';
 import { SecretsManagerClient, GetSecretValueCommand } from '@aws-sdk/client-secrets-manager';
 import { DynamoDBClient } from '@aws-sdk/client-dynamodb';
 import { DynamoDBDocumentClient, GetCommand, UpdateCommand } from '@aws-sdk/lib-dynamodb';
 import Stripe from 'stripe';
+import { readTier } from './body';
 
 const sm = new SecretsManagerClient({});
 const ddb = DynamoDBDocumentClient.from(new DynamoDBClient({}));
+const cognito = new CognitoIdentityProviderClient({});
+
+async function emailFor(username: string): Promise<string | null> {
+  const out = await cognito.send(new AdminGetUserCommand({
+    UserPoolId: process.env.USER_POOL_ID!,
+    Username: username,
+  }));
+  return out.UserAttributes?.find((a) => a.Name === 'email')?.Value ?? null;
+}
 
 let cachedSecrets: { apiKey: string } | null = null;
 let cachedStripe: Stripe | null = null;
@@ -77,36 +88,27 @@ async function getOrCreateCustomer(stripe: Stripe, userId: string, email: string
   return customer.id;
 }
 
-interface CheckoutBody {
-  tier: 'pro' | 'team';
-  user_id: string;
-  email: string;
-}
+export async function handler(event: APIGatewayProxyEventV2WithJWTAuthorizer): Promise<APIGatewayProxyResultV2> {
+  // Identity comes from the Cognito access token API Gateway has already
+  // verified, never from the body.
+  const claims = event.requestContext.authorizer.jwt.claims;
+  const userId = typeof claims.sub === 'string' ? claims.sub : '';
+  const username = typeof claims.username === 'string' ? claims.username : '';
+  if (!userId || !username) return { statusCode: 401, body: 'Missing identity' };
 
-export async function handler(event: APIGatewayProxyEventV2): Promise<APIGatewayProxyResultV2> {
-  if (!event.body) return { statusCode: 400, body: 'Missing body' };
+  const tier = readTier(event.body, event.isBase64Encoded);
+  if (!tier) return { statusCode: 400, body: 'Body must be {"tier":"pro"|"team"}' };
 
-  let body: CheckoutBody;
-  try {
-    body = JSON.parse(event.isBase64Encoded ? Buffer.from(event.body, 'base64').toString('utf8') : event.body);
-  } catch {
-    return { statusCode: 400, body: 'Invalid JSON' };
-  }
-
-  if (!['pro', 'team'].includes(body.tier)) {
-    return { statusCode: 400, body: `Invalid tier: ${body.tier}` };
-  }
-  if (!body.user_id || !body.email) {
-    return { statusCode: 400, body: 'Missing user_id or email' };
-  }
+  const email = await emailFor(username);
+  if (!email) return { statusCode: 400, body: 'Account has no email address' };
 
   const stripe = await loadStripe();
-  const priceId = PRICE_LOOKUP[body.tier];
+  const priceId = PRICE_LOOKUP[tier];
 
   try {
-    const customerId = await getOrCreateCustomer(stripe, body.user_id, body.email);
+    const customerId = await getOrCreateCustomer(stripe, userId, email);
 
-    // The customer is stable per install, and Stripe will happily attach a second
+    // The customer is stable per account, and Stripe will happily attach a second
     // subscription to the same customer. Nothing downstream detects that: the
     // webhook just rewrites the same DynamoDB item, so the user is billed twice
     // every month in silence. Send an existing subscriber to the billing portal
@@ -153,9 +155,9 @@ export async function handler(event: APIGatewayProxyEventV2): Promise<APIGateway
       mode: 'subscription',
       customer: customerId,
       line_items: [{ price: priceId, quantity: 1 }],
-      client_reference_id: body.user_id,
+      client_reference_id: userId,
       subscription_data: {
-        metadata: { userId: body.user_id, tier: body.tier, project: 'jarvis' },
+        metadata: { userId, tier, project: 'jarvis' },
       },
       success_url: `https://${APP_DOMAIN}/payment/success?session_id={CHECKOUT_SESSION_ID}`,
       cancel_url: `https://${APP_DOMAIN}/payment/cancel`,
@@ -165,7 +167,7 @@ export async function handler(event: APIGatewayProxyEventV2): Promise<APIGateway
       // A double click, a retry, or a second tab must reuse one session rather
       // than mint another. Stripe holds the key for 24h; a Checkout Session
       // expires in 24h too, so the window matches.
-      idempotencyKey: `checkout:${body.user_id}:${body.tier}`,
+      idempotencyKey: `checkout:${userId}:${tier}`,
     });
 
     return {

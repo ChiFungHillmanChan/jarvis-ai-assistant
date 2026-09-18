@@ -1,13 +1,13 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
-import { Plug, Settings2 } from 'lucide-react';
-import { getSettings } from '../lib/commands';
-import { DISPLAY_NAME_KEY, accountBadge, onDisplayNameChanged } from '../lib/account';
+import { LogIn, LogOut, Plug, Settings2 } from 'lucide-react';
+import { accountSignIn, accountSignOut, accountStatus, getSettings } from '../lib/commands';
+import type { AccountStatus } from '../lib/types';
+import { DISPLAY_NAME_KEY, SIGN_IN_CANCELLED, accountChanged, accountLabel, onAccountChanged, onDisplayNameChanged, tierKey } from '../lib/account';
 import { useUiLocale } from '../i18n';
 import type { WorkspaceView } from '../workspace/model';
 
 /**
- * The bottom row of the sidebar: the name from Settings, with 連接服務 and 設定
- * tucked into a menu above it.
+ * The bottom row of the sidebar: the name from Settings (or the signed-in account's email), with 連接服務, 設定 and sign-in tucked into a menu above it.
  *
  * Hover opens the menu, but hover is never the only way in -- click toggles it
  * and the trigger is a real button, so the two destinations stay reachable by
@@ -19,6 +19,23 @@ const CLOSE_DELAY_MS = 120;
 export default function SidebarAccount({ active, onNavigate }: { active: WorkspaceView | undefined; onNavigate: (view: WorkspaceView) => void }) {
   const { t } = useUiLocale();
   const [name, setName] = useState<string | null>(null);
+  const [account, setAccount] = useState<AccountStatus | null>(null);
+  const [accountBusy, setAccountBusy] = useState(false);
+
+  const loadAccount = useCallback(async () => {
+    try {
+      setAccount(await accountStatus());
+    } catch {
+      // Same as load() below: an unreadable account status just falls back
+      // to the pre-account display-name row, not an error state.
+      setAccount(null);
+    }
+  }, []);
+
+  useEffect(() => {
+    void loadAccount();
+    return onAccountChanged(() => void loadAccount());
+  }, [loadAccount]);
   const [open, setOpen] = useState(false);
   const wrapRef = useRef<HTMLDivElement | null>(null);
   const closeTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
@@ -69,7 +86,22 @@ export default function SidebarAccount({ active, onNavigate }: { active: Workspa
     };
   }, [open]);
 
-  const badge = accountBadge(name, t('navSettings'));
+  const signedIn = Boolean(account?.signed_in);
+  const badge = accountLabel(name, signedIn ? account?.email : null, t('navSettings'));
+  const signInOrOut = async () => {
+    if (accountBusy) return;
+    setOpen(false);
+    setAccountBusy(true);
+    try {
+      if (signedIn) await accountSignOut();
+      else await accountSignIn();
+    } catch (e) {
+      if (String(e) !== SIGN_IN_CANCELLED) console.warn('account action failed', e);
+    } finally {
+      setAccountBusy(false);
+      accountChanged();
+    }
+  };
   const go = (view: WorkspaceView) => {
     setOpen(false);
     onNavigate(view);
@@ -91,6 +123,11 @@ export default function SidebarAccount({ active, onNavigate }: { active: Workspa
           <button role="menuitem" className="sidebar-item" aria-current={active === 'settings' ? 'page' : undefined} onClick={() => go('settings')}>
             <Settings2 size={16} /><span>{t('navSettings')}</span>
           </button>
+          {account?.available && (
+            <button role="menuitem" className="sidebar-item" disabled={accountBusy} onClick={() => void signInOrOut()}>
+              {signedIn ? <LogOut size={16} /> : <LogIn size={16} />}<span>{signedIn ? t('signOut') : t('signIn')}</span>
+            </button>
+          )}
         </div>
       )}
       <button
@@ -105,6 +142,7 @@ export default function SidebarAccount({ active, onNavigate }: { active: Workspa
           {badge.initial ?? <Settings2 size={15} />}
         </span>
         <span className="sidebar-account-name">{badge.label}</span>
+        {signedIn && <span className="sidebar-account-tier">{t(tierKey(account?.tier))}</span>}
       </button>
     </div>
   );

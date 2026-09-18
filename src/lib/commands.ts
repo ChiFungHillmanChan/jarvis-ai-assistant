@@ -1,5 +1,5 @@
 import { invoke as tauriInvoke } from "@tauri-apps/api/core";
-import type { Task, ChatMessage, DashboardData, Settings, EmailSummary, EmailStats, CalendarEventView, CronJobView, CronRunView, NotionPageView, GitHubItemView, GitHubStats, VoiceState, VoiceSettings, WakeWordStatus, EmailRule, BriefingResult, LocalEndpoint, LocalModel, ProviderChainEntry, EndpointHealth, SystemCompatibility, PrerequisiteCheck, RecommendedModel, LaunchReadiness, BetaTesterInput, BetaTesterView, BetaFeedbackInput, AwsCredsStatus, StorageUsage, SweepReport, StorageScope } from "./types";
+import type { Task, ChatMessage, DashboardData, Settings, EmailSummary, EmailStats, CalendarEventView, CronJobView, CronRunView, NotionPageView, GitHubItemView, GitHubStats, VoiceState, VoiceSettings, WakeWordStatus, EmailRule, BriefingResult, LocalEndpoint, LocalModel, ProviderChainEntry, EndpointHealth, SystemCompatibility, PrerequisiteCheck, RecommendedModel, LaunchReadiness, BetaTesterInput, BetaTesterView, BetaFeedbackInput, AwsCredsStatus, StorageUsage, SweepReport, StorageScope, AccountStatus } from "./types";
 
 // Tauri v2 commands default to rename_all = "camelCase", so a Rust parameter named
 // `gmail_id` is looked up on the IPC boundary as `gmailId`. A required arg sent as
@@ -47,9 +47,21 @@ export async function getLaunchReadiness(): Promise<LaunchReadiness> { return in
 export async function saveBetaTester(input: BetaTesterInput): Promise<BetaTesterView> { return invoke("save_beta_tester", { input }); }
 export async function submitBetaFeedback(input: BetaFeedbackInput): Promise<void> { return invoke("submit_beta_feedback", { input }); }
 
-// Payments (Stripe test mode until launch; backend set via JARVIS_PAYMENT_API)
-export async function paymentsStartCheckout(tier: "pro" | "team", email: string): Promise<{ url: string; session_id: string }> {
-  return invoke("payments_start_checkout", { tier, email });
+// Account (Cognito). Signing in is optional; it is required for checkout.
+export async function accountStatus(refresh = false): Promise<AccountStatus> {
+  return invoke("account_status", { refresh });
+}
+export async function accountSignIn(provider?: "google"): Promise<AccountStatus> {
+  return invoke("account_sign_in", { provider: provider ?? null });
+}
+export async function accountSignOut(): Promise<void> {
+  return invoke("account_sign_out");
+}
+
+// Payments (Stripe test mode until launch; backend set via JARVIS_PAYMENT_API).
+// Requires a signed-in account; rejects with "not_signed_in" otherwise.
+export async function paymentsStartCheckout(tier: "pro" | "team"): Promise<{ url: string; session_id: string }> {
+  return invoke("payments_start_checkout", { tier });
 }
 export async function getSettings(): Promise<Settings> {
   return invoke("get_settings");

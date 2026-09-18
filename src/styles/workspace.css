@@ -92,6 +92,7 @@
 .sidebar-account-trigger:focus-visible { outline:2px solid var(--cyan); outline-offset:-2px; }
 .sidebar-account-avatar { flex-shrink:0; width:26px; height:26px; border-radius:50%; display:inline-flex; align-items:center; justify-content:center; background:var(--accent-wash); color:var(--cyan); font-size:12px; line-height:1; text-transform:uppercase; }
 .sidebar-account-name { overflow:hidden; text-overflow:ellipsis; white-space:nowrap; font-size:13px; }
+.sidebar-account-tier { margin-left:auto; font-size:11px; color:var(--text-secondary); white-space:nowrap; }
 .sidebar-account-menu { position:absolute; bottom:calc(100% + 6px); left:0; right:0; z-index:40; padding:5px; border:1px solid var(--border-primary); border-radius:8px; background:var(--surface-solid); box-shadow:0 10px 26px rgba(0,0,0,0.32); }
 .sidebar-account-menu .sidebar-item { margin-bottom:0; font-size:12.5px; }
 

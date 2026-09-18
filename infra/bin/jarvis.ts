@@ -32,6 +32,7 @@ const stackProps: cdk.StackProps = {
 const auth = new AuthStack(app, `Jarvis-${env}-Auth`, {
   ...stackProps,
   envName: env,
+  appDomain: ctx.appDomain,
 });
 
 const data = new DataStack(app, `Jarvis-${env}-Data`, {
@@ -51,6 +52,8 @@ new PaymentStack(app, `Jarvis-${env}-Payment`, {
   ...stackProps,
   envName: env,
   userMetaTable: data.userMetaTable,
+  userPool: auth.userPool,
+  userPoolClient: auth.userPoolClient,
 });
 
 new AuditStack(app, `Jarvis-${env}-Audit`, {

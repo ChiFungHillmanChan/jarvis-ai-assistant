@@ -318,6 +318,9 @@ pub fn run() {
             app.manage(commands::local_setup::LocalSetupState::new());
             app.manage(mail::sync::MailSyncState::new());
             app.manage(std::sync::Arc::clone(&scheduler_handle));
+            app.manage(std::sync::Arc::new(auth::cognito::CognitoSession::new(
+                auth::cognito::CognitoConfig::from_env(),
+            )));
             // A tray that fails to build is a missing menu bar icon, not a
             // reason to abort startup with an invisible panic.
             if let Err(e) = tray::create_tray(app) {
@@ -480,6 +483,9 @@ pub fn run() {
             commands::launch::save_beta_tester,
             commands::launch::submit_beta_feedback,
             commands::payments::payments_start_checkout,
+            commands::account::account_status,
+            commands::account::account_sign_in,
+            commands::account::account_sign_out,
             voice::commands::start_listening,
             voice::commands::stop_listening,
             voice::commands::stop_speaking,
@@ -655,5 +661,24 @@ mod tests {
             handler_block.contains("voice::commands::stop_speaking"),
             "voice::commands::stop_speaking must be registered in generate_handler!"
         );
+    }
+
+    #[test]
+    fn account_commands_are_registered() {
+        let lib_rs = include_str!("lib.rs");
+        let handler_start = lib_rs
+            .find("tauri::generate_handler![")
+            .expect("generate_handler! block must exist in lib.rs");
+        let handler_len = lib_rs[handler_start..]
+            .find(']')
+            .expect("generate_handler! block must be closed");
+        let handler_block = &lib_rs[handler_start..handler_start + handler_len];
+        for command in [
+            "commands::account::account_status",
+            "commands::account::account_sign_in",
+            "commands::account::account_sign_out",
+        ] {
+            assert!(handler_block.contains(command), "{command} must be registered in generate_handler!");
+        }
     }
 }

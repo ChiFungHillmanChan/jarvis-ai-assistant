@@ -1,9 +1,12 @@
-// What the sidebar's bottom row shows for the person using this Mac.
+// What the sidebar's bottom row shows for the person using this Mac, and the
+// small amount of shared state around the optional JARVIS account.
 //
-// JARVIS has no account of its own: the name is whatever the user typed into
-// Settings, so it can be missing, blank, or in any script. The caller passes
-// the localised fallback rather than this module importing the catalog, which
-// keeps the rule testable without a locale.
+// The display name is whatever the user typed into Settings, so it can be
+// missing, blank, or in any script. The caller passes the localised fallback
+// rather than this module importing the catalog, which keeps the rules
+// testable without a locale.
+
+import type { AccountStatus } from './types';
 
 export interface AccountBadge {
   label: string;
@@ -34,4 +37,50 @@ export function accountBadge(displayName: string | null | undefined, fallback: s
   // Array.from splits by code point; charAt would cut a surrogate pair in half.
   const first = Array.from(name)[0] ?? '';
   return { label: name, initial: first.toUpperCase(), isPlaceholder: false };
+}
+
+/** Error strings the Rust account commands return; see auth/cognito.rs. */
+export const NOT_SIGNED_IN = 'not_signed_in';
+export const SIGN_IN_CANCELLED = 'sign_in_cancelled';
+
+const ACCOUNT_EVENT = 'jarvis:account-changed';
+
+/** Tells the sidebar and Settings to re-read the account after sign-in or sign-out. */
+export function accountChanged() {
+  if (typeof window === 'undefined') return;
+  window.dispatchEvent(new Event(ACCOUNT_EVENT));
+}
+
+export function onAccountChanged(listener: () => void): () => void {
+  if (typeof window === 'undefined') return () => {};
+  window.addEventListener(ACCOUNT_EVENT, listener);
+  return () => window.removeEventListener(ACCOUNT_EVENT, listener);
+}
+
+export type TierKey = 'tierFree' | 'tierPro' | 'tierTeam' | 'tierUnknown';
+
+/** Anything the server did not clearly say reads as unknown, never as a paid plan. */
+export function tierKey(tier: string | null | undefined): TierKey {
+  switch (tier) {
+    case 'free': return 'tierFree';
+    case 'pro': return 'tierPro';
+    case 'team': return 'tierTeam';
+    default: return 'tierUnknown';
+  }
+}
+
+/** The typed display name wins; a signed-in account's email is next; then the fallback. */
+export function accountLabel(displayName: string | null | undefined, email: string | null | undefined, fallback: string): AccountBadge {
+  const name = displayName?.trim() ? displayName : email;
+  return accountBadge(name, fallback);
+}
+
+/**
+ * Whether Settings should show its Account section. Mirrors the sidebar's own
+ * `account?.available` check. A status that has not loaded yet (null or
+ * undefined) reads as hidden, never as shown -- the section must not flash
+ * into view only to disappear once the real status arrives.
+ */
+export function accountSectionVisible(status: AccountStatus | null | undefined): boolean {
+  return status?.available === true;
 }
