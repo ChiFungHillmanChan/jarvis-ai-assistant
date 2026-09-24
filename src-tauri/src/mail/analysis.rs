@@ -1497,6 +1497,7 @@ mod tests {
             is_read: false,
             is_inbox: true,
             received_at: "2026-09-10T09:00:00Z".into(),
+            attachments: None,
         }
     }
 

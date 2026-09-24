@@ -114,16 +114,17 @@ pub fn save_messages(
     let mut conn = db.conn.lock().map_err(err)?;
     let tx = conn.transaction().map_err(err)?;
     for (m, body) in rows {
-        tx.execute("INSERT INTO mail_messages(account_id,provider_id,thread_id,subject,sender,snippet,body,is_read,is_inbox,received_at)
-          VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10)
-          ON CONFLICT(account_id,provider_id) DO UPDATE SET thread_id=excluded.thread_id,subject=excluded.subject,sender=excluded.sender,snippet=excluded.snippet,body=excluded.body,is_read=excluded.is_read,is_inbox=excluded.is_inbox,received_at=excluded.received_at,saved_at=datetime('now')",
-          params![account_id,m.id,m.thread_id,m.subject.as_deref().unwrap_or(""),m.sender.as_deref().unwrap_or(""),m.snippet.as_deref().unwrap_or(""),body,m.is_read,m.label_ids.iter().any(|l|l=="INBOX"),m.received_at.as_deref().unwrap_or("")]).map_err(err)?;
+        let attachments = serde_json::to_string(&m.attachments).map_err(err)?;
+        tx.execute("INSERT INTO mail_messages(account_id,provider_id,thread_id,subject,sender,snippet,body,is_read,is_inbox,received_at,attachments)
+          VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11)
+          ON CONFLICT(account_id,provider_id) DO UPDATE SET thread_id=excluded.thread_id,subject=excluded.subject,sender=excluded.sender,snippet=excluded.snippet,body=excluded.body,is_read=excluded.is_read,is_inbox=excluded.is_inbox,received_at=excluded.received_at,attachments=excluded.attachments,saved_at=datetime('now')",
+          params![account_id,m.id,m.thread_id,m.subject.as_deref().unwrap_or(""),m.sender.as_deref().unwrap_or(""),m.snippet.as_deref().unwrap_or(""),body,m.is_read,m.label_ids.iter().any(|l|l=="INBOX"),m.received_at.as_deref().unwrap_or(""),attachments]).map_err(err)?;
     }
     tx.commit().map_err(err)?;
     Ok(rows.len())
 }
 const MESSAGE_COLUMNS: &str =
-    "m.id,m.account_id,a.email,m.provider_id,m.thread_id,m.subject,m.sender,m.snippet";
+    "m.id,m.account_id,a.email,m.provider_id,m.thread_id,m.subject,m.sender,m.snippet,m.attachments";
 fn message_row(r: &Row<'_>) -> rusqlite::Result<MailMessage> {
     Ok(MailMessage {
         id: r.get(0)?,
@@ -134,10 +135,11 @@ fn message_row(r: &Row<'_>) -> rusqlite::Result<MailMessage> {
         subject: r.get(5)?,
         sender: r.get(6)?,
         snippet: r.get(7)?,
-        body: r.get(8)?,
-        is_read: r.get(9)?,
-        is_inbox: r.get(10)?,
-        received_at: r.get(11)?,
+        attachments: r.get::<_, Option<String>>(8)?.map(|json| serde_json::from_str(&json).unwrap_or_default()),
+        body: r.get(9)?,
+        is_read: r.get(10)?,
+        is_inbox: r.get(11)?,
+        received_at: r.get(12)?,
     })
 }
 pub fn get_message(db: &Database, id: i64) -> Result<MailMessage, String> {
@@ -446,6 +448,7 @@ mod tests {
             label_ids: vec!["INBOX".into()],
             is_read: true,
             received_at: Some("2026-09-10T09:30:00Z".into()),
+            attachments: Vec::new(),
         }
     }
 
@@ -1202,6 +1205,28 @@ mod tests {
         assert_eq!(context.settings.processing_mode, "local");
         assert_eq!(context.group.instructions, "User instruction");
     }
+    /// Messages saved before attachments were recorded only gain them when a
+    /// rescan saves them again, so the upsert has to replace the list.
+    #[test]
+    fn attachments_are_saved_read_back_and_replaced_by_a_rescan() {
+        let db = seeded();
+        let mut msg = message("with-file", "Invoice");
+        msg.attachments = vec![MailAttachment { filename: "Invoice 0925.pdf".into(), mime_type: "application/pdf".into(), size: 184320 }];
+        save_messages(&db, "a", &[(msg.clone(), "body".into())]).unwrap();
+
+        let listed = list_messages(&db, Some("a"), None, "Invoice", 0).unwrap();
+        assert_eq!(listed.messages[0].attachments.as_ref(), Some(&msg.attachments), "the inbox list needs the paperclip without opening the message");
+        let opened = get_message(&db, listed.messages[0].id).unwrap();
+        assert_eq!(opened.attachments.as_ref(), Some(&msg.attachments));
+
+        msg.attachments.clear();
+        save_messages(&db, "a", &[(msg, "body".into())]).unwrap();
+        assert_eq!(get_message(&db, opened.id).unwrap().attachments, Some(Vec::new()), "a rescan that finds none records none");
+
+        // Rows written before V26 are unknown, not empty.
+        assert_eq!(get_message(&db, 1).unwrap().attachments, None);
+    }
+
     #[test]
     fn sync_updates_body_without_replacing_local_message_identity_or_membership() {
         let db = seeded();
@@ -1216,6 +1241,7 @@ mod tests {
             label_ids: vec!["INBOX".into()],
             is_read: true,
             received_at: Some("2026-09-10".into()),
+            attachments: Vec::new(),
         };
         save_messages(&db, "a", &[(msg.clone(), "new body".into())]).unwrap();
         save_messages(&db, "a", &[(msg, "new body".into())]).unwrap();

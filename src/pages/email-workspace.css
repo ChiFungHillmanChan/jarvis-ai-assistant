@@ -56,6 +56,9 @@
 .mail-workspace .mail-message-button:hover:not(:disabled) { border: 0; background: transparent; }
 .mail-workspace .mail-row-meta { display: flex; justify-content: space-between; gap: 10px; color: var(--text-secondary); font-size: 13px; }
 .mail-workspace .mail-row-meta strong { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-weight: 600; }
+.mail-workspace .mail-sender { display: flex; align-items: baseline; gap: 8px; min-width: 0; overflow: hidden; }
+.mail-workspace .mail-sender > span { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--mail-muted); font-size: 12px; }
+.mail-workspace .mail-attachment-count { display: inline-flex; align-items: center; gap: 3px; margin-left: 8px; color: var(--mail-muted); font-size: 12px; vertical-align: middle; }
 .mail-workspace .mail-row-meta time { white-space: nowrap; color: var(--mail-muted); }
 .mail-workspace .mail-subject { display: block; margin: 6px 0; overflow-wrap: anywhere; font-size: 14px; }
 .mail-workspace .mail-subject i { display: inline-block; width: 6px; height: 6px; margin: 0 6px 2px 0; border-radius: 50%; background: var(--cyan); }
@@ -65,6 +68,12 @@
 .mail-workspace .mail-detail { min-width: 0; padding: 0 22px 22px; overflow-y: auto; background: var(--surface); }
 .mail-workspace .mail-reader { padding-bottom: 22px; border-bottom: 1px solid var(--mail-line); }
 .mail-workspace .mail-reader h3 { font-size: 20px; line-height: 1.4; overflow-wrap: anywhere; }
+.mail-workspace .mail-from { display: flex; flex-wrap: wrap; align-items: baseline; gap: 4px 10px; }
+.mail-workspace .mail-from span { color: var(--mail-muted); font-size: 13px; overflow-wrap: anywhere; }
+.mail-workspace .mail-attachments { display: flex; flex-wrap: wrap; gap: 8px; margin: 16px 0 0; padding: 0; list-style: none; }
+.mail-workspace .mail-attachments li { display: inline-flex; align-items: center; gap: 6px; max-width: 100%; padding: 6px 10px; border: 1px solid var(--mail-line); border-radius: 6px; font-size: 13px; }
+.mail-workspace .mail-attachments li span { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.mail-workspace .mail-attachments li small { color: var(--mail-muted); white-space: nowrap; }
 .mail-workspace .mail-preserve { white-space: pre-wrap; overflow-wrap: anywhere; font: inherit; line-height: 1.7; }
 .mail-workspace .mail-reader .readable-content { color: var(--text-secondary); font-size: 15px; }
 .mail-workspace .mail-source-footer { margin-top: 18px; padding-top: 12px; border-top: 1px solid var(--mail-line); }

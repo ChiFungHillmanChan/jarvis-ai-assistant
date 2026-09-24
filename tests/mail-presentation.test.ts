@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { mailSourceUrl, revealMailSource } from '../src/lib/mail-presentation.ts';
+import { fileSize, mailSourceUrl, parseSender, readableBody, revealMailSource } from '../src/lib/mail-presentation.ts';
 
 test('Gmail source links target the message and its owning account', () => {
   const href = mailSourceUrl({ provider_id: '18afe12b09', account_email: 'first+work@example.test' });
@@ -45,4 +45,27 @@ test('ordinary refreshes and a different or still-loading source do not move rea
   assert.equal(revealMailSource(42, 99, reader), false);
   assert.equal(revealMailSource(42, 42, null), false);
   assert.equal(movements, 0);
+});
+
+test('senders show the display name and the address separately', () => {
+  assert.deepEqual(parseSender('Brian Ko <brian@evoke.example>'), { name: 'Brian Ko', address: 'brian@evoke.example' });
+  assert.deepEqual(parseSender('"Ko, Brian" <brian@evoke.example>'), { name: 'Ko, Brian', address: 'brian@evoke.example' });
+  assert.deepEqual(parseSender('陳大文 <tai.man@example.hk>'), { name: '陳大文', address: 'tai.man@example.hk' });
+  assert.deepEqual(parseSender('<noreply@example.com>'), { name: 'noreply@example.com', address: '' });
+  assert.deepEqual(parseSender('client@example.com'), { name: 'client@example.com', address: '' });
+  assert.deepEqual(parseSender('  '), { name: '', address: '' });
+});
+
+test('attachment sizes are readable', () => {
+  assert.equal(fileSize(0), '');
+  assert.equal(fileSize(512), '512 B');
+  assert.equal(fileSize(184320), '180 KB');
+  assert.equal(fileSize(3_250_000), '3.1 MB');
+});
+
+test('the reader does not repeat the headers already shown above the body', () => {
+  const stored = 'From: Brian <b@example.com>\nTo: me@example.com\nDate: Tue, 22 Sep 2026 10:00:00 +0800\nSubject: Invoice\n\nPlease send the invoice.';
+  assert.equal(readableBody(stored), 'Please send the invoice.');
+  assert.equal(readableBody('Plain text that mentions From: someone'), 'Plain text that mentions From: someone');
+  assert.equal(readableBody('From: only one header line\n\nbody'), 'From: only one header line\n\nbody');
 });

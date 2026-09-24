@@ -10,7 +10,9 @@ export function installWorkspacePreview() {
   const mailSettings = { processing_mode: 'local', local_model: 'qwen3:8b', bedrock_model: '', openai_model: '' };
   const accounts = [{ id: 'sample-account', email: 'alex@example.com', connected: true, message_count: 4, last_synced: now.toISOString(), next_page_token: null }];
   const groups = [{ id: 1, name: 'Customer follow-ups', instructions: 'Summarize the decisions and follow-ups.', message_count: 2 }];
-  const messages = ['September project review', 'Proposal: next steps', 'Team planning for Friday', 'Weekly product update'].map((subject, index) => ({ id: index + 1, account_id: 'sample-account', account_email: 'alex@example.com', provider_id: `sample-${index}`, thread_id: null, subject, sender: index % 2 ? 'Jordan Lee <jordan@example.com>' : 'Sam Taylor <sam@example.com>', snippet: 'Here are the details for our next review. Please check the timeline and proposed next steps.', body: `Hi Alex,\n\nHere are the details for our next review. The proposal is ready for your feedback.\n\nCould we review the timeline on Friday?\n\nThanks,\nSam`, is_read: index > 1, is_inbox: true, received_at: now.toISOString() }));
+  const messages = ['September project review', 'Proposal: next steps', 'Team planning for Friday', 'Weekly product update'].map((subject, index) => ({ id: index + 1, account_id: 'sample-account', account_email: 'alex@example.com', provider_id: `sample-${index}`, thread_id: null, subject, sender: index % 2 ? 'Jordan Lee <jordan@example.com>' : 'Sam Taylor <sam@example.com>', snippet: 'Here are the details for our next review. Please check the timeline and proposed next steps.', body: `Hi Alex,\n\nHere are the details for our next review. The proposal is ready for your feedback.\n\nCould we review the timeline on Friday?\n\nThanks,\nSam`, is_read: index > 1, is_inbox: true, received_at: now.toISOString(), attachments: index === 0 ? [{ filename: 'Review timeline.pdf', mime_type: 'application/pdf', size: 184320 }, { filename: 'site-photo.jpg', mime_type: 'image/jpeg', size: 3250000 }] : index === 1 ? [] : null }));
+  const shift = (days: number) => { const d = new Date(now); d.setDate(d.getDate() + days); return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`; };
+  let tasks = [['Reply to the proposal', -1], ['Send the review notes', 0], ['Confirm Friday planning', 2], ['Quarterly review', 10]].map(([title, days], index) => ({ id: index + 1, title: title as string, description: null, deadline: shift(days as number), priority: 1, status: 'pending', source: 'manual', created_at: null }));
   const events = [{ id: 1, google_id: 'sample-event', summary: 'Customer onboarding review', description: 'Review the rollout plan and answer open questions.', location: 'Meeting room 2', start_time: day + 'T14:00:00Z', end_time: day + 'T14:45:00Z', attendees: '', status: 'confirmed' }];
   const github = [{ id: 1, title: 'Improve onboarding checklist', repo: 'example/workspace', number: 42, state: 'open', item_type: 'issue', url: 'https://github.com/example/workspace/issues/42', updated_at: now.toISOString() }];
   const notes = [{ id: 1, notion_id: '12345678901234567890123456789012ab', title: 'Customer onboarding playbook', url: 'https://www.notion.so/12345678901234567890123456789012ab', parent_type: 'workspace', last_edited: now.toISOString() }];
@@ -42,7 +44,9 @@ export function installWorkspacePreview() {
       }
       case 'get_voice_state': return 'Idle';
       case 'get_wallpaper_status': case 'is_wallpaper_raised': return false;
-      case 'get_tasks': case 'get_emails': case 'mail_list_memories': return [];
+      case 'get_tasks': return tasks;
+      case 'update_task': tasks = tasks.map(t => t.id === args.id ? { ...t, status: args.status } : t); return null;
+      case 'get_emails': case 'mail_list_memories': return [];
       case 'get_events': case 'get_todays_events': return events;
       case 'get_github_items': return github;
       case 'get_notion_pages': return notes;

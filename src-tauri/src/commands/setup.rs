@@ -237,6 +237,7 @@ fn synthetic_context(settings: MailSettings) -> MailContext {
             is_read: true,
             is_inbox: true,
             received_at: "2026-09-12T12:00:00Z".into(),
+            attachments: None,
         }],
         memories: vec![],
         settings,

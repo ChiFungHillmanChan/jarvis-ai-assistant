@@ -24,6 +24,16 @@ pub struct MailMessage {
     pub is_read: bool,
     pub is_inbox: bool,
     pub received_at: String,
+    /// None: saved before V26 recorded attachments, so unknown rather than empty.
+    pub attachments: Option<Vec<MailAttachment>>,
+}
+
+/// A file attached to a message. Metadata only: the file stays with the provider.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct MailAttachment {
+    pub filename: String,
+    pub mime_type: String,
+    pub size: u64,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

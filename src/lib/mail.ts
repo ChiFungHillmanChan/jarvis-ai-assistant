@@ -1,7 +1,9 @@
 import { invoke } from "@tauri-apps/api/core";
 
 export interface MailAccount { id: string; email: string; connected: boolean; last_synced: string | null; next_page_token: string | null; message_count: number }
-export interface MailMessage { id: number; account_id: string; account_email: string; provider_id: string; thread_id: string | null; subject: string; sender: string; snippet: string; body: string | null; is_read: boolean; is_inbox: boolean; received_at: string }
+export interface MailMessage { id: number; account_id: string; account_email: string; provider_id: string; thread_id: string | null; subject: string; sender: string; snippet: string; body: string | null; is_read: boolean; is_inbox: boolean; received_at: string; attachments: MailAttachment[] | null }
+/** null: synced before attachments were recorded, so unknown until a rescan. */
+export interface MailAttachment { filename: string; mime_type: string; size: number }
 export interface MailGroup { id: number; name: string; instructions: string; message_count: number }
 export interface MailMemory { id: number; group_id: number; content: string; kind: string; source_message_id: number | null; expires_at: string | null; status: string; updated_at: string }
 export interface MailMemoryInput { id: number | null; group_id: number; content: string; kind: string; source_message_id: number | null; expires_at: string | null; status: string }

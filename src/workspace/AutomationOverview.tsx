@@ -1,8 +1,9 @@
 import { useEffect, useState, useCallback } from 'react';
-import { ArrowUpRight, Clock3, Mic, Pause, Play, RefreshCw, MessageSquare } from 'lucide-react';
+import { ArrowUpRight, Check, Clock3, Mic, Pause, Play, RefreshCw, MessageSquare } from 'lucide-react';
 import JarvisScene from '../components/3d/JarvisScene';
-import { getCronJobs, getCronRuns, setCronJobStatus } from '../lib/commands';
-import type { CronJobView, CronRunView } from '../lib/types';
+import { getCronJobs, getCronRuns, getTasks, setCronJobStatus, updateTask } from '../lib/commands';
+import { followUps, localDate } from '../lib/follow-ups';
+import type { CronJobView, CronRunView, Task } from '../lib/types';
 import type { AssistantActivity } from './useAssistantActivity';
 import { useWorkspace } from './WorkspaceContext';
 import { useChatContext } from '../hooks/ChatContext';
@@ -18,6 +19,8 @@ export default function AutomationOverview({ activity, onVoice, listening }: { a
   const [loading, setLoading] = useState(true);
   const [busy, setBusy] = useState<number | null>(null);
   const [selected, setSelected] = useState<number | null>(null);
+  const [tasks, setTasks] = useState<Task[]>([]);
+  const [completing, setCompleting] = useState<number | null>(null);
   const { open, newTask, writeValue } = useWorkspace();
   const chat = useChatContext();
   const refresh = useCallback(async () => {
@@ -31,7 +34,7 @@ export default function AutomationOverview({ activity, onVoice, listening }: { a
     let mounted = true, fetching = false;
     async function load() {
       if (fetching) return; fetching = true;
-      try { const { next, latest, incomplete } = await refresh(); if (mounted) { setJobs(next); setRuns(latest); setError(incomplete ? text('Some run history could not be refreshed.', '部分執行紀錄未能更新。') : ''); } }
+      try { const [{ next, latest, incomplete }, openTasks] = await Promise.all([refresh(), getTasks().catch(() => null)]); if (mounted) { setJobs(next); setRuns(latest); if (openTasks) setTasks(openTasks); setError(incomplete ? text('Some run history could not be refreshed.', '部分執行紀錄未能更新。') : openTasks ? '' : text('Follow-ups could not be refreshed.', '未能更新待跟進工作。')); } }
       catch (e) { if (mounted) setError(String(e)); }
       finally { fetching = false; if (mounted) setLoading(false); }
     }
@@ -44,6 +47,14 @@ export default function AutomationOverview({ activity, onVoice, listening }: { a
     try { await setCronJobStatus(job.id, job.status === 'active' ? 'paused' : 'active'); const { next, latest } = await refresh(); setJobs(next); setRuns(latest); setError(''); window.dispatchEvent(new Event('jarvis-automations-changed')); }
     catch (e) { setError(String(e)); } finally { setBusy(null); }
   }
+  async function complete(task: Task) {
+    if (task.id === null || completing !== null) return; setCompleting(task.id);
+    try { await updateTask(task.id, 'completed'); setTasks(list => list.filter(t => t.id !== task.id)); }
+    catch (e) { setError(String(e)); } finally { setCompleting(null); }
+  }
+  const today = localDate(new Date());
+  const due = followUps(tasks, today);
+  const dueLabel = (deadline: string) => deadline < today ? text('Overdue', '已逾期') : deadline === today ? text('Due today', '今天到期') : new Date(`${deadline}T00:00`).toLocaleDateString(locale, { month: 'short', day: 'numeric' });
   const enabled = jobs.filter(j => j.status === 'active');
   const running = Object.values(runs).filter(r => r.status === 'running');
   const selectedRun = selected === null ? undefined : runs[selected];
@@ -56,7 +67,9 @@ export default function AutomationOverview({ activity, onVoice, listening }: { a
       <div className="automation-presence"><span className={`status-dot ${activityLevel !== 'idle' ? 'is-working' : ''}`} /><span>{loading ? text('Loading automations…', '正在載入自動排程…') : text(`${enabled.length} enabled`, `已啟用 ${enabled.length} 項`)}</span><span className="presence-separator" /><span>{currentStatus}</span></div>
       <div className="automation-scene"><JarvisScene contained minimalLabels activityLevel={activityLevel} assistantPhase={listening ? 'listening' : activity.phase} ttsAmplitudeRef={activity.tts} micAmplitudeRef={activity.mic} pendingToolCall={activity.tool} onToolCallConsumed={activity.clearTool} /></div>
       <div className="automation-command"><p>{activityLevel === 'idle' ? text('Ready for your next instruction.', '已準備好接收下一項工作指示。') : currentStatus}</p><div><button className="workspace-button primary" onClick={() => { const id = newTask(); chat.selectSession(id); }}><MessageSquare size={17} />{text('Give JARVIS a task', '向 JARVIS 提供工作指示')}</button><button className="workspace-button" onClick={onVoice} disabled={chat.busy}><Mic size={17} />{listening ? text('Finish listening', '結束語音輸入') : text('Speak', '語音輸入')}</button></div><small>{text('Only enabled routines run. Opening this view starts no new actions.', '系統只會執行已啟用的排程。開啟此頁面不會啟動新工作。')}</small></div>
-    </section><aside className="automation-work"><div className="section-heading"><h2>{text('Enabled routines', '已啟用的排程')}</h2><span>{enabled.length}</span></div>
+    </section><aside className="automation-work">{due.length > 0 && <section className="automation-followups" aria-label={text('Follow-ups', '待跟進')}><div className="section-heading"><h2>{text('Follow-ups', '待跟進')}</h2><span>{due.length}</span></div>
+      {due.map(task => <div className="automation-job" key={task.id}><div className="automation-job-main"><span className="automation-job-name">{task.title}</span><span className={`run-state ${task.deadline! < today ? 'failed' : ''}`}>{dueLabel(task.deadline!)}</span></div><button className="icon-button" aria-label={text(`Mark ${task.title} as done`, `將「${task.title}」標為完成`)} disabled={completing !== null} onClick={() => void complete(task)}><Check size={15} /></button></div>)}</section>}
+      <div className="section-heading"><h2>{text('Enabled routines', '已啟用的排程')}</h2><span>{enabled.length}</span></div>
       <div className="automation-joblist">{loading ? <p className="workspace-empty">{text('Loading your routines…', '正在載入排程…')}</p> : !enabled.length ? <div className="workspace-empty"><p>{text('No routines enabled.', '目前沒有已啟用的排程。')}</p><button className="text-button" onClick={() => open('cron')}>{jobs.length ? text('Manage routines', '管理排程') : text('Create an automation', '建立自動排程')}<ArrowUpRight size={14} /></button></div> : enabled.map(job => { const run = runs[job.id]; return <div className={`automation-job ${selected === job.id ? 'is-selected' : ''}`} key={job.id}><button className="automation-job-main" onClick={() => setSelected(job.id)}><span className="automation-job-name">{job.name}</span><span className={`run-state ${run?.status === 'failed' ? 'failed' : ''}`}>{job.status === 'paused' ? text('Paused', '已暫停') : run?.status === 'running' ? text('Running', '執行中') : text('Enabled', '已啟用')}</span><small>{run?.status === 'failed' ? text('Last run failed · Review result', '上次執行失敗 · 請核對結果') : job.next_run ? `${text("Next", "下次")} ${when(job.next_run)}` : `${text("Last", "上次")} ${when(job.last_run)}`}</small></button><button className="icon-button" aria-label={`${job.status === 'active' ? text('Pause', '暫停') : text('Resume', '恢復')} ${job.name}`} disabled={busy !== null} onClick={() => void toggle(job)}>{job.status === 'active' ? <Pause size={15} /> : <Play size={15} />}</button></div>; })}</div>
       {selectedRun && <section className="automation-result"><div className="section-heading"><h2>{text('Last result', '最近結果')}</h2><span>{selectedRun.status}</span></div><small>{when(selectedRun.started_at)}</small><div><MessageRenderer content={selectedRun.error || selectedRun.result || (selectedRun.status === 'running' ? text('This routine is still running.', '此排程仍在執行中。') : text('No text output for this run.', '本次執行沒有文字結果。'))} /></div><button className="text-button" onClick={() => { writeValue('tool:cron', 'selectedJobId', selected); open('cron'); }}>{text("View run history", "查看執行紀錄")}<ArrowUpRight size={14} /></button></section>}
       {!selectedRun && enabled.length > 0 && <p className="automation-hint">{text('Select a routine to see its latest result. Your tools stay available while routines run.', '選取排程查看最近結果。排程執行期間，你仍可使用其他工具。')}</p>}

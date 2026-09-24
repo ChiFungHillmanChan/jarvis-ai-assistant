@@ -1,6 +1,7 @@
 use base64::Engine;
 use futures_util::stream::StreamExt;
 use reqwest::Client;
+use crate::mail::models::MailAttachment;
 use serde::{Deserialize, Serialize};
 use std::collections::HashSet;
 use std::sync::LazyLock;
@@ -36,6 +37,9 @@ pub struct GmailMessage {
     pub label_ids: Vec<String>,
     pub is_read: bool,
     pub received_at: Option<String>,
+    /// Filled only by `get_message_full`; the metadata fetch does not see parts.
+    #[serde(default)]
+    pub attachments: Vec<MailAttachment>,
 }
 
 #[derive(Deserialize)]
@@ -84,6 +88,7 @@ struct Part {
 #[derive(Deserialize)]
 struct BodyData {
     data: Option<String>,
+    size: Option<u64>,
 }
 
 #[derive(Deserialize)]
@@ -364,10 +369,11 @@ pub async fn fetch_message_detail(
         thread_id: detail.thread_id,
         subject,
         sender,
-        snippet: detail.snippet,
+        snippet: snippet_text(detail.snippet),
         label_ids: labels,
         is_read,
         received_at: normalise_received_at(detail.internal_date.as_deref(), date.as_deref()),
+        attachments: Vec::new(),
     })
 }
 
@@ -538,6 +544,8 @@ pub async fn get_message_full(
         .map(|h| h.value.clone());
     let labels = detail.label_ids.unwrap_or_default();
     let is_read = !labels.contains(&"UNREAD".to_string());
+    let snippet = snippet_text(detail.snippet);
+    let attachments = payload.map(collect_attachments).unwrap_or_default();
 
     // Extract body from payload; fall back to the Gmail-provided snippet if extraction yields nothing.
     let mut body_text = if let Some(ref pl) = detail.payload {
@@ -546,7 +554,7 @@ pub async fn get_message_full(
         String::new()
     };
     if body_text.trim().is_empty() {
-        if let Some(ref snippet) = detail.snippet {
+        if let Some(ref snippet) = snippet {
             if !snippet.is_empty() {
                 body_text = snippet.clone();
                 log::warn!(
@@ -563,10 +571,11 @@ pub async fn get_message_full(
         thread_id: detail.thread_id,
         subject: subject.clone(),
         sender: sender.clone(),
-        snippet: detail.snippet,
+        snippet,
         label_ids: labels,
         is_read,
         received_at: normalise_received_at(detail.internal_date.as_deref(), date.as_deref()),
+        attachments,
     };
 
     let formatted = format!(
@@ -648,6 +657,48 @@ fn is_attachment(filename: Option<&str>, headers: Option<&[Header]>) -> bool {
             header.name.eq_ignore_ascii_case("Content-Disposition")
                 && header.value.split(';').next().unwrap_or("").trim().eq_ignore_ascii_case("attachment")
         })
+}
+
+/// Gmail returns `snippet` HTML-escaped (`I&#39;ll`), unlike every other field.
+fn snippet_text(raw: Option<String>) -> Option<String> {
+    raw.map(|snippet| decode_html_entities(&snippet))
+}
+
+/// Named files in the message, metadata only. An image with a Content-ID inside
+/// multipart/related is part of the HTML body, usually a signature logo, not a
+/// file the sender attached. A forwarded message counts as one file; the files
+/// inside it are not listed.
+fn collect_attachments(payload: &Payload) -> Vec<MailAttachment> {
+    fn named(filename: Option<&str>, mime_type: Option<&str>, body: Option<&BodyData>) -> Option<MailAttachment> {
+        let filename = filename.map(str::trim).filter(|name| !name.is_empty())?;
+        Some(MailAttachment {
+            filename: filename.to_string(),
+            mime_type: mime_type.unwrap_or("application/octet-stream").to_string(),
+            size: body.and_then(|b| b.size).unwrap_or(0),
+        })
+    }
+    fn walk(parts: &[Part], parent_mime: &str, out: &mut Vec<MailAttachment>) {
+        for part in parts {
+            let mime = part.mime_type.as_deref().unwrap_or("");
+            let embedded = parent_mime.eq_ignore_ascii_case("multipart/related")
+                && part.headers.as_deref().unwrap_or(&[]).iter().any(|h| h.name.eq_ignore_ascii_case("Content-ID"));
+            if !embedded {
+                if let Some(file) = named(part.filename.as_deref(), part.mime_type.as_deref(), part.body.as_ref()) {
+                    out.push(file);
+                    continue;
+                }
+            }
+            if let Some(children) = part.parts.as_deref().filter(|_| !mime.eq_ignore_ascii_case("message/rfc822")) {
+                walk(children, mime, out);
+            }
+        }
+    }
+    if let Some(file) = named(payload.filename.as_deref(), payload.mime_type.as_deref(), payload.body.as_ref()) {
+        return vec![file];
+    }
+    let mut out = Vec::new();
+    walk(payload.parts.as_deref().unwrap_or(&[]), payload.mime_type.as_deref().unwrap_or(""), &mut out);
+    out
 }
 
 fn decode_base64url(data: &str) -> Result<String, String> {
@@ -899,6 +950,45 @@ mod tests {
         assert_eq!(body_fixture(serde_json::json!({"mimeType":"text/plain", "filename":"notes.txt", "body":encoded_body("Private attachment")})), "");
     }
 
+    /// Outlook and Gmail signatures embed their logos as named image parts
+    /// inside multipart/related. Listing those would mark nearly every business
+    /// email as having attachments.
+    #[test]
+    fn attachments_list_named_files_but_not_embedded_signature_images() {
+        let payload = serde_json::from_value::<Payload>(serde_json::json!({"mimeType":"multipart/mixed", "parts":[
+            {"mimeType":"multipart/related", "parts":[
+                {"mimeType":"text/html", "body":encoded_body("<p>Hi</p><img src=\"cid:logo\">")},
+                {"mimeType":"image/png", "filename":"image001.png", "headers":[{"name":"Content-ID","value":"<logo>"}], "body":{"size":2048}}
+            ]},
+            {"mimeType":"application/pdf", "filename":"Invoice 0925.pdf",
+             "headers":[{"name":"Content-Disposition","value":"attachment; filename=\"Invoice 0925.pdf\""}], "body":{"size":184320}},
+            {"mimeType":"image/jpeg", "filename":"site.jpg",
+             "headers":[{"name":"Content-ID","value":"<site>"},{"name":"Content-Disposition","value":"inline; filename=site.jpg"}], "body":{"size":90000}},
+            {"mimeType":"message/rfc822", "filename":"Fwd.eml", "body":{"size":5000},
+             "parts":[{"mimeType":"application/pdf", "filename":"inner.pdf", "body":{"size":1}}]}
+        ]})).unwrap();
+        let listed: Vec<(String, String, u64)> = collect_attachments(&payload)
+            .into_iter().map(|a| (a.filename, a.mime_type, a.size)).collect();
+        assert_eq!(listed, vec![
+            ("Invoice 0925.pdf".into(), "application/pdf".into(), 184320),
+            // A photo shown inline by Apple Mail is still a file the sender attached.
+            ("site.jpg".into(), "image/jpeg".into(), 90000),
+            // A forwarded message is one attachment; its own files belong to it.
+            ("Fwd.eml".into(), "message/rfc822".into(), 5000),
+        ]);
+
+        let single = serde_json::from_value::<Payload>(serde_json::json!(
+            {"mimeType":"application/pdf", "filename":"scan.pdf", "body":{"size":10}})).unwrap();
+        assert_eq!(collect_attachments(&single).len(), 1, "a message that is only a file lists that file");
+    }
+
+    /// Gmail returns snippets HTML-escaped, so `I&#39;ll` reached the inbox list.
+    #[test]
+    fn gmail_snippets_are_unescaped_once() {
+        assert_eq!(snippet_text(Some("I&#39;ll send it &amp;lt;today&amp;gt;".into())).as_deref(), Some("I'll send it &lt;today&gt;"));
+        assert_eq!(snippet_text(None), None);
+    }
+
     #[test]
     fn mail_html_removes_scripts_and_styles_in_document_order() {
         assert_eq!(strip_html("<style>.hidden {color:red}</style><p>First</p><script>alert(1)</script><style>.later{}</style><p>Second</p>"), "First\nSecond");
@@ -1129,6 +1219,7 @@ mod sync_tests {
             label_ids: vec!["INBOX".to_string()],
             is_read: false,
             received_at: Some(received_at.to_string()),
+            attachments: Vec::new(),
         }
     }
 
