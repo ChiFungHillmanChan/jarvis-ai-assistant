@@ -6,6 +6,7 @@ import { canStartFirstAnalysis } from '../lib/setup-flow';
 import { applyTestedMailSettings, getSetupStatus, setupError, testMailAiConnection, type SetupStatus } from '../lib/setup';
 import LocalMailSetup from '../components/LocalMailSetup';
 import WindowControls from '../components/WindowControls';
+import ReadableContent from '../components/content/ReadableContent';
 import '../styles/setup.css';
 
 export default function OnboardingWizard({ onComplete }: { onComplete: () => void }) {
@@ -107,7 +108,11 @@ export default function OnboardingWizard({ onComplete }: { onComplete: () => voi
     });
   }
   function finish() {
-    void run(text('Opening mail', '開啟電郵'), async () => { await markOnboardingComplete(); onComplete(); });
+    void run(text('Opening mail', '開啟電郵'), async () => {
+      if (!await setLocale(locale)) return;
+      await markOnboardingComplete();
+      onComplete();
+    });
   }
 
   return <div className="setup-screen">
@@ -155,7 +160,7 @@ export default function OnboardingWizard({ onComplete }: { onComplete: () => voi
           <p className="setup-hint">{workspace.settings.processing_mode === 'local' ? text('Analysis uses the local model. If the group is too long, reduce its size in the mail workspace.', '分析使用本機模型。群組內容過長時，可在電郵工作區縮小範圍。') : text(`Analysis sends this group to ${workspace.settings.processing_mode === 'openai' ? 'OpenAI' : 'AWS Bedrock'} using your account.`, `分析會使用你的帳戶，將此群組內容傳送至 ${workspace.settings.processing_mode === 'openai' ? 'OpenAI' : 'AWS Bedrock'}。`)}</p>
           {readiness !== 'ready' && <p>{text('Return to step 1 to test the selected AI before analyzing.', '分析前，請返回第 1 步測試所選 AI。')}</p>}
           <button type="button" className="setup-primary" disabled={!canAnalyze || !groupName.trim()} onClick={() => void firstAnalysis()}>{text('Create group and analyze', '建立群組並分析')}</button>
-          {analysis && <article className="setup-result"><h2>{text('Open a source to check the result', '開啟原信以核對結果')}</h2><pre>{analysis.text}</pre><p>{text('Messages omitted', '未納入郵件')}: {analysis.omitted_messages}</p><div className="setup-actions">{analysis.source_ids.map(id => <button type="button" key={id} onClick={() => void run(text('Opening source', '開啟原信'), async () => { setSource(await mail.mailGetMessage(id)); })}>{text('Source', '原信')} #{id}</button>)}</div>{source && <section><h3>{source.subject}</h3><pre>{source.body || source.snippet}</pre></section>}</article>}
+          {analysis && <article className="setup-result"><h2>{text('Open a source to check the result', '開啟原信以核對結果')}</h2><ReadableContent text={analysis.text} sourceIds={analysis.source_ids} onSource={id => void run(text('Opening source', '開啟原信'), async () => { setSource(await mail.mailGetMessage(id)); })} /><p>{text('Messages omitted', '未納入郵件')}: {analysis.omitted_messages}</p><div className="setup-actions">{analysis.source_ids.map(id => <button type="button" key={id} onClick={() => void run(text('Opening source', '開啟原信'), async () => { setSource(await mail.mailGetMessage(id)); })}>{text('Source', '原信')} #{id}</button>)}</div>{source && <section><h3>{source.subject}</h3><ReadableContent text={source.body || source.snippet} format="plain" /></section>}</article>}
         </>}
         <footer className="setup-footer"><button type="button" disabled={step === 1 || localBusy} onClick={() => goStep(step - 1)}>{text('Back', '上一步')}</button>{step < 3 && <button type="button" disabled={localBusy} onClick={() => goStep(step + 1)}>{text('Continue', '繼續')}</button>}<button type="button" disabled={localBusy} onClick={finish}>{step === 3 ? text('Open mail workspace', '開啟電郵工作區') : text('Set up later', '稍後繼續設定')}</button></footer>
       </fieldset>}

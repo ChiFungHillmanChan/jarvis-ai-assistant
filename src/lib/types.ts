@@ -371,3 +371,14 @@ export interface AccountStatus {
   email: string | null;
   tier: string | null;
 }
+
+export interface PaymentPage {
+  url: string;
+  browser_opened: boolean;
+  session_generation: number;
+}
+
+export interface CheckoutPage extends PaymentPage {
+  session_id: string;
+  already_subscribed: boolean;
+}

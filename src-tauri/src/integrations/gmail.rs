@@ -63,6 +63,7 @@ struct MessageDetail {
 
 #[derive(Deserialize)]
 struct Payload {
+    filename: Option<String>,
     headers: Option<Vec<Header>>,
     parts: Option<Vec<Part>>,
     body: Option<BodyData>,
@@ -72,6 +73,8 @@ struct Payload {
 
 #[derive(Deserialize)]
 struct Part {
+    filename: Option<String>,
+    headers: Option<Vec<Header>>,
     #[serde(rename = "mimeType")]
     mime_type: Option<String>,
     body: Option<BodyData>,
@@ -579,12 +582,16 @@ pub async fn get_message_full(
 }
 
 fn extract_body_from_payload(payload: &Payload) -> String {
+    if is_attachment(payload.filename.as_deref(), payload.headers.as_deref()) {
+        return String::new();
+    }
     // Try direct body on the payload itself
-    if let Some(ref body) = payload.body {
+    let mime = payload.mime_type.as_deref().unwrap_or("");
+    if let Some(ref body) = payload.body.as_ref().filter(|_| mime.eq_ignore_ascii_case("text/plain") || mime.eq_ignore_ascii_case("text/html")) {
         if let Some(ref data) = body.data {
             if !data.is_empty() {
                 if let Ok(decoded) = decode_base64url(data) {
-                    let is_html = payload.mime_type.as_deref() == Some("text/html");
+                    let is_html = mime.eq_ignore_ascii_case("text/html");
                     return if is_html {
                         strip_html(&decoded)
                     } else {
@@ -608,12 +615,18 @@ fn extract_body_from_payload(payload: &Payload) -> String {
 
 fn find_body_in_parts(parts: &[Part], target_mime: &str) -> Option<String> {
     for part in parts {
-        if part.mime_type.as_deref() == Some(target_mime) {
+        if is_attachment(part.filename.as_deref(), part.headers.as_deref())
+            || part.mime_type.as_deref().is_some_and(|mime| mime.eq_ignore_ascii_case("message/rfc822")) {
+            continue;
+        }
+        if part.mime_type.as_deref().is_some_and(|mime| mime.eq_ignore_ascii_case(target_mime)) {
             if let Some(ref body) = part.body {
                 if let Some(ref data) = body.data {
                     if !data.is_empty() {
                         if let Ok(decoded) = decode_base64url(data) {
-                            return Some(decoded);
+                            if !decoded.trim().is_empty() {
+                                return Some(decoded);
+                            }
                         }
                     }
                 }
@@ -627,6 +640,14 @@ fn find_body_in_parts(parts: &[Part], target_mime: &str) -> Option<String> {
         }
     }
     None
+}
+
+fn is_attachment(filename: Option<&str>, headers: Option<&[Header]>) -> bool {
+    filename.is_some_and(|name| !name.trim().is_empty())
+        || headers.unwrap_or(&[]).iter().any(|header| {
+            header.name.eq_ignore_ascii_case("Content-Disposition")
+                && header.value.split(';').next().unwrap_or("").trim().eq_ignore_ascii_case("attachment")
+        })
 }
 
 fn decode_base64url(data: &str) -> Result<String, String> {
@@ -655,18 +676,14 @@ fn strip_html(html: &str) -> String {
         while i < html.len() {
             let rest_lower = &lower[i..];
             let rest = &html[i..];
-            if let Some(start) = rest_lower.find("<script") {
+            let next = [("<script", "</script>"), ("<style", "</style>")]
+                .into_iter()
+                .filter_map(|(open, close)| rest_lower.find(open).map(|start| (start, close)))
+                .min_by_key(|(start, _)| *start);
+            if let Some((start, close)) = next {
                 out.push_str(&rest[..start]);
-                if let Some(end) = rest_lower[start..].find("</script>") {
-                    i += start + end + "</script>".len();
-                    continue;
-                }
-                break;
-            }
-            if let Some(start) = rest_lower.find("<style") {
-                out.push_str(&rest[..start]);
-                if let Some(end) = rest_lower[start..].find("</style>") {
-                    i += start + end + "</style>".len();
+                if let Some(end) = rest_lower[start..].find(close) {
+                    i += start + end + close.len();
                     continue;
                 }
                 break;
@@ -702,14 +719,7 @@ fn strip_html(html: &str) -> String {
     }
 
     // Decode the common HTML entities we care about.
-    let text = text
-        .replace("&nbsp;", " ")
-        .replace("&amp;", "&")
-        .replace("&lt;", "<")
-        .replace("&gt;", ">")
-        .replace("&quot;", "\"")
-        .replace("&#39;", "'")
-        .replace("&apos;", "'");
+    let text = decode_html_entities(&text);
 
     // Collapse runs of blank lines to at most one blank line so paragraphs remain visible.
     let mut cleaned = String::with_capacity(text.len());
@@ -728,6 +738,42 @@ fn strip_html(html: &str) -> String {
         }
     }
     cleaned.trim().to_string()
+}
+
+fn decode_html_entities(text: &str) -> String {
+    let mut output = String::with_capacity(text.len());
+    let mut rest = text;
+    while let Some(start) = rest.find('&') {
+        output.push_str(&rest[..start]);
+        rest = &rest[start..];
+        // Entity names and Unicode numeric references are short. Bound the
+        // scan so malformed input with many ampersands stays linear.
+        let end = rest.bytes().take(16).position(|byte| byte == b';');
+        let decoded = end.and_then(|end| {
+            let entity = &rest[1..end];
+            match entity {
+                "nbsp" => Some(' '), "amp" => Some('&'), "lt" => Some('<'),
+                "gt" => Some('>'), "quot" => Some('"'), "apos" => Some('\''),
+                _ => {
+                    let value = if let Some(hex) = entity.strip_prefix("#x").or_else(|| entity.strip_prefix("#X")) {
+                        u32::from_str_radix(hex, 16).ok()
+                    } else {
+                        entity.strip_prefix('#').and_then(|digits| digits.parse::<u32>().ok())
+                    };
+                    value.and_then(char::from_u32).filter(|ch| *ch != '\0')
+                }
+            }
+        });
+        if let (Some(end), Some(ch)) = (end, decoded) {
+            output.push(ch);
+            rest = &rest[end + 1..];
+        } else {
+            output.push('&');
+            rest = &rest[1..];
+        }
+    }
+    output.push_str(rest);
+    output
 }
 
 /// Remove CR/LF (and surrounding whitespace) from a value destined for an
@@ -826,6 +872,42 @@ pub async fn send_message(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn body_fixture(value: serde_json::Value) -> String {
+        extract_body_from_payload(&serde_json::from_value::<Payload>(value).unwrap())
+    }
+
+    fn encoded_body(text: &str) -> serde_json::Value {
+        serde_json::json!({"data": base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(text)})
+    }
+
+    #[test]
+    fn mail_body_skips_text_attachments_and_attached_messages() {
+        let result = body_fixture(serde_json::json!({"mimeType":"multipart/mixed", "parts":[
+            {"mimeType":"text/plain", "filename":"notes.txt", "body":encoded_body("Attachment text")},
+            {"mimeType":"multipart/mixed", "headers":[{"name":"content-disposition","value":"Attachment; filename=mail.eml"}],
+             "parts":[{"mimeType":"text/plain","body":encoded_body("Forwarded attachment")}]},
+            {"mimeType":"text/plain", "body":encoded_body("  \n ")},
+            {"mimeType":"text/html", "body":encoded_body("<p>Actual message</p>")}
+        ]}));
+        assert_eq!(result, "Actual message");
+    }
+
+    #[test]
+    fn mail_body_does_not_display_binary_or_named_root_attachments() {
+        assert_eq!(body_fixture(serde_json::json!({"mimeType":"application/pdf", "body":encoded_body("%PDF-binary")})), "");
+        assert_eq!(body_fixture(serde_json::json!({"mimeType":"text/plain", "filename":"notes.txt", "body":encoded_body("Private attachment")})), "");
+    }
+
+    #[test]
+    fn mail_html_removes_scripts_and_styles_in_document_order() {
+        assert_eq!(strip_html("<style>.hidden {color:red}</style><p>First</p><script>alert(1)</script><style>.later{}</style><p>Second</p>"), "First\nSecond");
+    }
+
+    #[test]
+    fn mail_html_decodes_numeric_entities_once_and_keeps_unknown_entities() {
+        assert_eq!(strip_html("<p>&#25991;&#x4EF6; &amp;lt; &unknown;</p>"), "文件 &lt; &unknown;");
+    }
 
     #[test]
     fn strip_header_value_removes_crlf_injection() {

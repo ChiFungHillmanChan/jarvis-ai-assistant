@@ -1184,13 +1184,17 @@ export default function Settings() {
             <h2 className="settings-heading">{text('On this Mac', '本機用量')}</h2>
             <p style={styles.hint}>
               {text(
-                "Everything JARVIS stores stays on this Mac. Nothing here is synced or sent anywhere.",
-                "JARVIS 的所有資料都只保存在本機，不會同步或上載至任何地方。",
+                "This page shows JARVIS's local copies and files on this Mac. Cloud AI analysis sends the content needed for your request to the selected provider.",
+                "此頁顯示 JARVIS 在這部 Mac 儲存的本機副本及檔案。使用雲端 AI 分析時，所需內容會傳送至你選擇的供應商。",
               )}
             </p>
             {!storage && !storageError && <div style={styles.statusText}>{text("Reading…", "正在讀取…")}</div>}
             {storage && (<>
               <div style={styles.storageTotal}>{formatBytes(storage.totalBytes)}</div>
+              <p style={styles.hint}>{text(
+                "Total for the items listed below. Excludes the App itself and models managed by other apps, such as Ollama.",
+                "總計只包括下列項目，不包括 App 本身或由 Ollama 等其他應用程式管理的模型。",
+              )}</p>
               <dl style={styles.storageList}>
                 {([
                   ["database", text('Database', '資料庫'), storage.databaseBytes + storage.walBytes],
@@ -1220,8 +1224,8 @@ export default function Settings() {
             <h2 className="settings-heading">{text('Automatic clean-up', '自動清理')}</h2>
             <p style={styles.hint}>
               {text(
-                "JARVIS keeps walking backwards through your mailbox, so without a limit the database only grows. Old message text is dropped while the subject, sender and preview stay; anything you filed into a mail group is never touched.",
-                "JARVIS 會持續向前同步較舊的郵件，若不設限，資料庫只會不斷增大。超過期限的郵件只會移除內文，主旨、寄件人及預覽會保留；已歸入郵件群組的郵件不會被清理。",
+                "When enabled, clean-up runs on launch or when you choose Clean up now. Ungrouped mail is aged from its last local save: only its text is removed, while subjects, senders and previews remain. Grouped mail is kept. Old conversations and related cached records are also removed.",
+                "啟用後，JARVIS 會在啟動或按「立即清理」時執行清理。未分組郵件以最近儲存日期計算期限，只移除內文，保留主旨、寄件人及預覽；已分組的郵件會保留。超過期限的對話及相關快取記錄亦會移除。",
               )}
             </p>
             <label style={styles.option}>
@@ -1257,17 +1261,17 @@ export default function Settings() {
             <h2 className="settings-heading">{text('Free up space', '釋放空間')}</h2>
             <p style={styles.hint}>
               {text(
-                "Each of these is safe to remove. Models and caches are re-downloaded or rebuilt when they are next needed.",
-                "以下項目均可安全移除。模型及快取會在下次需要時重新下載或重建。",
+                "Choose which local items to remove. Models can be downloaded again and caches rebuilt; deleted backups and chat history cannot be recovered. Removing local mail text does not delete the originals in Gmail.",
+                "請選擇要移除的本機項目。模型可重新下載，快取可重建；備份及對話記錄刪除後無法復原。移除本機郵件內文不會刪除 Gmail 的原始郵件。",
               )}
             </p>
             {([
               { scope: "cache", label: text('Clear web cache', '清除網頁快取'),
                 help: text('Rebuilt automatically.', '會自動重建。'), bytes: storage?.cacheBytes },
               { scope: "backups", label: text('Delete old backups', '刪除舊備份'),
-                help: text('Copies left behind by earlier versions.', '舊版本遺留的備份副本。'), bytes: storage?.backupsBytes },
+                help: text('Removes earlier backup copies permanently. Make sure you no longer need them to restore data or an older version.', '永久刪除先前的備份副本。請先確認不再需要用這些備份還原資料或舊版本。'), bytes: storage?.backupsBytes },
               { scope: "models", label: text('Delete downloaded models', '刪除已下載的模型'),
-                help: text('Offline speech and voice models. Re-downloaded on demand.', '離線語音及聲音模型，需要時會重新下載。'), bytes: storage?.modelsBytes },
+                help: text('Offline speech and voice models. Download them again to use the affected offline voice features.', '離線語音及聲音模型。刪除後，須重新下載才能使用相關的離線語音功能。'), bytes: storage?.modelsBytes },
               { scope: "mailBodies", label: text('Drop stored mail text', '移除已儲存的郵件內文'),
                 help: text('Keeps subjects and previews. Grouped mail is kept in full.', '保留主旨及預覽；已分組的郵件會完整保留。'), bytes: storage?.mailBodyBytes },
             ] as const).map((item) => (

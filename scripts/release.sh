@@ -30,7 +30,7 @@ cd "${REPO_ROOT}"
 [ -z "$(git status --porcelain)" ] || { echo "commit or stash first"; exit 1; }
 
 # Source .env so option_env! macros (GOOGLE_CLIENT_ID, GOOGLE_CLIENT_SECRET,
-# JARVIS_PAYMENT_API) get baked into the release binary at compile time. dotenvy
+# JARVIS_PAYMENT_API and public Cognito settings) get baked into the release binary at compile time. dotenvy
 # at runtime is enough for `tauri dev`, but a packaged DMG has no .env to read —
 # these values must be in the env when `tauri build` runs. `set -a` exports every
 # variable the file defines, which is what option_env! reads.
@@ -45,14 +45,10 @@ if [ -z "${GOOGLE_CLIENT_ID:-}" ]; then
   read -r -p "Continue anyway? [y/N] " GO_ANYWAY
   if [[ "${GO_ANYWAY}" != "y" && "${GO_ANYWAY}" != "Y" ]]; then exit 1; fi
 fi
-if [ -z "${JARVIS_PAYMENT_API:-}" ]; then
-  echo "WARNING: JARVIS_PAYMENT_API not set — UPGRADE TO PRO in the shipped DMG will fail with"
-  echo "         'checkout backend not configured'. The build has no other way to learn the URL."
-  read -r -p "Continue anyway? [y/N] " GO_ANYWAY
-  if [[ "${GO_ANYWAY}" != "y" && "${GO_ANYWAY}" != "Y" ]]; then exit 1; fi
-else
-  export JARVIS_PAYMENT_API
-fi
+# A payment endpoint alone leaves Account hidden in downloaded builds. Stop
+# before version changes or uploads if the complete public configuration is absent.
+export JARVIS_PAYMENT_API JARVIS_COGNITO_DOMAIN JARVIS_COGNITO_CLIENT_ID
+node scripts/release-billing-config.mjs
 
 echo "==> 0/10 Running the test suite (same command CI runs)"
 # release.sh builds from the local working tree, so CI green on the last push

@@ -1,4 +1,5 @@
 use crate::db::Database;
+use rusqlite::OptionalExtension;
 use std::sync::Arc;
 use tauri::State;
 
@@ -20,7 +21,8 @@ fn read_onboarding_complete(db: &Arc<Database>) -> Result<bool, String> {
             [],
             |row| row.get(0),
         )
-        .ok();
+        .optional()
+        .map_err(|e| e.to_string())?;
     Ok(matches!(value.as_deref(), Some("true")))
 }
 
@@ -64,6 +66,14 @@ mod tests {
     fn check_returns_false_when_value_missing() {
         let db = make_db_with_pref(None);
         assert!(!read_onboarding_complete(&db).unwrap());
+    }
+
+    #[test]
+    fn check_reports_database_errors_instead_of_treating_them_as_first_launch() {
+        let db = Arc::new(Database {
+            conn: Mutex::new(Connection::open_in_memory().unwrap()),
+        });
+        assert!(read_onboarding_complete(&db).is_err());
     }
 
     #[test]

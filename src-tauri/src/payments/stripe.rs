@@ -9,17 +9,33 @@ pub enum Tier {
     Team,
 }
 
-/// The server takes the user id from the verified token and the email from
-/// Cognito, so the body carries only the tier.
+#[derive(Debug, Default, Clone, Copy, Serialize, Deserialize)]
+pub enum PaymentLocale {
+    #[default]
+    #[serde(rename = "en")]
+    English,
+    #[serde(rename = "zh-HK")]
+    TraditionalChinese,
+}
+
+/// Identity is taken from the verified token; locale only selects return pages.
 #[derive(Debug, Serialize)]
 pub struct CheckoutRequest {
     pub tier: Tier,
+    pub locale: PaymentLocale,
 }
 
 #[derive(Debug, Deserialize)]
 pub struct CheckoutResponse {
     pub url: String,
     pub session_id: String,
+    #[serde(default)]
+    pub already_subscribed: bool,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct PortalResponse {
+    pub url: String,
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -28,12 +44,16 @@ pub enum PaymentError {
     NotConfigured,
     #[error("network error: {0}")]
     Network(#[from] reqwest::Error),
-    #[error("checkout failed: {0}")]
+    #[error("billing request failed: {0}")]
     Checkout(String),
     #[error("not_signed_in")]
     NotSignedIn,
     #[error("{0}")]
     Account(String),
+    #[error("billing_busy")]
+    Busy,
+    #[error("The payment service returned an unsupported URL.")]
+    InvalidUrl,
 }
 
 /// The checkout backend endpoint, embedded at compile time. A packaged .app has
@@ -58,38 +78,74 @@ fn payment_api_base() -> Result<String, PaymentError> {
         .ok_or(PaymentError::NotConfigured)
 }
 
-pub async fn create_checkout_session(
-    tier: Tier,
+/// Only Stripe-hosted payment pages may be opened, including retries from IPC.
+pub fn validate_payment_url(value: &str) -> Result<(), PaymentError> {
+    let url = reqwest::Url::parse(value).map_err(|_| PaymentError::InvalidUrl)?;
+    if url.scheme() != "https"
+        || !matches!(url.host_str(), Some("checkout.stripe.com" | "billing.stripe.com"))
+        || !url.username().is_empty()
+        || url.password().is_some()
+        || url.port().is_some()
+    {
+        return Err(PaymentError::InvalidUrl);
+    }
+    Ok(())
+}
+
+async fn post_session<T: serde::de::DeserializeOwned>(
+    path: &str,
+    body: Option<serde_json::Value>,
     session: &crate::auth::cognito::CognitoSession,
-) -> Result<CheckoutResponse, PaymentError> {
+    generation: u64,
+) -> Result<T, PaymentError> {
     use crate::auth::cognito::AccountError;
     let base = payment_api_base()?;
-    let url = format!("{}/checkout", base.trim_end_matches('/'));
-    let body = CheckoutRequest { tier };
+    let url = format!("{}/{}", base.trim_end_matches('/'), path);
     let client = crate::util::http_client();
-
     let resp = session
-        .send_authed(|token| client.post(&url).bearer_auth(token).json(&body))
+        .send_authed_in_generation(generation, |token| {
+            let request = client.post(&url).bearer_auth(token);
+            match &body {
+                Some(body) => request.json(body),
+                None => request,
+            }
+        })
         .await
         .map_err(|e| match e {
             AccountError::NotSignedIn => PaymentError::NotSignedIn,
             other => PaymentError::Account(other.to_string()),
         })?;
-
-    if !resp.status().is_success() {
-        let status = resp.status();
-        let body = resp.text().await.unwrap_or_default();
-        return Err(PaymentError::Checkout(format!("{}: {}", status, body)));
+    if resp.status() == reqwest::StatusCode::CONFLICT {
+        return Err(PaymentError::Busy);
     }
-
-    let parsed: CheckoutResponse = resp.json().await?;
+    if !resp.status().is_success() {
+        return Err(PaymentError::Checkout(resp.status().to_string()));
+    }
+    let parsed = resp.json().await?;
+    session.with_current_generation(generation, || ()).map_err(|_| PaymentError::NotSignedIn)?;
     Ok(parsed)
 }
 
-// The billing-portal client was removed 2026-08-07: it POSTed to a /portal
-// route the payment stack has never registered, and no UI called it -- a
-// guaranteed 404 masquerading as a feature. Rebuild it together with the
-// entitlement layer, backend route first.
+pub async fn create_checkout_session(
+    tier: Tier,
+    locale: PaymentLocale,
+    session: &crate::auth::cognito::CognitoSession,
+    generation: u64,
+) -> Result<CheckoutResponse, PaymentError> {
+    let parsed: CheckoutResponse = post_session("checkout", Some(serde_json::json!(CheckoutRequest { tier, locale })), session, generation).await?;
+    validate_payment_url(&parsed.url)?;
+    Ok(parsed)
+}
+
+pub async fn create_portal_session(
+    locale: PaymentLocale,
+    session: &crate::auth::cognito::CognitoSession,
+    generation: u64,
+) -> Result<PortalResponse, PaymentError> {
+    let parsed: PortalResponse = post_session("portal", Some(serde_json::json!({ "locale": locale })), session, generation).await?;
+    validate_payment_url(&parsed.url)?;
+    Ok(parsed)
+}
 
 #[cfg(test)]
 mod tests {
@@ -125,8 +181,34 @@ mod tests {
     }
 
     #[test]
-    fn checkout_body_carries_only_the_tier() {
-        let body = serde_json::to_value(CheckoutRequest { tier: Tier::Pro }).unwrap();
-        assert_eq!(body, serde_json::json!({ "tier": "pro" }));
+    fn checkout_body_carries_only_tier_and_the_selected_locale() {
+        let body = serde_json::to_value(CheckoutRequest { tier: Tier::Pro, locale: PaymentLocale::TraditionalChinese }).unwrap();
+        assert_eq!(body, serde_json::json!({ "tier": "pro", "locale": "zh-HK" }));
+    }
+
+    #[test]
+    fn payment_locale_accepts_only_the_two_ui_languages_and_defaults_to_english() {
+        assert_eq!(serde_json::to_value(PaymentLocale::default()).unwrap(), "en");
+        assert!(serde_json::from_str::<PaymentLocale>("\"en\"").is_ok());
+        assert!(serde_json::from_str::<PaymentLocale>("\"zh-HK\"").is_ok());
+        assert!(serde_json::from_str::<PaymentLocale>("\"../../other\"").is_err());
+    }
+
+    #[test]
+    fn only_stripe_https_checkout_and_billing_urls_are_accepted() {
+        for url in ["https://checkout.stripe.com/c/pay/cs_test_123", "https://billing.stripe.com/p/session/test_123"] {
+            assert!(validate_payment_url(url).is_ok(), "{url}");
+        }
+        for url in ["http://checkout.stripe.com/pay", "https://checkout.stripe.com.evil.test/pay", "https://evil.test/?checkout.stripe.com", "https://user@billing.stripe.com/session", "https://billing.stripe.com:8443/session", "file:///tmp/billing.stripe.com", "javascript:alert(1)", "https://stripe.com/pay"] {
+            assert!(validate_payment_url(url).is_err(), "{url}");
+        }
+    }
+
+    #[test]
+    fn checkout_accepts_existing_subscription_portal_and_defaults_new_checkout_flag() {
+        let new: CheckoutResponse = serde_json::from_str(r#"{"url":"https://checkout.stripe.com/pay","session_id":"cs_test"}"#).unwrap();
+        assert!(!new.already_subscribed);
+        let existing: CheckoutResponse = serde_json::from_str(r#"{"url":"https://billing.stripe.com/session","session_id":"bps_test","already_subscribed":true}"#).unwrap();
+        assert!(existing.already_subscribed);
     }
 }

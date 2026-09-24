@@ -1,4 +1,7 @@
 import { invoke as tauriInvoke } from "@tauri-apps/api/core";
+import type { CheckoutPage, PaymentPage } from "./types";
+import type { UiLocale } from "../i18n/catalog";
+import { beginAccountSessionChange, finishAccountSessionChange } from "./account.ts";
 import type { Task, ChatMessage, DashboardData, Settings, EmailSummary, EmailStats, CalendarEventView, CronJobView, CronRunView, NotionPageView, GitHubItemView, GitHubStats, VoiceState, VoiceSettings, WakeWordStatus, EmailRule, BriefingResult, LocalEndpoint, LocalModel, ProviderChainEntry, EndpointHealth, SystemCompatibility, PrerequisiteCheck, RecommendedModel, LaunchReadiness, BetaTesterInput, BetaTesterView, BetaFeedbackInput, AwsCredsStatus, StorageUsage, SweepReport, StorageScope, AccountStatus } from "./types";
 
 // Tauri v2 commands default to rename_all = "camelCase", so a Rust parameter named
@@ -52,16 +55,26 @@ export async function accountStatus(refresh = false): Promise<AccountStatus> {
   return invoke("account_status", { refresh });
 }
 export async function accountSignIn(provider?: "google"): Promise<AccountStatus> {
-  return invoke("account_sign_in", { provider: provider ?? null });
+  const revision = beginAccountSessionChange();
+  try { return await invoke("account_sign_in", { provider: provider ?? null }); }
+  finally { finishAccountSessionChange(revision); }
 }
 export async function accountSignOut(): Promise<void> {
-  return invoke("account_sign_out");
+  const revision = beginAccountSessionChange();
+  try { await invoke("account_sign_out"); }
+  finally { finishAccountSessionChange(revision); }
 }
 
-// Payments (Stripe test mode until launch; backend set via JARVIS_PAYMENT_API).
+// Payments (backend set via JARVIS_PAYMENT_API).
 // Requires a signed-in account; rejects with "not_signed_in" otherwise.
-export async function paymentsStartCheckout(tier: "pro" | "team"): Promise<{ url: string; session_id: string }> {
-  return invoke("payments_start_checkout", { tier });
+export async function paymentsStartCheckout(tier: "pro" | "team", locale: UiLocale = "en"): Promise<CheckoutPage> {
+  return invoke("payments_start_checkout", { tier, locale });
+}
+export async function paymentsOpenPortal(locale: UiLocale = "en"): Promise<PaymentPage> {
+  return invoke("payments_open_portal", { locale });
+}
+export async function paymentsReopenUrl(url: string, sessionGeneration: number): Promise<PaymentPage> {
+  return invoke("payments_reopen_url", { url, sessionGeneration });
 }
 export async function getSettings(): Promise<Settings> {
   return invoke("get_settings");
@@ -233,6 +246,12 @@ export async function clearAwsCredentials(): Promise<void> {
 // User preferences (single key/value)
 export async function getPreference(key: string): Promise<string> {
   return await invoke<string>("get_user_preference", { key });
+}
+export async function getOptionalPreference(key: string): Promise<string> {
+  // get_user_preference rejects absent rows. Optional first-launch preferences
+  // use the settings map so a missing key is distinct from a database failure.
+  const settings = await getSettings();
+  return settings.values[key] ?? '';
 }
 export async function setPreference(key: string, value: string): Promise<void> {
   await invoke("set_user_preference", { key, value });

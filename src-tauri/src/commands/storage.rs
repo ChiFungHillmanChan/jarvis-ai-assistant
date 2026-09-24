@@ -62,13 +62,24 @@ pub struct StorageUsage {
     pub data_dir: String,
 }
 
-fn jarvis_data_dir() -> Option<PathBuf> {
-    dirs::data_dir().map(|dir| dir.join("jarvis"))
+fn jarvis_data_dir(db: &Database) -> Result<PathBuf, String> {
+    let conn = db.conn.lock().map_err(|e| e.to_string())?;
+    // Follow the database actually opened by this process. In particular, an
+    // isolated QA database must never report or purge production model/backups.
+    conn.path()
+        .filter(|path| !path.is_empty())
+        .and_then(|path| Path::new(path).parent())
+        .filter(|path| !path.as_os_str().is_empty())
+        .map(Path::to_path_buf)
+        .ok_or_else(|| "未能確認目前資料庫的儲存資料夾。".to_string())
 }
 
 /// The WKWebView network cache. Tauri names it after the product, not the
 /// bundle id, which is why this is `jarvis` and not `com.jarvis.app`.
 fn jarvis_cache_dir() -> Option<PathBuf> {
+    #[cfg(feature = "native-qa")]
+    return crate::native_qa::directory().ok().map(|dir| dir.join("cache"));
+    #[cfg(not(feature = "native-qa"))]
     dirs::cache_dir().map(|dir| dir.join("jarvis"))
 }
 
@@ -80,6 +91,9 @@ fn file_size(path: &Path) -> u64 {
 /// whole report. Symlinks are not followed: a link into the user's home would
 /// otherwise be counted as JARVIS storage.
 fn dir_size(path: &Path) -> u64 {
+    if !std::fs::symlink_metadata(path).is_ok_and(|metadata| metadata.is_dir()) {
+        return 0;
+    }
     let Ok(entries) = std::fs::read_dir(path) else {
         return 0;
     };
@@ -97,13 +111,14 @@ fn dir_size(path: &Path) -> u64 {
 /// everything": the preference is off, missing, unparseable, or shorter than
 /// `MIN_RETENTION_DAYS`.
 pub fn retention_window(conn: &Connection) -> Option<i64> {
-    let enabled = read_pref(conn, "storage_retention_enabled").unwrap_or_else(|| "1".into());
+    let enabled = read_pref(conn, "storage_retention_enabled")?;
     if enabled.trim() != "1" {
         return None;
     }
-    let days = read_pref(conn, "storage_retention_days")
-        .and_then(|v| v.trim().parse::<i64>().ok())
-        .unwrap_or(DEFAULT_RETENTION_DAYS);
+    let days = read_pref(conn, "storage_retention_days")?
+        .trim()
+        .parse::<i64>()
+        .ok()?;
     (days >= MIN_RETENTION_DAYS).then_some(days)
 }
 
@@ -186,7 +201,9 @@ pub fn sweep(conn: &Connection, retention_days: i64) -> Result<SweepReport, Stri
 /// inside the file, so without this the database never shrinks and the Storage
 /// panel keeps reporting the high-water mark.
 fn reclaim(conn: &Connection) {
-    if let Err(e) = conn.execute_batch("PRAGMA wal_checkpoint(TRUNCATE); VACUUM;") {
+    // VACUUM itself writes into the WAL. Checkpoint afterwards so those pages
+    // do not stay allocated until the next automatic checkpoint or shutdown.
+    if let Err(e) = conn.execute_batch("VACUUM; PRAGMA wal_checkpoint(TRUNCATE);") {
         log::warn!("storage: reclaim failed: {e}");
     }
 }
@@ -214,7 +231,7 @@ pub fn sweep_on_startup(db: &Database) {
 
 #[tauri::command]
 pub fn get_storage_usage(db: State<Arc<Database>>) -> Result<StorageUsage, String> {
-    let data_dir = jarvis_data_dir().ok_or("Could not find application support directory")?;
+    let data_dir = jarvis_data_dir(&db)?;
     let db_file = data_dir.join("jarvis.db");
     let database_bytes = file_size(&db_file);
     let wal_bytes = file_size(&data_dir.join("jarvis.db-wal"))
@@ -227,22 +244,14 @@ pub fn get_storage_usage(db: State<Arc<Database>>) -> Result<StorageUsage, Strin
     let mail_message_count = conn
         .query_row("SELECT COUNT(*) FROM mail_messages", [], |row| row.get(0))
         .unwrap_or(0);
-    let mail_body_bytes = conn
-        .query_row(
-            "SELECT COALESCE(SUM(LENGTH(body)), 0) FROM mail_messages",
-            [],
-            |row| row.get(0),
-        )
-        .unwrap_or(0);
+    let mail_body_bytes = mail_body_bytes(&conn);
     let conversation_count = conn
         .query_row("SELECT COUNT(*) FROM conversations", [], |row| row.get(0))
         .unwrap_or(0);
     let retention_days = read_pref(&conn, "storage_retention_days")
         .and_then(|v| v.trim().parse::<i64>().ok())
         .unwrap_or(DEFAULT_RETENTION_DAYS);
-    let retention_enabled = read_pref(&conn, "storage_retention_enabled")
-        .map(|v| v.trim() == "1")
-        .unwrap_or(true);
+    let retention_enabled = retention_window(&conn).is_some();
 
     Ok(StorageUsage {
         database_bytes,
@@ -277,7 +286,7 @@ pub fn run_storage_sweep(db: State<Arc<Database>>) -> Result<SweepReport, String
 /// deletable through this command -- the match is the allowlist.
 #[tauri::command]
 pub fn purge_storage(db: State<Arc<Database>>, scope: String) -> Result<u64, String> {
-    let data_dir = jarvis_data_dir().ok_or("Could not find application support directory")?;
+    let data_dir = jarvis_data_dir(&db)?;
     match scope.as_str() {
         "cache" => {
             let dir = jarvis_cache_dir().ok_or("Could not find cache directory")?;
@@ -324,7 +333,7 @@ pub fn purge_storage(db: State<Arc<Database>>, scope: String) -> Result<u64, Str
 
 fn mail_body_bytes(conn: &Connection) -> i64 {
     conn.query_row(
-        "SELECT COALESCE(SUM(LENGTH(body)), 0) FROM mail_messages",
+        "SELECT COALESCE(SUM(LENGTH(CAST(body AS BLOB))), 0) FROM mail_messages",
         [],
         |row| row.get(0),
     )
@@ -334,12 +343,19 @@ fn mail_body_bytes(conn: &Connection) -> i64 {
 /// Empty a directory without removing the directory itself, so the next write
 /// does not have to recreate it. A missing directory is already empty.
 fn remove_dir_contents(dir: &Path) -> Result<(), String> {
+    match std::fs::symlink_metadata(dir) {
+        Ok(metadata) if metadata.is_dir() => {}
+        Ok(_) => return Err("只可清理一般資料夾；不支援符號連結或其他檔案。".to_string()),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+        Err(e) => return Err(format!("read {}: {e}", dir.display())),
+    }
     let entries = match std::fs::read_dir(dir) {
         Ok(entries) => entries,
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(()),
         Err(e) => return Err(format!("read {}: {e}", dir.display())),
     };
-    for entry in entries.filter_map(Result::ok) {
+    for entry in entries {
+        let entry = entry.map_err(|e| format!("read {}: {e}", dir.display()))?;
         let path = entry.path();
         let outcome = match entry.file_type() {
             Ok(kind) if kind.is_dir() => std::fs::remove_dir_all(&path),
@@ -478,13 +494,89 @@ mod tests {
             .unwrap();
         };
         set("storage_retention_days", "not a number");
-        assert_eq!(retention_window(&conn), Some(DEFAULT_RETENTION_DAYS));
+        assert_eq!(retention_window(&conn), None, "invalid settings keep all");
         set("storage_retention_days", "1");
         assert_eq!(retention_window(&conn), None, "below the floor keeps all");
         set("storage_retention_days", "30");
         assert_eq!(retention_window(&conn), Some(30));
         set("storage_retention_enabled", "0");
         assert_eq!(retention_window(&conn), None, "switched off keeps all");
+
+        conn.execute(
+            "DELETE FROM user_preferences WHERE key LIKE 'storage_retention_%'",
+            [],
+        )
+        .unwrap();
+        assert_eq!(retention_window(&conn), None, "missing settings keep all");
+        set("storage_retention_enabled", "1");
+        assert_eq!(retention_window(&conn), None, "a missing window keeps all");
+    }
+
+    #[test]
+    fn body_usage_counts_utf8_bytes_including_embedded_nuls() {
+        let db = test_database();
+        let conn = db.conn.lock().unwrap();
+        seed(&conn);
+        conn.execute("UPDATE mail_messages SET body = NULL", [])
+            .unwrap();
+        let body = "本機郵件\0內容";
+        conn.execute("UPDATE mail_messages SET body = ?1 WHERE id = 1", [body])
+            .unwrap();
+        assert_eq!(mail_body_bytes(&conn), body.len() as i64);
+    }
+
+    #[test]
+    fn storage_uses_the_open_database_directory_and_refuses_memory_fallback() {
+        let root =
+            std::env::temp_dir().join(format!("jarvis-storage-root-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir(&root).unwrap();
+        {
+            let db = crate::db::test_database_at(&root.join("jarvis.db"));
+            assert_eq!(jarvis_data_dir(&db).unwrap(), root.canonicalize().unwrap());
+        }
+        assert!(jarvis_data_dir(&test_database()).is_err());
+        std::fs::remove_dir_all(&root).unwrap();
+    }
+
+    #[test]
+    fn reclaim_leaves_no_vacuum_pages_in_the_wal() {
+        let root = std::env::temp_dir().join(format!("jarvis-reclaim-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir(&root).unwrap();
+        let path = root.join("jarvis.db");
+        {
+            let db = crate::db::test_database_at(&path);
+            let conn = db.conn.lock().unwrap();
+            conn.execute(
+                "INSERT INTO conversations(role,content) VALUES ('user',zeroblob(1048576))",
+                [],
+            )
+            .unwrap();
+            conn.execute("DELETE FROM conversations", []).unwrap();
+            reclaim(&conn);
+            assert_eq!(file_size(&root.join("jarvis.db-wal")), 0);
+            assert!(
+                file_size(&path) < 1048576,
+                "deleted content pages return to disk"
+            );
+        }
+        std::fs::remove_dir_all(&root).unwrap();
+    }
+
+    #[test]
+    fn storage_directory_links_cannot_count_or_purge_external_files() {
+        let root =
+            std::env::temp_dir().join(format!("jarvis-storage-link-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(root.join("outside")).unwrap();
+        let kept = root.join("outside/keep.bin");
+        std::fs::write(&kept, b"user data").unwrap();
+        std::os::unix::fs::symlink(root.join("outside"), root.join("cache")).unwrap();
+        let count = dir_size(&root.join("cache"));
+        let purge = remove_dir_contents(&root.join("cache"));
+        let preserved = kept.exists();
+        std::fs::remove_dir_all(&root).unwrap();
+        assert_eq!(count, 0, "linked content is outside JARVIS storage");
+        assert!(purge.is_err(), "a linked purge root must be refused");
+        assert!(preserved, "external data must survive");
     }
 
     #[test]

@@ -1,46 +1,41 @@
-import { createContext, useContext, useEffect, useMemo, useState, type ReactNode } from 'react';
-import { getPreference, setPreference } from '../lib/commands';
+import { createContext, useContext, useEffect, useMemo, useSyncExternalStore, type ReactNode } from 'react';
+import { getOptionalPreference, setPreference } from '../lib/commands';
 import { normalizeUiLocale, suggestedUiLocale, translate, type MessageKey, type UiLocale } from './catalog';
+import { createLocaleStore } from './locale-store';
 export { catalog, interpolate, normalizeUiLocale, suggestedUiLocale, translate } from './catalog';
 export type { MessageKey, UiLocale } from './catalog';
 const storageKey = 'jarvis.ui_locale';
-const browserLanguages = () => typeof navigator === 'undefined' ? [] : navigator.languages;
-const initial = () => normalizeUiLocale(typeof localStorage === 'undefined' ? undefined : localStorage.getItem(storageKey), suggestedUiLocale(browserLanguages()));
-let currentLocale: UiLocale = initial();
-let saveError: string | null = null;
-let choiceVersion = 0;
-const listeners = new Set<() => void>();
-export function getUiLocale() { return currentLocale; }
-export function subscribeUiLocale(listener: () => void) { listeners.add(listener); return () => { listeners.delete(listener); }; }
-export function setUiLocale(locale: UiLocale) {
-  choiceVersion += 1;
-  const saveVersion = choiceVersion;
-  currentLocale = locale;
-  saveError = null;
-  if (typeof localStorage !== 'undefined') localStorage.setItem(storageKey, locale);
-  if (typeof document !== 'undefined') document.documentElement.lang = locale;
-  listeners.forEach(listener => listener());
-  void setPreference('ui_locale', locale).catch(() => { if (choiceVersion !== saveVersion) return; saveError = 'Could not save the interface language. Retry before closing JARVIS.'; listeners.forEach(listener => listener()); });
+function initialLocale() {
+  const suggested = suggestedUiLocale(typeof navigator === 'undefined' ? [] : navigator.languages);
+  try { return normalizeUiLocale(localStorage.getItem(storageKey), suggested); }
+  catch { return suggested; }
 }
-type LocaleContextValue = { locale: UiLocale; saveError: string | null; retrySave: () => void; setLocale: (locale: UiLocale) => void; t: (key: MessageKey, params?: Record<string, string | number>) => string; text: (english: string, traditionalChinese: string) => string };
+const store = createLocaleStore(initialLocale(), () => getOptionalPreference('ui_locale'), locale => setPreference('ui_locale', locale));
+export function getUiLocale() { return store.getSnapshot().locale; }
+export const subscribeUiLocale = store.subscribe;
+export const setUiLocale = store.setLocale;
+type LocaleContextValue = {
+  locale: UiLocale; ready: boolean; hasSavedChoice: boolean; saving: boolean; loadError: boolean;
+  saveError: string | null; retryLoad: () => void; retrySave: () => void;
+  setLocale: (locale: UiLocale) => Promise<boolean>;
+  t: (key: MessageKey, params?: Record<string, string | number>) => string;
+  text: (english: string, traditionalChinese: string) => string;
+};
 const LocaleContext = createContext<LocaleContextValue | null>(null);
 export function UiLocaleProvider({ children }: { children: ReactNode }) {
-  const [locale, setLocaleState] = useState<UiLocale>(currentLocale);
-  const [, forceRender] = useState(0);
-  useEffect(() => subscribeUiLocale(() => { setLocaleState(currentLocale); forceRender(value => value + 1); }), []);
-  useEffect(() => { document.documentElement.lang = locale; }, [locale]);
+  const state = useSyncExternalStore(store.subscribe, store.getSnapshot);
+  useEffect(() => { void store.restore(); }, []);
   useEffect(() => {
-    document.documentElement.lang = locale;
-    let active = true;
-    const startingVersion = choiceVersion;
-    getPreference('ui_locale').then(value => {
-      if (!active || choiceVersion !== startingVersion) return;
-      const saved = normalizeUiLocale(value, currentLocale);
-      if (saved !== currentLocale) { currentLocale = saved; localStorage.setItem(storageKey, saved); listeners.forEach(listener => listener()); }
-    }).catch(() => {});
-    return () => { active = false; };
-  }, []);
-  const value = useMemo<LocaleContextValue>(() => ({ locale, saveError, retrySave: () => setUiLocale(currentLocale), setLocale: setUiLocale, t: (key, params) => translate(locale, key, params), text: (english, traditionalChinese) => locale === 'zh-HK' ? traditionalChinese : english }), [locale, saveError]);
+    document.documentElement.lang = state.locale;
+    try { localStorage.setItem(storageKey, state.locale); } catch { /* Native preferences still persist when browser storage is unavailable. */ }
+  }, [state.locale]);
+  const value = useMemo<LocaleContextValue>(() => ({
+    ...state,
+    saveError: state.saveError ? 'Could not save the interface language. Retry before closing JARVIS.' : null,
+    retryLoad: () => { void store.restore(); }, retrySave: () => { void setUiLocale(state.locale); }, setLocale: setUiLocale,
+    t: (key, params) => translate(state.locale, key, params),
+    text: (english, traditionalChinese) => state.locale === 'zh-HK' ? traditionalChinese : english,
+  }), [state]);
   return <LocaleContext.Provider value={value}>{children}</LocaleContext.Provider>;
 }
 export function useUiLocale() { const value = useContext(LocaleContext); if (!value) throw new Error('UiLocaleProvider is required'); return value; }

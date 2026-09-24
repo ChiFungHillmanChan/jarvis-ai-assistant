@@ -28,6 +28,7 @@ pub const SIGN_IN_CANCELLED: &str = "sign_in_cancelled";
 
 const SCOPES: &str = "openid email profile";
 const REFRESH_MARGIN_SECS: i64 = 60;
+const PLAN_CACHE_TTL: std::time::Duration = std::time::Duration::from_secs(60);
 /// Cognito's error text when a Google sign-in lands on a user the pre-sign-up
 /// trigger linked a moment ago. Repeating the same sign-in succeeds.
 const LINKED_RETRY_MARKER: &str = "Already found an entry for username";
@@ -307,12 +308,14 @@ struct Tokens {
     expires_at: i64,
     email: Option<String>,
     me: Option<Me>,
+    me_fetched_at: Option<std::time::Instant>,
     /// Bumped by `forget_local`. A write that was started before a sign-out
     /// (a refresh, a sign-in, or a `/me` fetch that is still in flight)
     /// captures this before its `.await` and only applies if it is still
     /// current, so a slow response landing after sign-out cannot resurrect a
     /// session the user just ended.
     generation: u64,
+    auth_transition: bool,
 }
 
 pub struct CognitoSession {
@@ -321,6 +324,8 @@ pub struct CognitoSession {
     tokens: Mutex<Tokens>,
     /// Serialises refreshes so concurrent callers produce one token request.
     refresh_lock: tokio::sync::Mutex<()>,
+    /// Prevent concurrent /me responses from overwriting a newer result.
+    status_lock: tokio::sync::Mutex<()>,
 }
 
 fn now() -> i64 {
@@ -392,6 +397,7 @@ impl CognitoSession {
             config,
             tokens: Mutex::new(Tokens::default()),
             refresh_lock: tokio::sync::Mutex::new(()),
+            status_lock: tokio::sync::Mutex::new(()),
         }
     }
 
@@ -408,37 +414,88 @@ impl CognitoSession {
     }
 
     /// Snapshot to compare against after an `.await`; see `Tokens::generation`.
-    fn generation(&self) -> u64 {
+    pub(crate) fn generation(&self) -> u64 {
         self.tokens().generation
     }
 
-    fn store(&self, set: &TokenSet) {
-        let email = set.id_token.as_deref().and_then(id_token_claims).and_then(|c| c.email);
-        let mut t = self.tokens();
-        t.access_token = Some(set.access_token.clone());
-        t.expires_at = now() + set.expires_in;
-        if email.is_some() {
-            t.email = email;
+    /// Runs a synchronous side effect only while its originating session is
+    /// current. The token lock closes the check-to-browser-open race.
+    pub(crate) fn with_current_generation<T>(&self, generation: u64, action: impl FnOnce() -> T) -> Result<T, AccountError> {
+        let tokens = self.tokens();
+        if tokens.generation != generation || tokens.auth_transition {
+            return Err(AccountError::NotSignedIn);
         }
+        Ok(action())
+    }
+
+    fn begin_auth_transition(&self) -> u64 {
+        let mut tokens = self.tokens();
+        tokens.generation = tokens.generation.wrapping_add(1);
+        tokens.auth_transition = true;
+        tokens.me = None;
+        tokens.me_fetched_at = None;
+        tokens.generation
+    }
+
+    fn finish_auth_transition(&self, generation: u64) {
+        let mut tokens = self.tokens();
+        if tokens.generation == generation { tokens.auth_transition = false; }
+    }
+
+    fn apply_token_set(tokens: &mut Tokens, set: &TokenSet) {
+        let email = set.id_token.as_deref().and_then(id_token_claims).and_then(|c| c.email);
+        tokens.access_token = Some(set.access_token.clone());
+        tokens.expires_at = now() + set.expires_in;
+        if email.is_some() { tokens.email = email; }
+    }
+
+    #[cfg(test)]
+    fn store(&self, set: &TokenSet) {
+        Self::apply_token_set(&mut self.tokens(), set);
+    }
+
+    fn complete_sign_in(&self, generation: u64, set: &TokenSet) -> Result<(), AccountError> {
+        let mut tokens = self.tokens();
+        if tokens.generation != generation { return Err(AccountError::NotSignedIn); }
+        let refresh = set.refresh_token.as_deref().ok_or_else(|| AccountError::Failed("Cognito returned no refresh token".into()))?;
+        // The same guard covers persistent and in-memory credentials. A late
+        // browser flow cannot resurrect an account after sign-out.
+        KeychainStore::put(KEYCHAIN_SERVICE, KEYCHAIN_ACCOUNT, refresh).map_err(AccountError::Failed)?;
+        tokens.email = None;
+        Self::apply_token_set(&mut tokens, set);
+        tokens.me = None;
+        tokens.me_fetched_at = None;
+        tokens.auth_transition = false;
+        Ok(())
     }
 
     fn live_access_token(&self) -> Option<String> {
-        let t = self.tokens();
-        t.access_token.clone().filter(|_| !needs_refresh(t.expires_at, now()))
+        let tokens = self.tokens();
+        if tokens.auth_transition { return None; }
+        tokens.access_token.clone().filter(|_| !needs_refresh(tokens.expires_at, now()))
     }
 
-    fn drop_access_token(&self) {
-        self.tokens().access_token = None;
+    fn drop_access_token(&self, generation: u64) -> Result<(), AccountError> {
+        let mut tokens = self.tokens();
+        if tokens.generation != generation || tokens.auth_transition { return Err(AccountError::NotSignedIn); }
+        tokens.access_token = None;
+        Ok(())
     }
 
-    fn forget_local(&self) {
-        {
-            let mut t = self.tokens();
-            let next_generation = t.generation.wrapping_add(1);
-            *t = Tokens::default();
-            t.generation = next_generation;
-        }
+    fn forget_generation(&self, expected: Option<u64>) -> Result<(Option<String>, u64), AccountError> {
+        let mut tokens = self.tokens();
+        if expected.is_some_and(|generation| tokens.generation != generation) { return Err(AccountError::NotSignedIn); }
+        let refresh = KeychainStore::get(KEYCHAIN_SERVICE, KEYCHAIN_ACCOUNT).ok();
+        let next_generation = tokens.generation.wrapping_add(1);
+        *tokens = Tokens::default();
+        tokens.generation = next_generation;
         let _ = KeychainStore::delete(KEYCHAIN_SERVICE, KEYCHAIN_ACCOUNT);
+        Ok((refresh, next_generation))
+    }
+
+    #[cfg(test)]
+    fn forget_local(&self) {
+        let _ = self.forget_generation(None);
     }
 
     async fn token_request(&self, form: &[(&str, &str)]) -> Result<TokenSet, TokenError> {
@@ -459,16 +516,18 @@ impl CognitoSession {
     /// failure so a flaky connection never logs anyone out.
     pub async fn access_token(&self) -> Result<String, AccountError> {
         let client_id = self.config()?.client_id.clone();
+        let generation = self.generation();
+        self.with_current_generation(generation, || ())?;
         if let Some(token) = self.live_access_token() {
             return Ok(token);
         }
         let _guard = self.refresh_lock.lock().await;
+        self.with_current_generation(generation, || ())?;
         if let Some(token) = self.live_access_token() {
             return Ok(token);
         }
         let refresh = KeychainStore::get(KEYCHAIN_SERVICE, KEYCHAIN_ACCOUNT)
             .map_err(|_| AccountError::NotSignedIn)?;
-        let generation = self.generation();
         match self
             .token_request(&[
                 ("grant_type", "refresh_token"),
@@ -480,13 +539,13 @@ impl CognitoSession {
             Ok(set) => {
                 // A sign-out that ran while this refresh was in flight must
                 // not be undone by writing the token it fetched.
-                if self.generation() == generation {
-                    self.store(&set);
-                }
+                let mut tokens = self.tokens();
+                if tokens.generation != generation || tokens.auth_transition { return Err(AccountError::NotSignedIn); }
+                Self::apply_token_set(&mut tokens, &set);
                 Ok(set.access_token)
             }
             Err(TokenError::InvalidGrant) => {
-                self.forget_local();
+                self.forget_generation(Some(generation))?;
                 Err(AccountError::NotSignedIn)
             }
             Err(e) => Err(AccountError::Failed(format!("Token refresh failed: {e}"))),
@@ -499,22 +558,34 @@ impl CognitoSession {
     where
         F: Fn(&str) -> reqwest::RequestBuilder,
     {
+        self.send_authed_in_generation(self.generation(), build).await
+    }
+
+    pub(crate) async fn send_authed_in_generation<F>(&self, generation: u64, build: F) -> Result<reqwest::Response, AccountError>
+    where
+        F: Fn(&str) -> reqwest::RequestBuilder,
+    {
+        self.with_current_generation(generation, || ())?;
         let token = self.access_token().await?;
+        self.with_current_generation(generation, || ())?;
         let resp = build(&token)
             .send()
             .await
             .map_err(|e| AccountError::Failed(format!("network: {e}")))?;
+        self.with_current_generation(generation, || ())?;
         if resp.status() != reqwest::StatusCode::UNAUTHORIZED {
             return Ok(resp);
         }
-        self.drop_access_token();
+        self.drop_access_token(generation)?;
         let token = self.access_token().await?;
+        self.with_current_generation(generation, || ())?;
         let resp = build(&token)
             .send()
             .await
             .map_err(|e| AccountError::Failed(format!("network: {e}")))?;
+        self.with_current_generation(generation, || ())?;
         if resp.status() == reqwest::StatusCode::UNAUTHORIZED {
-            self.forget_local();
+            self.forget_generation(Some(generation))?;
             return Err(AccountError::NotSignedIn);
         }
         Ok(resp)
@@ -534,53 +605,72 @@ impl CognitoSession {
             .map_err(|e| AccountError::Failed(format!("GET /me: {e}")))?;
         // A sign-out that ran while this fetch was in flight must not leave a
         // cached `me` behind for the next `status(false)` to serve.
-        if self.generation() == generation {
-            self.tokens().me = Some(me.clone());
+        let mut tokens = self.tokens();
+        if tokens.generation != generation {
+            return Err(AccountError::NotSignedIn);
         }
+        tokens.me = Some(me.clone());
+        tokens.me_fetched_at = Some(std::time::Instant::now());
         Ok(me)
+    }
+
+    fn cached_status(&self) -> Option<AccountStatus> {
+        let tokens = self.tokens();
+        if tokens.me_fetched_at?.elapsed() >= PLAN_CACHE_TTL {
+            return None;
+        }
+        let me = tokens.me.as_ref()?;
+        Some(AccountStatus {
+            available: true,
+            signed_in: true,
+            email: me.email.clone().or_else(|| tokens.email.clone()),
+            tier: Some(me.tier.clone()),
+        })
     }
 
     pub async fn status(&self, force: bool) -> AccountStatus {
         if !self.available() {
             return AccountStatus::default();
         }
+        // Also serialise reads with forced refreshes: a normal focus read must
+        // not return the old cached tier while a refresh is discovering failure.
+        let _guard = self.status_lock.lock().await;
         if !force {
-            let cached = {
-                let t = self.tokens();
-                t.me.clone().map(|me| (me, t.email.clone()))
-            };
-            if let Some((me, email)) = cached {
-                return AccountStatus {
-                    available: true,
-                    signed_in: true,
-                    email: me.email.or(email),
-                    tier: Some(me.tier),
-                };
+            if let Some(cached) = self.cached_status() {
+                return cached;
             }
         }
-        match self.fetch_me().await {
-            Ok(me) => {
-                let fallback = self.tokens().email.clone();
-                AccountStatus {
-                    available: true,
-                    signed_in: true,
-                    email: me.email.or(fallback),
-                    tier: Some(me.tier),
-                }
-            }
+        let generation = self.generation();
+        let result = self.fetch_me().await;
+        let mut tokens = self.tokens();
+        if tokens.generation != generation {
+            return AccountStatus { available: true, ..AccountStatus::default() };
+        }
+        match result {
+            Ok(me) => AccountStatus {
+                available: true,
+                signed_in: true,
+                email: me.email.or_else(|| tokens.email.clone()),
+                tier: Some(me.tier),
+            },
             Err(AccountError::Failed(e)) => {
                 log::warn!("account status: {e}");
+                // Never let a follow-up cached read disguise an unsuccessful
+                // refresh as a verified paid plan. Keep the login token.
+                tokens.me = None;
+                tokens.me_fetched_at = None;
                 AccountStatus {
                     available: true,
                     signed_in: true,
-                    email: self.tokens().email.clone(),
+                    email: tokens.email.clone(),
                     tier: None,
                 }
             }
-            Err(_) => AccountStatus {
-                available: true,
-                ..AccountStatus::default()
-            },
+            Err(_) => {
+                tokens.me = None;
+                tokens.me_fetched_at = None;
+                AccountStatus { available: true, ..AccountStatus::default() }
+            }
         }
     }
 
@@ -615,7 +705,7 @@ impl CognitoSession {
     /// hosted page (which offers both email and Google).
     pub async fn sign_in(&self, provider: Option<&str>) -> Result<AccountStatus, AccountError> {
         let cfg = self.config()?.clone();
-        let generation = self.generation();
+        let generation = self.begin_auth_transition();
         let mut result = self.run_browser_flow(&cfg, provider).await;
         if let Err(FlowError::Denied(description)) = &result {
             if is_linked_account_retry(description) {
@@ -623,39 +713,36 @@ impl CognitoSession {
                 result = self.run_browser_flow(&cfg, provider).await;
             }
         }
-        let set = result?;
-        let refresh = set
-            .refresh_token
-            .clone()
-            .ok_or_else(|| AccountError::Failed("Cognito returned no refresh token".to_string()))?;
-        KeychainStore::put(KEYCHAIN_SERVICE, KEYCHAIN_ACCOUNT, &refresh).map_err(AccountError::Failed)?;
-        // A sign-out that ran while the browser flow was open must not have
-        // this now-stale flow write a token back into memory.
-        if self.generation() == generation {
-            self.store(&set);
-            self.tokens().me = None;
+        let set = match result {
+            Ok(set) => set,
+            Err(error) => { self.finish_auth_transition(generation); return Err(error.into()); }
+        };
+        if let Err(error) = self.complete_sign_in(generation, &set) {
+            self.finish_auth_transition(generation);
+            return Err(error);
         }
         Ok(self.status(true).await)
     }
 
     pub async fn sign_out(&self) -> Result<(), AccountError> {
         let cfg = self.config()?.clone();
-        if let Ok(refresh) = KeychainStore::get(KEYCHAIN_SERVICE, KEYCHAIN_ACCOUNT) {
+        // End the local session before waiting for the best-effort revoke.
+        let (refresh, generation) = self.forget_generation(None)?;
+        if let Some(refresh) = refresh {
             let revoke = crate::util::http_client()
                 .post(format!("{}/oauth2/revoke", cfg.domain))
                 .form(&[("token", refresh.as_str()), ("client_id", cfg.client_id.as_str())])
                 .send()
                 .await;
-            if let Err(e) = revoke {
-                log::warn!("refresh token revoke failed: {e}");
+            if let Err(e) = revoke { log::warn!("refresh token revoke failed: {e}"); }
+        }
+        // A newer sign-in must not have its browser cookie cleared by this
+        // older sign-out completing late.
+        let _ = self.with_current_generation(generation, || {
+            if let Err(e) = open::that(logout_url(&cfg)) {
+                log::warn!("could not open the logout page: {e}");
             }
-        }
-        self.forget_local();
-        // Clears the managed-login session cookie, otherwise the next "Sign in"
-        // silently signs the same account back in.
-        if let Err(e) = open::that(logout_url(&cfg)) {
-            log::warn!("could not open the logout page: {e}");
-        }
+        });
         Ok(())
     }
 }
@@ -1063,6 +1150,129 @@ mod tests {
 
         assert!(status.signed_in);
         assert_eq!(status.tier, None);
+        server.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn an_expired_plan_cache_is_refreshed_without_a_forced_read() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let server = tokio::spawn(fake_server(listener, vec![(200, "OK", r#"{"sub":"test","tier":"free"}"#.into())]));
+        let session = CognitoSession::new(Some(CognitoConfig { domain: "https://auth.example.com".into(), client_id: "test".into(), api_base: format!("http://127.0.0.1:{port}") }));
+        session.store(&TokenSet { access_token: "live".into(), id_token: None, refresh_token: None, expires_in: 3600 });
+        {
+            let mut tokens = session.tokens();
+            tokens.me = Some(Me { sub: "test".into(), email: None, tier: "pro".into(), subscription_status: None });
+            tokens.me_fetched_at = Some(std::time::Instant::now() - std::time::Duration::from_secs(61));
+        }
+        assert_eq!(session.status(false).await.tier.as_deref(), Some("free"));
+        server.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn a_failed_refresh_cannot_resurface_a_previously_cached_paid_plan() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let server = tokio::spawn(fake_server(listener, vec![(500, "Error", "{}".into()), (500, "Error", "{}".into())]));
+        let session = CognitoSession::new(Some(CognitoConfig { domain: "https://auth.example.com".into(), client_id: "test".into(), api_base: format!("http://127.0.0.1:{port}") }));
+        session.store(&TokenSet { access_token: "live".into(), id_token: None, refresh_token: None, expires_in: 3600 });
+        {
+            let mut tokens = session.tokens();
+            tokens.me = Some(Me { sub: "test".into(), email: None, tier: "pro".into(), subscription_status: None });
+            tokens.me_fetched_at = Some(std::time::Instant::now());
+        }
+        assert_eq!(session.status(true).await.tier, None);
+        assert_eq!(session.status(false).await.tier, None);
+        server.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn a_restarted_session_restores_the_server_plan_from_its_refresh_token() {
+        let _guard = KEYCHAIN_GUARD.lock().unwrap_or_else(|e| e.into_inner());
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let server = tokio::spawn(fake_server(listener, vec![(200, "OK", token_json()), (200, "OK", r#"{"sub":"test","tier":"pro","email":"test@example.com"}"#.into())]));
+        KeychainStore::put(KEYCHAIN_SERVICE, KEYCHAIN_ACCOUNT, "saved-refresh").unwrap();
+        let session = CognitoSession::new(Some(CognitoConfig { domain: format!("http://127.0.0.1:{port}"), client_id: "test".into(), api_base: format!("http://127.0.0.1:{port}") }));
+        let status = session.status(false).await;
+        assert!(status.signed_in);
+        assert_eq!(status.tier.as_deref(), Some("pro"));
+        assert_eq!(status.email.as_deref(), Some("test@example.com"));
+        server.await.unwrap();
+        // No second network request is needed during the normal-focus TTL.
+        assert_eq!(session.status(false).await, status);
+        assert_eq!(KeychainStore::get(KEYCHAIN_SERVICE, KEYCHAIN_ACCOUNT).unwrap(), "saved-refresh");
+    }
+
+    #[test]
+    fn a_late_sign_in_cannot_restore_tokens_after_logout_or_replace_a_newer_account() {
+        let _guard = KEYCHAIN_GUARD.lock().unwrap_or_else(|e| e.into_inner());
+        let session = CognitoSession::new(Some(cfg()));
+        let old = session.begin_auth_transition();
+        session.forget_local();
+        let current = session.begin_auth_transition();
+        let newer = TokenSet { access_token: "new-user".into(), id_token: None, refresh_token: Some("new-refresh".into()), expires_in: 3600 };
+        session.complete_sign_in(current, &newer).unwrap();
+        let stale = TokenSet { access_token: "old-user".into(), id_token: None, refresh_token: Some("old-refresh".into()), expires_in: 3600 };
+        assert_eq!(session.complete_sign_in(old, &stale), Err(AccountError::NotSignedIn));
+        assert_eq!(session.live_access_token().as_deref(), Some("new-user"));
+        assert_eq!(KeychainStore::get(KEYCHAIN_SERVICE, KEYCHAIN_ACCOUNT).unwrap(), "new-refresh");
+    }
+
+    #[tokio::test]
+    async fn a_deferred_authorized_response_is_rejected_after_session_change() {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let (arrived, request_arrived) = tokio::sync::oneshot::channel();
+        let (release, released) = tokio::sync::oneshot::channel();
+        let server = tokio::spawn(async move {
+            let (mut stream, _) = listener.accept().await.unwrap();
+            let mut buffer = [0; 4096];
+            stream.read(&mut buffer).await.unwrap();
+            arrived.send(()).unwrap();
+            released.await.unwrap();
+            stream.write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 2\r\nConnection: close\r\n\r\n{}").await.unwrap();
+        });
+        let session = std::sync::Arc::new(CognitoSession::new(Some(cfg())));
+        session.store(&TokenSet { access_token: "old-user".into(), id_token: None, refresh_token: None, expires_in: 3600 });
+        let pending_session = session.clone();
+        let pending = tokio::spawn(async move { pending_session.send_authed(|token| crate::util::http_client().post(format!("http://{address}/checkout")).bearer_auth(token)).await });
+        request_arrived.await.unwrap();
+        session.begin_auth_transition();
+        release.send(()).unwrap();
+        assert!(matches!(pending.await.unwrap(), Err(AccountError::NotSignedIn)));
+        server.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn a_deferred_token_refresh_cannot_return_an_old_accounts_token() {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        let _guard = KEYCHAIN_GUARD.lock().unwrap_or_else(|e| e.into_inner());
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let (arrived, request_arrived) = tokio::sync::oneshot::channel();
+        let (release, released) = tokio::sync::oneshot::channel();
+        let server = tokio::spawn(async move {
+            let (mut stream, _) = listener.accept().await.unwrap();
+            let mut buffer = [0; 4096];
+            stream.read(&mut buffer).await.unwrap();
+            arrived.send(()).unwrap();
+            released.await.unwrap();
+            let body = token_json();
+            stream.write_all(format!("HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}", body.len()).as_bytes()).await.unwrap();
+        });
+        KeychainStore::put(KEYCHAIN_SERVICE, KEYCHAIN_ACCOUNT, "old-refresh").unwrap();
+        let session = std::sync::Arc::new(CognitoSession::new(Some(CognitoConfig { domain: format!("http://{address}"), ..cfg() })));
+        let pending_session = session.clone();
+        let pending = tokio::spawn(async move { pending_session.access_token().await });
+        request_arrived.await.unwrap();
+        let newer = session.begin_auth_transition();
+        session.complete_sign_in(newer, &TokenSet { access_token: "new-account".into(), id_token: None, refresh_token: Some("new-refresh".into()), expires_in: 3600 }).unwrap();
+        release.send(()).unwrap();
+        assert_eq!(pending.await.unwrap(), Err(AccountError::NotSignedIn));
+        assert_eq!(session.live_access_token().as_deref(), Some("new-account"));
+        assert_eq!(KeychainStore::get(KEYCHAIN_SERVICE, KEYCHAIN_ACCOUNT).unwrap(), "new-refresh");
         server.await.unwrap();
     }
 

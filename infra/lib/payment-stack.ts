@@ -36,6 +36,15 @@ export class PaymentStack extends cdk.Stack {
       },
     });
 
+    // Supply the independent Stripe account's real price IDs at synth time.
+    // Only ENV=sandbox permits the legacy test-price fallback in the handlers.
+    const priceEnvironment = {
+      STRIPE_PRO_PRICE_ID: this.node.tryGetContext('stripeProPriceId') || process.env.STRIPE_PRO_PRICE_ID || '',
+      STRIPE_TEAM_PRICE_ID: this.node.tryGetContext('stripeTeamPriceId') || process.env.STRIPE_TEAM_PRICE_ID || '',
+    };
+
+    const portalConfiguration = this.node.tryGetContext('stripePortalConfigurationId') || process.env.STRIPE_PORTAL_CONFIGURATION_ID || '';
+
     const webhookFn = new nodejs.NodejsFunction(this, 'StripeWebhookFn', {
       functionName: `jarvis-${props.envName}-stripe-webhook`,
       runtime: lambda.Runtime.NODEJS_24_X,
@@ -47,6 +56,7 @@ export class PaymentStack extends cdk.Stack {
         STRIPE_SECRET_NAME: stripeSecrets.secretName,
         USER_META_TABLE: props.userMetaTable.tableName,
         ENV: props.envName,
+        ...priceEnvironment,
       },
       bundling: { minify: true, sourceMap: true },
     });
@@ -64,13 +74,34 @@ export class PaymentStack extends cdk.Stack {
         STRIPE_SECRET_NAME: stripeSecrets.secretName,
         USER_META_TABLE: props.userMetaTable.tableName,
         ENV: props.envName,
+        ...priceEnvironment,
         APP_DOMAIN: 'jarvis-automation.com',
+        STRIPE_PORTAL_CONFIGURATION_ID: portalConfiguration,
         USER_POOL_ID: props.userPool.userPoolId,
       },
       bundling: { minify: true, sourceMap: true },
     });
     stripeSecrets.grantRead(checkoutFn);
     props.userMetaTable.grantReadWriteData(checkoutFn);
+
+    const portalFn = new nodejs.NodejsFunction(this, 'StripePortalFn', {
+      functionName: `jarvis-${props.envName}-stripe-portal`,
+      runtime: lambda.Runtime.NODEJS_24_X,
+      entry: path.join(__dirname, '../lambda/stripe-portal/index.ts'),
+      handler: 'handler',
+      timeout: cdk.Duration.seconds(10),
+      memorySize: 256,
+      environment: {
+        STRIPE_SECRET_NAME: stripeSecrets.secretName,
+        USER_META_TABLE: props.userMetaTable.tableName,
+        ENV: props.envName,
+        APP_DOMAIN: 'jarvis-automation.com',
+        STRIPE_PORTAL_CONFIGURATION_ID: portalConfiguration,
+      },
+      bundling: { minify: true, sourceMap: true },
+    });
+    stripeSecrets.grantRead(portalFn);
+    props.userMetaTable.grantReadData(portalFn);
 
     const meFn = new nodejs.NodejsFunction(this, 'MeFn', {
       functionName: `jarvis-${props.envName}-me`,
@@ -117,10 +148,16 @@ export class PaymentStack extends cdk.Stack {
       methods: [apigwv2.HttpMethod.POST],
       integration: new apigwv2Integ.HttpLambdaIntegration('WebhookIntegration', webhookFn),
     });
-    httpApi.addRoutes({
+    const checkoutRoutes = httpApi.addRoutes({
       path: '/checkout',
       methods: [apigwv2.HttpMethod.POST],
       integration: new apigwv2Integ.HttpLambdaIntegration('CheckoutIntegration', checkoutFn),
+      ...authorised,
+    });
+    const portalRoutes = httpApi.addRoutes({
+      path: '/portal',
+      methods: [apigwv2.HttpMethod.POST],
+      integration: new apigwv2Integ.HttpLambdaIntegration('PortalIntegration', portalFn),
       ...authorised,
     });
     httpApi.addRoutes({
@@ -130,11 +167,17 @@ export class PaymentStack extends cdk.Stack {
       ...authorised,
     });
 
-    // POST /checkout and GET /me require a Cognito access token (JWT authorizer
+    // POST /checkout, POST /portal and GET /me require a Cognito access token (JWT authorizer
     // above); the Lambdas take the user id from the verified `sub` claim.
     // Throttling stays as a second line: API Gateway throttles per stage and
     // route, so it caps cost, not any one caller.
     const defaultStage = httpApi.defaultStage!.node.defaultChild as apigwv2.CfnStage;
+    // RouteSettings uses plain route-key strings, so CloudFormation cannot infer
+    // these dependencies. API Gateway rejects stage updates until every named
+    // route exists; ordering also keeps routes present during stage rollback.
+    for (const route of [...checkoutRoutes, ...portalRoutes]) {
+      defaultStage.addDependency(route.node.defaultChild as apigwv2.CfnRoute);
+    }
     defaultStage.defaultRouteSettings = {
       throttlingRateLimit: 10,
       throttlingBurstLimit: 20,
@@ -142,6 +185,10 @@ export class PaymentStack extends cdk.Stack {
     // routeSettings is untyped JSON passed to CloudFormation verbatim, so its keys must be PascalCase.
     defaultStage.routeSettings = {
       // Real usage is single-digit requests per minute: one click per upgrade.
+      'POST /portal': {
+        ThrottlingRateLimit: 2,
+        ThrottlingBurstLimit: 5,
+      },
       'POST /checkout': {
         ThrottlingRateLimit: 2,
         ThrottlingBurstLimit: 5,

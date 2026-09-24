@@ -483,6 +483,8 @@ pub fn run() {
             commands::launch::save_beta_tester,
             commands::launch::submit_beta_feedback,
             commands::payments::payments_start_checkout,
+            commands::payments::payments_open_portal,
+            commands::payments::payments_reopen_url,
             commands::account::account_status,
             commands::account::account_sign_in,
             commands::account::account_sign_out,

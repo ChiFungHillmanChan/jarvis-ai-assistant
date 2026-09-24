@@ -1,74 +1,143 @@
-import { useCallback, useEffect, useState } from "react";
-import { accountSignIn, accountSignOut, accountStatus, paymentsStartCheckout } from "../lib/commands";
-import type { AccountStatus } from "../lib/types";
-import { NOT_SIGNED_IN, SIGN_IN_CANCELLED, accountChanged, onAccountChanged, tierKey } from "../lib/account";
+import { useCallback, useEffect, useRef, useState } from "react";
+import { accountSignIn, accountSignOut, accountStatus, paymentsOpenPortal, paymentsReopenUrl, paymentsStartCheckout } from "../lib/commands";
+import type { AccountStatus, PaymentPage } from "../lib/types";
+import { NOT_SIGNED_IN, SIGN_IN_CANCELLED, accountChanged, onAccountChanged, createAccountOperationGuard, isAccountSessionChanging, onAccountSessionChange, tierKey } from "../lib/account";
+import { createAccountMonitor, type PaymentState } from "../lib/account-monitor";
 import { useUiLocale } from "../i18n";
+import type { MessageKey } from "../i18n/catalog";
 
-type Busy = null | "signin" | "signout" | "checkout" | "refresh";
+type Busy = null | "signin" | "signout" | "checkout" | "portal" | "reopen" | "refresh";
 
-/**
- * Settings -> Account. The account is optional: signed out, the rest of JARVIS
- * works exactly as before. It is needed for Pro checkout.
- */
+/** The account is optional; signing in is required for Stripe checkout. */
 export default function AccountPanel() {
-  const { t } = useUiLocale();
+  const { t, locale } = useUiLocale();
   const [status, setStatus] = useState<AccountStatus | null>(null);
   const [busy, setBusy] = useState<Busy>(null);
-  const [message, setMessage] = useState<string | null>(null);
+  const [sessionChanging, setSessionChanging] = useState(isAccountSessionChanging);
+  const operations = useRef(createAccountOperationGuard());
+  const [message, setMessage] = useState<MessageKey | null>(null);
   const [error, setError] = useState<string | null>(null);
-
-  const load = useCallback(async (refresh = false) => {
-    try {
-      setStatus(await accountStatus(refresh));
-    } catch (e) {
-      setError(String(e));
-    }
-  }, []);
+  const [payment, setPayment] = useState<PaymentState>(null);
+  const [page, setPage] = useState<(PaymentPage & { kind: "checkout" | "portal" }) | null>(null);
+  const monitor = useRef<ReturnType<typeof createAccountMonitor> | null>(null);
+  const load = useCallback((refresh = false) => monitor.current?.refresh(refresh) ?? Promise.resolve(), []);
 
   useEffect(() => {
-    void load();
-    return onAccountChanged(() => void load());
-  }, [load]);
+    const watcher = createAccountMonitor({
+      fetchStatus: accountStatus,
+      onStatus: next => {
+        setStatus(next);
+        setError(null);
+        const paid = next.tier === "pro" || next.tier === "team";
+        setPayment(previous => (previous === "confirmed" && !paid) || (previous === "unconfirmed" && paid) ? null : previous);
+        if (paid) {
+          setPage(previous => previous?.kind === "checkout" ? null : previous);
+          setMessage(previous => previous === "upgradeOpened" ? null : previous);
+        }
+        accountChanged(next);
+      },
+      onPayment: setPayment,
+      onError: e => setError(String(e)),
+    });
+    monitor.current = watcher;
+    void watcher.refresh();
+    const unsubscribe = onAccountChanged(next => {
+      if (!next) { void watcher.refresh(); return; }
+      setStatus(next);
+      if (!next.signed_in) { watcher.cancelPayment(); setPage(null); setMessage(null); }
+    });
+    const stopSession = onAccountSessionChange(changing => {
+      setSessionChanging(changing);
+      if (changing) {
+        operations.current.invalidate();
+        watcher.cancelPayment();
+        setPage(null); setMessage(null); setError(null); setBusy(null);
+      } else void watcher.refresh(true);
+    });
+    // Returning from Stripe rechecks immediately, including changes in the portal.
+    const resume = () => { if (document.visibilityState !== "hidden") void watcher.refresh(true); };
+    window.addEventListener("focus", resume);
+    document.addEventListener("visibilitychange", resume);
+    return () => {
+      unsubscribe();
+      stopSession();
+      operations.current.invalidate();
+      window.removeEventListener("focus", resume);
+      document.removeEventListener("visibilitychange", resume);
+      watcher.dispose();
+      monitor.current = null;
+    };
+  }, []);
 
-  async function run(kind: Exclude<Busy, null>, action: () => Promise<void>) {
+  async function run(kind: Exclude<Busy, null>, action: (current: () => boolean) => Promise<void>) {
+    operations.current.invalidate();
     setBusy(kind);
     setError(null);
     setMessage(null);
+    let current = () => false;
     try {
-      await action();
+      // Sign-in/out emits its boundary synchronously. Capture afterwards so
+      // this operation survives its own boundary but never a later one.
+      const pending = action(() => current());
+      current = operations.current.capture();
+      setBusy(kind);
+      await pending;
     } catch (e) {
+      if (!current()) return;
       const msg = String(e);
       if (msg === NOT_SIGNED_IN) {
-        // The session expired between actions: reload status and tell the
-        // user in their own language, never the raw error code.
-        await load();
-        setError(t("sessionEnded"));
+        monitor.current?.cancelPayment();
+        setPage(null);
+        await load(true);
+        if (current()) setError(t("sessionEnded"));
+      } else if (msg === "billing_busy") {
+        setError(t("billingBusy"));
       } else if (msg !== SIGN_IN_CANCELLED) {
-        // The user closed the browser or let it time out: not an error to report.
         setError(msg);
       }
     } finally {
-      setBusy(null);
+      if (current()) setBusy(null);
     }
   }
 
-  const signIn = (provider?: "google") => run("signin", async () => {
-    setStatus(await accountSignIn(provider));
-    accountChanged();
+  const signIn = (provider?: "google") => run("signin", async current => {
+    monitor.current?.cancelPayment();
+    const next = await accountSignIn(provider);
+    if (!current()) return;
+    setStatus(next);
+    accountChanged(next);
   });
-  const signOut = () => run("signout", async () => {
+  const signOut = () => run("signout", async current => {
+    monitor.current?.cancelPayment();
+    setPage(null);
     await accountSignOut();
-    await load();
-    accountChanged();
+    if (current()) await load(true);
   });
-  const upgrade = () => run("checkout", async () => {
-    await paymentsStartCheckout("pro");
-    setMessage(t("upgradeOpened"));
+  const showPage = (next: PaymentPage, kind: "checkout" | "portal") => {
+    setPage({ ...next, kind });
+    setMessage(next.browser_opened ? (kind === "checkout" ? "upgradeOpened" : "billingOpened") : "billingBrowserFailed");
+  };
+  const upgrade = () => run("checkout", async current => {
+    monitor.current?.cancelPayment();
+    const next = await paymentsStartCheckout("pro", locale);
+    if (!current()) return;
+    showPage(next, next.already_subscribed ? "portal" : "checkout");
+    if (next.already_subscribed) await load(true);
+    else if (next.browser_opened) monitor.current?.waitForPayment();
   });
-  const refresh = () => run("refresh", async () => {
-    setStatus(await accountStatus(true));
-    accountChanged();
+  const manageBilling = () => run("portal", async current => {
+    monitor.current?.cancelPayment();
+    const next = await paymentsOpenPortal(locale);
+    if (current()) showPage(next, "portal");
   });
+  const reopen = () => run("reopen", async current => {
+    if (!page) return;
+    const next = await paymentsReopenUrl(page.url, page.session_generation);
+    if (!current()) return;
+    showPage(next, page.kind);
+    if (page.kind === "checkout" && next.browser_opened) monitor.current?.waitForPayment();
+  });
+  const refresh = () => run("refresh", async () => { await load(true); });
 
   if (!status) {
     if (error) {
@@ -88,29 +157,37 @@ export default function AccountPanel() {
   return (
     <div className="settings-panel">
       <h2 className="settings-heading">{t("accountSection")}</h2>
+      <p style={styles.hint}>{t("billingByok")}</p>
       {status.signed_in ? (
         <>
           <p style={styles.hint}>{t("signedInAs", { email: status.email ?? "-" })}</p>
           <p style={styles.hint}>{t("planLabel", { plan: t(tierKey(status.tier)) })}</p>
           <div style={styles.row}>
             {status.tier === "free" && (
-              <button style={styles.button} disabled={busy !== null} onClick={() => void upgrade()}>{t("upgradePro")}</button>
+              <button style={styles.button} disabled={sessionChanging || busy !== null || payment === "waiting"} onClick={() => void upgrade()}>{t("upgradePro")}</button>
             )}
-            <button style={styles.button} disabled={busy !== null} onClick={() => void refresh()}>{busy === "refresh" ? t("refreshing") : t("refresh")}</button>
-            <button style={styles.button} disabled={busy !== null} onClick={() => void signOut()}>{t("signOut")}</button>
+            {(status.tier === "pro" || status.tier === "team") && (
+              <button style={styles.button} disabled={sessionChanging || busy !== null} onClick={() => void manageBilling()}>{t("manageBilling")}</button>
+            )}
+            <button style={styles.button} disabled={sessionChanging || busy !== null} onClick={() => void refresh()}>{busy === "refresh" ? t("refreshing") : t("refresh")}</button>
+            <button style={styles.button} disabled={sessionChanging || busy !== null} onClick={() => void signOut()}>{t("signOut")}</button>
           </div>
         </>
       ) : (
         <>
           <p style={styles.hint}>{t("accountSignedOut")}</p>
           <div style={styles.row}>
-            <button style={styles.button} disabled={busy !== null} onClick={() => void signIn("google")}>{t("signInGoogle")}</button>
-            <button style={styles.button} disabled={busy !== null} onClick={() => void signIn()}>{t("signInEmail")}</button>
+            <button style={styles.button} disabled={sessionChanging || busy !== null} onClick={() => void signIn("google")}>{t("signInGoogle")}</button>
+            <button style={styles.button} disabled={sessionChanging || busy !== null} onClick={() => void signIn()}>{t("signInEmail")}</button>
           </div>
           {busy === "signin" && <p role="status" style={styles.hint}>{t("signingIn")}</p>}
         </>
       )}
-      {message && <p role="status" style={styles.hint}>{message}</p>}
+      {message && payment !== "confirmed" && <p role="status" style={styles.hint}>{t(message)}</p>}
+      {payment && <p role="status" style={styles.hint}>{t(payment === "waiting" ? "paymentChecking" : payment === "confirmed" ? "paymentConfirmed" : "paymentUnconfirmed")}</p>}
+      {page && payment !== "confirmed" && (
+        <button style={styles.button} disabled={sessionChanging || busy !== null} onClick={() => void reopen()}>{t(page.kind === "checkout" ? "reopenCheckout" : "reopenBilling")}</button>
+      )}
       {error && <p role="alert" style={styles.error}>{error}</p>}
     </div>
   );

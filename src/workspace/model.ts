@@ -4,6 +4,16 @@ export type WorkspaceView = typeof views[number];
 export const viewNames: Record<WorkspaceView, string> = { home: 'Automation', chat: 'Assistant', email: 'Mail', calendar: 'Calendar', github: 'GitHub', notion: 'Notes', cron: 'Automations', connections: 'Connections', settings: 'Settings', result: 'Result' };
 export interface WorkspaceTab { id: string; view: WorkspaceView; title: string; sessionId?: string; pinned?: boolean; notice?: boolean }
 export interface WorkspaceState { tabs: WorkspaceTab[]; activeId: string; history: WorkspaceTab[]; previousId?: string }
+export type WorkspacePages = Record<string, Record<string, unknown>>;
+export function pruneWorkspacePages(state: WorkspaceState, pages: WorkspacePages): WorkspacePages {
+  const reachable = new Set([...state.tabs, ...state.history].map(tab => tab.id));
+  return Object.fromEntries(Object.entries(pages).filter(([id, page]) => {
+    // The assistant dock can use a session with no open or recent tab. Unsent
+    // user input must survive cache cleanup until the draft is sent or cleared.
+    const hasDraft = id.startsWith('task:') && typeof page?.assistantDraft === 'string' && page.assistantDraft.length > 0;
+    return reachable.has(id) || hasDraft;
+  }));
+}
 export type WorkspaceAction =
   | { type: 'open'; view: WorkspaceView; id?: string; title?: string; sessionId?: string; background?: boolean }
   | { type: 'activate' | 'close' | 'pin'; id: string }

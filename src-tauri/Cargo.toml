@@ -73,3 +73,9 @@ debug = 1
 
 [profile.dev.package."*"]
 debug = false
+
+# macOS 27's linker can emit an unloadable proc-macro dylib when debug
+# information is stripped (dyld: mis-aligned LINKEDIT string pool / E0463).
+# This host-only build tool is not included in the distributed app.
+[profile.dev.package.tauri-macros]
+strip = "none"

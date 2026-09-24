@@ -65,8 +65,14 @@
 .mail-workspace .mail-detail { min-width: 0; padding: 0 22px 22px; overflow-y: auto; background: var(--surface); }
 .mail-workspace .mail-reader { padding-bottom: 22px; border-bottom: 1px solid var(--mail-line); }
 .mail-workspace .mail-reader h3 { font-size: 20px; line-height: 1.4; overflow-wrap: anywhere; }
-.mail-workspace pre, .mail-workspace .mail-preserve { white-space: pre-wrap; overflow-wrap: anywhere; font: inherit; line-height: 1.7; }
-.mail-workspace .mail-reader pre { color: var(--text-secondary); font-size: 15px; }
+.mail-workspace .mail-preserve { white-space: pre-wrap; overflow-wrap: anywhere; font: inherit; line-height: 1.7; }
+.mail-workspace .mail-reader .readable-content { color: var(--text-secondary); font-size: 15px; }
+.mail-workspace .mail-source-footer { margin-top: 18px; padding-top: 12px; border-top: 1px solid var(--mail-line); }
+.mail-workspace .mail-reader .readable-content h3 { font-size: 16px; }
+.mail-workspace .readable-content :is(h1, h2, h3, h4, h5, h6) { margin: 20px 0 10px; line-height: 1.4; }
+.mail-workspace .readable-content > :first-child { margin-top: 0; }
+.mail-workspace .readable-content h1 { font-size: 21px; }
+.mail-workspace .readable-content h2 { font-size: 18px; }
 .mail-workspace .mail-empty { padding: 22px 12px; color: var(--mail-muted); line-height: 1.7; }
 .mail-workspace .mail-memory { margin: 12px 0; padding: 12px; border: 1px solid var(--mail-line); border-radius: 8px; background: var(--surface-solid); }
 .mail-workspace .mail-memory small { color: var(--text-muted); }
