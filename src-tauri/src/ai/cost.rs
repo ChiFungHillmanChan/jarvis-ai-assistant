@@ -57,6 +57,17 @@ pub fn price_for(model_id: &str) -> ModelPrice {
         ModelPrice { input_per_million: 0.15, output_per_million: 0.60, cache_read_per_million: 0.075, cache_write_per_million: 0.15 }
     } else if m.contains("gpt-4o") {
         ModelPrice { input_per_million: 2.50, output_per_million: 10.0, cache_read_per_million: 1.25, cache_write_per_million: 2.50 }
+    } else if m.contains("gpt-6-luna") {
+        // Read off developers.openai.com/api/docs/models/gpt-6-luna on
+        // 2026-09-25: $0.10 input, $0.01 cached input, $0.50 output. Cache
+        // writes assumed at 1.25x uncached input, as for gpt-5.6-luna. Above
+        // 272K input tokens the whole request is billed at 2x input / 1.5x
+        // output (see long_context_price_for).
+        ModelPrice { input_per_million: 0.10, output_per_million: 0.50, cache_read_per_million: 0.01, cache_write_per_million: 0.125 }
+    } else if m.contains("jev") {
+        // TypeSafe Jev (docs.typesafe.ai/models, 2026-09-25): $0.042 per 1M
+        // input tokens, output tokens free.
+        ModelPrice { input_per_million: 0.042, output_per_million: 0.0, cache_read_per_million: 0.042, cache_write_per_million: 0.042 }
     } else if m.contains("gpt-5.6-luna") {
         // Read off developers.openai.com/api/docs/models/gpt-5.6-luna on
         // 2026-09-04: $0.20 input, $0.02 cached input, $1.20 output, and cache
@@ -103,7 +114,9 @@ const LONG_CONTEXT_THRESHOLD_TOKENS: i64 = 200_000;
 /// premium, and the Flash tiers publish a single rate.
 fn long_context_price_for(model_id: &str) -> Option<ModelPrice> {
     let m = model_id.to_lowercase();
-    if m.contains("gemini-3.1-pro") {
+    if m.contains("gpt-6-luna") {
+        Some(ModelPrice { input_per_million: 0.20, output_per_million: 0.75, cache_read_per_million: 0.02, cache_write_per_million: 0.25 })
+    } else if m.contains("gemini-3.1-pro") {
         Some(ModelPrice { input_per_million: 4.0, output_per_million: 18.0, cache_read_per_million: 1.0, cache_write_per_million: 4.0 })
     } else if m.contains("gemini-2.5-pro") {
         Some(ModelPrice { input_per_million: 2.50, output_per_million: 15.0, cache_read_per_million: 0.625, cache_write_per_million: 2.50 })
@@ -119,7 +132,10 @@ pub fn compute_usd_cost_micro(
     cache_read_tokens: i64,
     cache_write_tokens: i64,
 ) -> i64 {
-    let p = if input_tokens > LONG_CONTEXT_THRESHOLD_TOKENS {
+    // OpenAI's Luna models switch tier at 272K, not at the 200K the other
+    // long-context providers use.
+    let threshold = if model_id.to_lowercase().contains("luna") { 272_000 } else { LONG_CONTEXT_THRESHOLD_TOKENS };
+    let p = if input_tokens > threshold {
         long_context_price_for(model_id).unwrap_or_else(|| price_for(model_id))
     } else {
         price_for(model_id)
@@ -276,6 +292,21 @@ pub(crate) mod tests {
             "gpt-5.6-luna resolved to the generic gpt-5 price -- its arm in \
              price_for() has fallen below the `contains(\"gpt-5\")` arm"
         );
+    }
+
+    /// gpt-6-luna is the default for chat and mail. Without its own arm it
+    /// fell through to the $3/$15 frontier fallback, overstating spend ~30x.
+    #[test]
+    fn gpt_6_luna_and_jev_have_their_own_prices() {
+        let luna = price_for("gpt-6-luna");
+        assert_eq!((luna.input_per_million, luna.output_per_million), (0.10, 0.50));
+        let jev = price_for("jev-1.13.0");
+        assert_eq!((jev.input_per_million, jev.output_per_million), (0.042, 0.0));
+        // 200K input + 100K output tokens at the base rate: $0.02 + $0.05.
+        assert_eq!(compute_usd_cost_micro("gpt-6-luna", 200_000, 100_000, 0, 0), 70_000);
+        // Above 272K the whole request moves to 2x input / 1.5x output.
+        assert_eq!(compute_usd_cost_micro("gpt-6-luna", 300_000, 0, 0, 0), 60_000);
+        assert_eq!(compute_usd_cost_micro("gpt-6-luna", 250_000, 0, 0, 0), 25_000);
     }
 
     /// Same ladder hazard on the Gemini side: the shipped MODEL_FLASH must
