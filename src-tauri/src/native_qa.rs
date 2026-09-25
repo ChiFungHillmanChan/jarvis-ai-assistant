@@ -36,7 +36,7 @@ pub fn seed_once(conn: &mut Connection) -> Result<(), rusqlite::Error> {
     }
     let tx = conn.transaction()?;
     for (key, value) in [
-        ("onboarding_complete", "true"),
+        ("onboarding_complete", if std::env::var("JARVIS_NATIVE_QA_FIRST_RUN").as_deref() == Ok("1") { "false" } else { "true" }),
         ("auto_briefing", "false"),
         ("wake_word_enabled", "false"),
         ("ai_provider", "local"),
@@ -68,6 +68,38 @@ pub fn seed_once(conn: &mut Connection) -> Result<(), rusqlite::Error> {
         tx.execute("INSERT INTO mail_messages(account_id,provider_id,subject,sender,snippet,body,is_read,is_inbox,received_at) VALUES (?1,?2,?3,?4,?5,?5,?6,1,?7)",
             params![account,format!("qa-{index:03}"),format!("桌面測試郵件 {index:03}"),"客戶 <customer@example.test>",body,index%3==0,
                 format!("2026-09-10T{:02}:{:02}:00Z",index/60,index%60)])?;
+    }
+    // Attachment and sender rendering: qa-001 has two files and a stored header
+    // block, qa-002 was scanned and has none, every other row predates V26
+    // (attachments NULL) and keeps the generic Gmail note.
+    tx.execute("UPDATE mail_messages SET sender=?1, attachments=?2, body=?3 WHERE provider_id='qa-001'", params![
+        "陳大文 <tai.man@example.test>",
+        r#"[{"filename":"報價單 2026-09.pdf","mime_type":"application/pdf","size":184320},{"filename":"site-photo.jpg","mime_type":"image/jpeg","size":3250000}]"#,
+        "From: 陳大文 <tai.man@example.test>\nTo: personal@example.test\nDate: Thu, 24 Sep 2026 10:00:00 +0800\nSubject: 桌面測試郵件 001\n\n請於星期五前確認附件中的報價單。",
+    ])?;
+    tx.execute("UPDATE mail_messages SET attachments='[]' WHERE provider_id='qa-002'", [])?;
+    // Follow-ups on Home: overdue, due today, in two days, and one outside the
+    // three-day window that must not appear.
+    for (title, offset) in [("合成：回覆報價", "-1 day"), ("合成：提交試用紀錄", "+0 days"), ("合成：跟進試用客戶", "+2 days"), ("合成：季度檢討", "+10 days")] {
+        tx.execute("INSERT INTO tasks(title,deadline,priority,status) VALUES (?1,date('now','localtime',?2),1,'pending')", params![title, offset])?;
+    }
+    if std::env::var("JARVIS_NATIVE_QA_PRESENTATION").as_deref() == Ok("1") {
+        // This stored fixture checks rendering and source navigation only. It
+        // is explicitly not evidence of a live AI analysis or attachment read.
+        tx.execute("INSERT INTO mail_groups(id,name,instructions) VALUES (1,?1,?2)",
+            params!["排版測試（合成資料）", "只供原生排版驗收；此結果並非模型生成。"])?;
+        tx.execute("INSERT INTO mail_group_members(group_id,message_id) VALUES (1,1),(1,2)", [])?;
+        let layout = serde_json::json!({"tabs":[
+            {"id":"automation","view":"home","title":"Automation","pinned":true},
+            {"id":"tool:email","view":"email","title":"Mail"}
+        ],"activeId":"tool:email","history":[]});
+        let pages = serde_json::json!({"tool:email":{"mailGroupId":1,"mailAnalysis":{"groupId":1,"result":{
+            "text":"# 排版驗收示範\n\n這是**合成結果**，只檢查排版。\n\n| 文件 | 截止日期 | 來源 |\n| --- | --- | --- |\n| 試用報告 | 2026-09-30 | [郵件 #1] |\n| 費用資料 | 待確認 | [郵件 #2] |\n\n- 核對原信\n- 取得原始文件\n\n> 此結果不是模型驗收證據。\n\n```text\n原始程式碼符號 **保留**\n```",
+            "mode":"local","model":"synthetic-rendering-fixture","source_ids":[1,2],"omitted_messages":0
+        }}}});
+        for (key, value) in [("workspace_layout_v1",layout.to_string()),("workspace_pages_v1",pages.to_string())] {
+            tx.execute("INSERT OR REPLACE INTO user_preferences(key,value) VALUES (?1,?2)", params![key,value])?;
+        }
     }
     tx.commit()
 }

@@ -4,9 +4,11 @@ import { listen } from '@tauri-apps/api/event';
 import { MessageSquare, Search, Minimize2, X, Command } from 'lucide-react';
 import Sidebar from './components/Sidebar';
 import OnboardingWizard from './pages/OnboardingWizard';
+import WelcomeGuide from './pages/WelcomeGuide';
 import UpdateToast from './components/UpdateToast';
 import ErrorBoundary from './components/ErrorBoundary';
-import { checkOnboardingStatus, stopSpeaking, listChatSessions } from './lib/commands';
+import { checkOnboardingStatus, getOptionalPreference, stopSpeaking, listChatSessions } from './lib/commands';
+import { readStartupScreen, type StartupScreen } from './lib/onboarding-flow';
 import { useVoiceState } from './hooks/useVoiceState';
 import ToastContainer, { showToast } from './components/Toast';
 import WindowControls from './components/WindowControls';
@@ -157,12 +159,21 @@ function AppShell() {
   </div>;
 }
 function AppGate() {
-  const { text } = useUiLocale();
+  const { text, ready: localeReady, loadError: localeError, retryLoad } = useUiLocale();
   const { open } = useWorkspace();
-  const [onboarding, setOnboarding] = useState<boolean | null>(null);
-  useEffect(() => { void checkOnboardingStatus().then(setOnboarding).catch(() => setOnboarding(true)); }, []);
-  if (onboarding === null) return <div className="workspace-loading" role="status">{text("Opening JARVIS…", "正在開啟 JARVIS…")}</div>;
-  if (!onboarding) return <OnboardingWizard onComplete={() => { setOnboarding(true); open('email'); }} />;
+  const [screen, setScreen] = useState<StartupScreen | null>(null);
+  const [loadError, setLoadError] = useState(false);
+  const [attempt, setAttempt] = useState(0);
+  useEffect(() => {
+    let active = true;
+    setLoadError(false);
+    void readStartupScreen(checkOnboardingStatus, () => getOptionalPreference('onboarding_intro_complete')).then(value => { if (active) setScreen(value); }).catch(() => { if (active) setLoadError(true); });
+    return () => { active = false; };
+  }, [attempt]);
+  if (loadError || localeError) return <div className="setup-screen"><header className="setup-titlebar" data-tauri-drag-region><WindowControls /><span>JARVIS</span></header><main className="setup-content"><p className="setup-error" role="alert">{text('Could not read your startup settings. Retry to continue.', '未能讀取啟動設定，請重試以繼續。')}</p><button onClick={() => { if (localeError) retryLoad(); setAttempt(value => value + 1); }}>{text('Retry', '重試')}</button></main></div>;
+  if (!localeReady || screen === null) return <div className="workspace-loading" role="status">{text("Opening JARVIS…", "正在開啟 JARVIS…")}</div>;
+  if (screen === 'welcome') return <WelcomeGuide onComplete={setScreen} />;
+  if (screen === 'setup') return <OnboardingWizard onComplete={() => { setScreen('workspace'); open('email'); }} />;
   return <AppShell />;
 }
 

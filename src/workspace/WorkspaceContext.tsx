@@ -1,6 +1,6 @@
 import { createContext, useCallback, useContext, useEffect, useReducer, useRef, useState, useSyncExternalStore, type Dispatch, type ReactNode, type SetStateAction } from 'react';
 import { getSettings, updateSetting } from '../lib/commands';
-import { initialWorkspace, restoreWorkspace, workspaceReducer, viewNames, type WorkspaceAction, type WorkspaceState, type WorkspaceView } from './model';
+import { initialWorkspace, pruneWorkspacePages, restoreWorkspace, workspaceReducer, viewNames, type WorkspaceAction, type WorkspacePages, type WorkspaceState, type WorkspaceView } from './model';
 
 interface WorkspaceContextValue {
   state: WorkspaceState;
@@ -22,7 +22,7 @@ export function WorkspaceProvider({ children }: { children: ReactNode }) {
   const [ready, setReady] = useState(false);
   const [saveError, setSaveError] = useState<string | null>(null);
   const [appearance, setAppearanceValue] = useState('dark');
-  const pages = useRef<Record<string, Record<string, unknown>>>({});
+  const pages = useRef<WorkspacePages>({});
   const subscribers = useRef(new Set<() => void>());
   const restored = useRef(false);
   const stateRef = useRef(state);
@@ -33,7 +33,11 @@ export function WorkspaceProvider({ children }: { children: ReactNode }) {
     if (!restored.current) return;
     if (timer.current) clearTimeout(timer.current);
     timer.current = setTimeout(() => {
-      const layout = JSON.stringify(stateRef.current);
+      const snapshot = stateRef.current;
+      // A tool result writes its payload before dispatching open. Prune only
+      // when this deferred save sees the current tabs and restorable history.
+      pages.current = pruneWorkspacePages(snapshot, pages.current);
+      const layout = JSON.stringify(snapshot);
       const pageState = JSON.stringify(pages.current);
       saveChain.current = saveChain.current.then(async () => {
         await updateSetting('workspace_layout_v1', layout);
@@ -46,8 +50,9 @@ export function WorkspaceProvider({ children }: { children: ReactNode }) {
     let cancelled = false;
     getSettings().then(settings => {
       if (cancelled) return;
-      dispatch({ type: 'restore', state: restoreWorkspace(settings.values.workspace_layout_v1) });
-      try { const saved = JSON.parse(settings.values.workspace_pages_v1 || '{}'); if (saved && typeof saved === 'object' && !Array.isArray(saved)) pages.current = saved; } catch { /* Recover from an invalid saved layout with a fresh workspace. */ }
+      const layout = restoreWorkspace(settings.values.workspace_layout_v1);
+      dispatch({ type: 'restore', state: layout });
+      try { const saved = JSON.parse(settings.values.workspace_pages_v1 || '{}'); if (saved && typeof saved === 'object' && !Array.isArray(saved)) pages.current = pruneWorkspacePages(layout, saved); } catch { /* Recover from an invalid saved layout with a fresh workspace. */ }
       const mode = settings.values.workspace_appearance;
       if (mode === 'light' || mode === 'dark' || mode === 'system') setAppearanceValue(mode);
       restored.current = true;

@@ -66,9 +66,17 @@ pub const KEY_SERVICE: &str = "com.jarvis.ai";
 /// env var counts as absent -- otherwise a stray `GEMINI_API_KEY=` in a
 /// dotfile would mask a key the user actually saved.
 fn resolve_key(env_var: &str, fallback: Option<String>) -> Option<String> {
+    resolve_key_with(env_var, || fallback)
+}
+
+/// Like `resolve_key`, but only asks the fallback when the environment has no
+/// key. The Keychain read behind it can show a password prompt and runs on the
+/// main thread at startup, so an eager read both asked for a secret `.env`
+/// already supplied and kept the window from opening until it was answered.
+fn resolve_key_with(env_var: &str, fallback: impl FnOnce() -> Option<String>) -> Option<String> {
     match std::env::var(env_var) {
         Ok(v) if !v.trim().is_empty() => Some(v),
-        _ => fallback.filter(|v| !v.trim().is_empty()),
+        _ => fallback().filter(|v| !v.trim().is_empty()),
     }
 }
 
@@ -526,9 +534,9 @@ impl AiRouter {
                 }
             }
         };
-        self.gemini_key = resolve_key("GEMINI_API_KEY", from_keychain("gemini_api_key"));
-        self.claude_key = resolve_key("ANTHROPIC_API_KEY", from_keychain("claude_api_key"));
-        self.openai_key = resolve_key("OPENAI_API_KEY", from_keychain("openai_api_key"));
+        self.gemini_key = resolve_key_with("GEMINI_API_KEY", || from_keychain("gemini_api_key"));
+        self.claude_key = resolve_key_with("ANTHROPIC_API_KEY", || from_keychain("claude_api_key"));
+        self.openai_key = resolve_key_with("OPENAI_API_KEY", || from_keychain("openai_api_key"));
     }
 
     /// Add Claude and/or OpenAI to the built-in default chain when the user
@@ -1098,6 +1106,17 @@ mod tests {
 
         assert_eq!(result.unwrap(), "still speaking");
         assert!(events.is_empty(), "model completion must not reset a still-speaking HUD");
+    }
+
+    #[test]
+    fn an_environment_key_never_touches_the_keychain() {
+        std::env::set_var("JARVIS_TEST_KEY_LAZY", "from-env");
+        assert_eq!(
+            resolve_key_with("JARVIS_TEST_KEY_LAZY", || panic!("Keychain read although the env var is set")),
+            Some("from-env".to_string())
+        );
+        std::env::remove_var("JARVIS_TEST_KEY_LAZY");
+        assert_eq!(resolve_key_with("JARVIS_TEST_KEY_LAZY", || Some("saved".into())), Some("saved".to_string()));
     }
 
     #[test]

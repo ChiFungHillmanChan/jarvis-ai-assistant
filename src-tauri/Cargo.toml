@@ -47,6 +47,7 @@ base64 = "0.22.1"
 urlencoding = "2.1.3"
 whisper-rs = "0.16.0"
 futures-util = "0.3"
+encoding_rs = "0.8"
 tiktoken-rs = "0.6"
 sysinfo = "0.33"
 async-trait = "0.1"
@@ -73,3 +74,9 @@ debug = 1
 
 [profile.dev.package."*"]
 debug = false
+
+# macOS 27's linker can emit an unloadable proc-macro dylib when debug
+# information is stripped (dyld: mis-aligned LINKEDIT string pool / E0463).
+# This host-only build tool is not included in the distributed app.
+[profile.dev.package.tauri-macros]
+strip = "none"

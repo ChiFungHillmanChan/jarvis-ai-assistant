@@ -2,8 +2,9 @@ import { useCallback, useEffect, useRef, useState } from 'react';
 import { LogIn, LogOut, Plug, Settings2 } from 'lucide-react';
 import { accountSignIn, accountSignOut, accountStatus, getSettings } from '../lib/commands';
 import type { AccountStatus } from '../lib/types';
-import { DISPLAY_NAME_KEY, SIGN_IN_CANCELLED, accountChanged, accountLabel, onAccountChanged, onDisplayNameChanged, tierKey } from '../lib/account';
+import { DISPLAY_NAME_KEY, SIGN_IN_CANCELLED, accountChanged, accountLabel, onAccountChanged, onDisplayNameChanged, isAccountSessionChanging, onAccountSessionChange, tierKey } from '../lib/account';
 import { useUiLocale } from '../i18n';
+import { createAccountMonitor } from '../lib/account-monitor';
 import type { WorkspaceView } from '../workspace/model';
 
 /**
@@ -21,21 +22,38 @@ export default function SidebarAccount({ active, onNavigate }: { active: Workspa
   const [name, setName] = useState<string | null>(null);
   const [account, setAccount] = useState<AccountStatus | null>(null);
   const [accountBusy, setAccountBusy] = useState(false);
-
-  const loadAccount = useCallback(async () => {
-    try {
-      setAccount(await accountStatus());
-    } catch {
-      // Same as load() below: an unreadable account status just falls back
-      // to the pre-account display-name row, not an error state.
-      setAccount(null);
-    }
-  }, []);
-
+  const [sessionChanging, setSessionChanging] = useState(isAccountSessionChanging);
   useEffect(() => {
-    void loadAccount();
-    return onAccountChanged(() => void loadAccount());
-  }, [loadAccount]);
+    const watcher = createAccountMonitor({
+      fetchStatus: accountStatus,
+      onStatus: setAccount,
+      onPayment: () => {},
+      onError: () => setAccount(null),
+    });
+    void watcher.refresh();
+    const unsubscribe = onAccountChanged(next => {
+      if (next) { watcher.cancelPayment(); setAccount(next); }
+      else void watcher.refresh();
+    });
+    const stopSession = onAccountSessionChange(changing => {
+      setSessionChanging(changing);
+      watcher.cancelPayment();
+      if (!changing) void watcher.refresh(true);
+    });
+    // This row stays mounted outside Settings. A return from Stripe must
+    // bypass the plan cache even after the Account panel was closed.
+    // The monitor coalesces simultaneous focus/visibility requests.
+    const resume = () => { if (document.visibilityState !== 'hidden') void watcher.refresh(true); };
+    window.addEventListener('focus', resume);
+    document.addEventListener('visibilitychange', resume);
+    return () => {
+      unsubscribe();
+      stopSession();
+      watcher.dispose();
+      window.removeEventListener('focus', resume);
+      document.removeEventListener('visibilitychange', resume);
+    };
+  }, []);
   const [open, setOpen] = useState(false);
   const wrapRef = useRef<HTMLDivElement | null>(null);
   const closeTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
@@ -89,7 +107,7 @@ export default function SidebarAccount({ active, onNavigate }: { active: Workspa
   const signedIn = Boolean(account?.signed_in);
   const badge = accountLabel(name, signedIn ? account?.email : null, t('navSettings'));
   const signInOrOut = async () => {
-    if (accountBusy) return;
+    if (accountBusy || sessionChanging) return;
     setOpen(false);
     setAccountBusy(true);
     try {
@@ -124,7 +142,7 @@ export default function SidebarAccount({ active, onNavigate }: { active: Workspa
             <Settings2 size={16} /><span>{t('navSettings')}</span>
           </button>
           {account?.available && (
-            <button role="menuitem" className="sidebar-item" disabled={accountBusy} onClick={() => void signInOrOut()}>
+            <button role="menuitem" className="sidebar-item" disabled={accountBusy || sessionChanging} onClick={() => void signInOrOut()}>
               {signedIn ? <LogOut size={16} /> : <LogIn size={16} />}<span>{signedIn ? t('signOut') : t('signIn')}</span>
             </button>
           )}

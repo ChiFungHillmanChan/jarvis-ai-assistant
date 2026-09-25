@@ -44,17 +44,56 @@ export const NOT_SIGNED_IN = 'not_signed_in';
 export const SIGN_IN_CANCELLED = 'sign_in_cancelled';
 
 const ACCOUNT_EVENT = 'jarvis:account-changed';
+const SESSION_EVENT = 'jarvis:account-session-changing';
+let sessionRevision = 0;
+let sessionChanging = false;
 
-/** Tells the sidebar and Settings to re-read the account after sign-in or sign-out. */
-export function accountChanged() {
-  if (typeof window === 'undefined') return;
-  window.dispatchEvent(new Event(ACCOUNT_EVENT));
+/** Every sign-in/out invalidates billing work from the previous session. */
+export function beginAccountSessionChange(): number {
+  sessionRevision++;
+  sessionChanging = true;
+  if (typeof window !== 'undefined') window.dispatchEvent(new CustomEvent(SESSION_EVENT, { detail: true }));
+  return sessionRevision;
 }
 
-export function onAccountChanged(listener: () => void): () => void {
+export function finishAccountSessionChange(revision: number) {
+  if (revision !== sessionRevision) return;
+  sessionChanging = false;
+  if (typeof window !== 'undefined') window.dispatchEvent(new CustomEvent(SESSION_EVENT, { detail: false }));
+}
+
+export function isAccountSessionChanging() { return sessionChanging; }
+
+export function onAccountSessionChange(listener: (changing: boolean) => void): () => void {
   if (typeof window === 'undefined') return () => {};
-  window.addEventListener(ACCOUNT_EVENT, listener);
-  return () => window.removeEventListener(ACCOUNT_EVENT, listener);
+  const receive = (event: Event) => listener((event as CustomEvent<boolean>).detail);
+  window.addEventListener(SESSION_EVENT, receive);
+  return () => window.removeEventListener(SESSION_EVENT, receive);
+}
+
+export function createAccountOperationGuard() {
+  let revision = 0;
+  return {
+    invalidate() { revision++; },
+    capture() {
+      const local = revision;
+      const session = sessionRevision;
+      return () => local === revision && session === sessionRevision;
+    },
+  };
+}
+
+/** Tells the sidebar and Settings to re-read the account after sign-in or sign-out. */
+export function accountChanged(status?: AccountStatus) {
+  if (typeof window === 'undefined') return;
+  window.dispatchEvent(new CustomEvent(ACCOUNT_EVENT, { detail: status }));
+}
+
+export function onAccountChanged(listener: (status?: AccountStatus) => void): () => void {
+  if (typeof window === 'undefined') return () => {};
+  const receive = (event: Event) => listener((event as CustomEvent<AccountStatus | undefined>).detail);
+  window.addEventListener(ACCOUNT_EVENT, receive);
+  return () => window.removeEventListener(ACCOUNT_EVENT, receive);
 }
 
 export type TierKey = 'tierFree' | 'tierPro' | 'tierTeam' | 'tierUnknown';

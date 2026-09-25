@@ -8,18 +8,139 @@ use crate::{
         models::*,
         store,
         sync::{self, MailSyncState},
+        triage,
     },
 };
 use std::sync::Arc;
 use tauri::State;
 
 #[tauri::command]
-pub fn mail_workspace(db: State<Arc<Database>>) -> Result<MailWorkspace, String> {
+pub fn mail_workspace(db: State<Arc<Database>>, account_id: Option<String>) -> Result<MailWorkspace, String> {
     Ok(MailWorkspace {
         accounts: store::list_accounts(&db)?,
         groups: store::list_groups(&db)?,
         settings: store::settings(&db)?,
+        triage: store::triage_status(&db, account_id.as_deref().filter(|id| !id.is_empty()), typesafe_key().is_some(), openai_key().is_ok())?,
     })
+}
+
+fn typesafe_key() -> Option<String> {
+    crate::integration_keys::resolve("typesafe_api_key")
+        .map(|key| key.trim().to_string())
+        .filter(|key| !key.is_empty())
+}
+
+fn openai_key() -> Result<String, String> {
+    select_openai_key(std::env::var("OPENAI_API_KEY").ok(), || {
+        crate::security::keychain::KeychainStore::get(crate::ai::KEY_SERVICE, "openai_api_key")
+    })
+}
+
+/// Classify untriaged local mail. Sends message text to TypeSafe, and for
+/// some messages to OpenAI, so it refuses to run until the user has turned
+/// triage on in the workspace settings.
+#[tauri::command]
+pub async fn mail_triage_run(
+    db: State<'_, Arc<Database>>,
+    language: Option<String>,
+) -> Result<MailTriageRun, String> {
+    if !store::auto_triage_enabled(&db)? {
+        return Err("請先在「分析設定」開啟自動整理。".into());
+    }
+    let typesafe = typesafe_key().ok_or("尚未設定 TypeSafe API 密鑰，請在分析設定中加入。")?;
+    let settings = store::settings(&db)?;
+    let keys = triage::TriageKeys {
+        typesafe,
+        // Without an OpenAI key, messages are still classified; they just get
+        // no summary or extracted dates.
+        openai: openai_key().ok(),
+        openai_model: if settings.openai_model.trim().is_empty() {
+            crate::ai::openai::OPENAI_MODEL.to_string()
+        } else {
+            settings.openai_model.trim().to_string()
+        },
+    };
+    let language = if language.as_deref() == Some("en") { "en" } else { "zh-HK" };
+    triage::run(&db, keys, language).await
+}
+
+#[tauri::command]
+pub fn mail_set_auto_triage(db: State<Arc<Database>>, enabled: bool) -> Result<(), String> {
+    store::set_auto_triage(&db, enabled)
+}
+
+#[tauri::command]
+pub fn mail_set_attention(db: State<Arc<Database>>, message_id: i64, attention: bool) -> Result<(), String> {
+    store::set_attention(&db, message_id, attention)
+}
+
+#[tauri::command]
+pub fn mail_list_items(
+    db: State<Arc<Database>>,
+    message_id: Option<i64>,
+    include_closed: Option<bool>,
+) -> Result<Vec<MailItem>, String> {
+    store::list_items(&db, message_id, include_closed.unwrap_or(false))
+}
+
+#[tauri::command]
+pub fn mail_update_item(
+    db: State<Arc<Database>>,
+    item_id: i64,
+    status: String,
+    remind_at: Option<String>,
+) -> Result<MailItem, String> {
+    store::update_item(&db, item_id, &status, remind_at.as_deref().filter(|s| !s.is_empty()))
+}
+
+/// Add one extracted item to the user's primary Google Calendar. Runs only
+/// on an explicit click; no attendees, so nothing leaves the user's calendar.
+#[tauri::command]
+pub async fn mail_item_to_calendar(
+    db: State<'_, Arc<Database>>,
+    auth: State<'_, Arc<crate::auth::google::GoogleAuth>>,
+    item_id: i64,
+) -> Result<MailItem, String> {
+    let item = store::get_item(&db, item_id)?;
+    if item.calendar_event_id.is_some() {
+        return Ok(item);
+    }
+    let date = item
+        .due_date
+        .as_deref()
+        .and_then(|d| chrono::NaiveDate::parse_from_str(d, "%Y-%m-%d").ok())
+        .ok_or("此項目沒有日期，未能加入日曆。")?;
+    let token = auth
+        .ensure_access_token()
+        .await
+        .map_err(|_| "請先在「連接」頁面連接 Google 日曆，再加入日曆。".to_string())?;
+    let description = format!(
+        "由 JARVIS 電郵工作區建立\n郵件：{}\n寄件者：{}\n依據：{}",
+        item.subject, item.sender, item.evidence
+    );
+    let event_id = match item.due_time.as_deref().and_then(|t| chrono::NaiveTime::parse_from_str(t, "%H:%M").ok()) {
+        None => crate::integrations::calendar::create_all_day_event(&token, &item.title, date, Some(&description)).await,
+        Some(start_time) => {
+            use chrono::TimeZone;
+            let start = chrono::Local
+                .from_local_datetime(&date.and_time(start_time))
+                .earliest()
+                .ok_or("時間無效。")?;
+            let end = item
+                .end_time
+                .as_deref()
+                .and_then(|t| chrono::NaiveTime::parse_from_str(t, "%H:%M").ok())
+                .and_then(|t| chrono::Local.from_local_datetime(&date.and_time(t)).earliest())
+                .filter(|end| *end > start)
+                .unwrap_or(start + chrono::Duration::hours(1));
+            crate::integrations::calendar::create_event(&token, &item.title, &start.to_rfc3339(), &end.to_rfc3339(), Some(&description), item.location.as_deref(), None)
+                .await
+                .map(|created| created.split(" | ").next().unwrap_or("").to_string())
+        }
+    }
+    .map_err(|e| if e == "UNAUTHORIZED" { "Google 日曆授權已失效，請重新連接。".to_string() } else { "未能加入 Google 日曆，請稍後重試。".to_string() })?;
+    store::set_item_calendar_event(&db, item_id, if event_id.is_empty() { "created" } else { &event_id })?;
+    store::get_item(&db, item_id)
 }
 #[tauri::command]
 pub async fn mail_connect_account(
@@ -60,6 +181,7 @@ pub fn mail_list_messages(
     group_id: Option<i64>,
     query: Option<String>,
     offset: Option<u32>,
+    view: Option<String>,
 ) -> Result<MailPage, String> {
     store::list_messages(
         &db,
@@ -67,6 +189,7 @@ pub fn mail_list_messages(
         group_id,
         query.as_deref().unwrap_or(""),
         offset.unwrap_or(0),
+        view.as_deref().filter(|v| !v.is_empty()),
     )
 }
 
@@ -147,19 +270,16 @@ pub async fn mail_analyze_group(
         None
     };
     let openai_key = if context.settings.processing_mode == "openai" {
-        Some(select_openai_key(
-            std::env::var("OPENAI_API_KEY").ok(),
-            || {
-                crate::security::keychain::KeychainStore::get(
-                    crate::ai::KEY_SERVICE,
-                    "openai_api_key",
-                )
-            },
-        )?)
+        Some(openai_key()?)
     } else {
         None
     };
-    analysis::analyze(context, creds, openai_key).await
+    let started = std::time::Instant::now();
+    let result = analysis::analyze(context, creds, openai_key).await?;
+    if result.mode == "openai" {
+        crate::ai::cost::record_inference(&db, "openai-mail", crate::ai::Workload::Volume, &result.model, result.input_tokens, result.output_tokens, result.cached_tokens, 0, started.elapsed().as_millis() as i64);
+    }
+    Ok(result)
 }
 
 fn select_openai_key(

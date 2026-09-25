@@ -12,3 +12,11 @@ export function readTier(body: string | undefined, isBase64: boolean): 'pro' | '
     return null;
   }
 }
+
+/** Restrict return paths to the website's supported languages. */
+export function readLocale(body: string | undefined, isBase64: boolean): 'en' | 'zh-HK' {
+  try {
+    const parsed = JSON.parse(isBase64 ? Buffer.from(body || '', 'base64').toString('utf8') : body || '{}');
+    return parsed?.locale === 'zh-HK' ? 'zh-HK' : 'en';
+  } catch { return 'en'; }
+}

@@ -159,6 +159,32 @@ pub async fn create_event(
     Ok(format!("{} | {}", id, link))
 }
 
+/// An all-day event on `date` (YYYY-MM-DD). Google treats the end date as
+/// exclusive, so the event ends on the following day. No attendees.
+pub async fn create_all_day_event(
+    access_token: &str,
+    summary: &str,
+    date: chrono::NaiveDate,
+    description: Option<&str>,
+) -> Result<String, String> {
+    let client = crate::util::http_client();
+    let url = format!("{}/calendars/primary/events", CALENDAR_API);
+    let end = date.succ_opt().ok_or("Invalid date")?;
+    let mut body = serde_json::json!({
+        "summary": summary,
+        "start": { "date": date.to_string() },
+        "end": { "date": end.to_string() },
+    });
+    if let Some(desc) = description {
+        body["description"] = serde_json::Value::String(desc.to_string());
+    }
+    let resp = client.post(&url).bearer_auth(access_token).json(&body).send().await.map_err(|e| format!("Create event error: {}", e))?;
+    if resp.status() == 401 { return Err("UNAUTHORIZED".to_string()); }
+    if !resp.status().is_success() { return Err(format!("Create event failed {}", resp.status())); }
+    let created: serde_json::Value = resp.json().await.map_err(|e| e.to_string())?;
+    Ok(created["id"].as_str().unwrap_or("").to_string())
+}
+
 pub async fn update_event(
     access_token: &str,
     event_id: &str,

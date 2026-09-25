@@ -1,16 +1,31 @@
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useRef, useState, type ReactNode } from "react";
+import { Paperclip } from "lucide-react";
 import * as mail from "../lib/mail";
-import type { MailAnalysis, MailMemory, MailMemoryInput, MailMessage, MailPage, MailSettings, MailWorkspace } from "../lib/mail";
+import type { MailAccount, MailAnalysis, MailItem, MailMemory, MailMemoryInput, MailMessage, MailPage, MailSettings, MailView, MailWorkspace } from "../lib/mail";
 import { useWorkspaceValue } from "../workspace/WorkspaceContext";
+import ReadableContent from "../components/content/ReadableContent";
+import { CategoryTag, MailAgenda, MailAiCard } from "../components/mail/MailItems";
+import { backendUtc, categoryLabel, decodeEntities, fileSize, formatDue, MAIL_CATEGORIES, mailSourceUrl, parseSender, readableBody, revealMailSource } from "../lib/mail-presentation";
+import { openUrl } from "../lib/commands";
+import { useUiLocale } from "../i18n";
 import "./email-workspace.css";
 
-type Editor = { type: "group"; id?: number; name: string; instructions: string } | { type: "memory"; input: MailMemoryInput } | { type: "settings"; input: MailSettings; consent: boolean } | { type: "delete"; kind: "account" | "group" | "memory"; id: string | number; name: string };
-const date = (value: string | null) => value ? new Date(value).toLocaleString("zh-HK") : "未同步";
+type Editor =
+  | { type: "group"; id?: number; name: string; instructions: string; members?: number[] }
+  | { type: "memory"; input: MailMemoryInput }
+  | { type: "settings"; input: MailSettings; consent: boolean; triage: boolean; triageConsent: boolean; typesafeKey: string }
+  | { type: "account"; account: MailAccount }
+  | { type: "delete"; kind: "account" | "group" | "memory"; id: string | number; name: string };
+
+const PAGE = 50;
 
 export default function EmailPage({ onSetup }: { onSetup?: () => void }) {
+  const { text, locale } = useUiLocale();
+  const dateTime = (value: string | null) => value ? backendUtc(value).toLocaleString(locale, { month: "numeric", day: "numeric", hour: "2-digit", minute: "2-digit" }) : text("Not synced", "未同步");
   const [workspace, setWorkspace] = useState<MailWorkspace | null>(null);
   const [accountId, setAccountId] = useWorkspaceValue("mailAccountId", "");
   const [groupId, setGroupId] = useWorkspaceValue<number | undefined>("mailGroupId", undefined);
+  const [view, setView] = useWorkspaceValue<MailView | undefined>("mailView", undefined);
   const [query, setQuery] = useWorkspaceValue("mailSearch", "");
   const [offset, setOffset] = useWorkspaceValue("mailOffset", 0);
   const [page, setPage] = useState<MailPage>({ messages: [], total: 0 });
@@ -18,6 +33,7 @@ export default function EmailPage({ onSetup }: { onSetup?: () => void }) {
   const [targetGroup, setTargetGroup] = useState("");
   const [messageId, setMessageId] = useWorkspaceValue<number | null>("mailMessageId", null);
   const [message, setMessage] = useState<MailMessage | null>(null);
+  const [items, setItems] = useState<MailItem[]>([]);
   const [memories, setMemories] = useState<MailMemory[]>([]);
   const [analysis, setAnalysis] = useWorkspaceValue<{ groupId: number; result: MailAnalysis } | null>("mailAnalysis", null);
   const [editor, setEditor] = useState<Editor | null>(null);
@@ -30,122 +46,327 @@ export default function EmailPage({ onSetup }: { onSetup?: () => void }) {
   const [revision, setRevision] = useState(0);
   const operation = useRef(false);
   const dialog = useRef<HTMLDialogElement>(null);
+  const reader = useRef<HTMLElement>(null);
+  const requestedSource = useRef<number | null>(null);
   const group = workspace?.groups.find(item => item.id === groupId);
   const account = workspace?.accounts.find(item => item.id === accountId);
+  const triage = workspace?.triage;
+  const sourceUrl = message ? mailSourceUrl(message) : null;
+  const from = message ? parseSender(message.sender) : null;
+  const files = message?.attachments ?? null;
+  const count = (category: string) => triage?.categories.find(([name]) => name === category)?.[1] ?? 0;
+  const triageReady = !!triage?.enabled && !!triage.typesafe_key;
 
   useEffect(() => {
     let current = true;
-    mail.mailWorkspace().then(data => { if (current) setWorkspace(data); }).catch(e => { if (current) setError(`載入工作區失敗：${String(e)}`); });
+    mail.mailWorkspace(accountId).then(data => { if (current) setWorkspace(data); }).catch(e => { if (current) setError(text(`Could not load the workspace: ${String(e)}`, `載入工作區失敗：${String(e)}`)); });
     return () => { current = false; };
-  }, [revision]);
+  }, [revision, accountId]);
+  useEffect(() => {
+    if (view === "due") return;
+    let current = true;
+    // Keep the current rows on screen while the next page loads.
+    setLoading(true);
+    const timer = window.setTimeout(() => {
+      mail.mailListMessages({ accountId: accountId || undefined, groupId, query, offset, view }).then(data => {
+        if (!current) return;
+        setPage(data);
+        setSelected(ids => ids.filter(id => data.messages.some(m => m.id === id)));
+        if (offset > 0 && offset >= data.total) setOffset(0);
+      }).catch(e => { if (current) setError(text(`Could not load messages: ${String(e)}`, `未能載入郵件：${String(e)}`)); }).finally(() => { if (current) setLoading(false); });
+    }, query ? 200 : 0);
+    return () => { current = false; window.clearTimeout(timer); };
+  }, [accountId, groupId, view, query, offset, revision]);
   useEffect(() => {
     let current = true;
-    setLoading(true); setSelected([]); setPage({ messages: [], total: 0 });
-    const timer = window.setTimeout(() => {
-      mail.mailListMessages({ accountId: accountId || undefined, groupId, query, offset }).then(data => {
-        if (current) { setPage(data); if (offset > 0 && offset >= data.total) setOffset(0); }
-      }).catch(e => { if (current) setError(`未能載入郵件：${String(e)}`); }).finally(() => { if (current) setLoading(false); });
-    }, 200);
-    return () => { current = false; window.clearTimeout(timer); };
-  }, [accountId, groupId, query, offset, revision]);
-  useEffect(() => {
-    let current = true; setMessage(null); setReading(messageId !== null);
-    if (messageId !== null) mail.mailGetMessage(messageId).then(data => { if (current) setMessage(data); }).catch(e => { if (current) setError(`未能開啟郵件：${String(e)}`); }).finally(() => { if (current) setReading(false); });
+    setReading(messageId !== null);
+    if (messageId === null) { setMessage(null); setItems([]); return; }
+    Promise.all([mail.mailGetMessage(messageId), mail.mailListItems(messageId, true)]).then(([data, found]) => {
+      if (current) { setMessage(data); setItems(found); }
+    }).catch(e => { if (current) { requestedSource.current = null; setMessage(null); setError(text(`Could not open the message: ${String(e)}`, `未能開啟郵件：${String(e)}`)); } }).finally(() => { if (current) setReading(false); });
     return () => { current = false; };
   }, [messageId, revision]);
   useEffect(() => {
+    if (requestedSource.current !== messageId) { requestedSource.current = null; return; }
+    if (!reading && revealMailSource(requestedSource.current, message?.id ?? null, reader.current)) requestedSource.current = null;
+  }, [messageId, message, reading]);
+  useEffect(() => {
     let current = true; setMemories([]); setMemoryLoading(groupId !== undefined);
-    if (groupId !== undefined) mail.mailListMemories(groupId).then(data => { if (current) setMemories(data); }).catch(e => { if (current) setError(`載入記憶失敗：${String(e)}`); }).finally(() => { if (current) setMemoryLoading(false); });
+    if (groupId !== undefined) mail.mailListMemories(groupId).then(data => { if (current) setMemories(data); }).catch(e => { if (current) setError(text(`Could not load memories: ${String(e)}`, `載入記憶失敗：${String(e)}`)); }).finally(() => { if (current) setMemoryLoading(false); });
     return () => { current = false; };
   }, [groupId, revision]);
   useEffect(() => { if (editor && dialog.current && !dialog.current.open) dialog.current.showModal(); }, [editor]);
+  // j / k move through the list, Escape closes the reader.
+  useEffect(() => {
+    function onKey(event: KeyboardEvent) {
+      const target = event.target as HTMLElement | null;
+      if (editor || event.metaKey || event.ctrlKey || event.altKey || event.isComposing || target?.closest("input, textarea, select, [contenteditable=true]")) return;
+      if (event.key === "Escape" && messageId !== null) { setMessageId(null); return; }
+      if ((event.key !== "j" && event.key !== "k") || view === "due") return;
+      const index = page.messages.findIndex(item => item.id === messageId);
+      const next = page.messages[event.key === "j" ? index + 1 : Math.max(0, index - 1)];
+      if (next) { event.preventDefault(); setMessageId(next.id); }
+    }
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  }, [page, messageId, editor, view]);
 
+  function refreshWorkspace() { mail.mailWorkspace(accountId).then(setWorkspace).catch(() => undefined); }
   async function run(label: string, action: () => Promise<void>, refresh = true) {
     if (operation.current) return;
     operation.current = true; setBusy(label); setError(""); setNotice("");
-    try { await action(); if (refresh) { setRevision(n => n + 1); setSelected([]); setAnalysis(null); } }
-    catch (e) { setError(`${label}失敗：${String(e)}`); }
+    try { await action(); if (refresh) { setRevision(n => n + 1); setAnalysis(null); } }
+    catch (e) { setError(text(`${label} failed: ${String(e)}`, `${label}失敗：${String(e)}`)); }
     finally { operation.current = false; setBusy(""); }
   }
-  function chooseGroup(id?: number) { setGroupId(id); setOffset(0); setSelected([]); setMessageId(null); }
+  function choose(next: { view?: MailView; groupId?: number }) {
+    setView(next.view); setGroupId(next.groupId); setOffset(0); setSelected([]); setMessageId(null);
+  }
+  function openSource(id: number) {
+    requestedSource.current = id;
+    setMessageId(id);
+    if (!reading && revealMailSource(id, message?.id ?? null, reader.current)) requestedSource.current = null;
+  }
   function editMemory(item?: MailMemory) {
     if (!group) return;
     setEditor({ type: "memory", input: item ? { ...item } : { id: null, group_id: group.id, content: "", kind: "fact", source_message_id: null, expires_at: null, status: "active" } });
   }
+  function openSettings() {
+    if (!workspace) return;
+    setEditor({ type: "settings", input: { ...workspace.settings }, consent: workspace.settings.processing_mode !== "local", triage: workspace.triage.enabled, triageConsent: workspace.triage.enabled, typesafeKey: "" });
+  }
   async function saveEditor() {
     if (!editor) return;
     const draft = editor;
-    await run("儲存", async () => {
-      if (draft.type === "group") await mail.mailSaveGroup(draft.name.trim(), draft.instructions, draft.id);
+    await run(text("Save", "儲存"), async () => {
+      if (draft.type === "group") {
+        const saved = await mail.mailSaveGroup(draft.name.trim(), draft.instructions, draft.id);
+        if (draft.members?.length) { await mail.mailSetGroupMembers(saved.id, draft.members, true); setSelected([]); }
+      }
       if (draft.type === "memory") await mail.mailSaveMemory({ ...draft.input, content: draft.input.content.trim() });
-      if (draft.type === "settings") await mail.mailSaveSettings(draft.input);
+      if (draft.type === "settings") {
+        await mail.mailSaveSettings(draft.input);
+        if (draft.typesafeKey.trim()) await mail.saveTypeSafeKey(draft.typesafeKey.trim());
+        await mail.mailSetAutoTriage(draft.triage && draft.triageConsent);
+      }
       if (draft.type === "delete") {
-        if (draft.kind === "account") { await mail.mailRemoveAccount(String(draft.id)); if (accountId === draft.id) setAccountId(""); }
-        if (draft.kind === "group") { await mail.mailDeleteGroup(Number(draft.id)); if (groupId === draft.id) chooseGroup(); if (targetGroup === String(draft.id)) setTargetGroup(""); }
+        if (draft.kind === "account") { await mail.mailRemoveAccount(String(draft.id)); if (accountId === draft.id) setAccountId(""); setMessageId(null); }
+        if (draft.kind === "group") { await mail.mailDeleteGroup(Number(draft.id)); if (groupId === draft.id) choose({}); if (targetGroup === String(draft.id)) setTargetGroup(""); }
         if (draft.kind === "memory") await mail.mailDeleteMemory(Number(draft.id));
       }
-      setEditor(null); setNotice(draft.type === "delete" ? "已刪除。" : "已儲存。");
+      setEditor(null); setNotice(draft.type === "delete" ? text("Deleted.", "已刪除。") : text("Saved.", "已儲存。"));
     });
   }
-  async function sync(older: boolean, restart = false) {
-    if (!account) return;
-    await run("同步郵件", async () => { const result = restart ? await mail.mailRestartSync(account.id) : await mail.mailSyncAccount(account.id, older); setNotice(`已儲存 ${result.saved} 封郵件。${result.has_more ? "仍有更舊的郵件可供載入。" : result.warning ? "同步未完成。" : "本次沒有更多郵件。"}${result.warning ? ` ${result.warning} 請再按「${restart ? "由最新郵件重新掃描" : older ? "載入更舊郵件" : "同步最近郵件"}」重試。` : ""}`); });
+  async function triageNow(runs = 1) {
+    let summary = "";
+    for (let i = 0; i < runs; i++) {
+      const result = await mail.mailTriageRun(locale === "zh-HK" ? "zh-HK" : "en");
+      const cost = result.cost_usd < 0.01 ? "< US$0.01" : `US$${result.cost_usd.toFixed(2)}`;
+      summary = text(
+        `Sorted ${result.triaged} emails, wrote ${result.summarized} summaries and found ${result.items} follow-ups (AI cost ${cost}).${result.remaining ? ` ${result.remaining} still to sort.` : ""}`,
+        `已整理 ${result.triaged} 封郵件，撰寫 ${result.summarized} 則摘要，找到 ${result.items} 項待辦（AI 費用 ${cost}）。${result.remaining ? `尚有 ${result.remaining} 封未整理。` : ""}`)
+        + (result.warning ? ` ${result.warning}` : "");
+      if (!result.remaining || !result.triaged) break;
+    }
+    return summary;
   }
+  async function sync(target: MailAccount | null, mode: "recent" | "older" | "restart" = "recent") {
+    const accounts = target ? [target] : (workspace?.accounts ?? []).filter(item => item.connected);
+    if (!accounts.length) return;
+    await run(text("Sync mail", "同步郵件"), async () => {
+      const notes: string[] = [];
+      let saved = 0;
+      for (const item of accounts) {
+        const result = mode === "restart" ? await mail.mailRestartSync(item.id) : await mail.mailSyncAccount(item.id, mode === "older");
+        saved += result.saved;
+        if (result.warning) notes.push(accounts.length > 1 ? `${item.email}：${result.warning}` : result.warning);
+      }
+      let message = text(`Saved ${saved} new emails.`, `已儲存 ${saved} 封新郵件。`);
+      if (notes.length) message += ` ${notes.join(" ")}`;
+      if (triageReady && saved > 0) message += ` ${await triageNow(3)}`;
+      setNotice(message);
+    });
+  }
+  const statusText = busy ? text(`${busy} in progress…`, `${busy}中…`) : notice;
+  const selectionActive = selected.length > 0;
+  const heading = view === "attention" ? text("Needs attention", "需要處理")
+    : view === "due" ? text("Follow-ups and dates", "待辦及日程")
+    : view === "untriaged" ? text("Not sorted yet", "尚未整理")
+    : view ? categoryLabel(view, text)
+    : group ? group.name
+    : text("All mail", "全部郵件");
+
+  const nav = (label: string, active: boolean, onClick: () => void, badge?: number, extra?: ReactNode) =>
+    <button className={`mail-nav${active ? " is-active" : ""}`} aria-current={active ? "page" : undefined} onClick={onClick}>{extra}<span className="mail-nav-label">{label}</span>{badge !== undefined && badge > 0 && <span className="mail-count">{badge}</span>}</button>;
 
   return <div className="mail-workspace">
-    <header className="mail-heading"><div><h1>電郵工作區</h1><p>集中管理多個信箱的本機副本，透過群組整理郵件與記憶。</p></div>{onSetup && <button disabled={!!busy} onClick={onSetup}>設定導引</button>}<button disabled={!!busy || !workspace} onClick={() => workspace && setEditor({ type: "settings", input: { ...workspace.settings }, consent: workspace.settings.processing_mode !== "local" })}>分析設定</button></header>
-    {error && <div role="alert" className="mail-alert">{error}<button onClick={() => { setError(""); setRevision(n => n + 1); }}>重新載入</button></div>}
-    <div role="status" className="mail-status">{busy ? `${busy}中，請稍等…` : notice || "郵件可讀文字儲存於此 Mac；部分格式可能只能取得摘要，附件尚未下載。"}</div>
-    <fieldset disabled={!!busy} className={`mail-layout${messageId !== null ? " has-message" : ""}`} aria-busy={!!busy}>
-      <aside className="mail-sidebar">
-        <h2>信箱</h2>
-        <button className={`mail-nav ${!accountId ? "is-active" : ""}`} onClick={() => { setAccountId(""); setOffset(0); setMessageId(null); }}>全部信箱 <span>{workspace?.accounts.reduce((sum, item) => sum + item.message_count, 0) ?? 0}</span></button>
-        {workspace?.accounts.map(item => <button key={item.id} className={`mail-nav ${accountId === item.id ? "is-active" : ""}`} onClick={() => { setAccountId(item.id); setOffset(0); setMessageId(null); }}><span className="mail-truncate">{item.email}<small>{item.connected ? "已連接" : "已斷開・保留本機副本"}</small></span><span>{item.message_count}</span></button>)}
-        <button className="mail-wide" onClick={() => run("連接 Gmail", async () => { const connected = await mail.mailConnectAccount(); setAccountId(connected.id); setOffset(0); setNotice("已連接。請按「同步最近郵件」下載首批郵件。"); })}>連接 Gmail 帳戶</button>
-        <p className="mail-hint">每個 Gmail 帳戶需分別授權；此處的連接與日曆設定互相獨立。</p>
-        <div className="mail-section-title"><h2>群組</h2><button onClick={() => setEditor({ type: "group", name: "", instructions: "" })}>新增</button></div>
-        <button className={`mail-nav ${groupId === undefined ? "is-active" : ""}`} onClick={() => chooseGroup()}>全部郵件</button>
-        {workspace?.groups.map(item => <button key={item.id} className={`mail-nav ${item.id === groupId ? "is-active" : ""}`} onClick={() => chooseGroup(item.id)}><span className="mail-truncate">{item.name}</span><span>{item.message_count}</span></button>)}
-        {account && <section className="mail-account"><h2>信箱同步</h2><p className="mail-hint">上次同步：{date(account.last_synced)}</p><button disabled={!account.connected} onClick={() => sync(false)}>同步最近郵件</button><button disabled={!account.connected || !account.next_page_token} onClick={() => sync(true)}>載入更舊郵件</button><p className="mail-hint">每次最多同步 50 封，不代表已備份整個信箱。</p><button disabled={!account.connected} onClick={() => sync(false, true)}>由最新郵件重新掃描</button><p className="mail-hint">保留本機郵件，並重設較舊郵件的載入位置；適合補回大量新郵件。</p>{account.connected && <button onClick={() => run("斷開帳戶", async () => { await mail.mailDisconnectAccount(account.id); setNotice("已斷開；本機郵件仍然保留。"); })}>斷開連接，保留郵件</button>}<button className="mail-danger" onClick={() => setEditor({ type: "delete", kind: "account", id: account.id, name: account.email })}>刪除帳戶及本機郵件</button></section>}
-      </aside>
-      <section className="mail-list-panel" aria-label="本機郵件">
-        <label className="mail-search">搜尋本機郵件<input type="search" value={query} placeholder="主旨、寄件人或內容" onChange={e => { setQuery(e.target.value); setOffset(0); setMessageId(null); }} /></label>
-        <div className="mail-selection"><label><input type="checkbox" checked={page.messages.length > 0 && selected.length === page.messages.length} disabled={!page.messages.length || loading} onChange={e => setSelected(e.target.checked ? page.messages.map(item => item.id) : [])} />全選本頁</label><span>已選 {selected.length} 封</span></div>
-        <div className="mail-membership"><select aria-label="選擇要加入的群組" value={targetGroup} onChange={e => setTargetGroup(e.target.value)}><option value="">選擇群組</option>{workspace?.groups.map(item => <option key={item.id} value={item.id}>{item.name}</option>)}</select><button disabled={!selected.length || !targetGroup || loading} onClick={() => run("加入群組", async () => { await mail.mailSetGroupMembers(Number(targetGroup), selected, true); setNotice("已加入群組。"); })}>加入</button><button disabled={!selected.length || !group || loading} onClick={() => group && run("移出群組", async () => { await mail.mailSetGroupMembers(group.id, selected, false); setNotice("已移出此群組，郵件仍然保留。"); })}>移出此群組</button></div>
-        <div className="mail-message-list" aria-busy={loading}>
-          {loading ? <p className="mail-empty">正在載入郵件…</p> : page.messages.length === 0 ? <p className="mail-empty">沒有符合條件的本機郵件。請調整搜尋或篩選條件，或選擇一個信箱進行同步。</p> : page.messages.map(item => <div key={item.id} className={`mail-row ${messageId === item.id ? "is-active" : ""}`}><input aria-label={`選取 ${item.subject || "無主旨"}`} type="checkbox" checked={selected.includes(item.id)} onChange={e => setSelected(ids => e.target.checked ? [...ids, item.id] : ids.filter(id => id !== item.id))} /><button className="mail-message-button" onClick={() => setMessageId(item.id)}><span className="mail-row-meta"><strong>{item.sender}</strong><time>{new Date(item.received_at).toLocaleDateString("zh-HK")}</time></span><span className="mail-subject">{!item.is_read && <i aria-label="未讀" />}{item.subject || "（無主旨）"}</span><span className="mail-snippet">{item.snippet}</span><small>{item.account_email}</small></button></div>)}
-        </div><footer className="mail-pagination"><button disabled={offset === 0 || loading} onClick={() => setOffset(n => Math.max(0, n - 50))}>上一頁</button><span>{page.total ? `${offset + 1}–${Math.min(offset + 50, page.total)}` : "0"} / {page.total}</span><button disabled={offset + 50 >= page.total || loading} onClick={() => setOffset(n => n + 50)}>下一頁</button></footer>
-      </section>
-      <section className="mail-detail">
-        {reading ? <p className="mail-empty">正在開啟郵件…</p> : message ? <article className="mail-reader"><div className="mail-section-title"><h2>郵件</h2><button onClick={() => setMessageId(null)}>收起</button></div><h3>{message.subject || "（無主旨）"}</h3><p>{message.sender}</p><p className="mail-hint">{message.account_email}<br />{date(message.received_at)}</p><pre>{message.body || message.snippet || "此郵件沒有可顯示的文字。"}</pre></article> : <p className="mail-empty">選取一封郵件，即可在此查看本機內容。</p>}
-        {group ? <section className="mail-group-detail"><div className="mail-section-title"><h2>{group.name}</h2><button onClick={() => setEditor({ type: "group", id: group.id, name: group.name, instructions: group.instructions })}>編輯群組</button></div><p className="mail-hint">群組共有 {group.message_count} 封；分析範圍涵蓋整個群組，不受左側信箱篩選影響。最多納入最近 50 封郵件，本機模型另有容量限制。</p><h3>個人指示</h3><p className="mail-preserve">{group.instructions || "尚未設定指示。可填寫此群組郵件的整理、回應及跟進方式。"}</p><div className="mail-section-title"><h3>群組記憶</h3><button onClick={() => editMemory()}>新增記憶</button></div>{memoryLoading ? <p className="mail-hint">正在載入記憶…</p> : !memories.length && <p className="mail-hint">記錄已確認的事實、偏好及承諾。分析不會自動新增記憶。</p>}{memories.map(item => <div key={item.id} className="mail-memory"><small>{({ fact: "事實", preference: "偏好", commitment: "承諾" } as Record<string, string>)[item.kind] || item.kind} · {item.status === "done" ? "已完成" : "進行中"}{item.expires_at ? ` · 到期 ${item.expires_at}` : ""}</small><p>{item.content}</p><div className="mail-actions">{item.source_message_id && <button onClick={() => setMessageId(item.source_message_id)}>來源 #{item.source_message_id}</button>}<button onClick={() => editMemory(item)}>編輯</button><button className="mail-danger" onClick={() => setEditor({ type: "delete", kind: "memory", id: item.id, name: item.content })}>刪除</button></div></div>)}<div className="mail-analysis"><h3>群組分析</h3><p className="mail-hint">{workspace?.settings.processing_mode === "openai" ? "使用你的 OpenAI API；此群組的郵件內容、指示及有效記憶會傳送至 OpenAI。" : workspace?.settings.processing_mode === "bedrock" ? "使用你的 AWS Bedrock；此群組的郵件內容、指示及有效記憶會傳送至 AWS。" : "僅使用本機 Ollama；失敗時不會自動改用雲端。"}</p><button className="mail-primary" onClick={() => run("分析群組", async () => { const result = await mail.mailAnalyzeGroup(group.id); setAnalysis({ groupId: group.id, result }); }, false)}>分析此群組</button>{analysis?.groupId === group.id && <div className="mail-analysis-result"><p className="mail-hint">{analysis.result.mode === "openai" ? "OpenAI GPT" : analysis.result.mode === "bedrock" ? "AWS Bedrock" : "本機 Ollama"} / {analysis.result.model}</p><p>未納入郵件：{analysis.result.omitted_messages} 封</p><pre>{analysis.result.text}</pre><div className="mail-actions">{analysis.result.source_ids.map(id => <button key={id} onClick={() => setMessageId(id)}>來源 #{id}</button>)}</div></div>}</div><button className="mail-danger" onClick={() => setEditor({ type: "delete", kind: "group", id: group.id, name: group.name })}>刪除群組</button></section> : <p className="mail-empty">選取一個群組，以管理指示、記憶及分析。</p>}
-      </section>
-    </fieldset>
-    {editor && <dialog ref={dialog} className="mail-dialog" onCancel={e => { e.preventDefault(); }}><form onSubmit={e => { e.preventDefault(); void saveEditor(); }}><fieldset disabled={!!busy}>
-      {editor.type === "group" && <><h2>{editor.id ? "編輯群組" : "新增群組"}</h2><label>群組名稱<input autoFocus required maxLength={100} value={editor.name} onChange={e => setEditor({ ...editor, name: e.target.value })} /></label><label>個人指示<textarea rows={6} maxLength={8000} value={editor.instructions} onChange={e => setEditor({ ...editor, instructions: e.target.value })} placeholder="例如：以繁體書面語整理，列出需要我回覆的問題及截止日期。" /></label></>}
-      {editor.type === "memory" && <><h2>{editor.input.id ? "編輯記憶" : "新增記憶"}</h2><label>內容<textarea autoFocus required maxLength={2000} rows={4} value={editor.input.content} onChange={e => setEditor({ ...editor, input: { ...editor.input, content: e.target.value } })} /></label><label>種類<select value={editor.input.kind} onChange={e => setEditor({ ...editor, input: { ...editor.input, kind: e.target.value } })}><option value="fact">事實</option><option value="preference">偏好</option><option value="commitment">承諾</option></select></label><label>狀態<select value={editor.input.status} onChange={e => setEditor({ ...editor, input: { ...editor.input, status: e.target.value } })}><option value="active">進行中</option><option value="done">已完成</option></select></label><label>來源郵件編號（可留空，必須屬於此群組）<input type="number" min={1} step={1} value={editor.input.source_message_id ?? ""} onChange={e => setEditor({ ...editor, input: { ...editor.input, source_message_id: e.target.value ? Number(e.target.value) : null } })} /></label><label>到期日（可留空）<input type="date" value={editor.input.expires_at ?? ""} onChange={e => setEditor({ ...editor, input: { ...editor.input, expires_at: e.target.value || null } })} /></label><p className="mail-hint">已完成或已到期的記憶不會納入分析。</p></>}
-      {editor.type === "settings" && <>
-        <h2>電郵分析設定</h2>
-        <label>處理方式<select value={editor.input.processing_mode} onChange={e => setEditor({ ...editor, consent: false, input: { ...editor.input, processing_mode: e.target.value } })}>
-          <option value="local">本機 Ollama</option>
-          <option value="openai">OpenAI GPT</option>
-          <option value="bedrock">自備 AWS Bedrock 帳戶</option>
-        </select></label>
-        {editor.input.processing_mode === "local" ? <>
-          <label>Ollama 模型名稱<input required value={editor.input.local_model} onChange={e => setEditor({ ...editor, input: { ...editor.input, local_model: e.target.value } })} placeholder="輸入已安裝的模型名稱" /></label>
-          <p className="mail-hint">請先在設定的「本機 AI」中安裝並啟動 Ollama，再填入已下載的模型名稱。工作區僅連接此 Mac 上的 Ollama。</p>
-        </> : editor.input.processing_mode === "openai" ? <>
-          <label>GPT 模型名稱<input required value={editor.input.openai_model} onChange={e => setEditor({ ...editor, input: { ...editor.input, openai_model: e.target.value } })} placeholder="gpt-5.6-luna" /></label>
-          <p className="mail-hint">使用設定頁儲存的 OpenAI API 密鑰；分析費用由你的 OpenAI 帳戶支付。郵件副本仍保留於本機，分析不會自動轉用其他服務。</p>
-          <label className="mail-consent"><input type="checkbox" required checked={editor.consent} onChange={e => setEditor({ ...editor, consent: e.target.checked })} />我明白執行分析時，群組郵件內容、個人指示及有效記憶會傳送至 OpenAI。</label>
-        </> : <>
-          <label>Bedrock 模型 ID<input required value={editor.input.bedrock_model} onChange={e => setEditor({ ...editor, input: { ...editor.input, bedrock_model: e.target.value } })} /></label>
-          <p className="mail-hint">請先在設定的「模型」頁面內，於 AWS 區塊填入自己的憑證及地區，或使用設定導引。分析費用由你的 AWS 帳戶支付。</p>
-          <label className="mail-consent"><input type="checkbox" required checked={editor.consent} onChange={e => setEditor({ ...editor, consent: e.target.checked })} />我明白執行分析時，群組郵件內容、個人指示及有效記憶會傳送至 AWS Bedrock。</label>
+    <header className="mail-heading">
+      <div><h1>{text("Mail", "電郵工作區")}</h1><p role="status" className="mail-status">{statusText || (triageReady ? text("AI sorts new mail as it arrives. Copies stay on this Mac.", "新郵件同步後由 AI 自動整理；郵件副本保存在此 Mac。") : text("Local copies of your mailboxes. Turn on AI sorting in Analysis settings.", "信箱的本機副本。可在「分析設定」開啟 AI 自動整理。"))}</p></div>
+      <div className="mail-heading-actions">{onSetup && <button disabled={!!busy} onClick={onSetup}>{text("Setup guide", "設定導引")}</button>}<button disabled={!!busy || !workspace} onClick={openSettings}>{text("Analysis settings", "分析設定")}</button></div>
+    </header>
+    {error && <div role="alert" className="mail-alert"><span>{error}</span><button onClick={() => { setError(""); setRevision(n => n + 1); }}>{text("Reload", "重新載入")}</button></div>}
+    <div className={`mail-layout${messageId !== null ? " has-message" : ""}`}>
+      <nav className="mail-sidebar" aria-label={text("Mail views", "郵件分類")}>
+        {nav(text("Needs attention", "需要處理"), view === "attention", () => choose({ view: "attention" }), triage?.attention)}
+        {nav(text("Follow-ups and dates", "待辦及日程"), view === "due", () => choose({ view: "due" }), triage?.open_items)}
+        {nav(text("All mail", "全部郵件"), !view && groupId === undefined, () => choose({}), undefined)}
+        <h2>{text("Sorted by AI", "AI 分類")}</h2>
+        {MAIL_CATEGORIES.map(category => <div key={category}>{nav(categoryLabel(category, text), view === category, () => choose({ view: category }), count(category), <CategoryTag category={category} text={text} compact />)}</div>)}
+        {!!triage?.untriaged && nav(text("Not sorted yet", "尚未整理"), view === "untriaged", () => choose({ view: "untriaged" }), triage.untriaged)}
+        <div className="mail-section-title"><h2>{text("My groups", "我的群組")}</h2><button className="mail-quiet" onClick={() => setEditor({ type: "group", name: "", instructions: "" })}>{text("New", "新增")}</button></div>
+        {workspace?.groups.length ? workspace.groups.map(item => <div key={item.id}>{nav(item.name, item.id === groupId, () => choose({ groupId: item.id }), item.message_count)}</div>) : <p className="mail-hint">{text("Groups hold hand-picked mail with your own instructions.", "群組用來收集你挑選的郵件，並附上你的指示。")}</p>}
+        <div className="mail-section-title"><h2>{text("Mailboxes", "信箱")}</h2></div>
+        {nav(text("All mailboxes", "全部信箱"), !accountId, () => { setAccountId(""); setOffset(0); setMessageId(null); }, workspace?.accounts.reduce((sum, item) => sum + item.message_count, 0))}
+        {workspace?.accounts.map(item => <div key={item.id} className="mail-account-row">
+          <button className={`mail-nav${accountId === item.id ? " is-active" : ""}`} title={item.email} onClick={() => { setAccountId(item.id); setOffset(0); setMessageId(null); }}>
+            <span className="mail-nav-label"><span className="mail-ellipsis">{item.email}</span><small className={item.connected ? "" : "is-warning"}>{item.connected ? text(`Synced ${dateTime(item.last_synced)}`, `上次同步 ${dateTime(item.last_synced)}`) : text("Reconnect needed", "需要重新連接")}</small></span>
+          </button>
+          <button className="mail-quiet mail-icon-button" aria-label={text(`Manage ${item.email}`, `管理 ${item.email}`)} onClick={() => setEditor({ type: "account", account: item })}>{text("Manage", "管理")}</button>
+        </div>)}
+        <button className="mail-wide" disabled={!!busy} onClick={() => run(text("Connect Gmail", "連接 Gmail"), async () => { const connected = await mail.mailConnectAccount(); setAccountId(connected.id); setOffset(0); setNotice(text("Connected. Choose Sync to download your mail.", "已連接。請按「同步」下載郵件。")); })}>{text("Connect Gmail account", "連接 Gmail 帳戶")}</button>
+        <p className="mail-hint">{text("Google shows a warning that the app is not verified yet. Choose Advanced, then Go to JARVIS, to continue.", "Google 會提示此應用程式尚未經驗證。請按「進階」，再按「前往 JARVIS」繼續。")}</p>
+      </nav>
+
+      <section className="mail-list-panel" aria-label={heading}>
+        <div className="mail-toolbar">
+          <h2>{heading}</h2>
+          {view !== "due" && <input type="search" value={query} aria-label={text("Search local mail", "搜尋本機郵件")} placeholder={text("Search subject, sender, text or summary", "搜尋主旨、寄件人、內容或摘要")} onChange={e => { setQuery(e.target.value); setOffset(0); }} />}
+          <div className="mail-toolbar-actions">
+            <button disabled={!!busy || !(workspace?.accounts ?? []).some(item => item.connected)} onClick={() => sync(account && account.connected ? account : null)}>{busy === text("Sync mail", "同步郵件") ? text("Syncing…", "同步中…") : text("Sync", "同步")}</button>
+            {triageReady
+              ? <button className="mail-primary" disabled={!!busy || !triage?.untriaged} onClick={() => run(text("AI sorting", "AI 整理"), async () => setNotice(await triageNow(3)))}>{triage?.untriaged ? text(`Sort ${triage.untriaged} with AI`, `AI 整理 ${triage.untriaged} 封`) : text("All sorted", "已全部整理")}</button>
+              : <button className="mail-primary" disabled={!!busy || !workspace} onClick={openSettings}>{text("Turn on AI sorting", "開啟 AI 整理")}</button>}
+          </div>
+        </div>
+        {selectionActive && view !== "due" && <div className="mail-selection" role="region" aria-label={text("Selected messages", "已選郵件")}>
+          <span>{text(`${selected.length} selected`, `已選 ${selected.length} 封`)}</span>
+          <select aria-label={text("Group to add to", "加入的群組")} value={targetGroup} onChange={e => setTargetGroup(e.target.value)}><option value="">{text("Add to group…", "加入群組…")}</option>{workspace?.groups.map(item => <option key={item.id} value={item.id}>{item.name}</option>)}</select>
+          <button disabled={!targetGroup || !!busy} onClick={() => run(text("Add to group", "加入群組"), async () => { await mail.mailSetGroupMembers(Number(targetGroup), selected, true); setSelected([]); setNotice(text("Added to group.", "已加入群組。")); })}>{text("Add", "加入")}</button>
+          <button disabled={!!busy} onClick={() => setEditor({ type: "group", name: "", instructions: "", members: selected })}>{text("New group from selection", "以所選建立群組")}</button>
+          {group && <button disabled={!!busy} onClick={() => run(text("Remove from group", "移出群組"), async () => { await mail.mailSetGroupMembers(group.id, selected, false); setSelected([]); setNotice(text("Removed from this group; messages are kept.", "已移出此群組，郵件仍然保留。")); })}>{text("Remove from group", "移出此群組")}</button>}
+          <button className="mail-quiet" onClick={() => setSelected([])}>{text("Clear", "取消選取")}</button>
+        </div>}
+        {view === "due" ? <div className="mail-message-list"><MailAgenda text={text} locale={locale} revision={revision} onOpenSource={openSource} onError={setError} /></div> : <>
+          <div className="mail-message-list" aria-busy={loading}>
+            {page.messages.length === 0 ? (loading ? <p className="mail-empty">{text("Loading…", "正在載入…")}</p>
+              : !workspace?.accounts.length ? <div className="mail-empty"><p>{text("Connect a Gmail account to start.", "連接 Gmail 帳戶即可開始。")}</p></div>
+              : <p className="mail-empty">{query ? text("No local mail matches this search.", "沒有符合搜尋的本機郵件。") : view === "attention" ? text("Nothing needs your attention right now.", "目前沒有需要處理的郵件。") : text("No mail here yet.", "這裏暫時沒有郵件。")}</p>)
+              : page.messages.map(item => {
+                const sender = parseSender(item.sender); const attachments = item.attachments?.length ?? 0; const t = item.triage;
+                return <div key={item.id} className={`mail-row${messageId === item.id ? " is-active" : ""}${item.is_read ? "" : " is-unread"}${t?.attention ? " needs-attention" : ""}`}>
+                  <input type="checkbox" aria-label={text(`Select ${item.subject || "no subject"}`, `選取 ${item.subject || "無主旨"}`)} checked={selected.includes(item.id)} onChange={e => setSelected(ids => e.target.checked ? [...ids, item.id] : ids.filter(id => id !== item.id))} />
+                  <button className="mail-row-main" onClick={() => setMessageId(item.id)} aria-current={messageId === item.id ? "true" : undefined}>
+                    <span className="mail-row-top"><strong>{t?.sent_by_owner ? text("You (sent)", "你（已寄出）") : sender.name || text("Unknown sender", "未知寄件人")}</strong><time dateTime={item.received_at}>{new Date(item.received_at).toLocaleDateString(locale, { month: "short", day: "numeric" })}</time></span>
+                    <span className="mail-row-subject"><span className="mail-ellipsis">{item.subject || text("(No subject)", "（無主旨）")}</span>{attachments > 0 && <Paperclip size={12} aria-label={text(`${attachments} attachments`, `${attachments} 個附件`)} />}{item.next_due && <span className="mail-due">{formatDue(item.next_due, null, locale, false)}</span>}</span>
+                    <span className="mail-row-summary">{t && <CategoryTag category={t.category} text={text} compact />}<span className="mail-ellipsis">{t?.summary || decodeEntities(item.snippet)}</span></span>
+                  </button>
+                </div>;
+              })}
+          </div>
+          <footer className="mail-pagination">
+            <label><input type="checkbox" checked={page.messages.length > 0 && selected.length === page.messages.length} disabled={!page.messages.length} onChange={e => setSelected(e.target.checked ? page.messages.map(item => item.id) : [])} />{text("Select page", "全選本頁")}</label>
+            <span>{page.total ? `${offset + 1}–${Math.min(offset + PAGE, page.total)} / ${page.total}` : "0"}</span>
+            <span><button disabled={offset === 0 || loading} onClick={() => setOffset(n => Math.max(0, n - PAGE))} aria-label={text("Previous page", "上一頁")}>‹</button><button disabled={offset + PAGE >= page.total || loading} onClick={() => setOffset(n => n + PAGE)} aria-label={text("Next page", "下一頁")}>›</button></span>
+          </footer>
         </>}
+      </section>
+
+      <section className="mail-detail" aria-label={text("Reading pane", "閱讀窗格")}>
+        {reading && !message ? <p className="mail-empty">{text("Opening…", "正在開啟…")}</p>
+          : message ? <article ref={reader} tabIndex={-1} className="mail-reader" aria-label={text("Email", "郵件")}>
+            <div className="mail-reader-bar"><button onClick={() => setMessageId(null)}>{text("Close", "關閉")}</button>{sourceUrl && <button onClick={() => void openUrl(sourceUrl).catch(() => setError(text("Could not open Gmail. Try again.", "未能開啟 Gmail，請重試。")))}>{text("Open in Gmail", "在 Gmail 開啟")}</button>}</div>
+            <h2 className="mail-reader-subject">{message.subject || text("(No subject)", "（無主旨）")}</h2>
+            <p className="mail-from"><strong>{from?.name || text("Unknown sender", "未知寄件人")}</strong>{from?.address && <span>{from.address}</span>}</p>
+            <p className="mail-hint">{new Date(message.received_at).toLocaleString(locale, { dateStyle: "full", timeStyle: "short" })}<br />{text(`In ${message.account_email}`, `收件信箱：${message.account_email}`)}</p>
+            {message.triage ? <MailAiCard triage={message.triage} items={items} text={text} locale={locale} onError={setError}
+                onChanged={next => { setItems(list => list.map(item => item.id === next.id ? next : item)); refreshWorkspace(); if (next.status !== "open") void mail.mailGetMessage(message.id).then(setMessage).catch(() => undefined); }}
+                onAttention={attention => void mail.mailSetAttention(message.id, attention).then(() => { setMessage(m => m && m.triage ? { ...m, triage: { ...m.triage, attention } } : m); setPage(p => ({ ...p, messages: p.messages.map(m => m.id === message.id && m.triage ? { ...m, triage: { ...m.triage, attention } } : m) })); refreshWorkspace(); }).catch(e => setError(String(e)))} />
+              : <p className="mail-ai-pending">{triageReady ? text("Not sorted yet. Choose “Sort with AI” to summarise it.", "尚未整理。按「AI 整理」即可生成摘要。") : text("Turn on AI sorting to get a summary and follow-ups for each email.", "開啟 AI 整理後，每封郵件都會有摘要及待辦。")}</p>}
+            <ReadableContent format="plain" text={(message.body && readableBody(message.body)) || decodeEntities(message.snippet) || text("This email has no readable text.", "此郵件沒有可顯示的文字。")} />
+            {files && files.length > 0 && <ul className="mail-attachments" aria-label={text("Attachments", "附件")}>{files.map((file, index) => <li key={index}><Paperclip size={13} aria-hidden="true" /><span>{file.filename}</span>{fileSize(file.size) && <small>{fileSize(file.size)}</small>}</li>)}</ul>}
+            {(files === null || files.length > 0) && <p className="mail-hint">{text("Attachments stay in Gmail. Open the email in Gmail to download them.", "附件保留在 Gmail，請在 Gmail 開啟原信下載。")}</p>}
+          </article>
+          : group ? <section className="mail-group-detail">
+            <div className="mail-section-title"><h2>{group.name}</h2><span className="mail-actions"><button onClick={() => setEditor({ type: "group", id: group.id, name: group.name, instructions: group.instructions })}>{text("Edit", "編輯")}</button><button className="mail-danger" onClick={() => setEditor({ type: "delete", kind: "group", id: group.id, name: group.name })}>{text("Delete", "刪除")}</button></span></div>
+            <p className="mail-hint">{text(`${group.message_count} emails. Analysis covers the newest 50 in the group, from every mailbox.`, `共 ${group.message_count} 封。分析涵蓋群組內最新 50 封，不受信箱篩選影響。`)}</p>
+            <h3>{text("Your instructions", "你的指示")}</h3>
+            <p className="mail-preserve">{group.instructions || text("No instructions yet. Say how this group's mail should be organised and followed up.", "尚未設定指示。可寫下此群組郵件的整理及跟進方式。")}</p>
+            <div className="mail-section-title"><h3>{text("Confirmed memories", "已確認的記憶")}</h3><button onClick={() => editMemory()}>{text("Add", "新增")}</button></div>
+            {memoryLoading ? <p className="mail-hint">{text("Loading…", "正在載入…")}</p> : !memories.length && <p className="mail-hint">{text("Facts, preferences and commitments you confirm. Analysis never adds them by itself.", "由你確認的事實、偏好及承諾；分析不會自行新增。")}</p>}
+            {memories.map(item => <div key={item.id} className="mail-memory"><small>{({ fact: text("Fact", "事實"), preference: text("Preference", "偏好"), commitment: text("Commitment", "承諾") } as Record<string, string>)[item.kind] || item.kind}{item.status === "done" ? text(", done", "，已完成") : ""}{item.expires_at ? text(`, until ${item.expires_at}`, `，至 ${item.expires_at}`) : ""}</small><p>{item.content}</p><div className="mail-actions">{item.source_message_id && <button onClick={() => item.source_message_id && openSource(item.source_message_id)}>{text(`Source #${item.source_message_id}`, `來源 #${item.source_message_id}`)}</button>}<button onClick={() => editMemory(item)}>{text("Edit", "編輯")}</button><button className="mail-danger" onClick={() => setEditor({ type: "delete", kind: "memory", id: item.id, name: item.content })}>{text("Delete", "刪除")}</button></div></div>)}
+            <div className="mail-analysis">
+              <h3>{text("Group analysis", "群組分析")}</h3>
+              <p className="mail-hint">{workspace?.settings.processing_mode === "openai" ? text(`Uses ${workspace.settings.openai_model} on your OpenAI account. The group's emails, instructions and active memories are sent to OpenAI.`, `使用你 OpenAI 帳戶的 ${workspace.settings.openai_model}；群組郵件、指示及有效記憶會傳送至 OpenAI。`) : workspace?.settings.processing_mode === "bedrock" ? text("Uses your AWS Bedrock account. The group's emails, instructions and active memories are sent to AWS.", "使用你的 AWS Bedrock；群組郵件、指示及有效記憶會傳送至 AWS。") : text("Uses Ollama on this Mac only, with no cloud fallback.", "只使用此 Mac 上的 Ollama，不會自動改用雲端。")}</p>
+              <button className="mail-primary" disabled={!!busy} onClick={() => run(text("Analyze group", "分析群組"), async () => { const result = await mail.mailAnalyzeGroup(group.id); setAnalysis({ groupId: group.id, result }); }, false)}>{busy === text("Analyze group", "分析群組") ? text("Analysing…", "分析中…") : text("Analyse this group", "分析此群組")}</button>
+              {analysis?.groupId === group.id && <div className="mail-analysis-result">
+                <p className="mail-hint">{analysis.result.mode === "openai" ? "OpenAI" : analysis.result.mode === "bedrock" ? "AWS Bedrock" : text("Local Ollama", "本機 Ollama")} {analysis.result.model}{analysis.result.input_tokens ? text(`, ${analysis.result.input_tokens + analysis.result.output_tokens} tokens`, `，${analysis.result.input_tokens + analysis.result.output_tokens} tokens`) : ""}{analysis.result.omitted_messages ? text(`, ${analysis.result.omitted_messages} emails not included`, `，${analysis.result.omitted_messages} 封未納入`) : ""}</p>
+                <ReadableContent text={analysis.result.text} sourceIds={analysis.result.source_ids} onSource={openSource} />
+              </div>}
+            </div>
+          </section>
+          : <section className="mail-overview">
+            <h2>{text("Overview", "概覽")}</h2>
+            <div className="mail-overview-stats">
+              <button onClick={() => choose({ view: "attention" })}><strong>{triage?.attention ?? 0}</strong><span>{text("need attention", "封需要處理")}</span></button>
+              <button onClick={() => choose({ view: "due" })}><strong>{triage?.open_items ?? 0}</strong><span>{text("open follow-ups", "項未完成待辦")}</span></button>
+              <button onClick={() => choose({ view: "untriaged" })}><strong>{triage?.untriaged ?? 0}</strong><span>{text("not sorted yet", "封尚未整理")}</span></button>
+            </div>
+            {!triageReady && <p className="mail-hint">{text("AI sorting reads each new email once: TypeSafe Jev decides the category and whether it needs you; gpt-6-luna writes a summary and finds dates only for the emails that need one.", "AI 整理會讀取每封新郵件一次：TypeSafe Jev 判斷分類及是否需要你處理；只有需要摘要或含日期的郵件，才交由 gpt-6-luna 撰寫摘要及找出日期。")}</p>}
+            <p className="mail-hint">{text("Select an email to read it here. Use j and k to move through the list.", "選取郵件即可在此閱讀；可按 j、k 上下移動。")}</p>
+          </section>}
+      </section>
+    </div>
+
+    {editor && <dialog ref={dialog} className="mail-dialog" onCancel={e => { e.preventDefault(); setEditor(null); }}><form onSubmit={e => { e.preventDefault(); void saveEditor(); }}><fieldset disabled={!!busy}>
+      {editor.type === "group" && <><h2>{editor.id ? text("Edit group", "編輯群組") : text("New group", "新增群組")}</h2>{editor.members?.length ? <p className="mail-hint">{text(`The ${editor.members.length} selected emails will be added.`, `會加入已選的 ${editor.members.length} 封郵件。`)}</p> : null}<label>{text("Group name", "群組名稱")}<input autoFocus required maxLength={100} value={editor.name} onChange={e => setEditor({ ...editor, name: e.target.value })} /></label><label>{text("Your instructions", "你的指示")}<textarea rows={6} maxLength={8000} value={editor.instructions} onChange={e => setEditor({ ...editor, instructions: e.target.value })} placeholder={text("For example: list the questions I need to answer and their deadlines.", "例如：列出需要我回覆的問題及截止日期。")} /></label></>}
+      {editor.type === "memory" && <><h2>{editor.input.id ? text("Edit memory", "編輯記憶") : text("Add memory", "新增記憶")}</h2><label>{text("Content", "內容")}<textarea autoFocus required maxLength={2000} rows={4} value={editor.input.content} onChange={e => setEditor({ ...editor, input: { ...editor.input, content: e.target.value } })} /></label><label>{text("Kind", "種類")}<select value={editor.input.kind} onChange={e => setEditor({ ...editor, input: { ...editor.input, kind: e.target.value } })}><option value="fact">{text("Fact", "事實")}</option><option value="preference">{text("Preference", "偏好")}</option><option value="commitment">{text("Commitment", "承諾")}</option></select></label><label>{text("Status", "狀態")}<select value={editor.input.status} onChange={e => setEditor({ ...editor, input: { ...editor.input, status: e.target.value } })}><option value="active">{text("Active", "進行中")}</option><option value="done">{text("Done", "已完成")}</option></select></label><label>{text("Source email ID (optional; must be in this group)", "來源郵件編號（可留空，必須屬於此群組）")}<input type="number" min={1} step={1} value={editor.input.source_message_id ?? ""} onChange={e => setEditor({ ...editor, input: { ...editor.input, source_message_id: e.target.value ? Number(e.target.value) : null } })} /></label><label>{text("Until (optional)", "到期日（可留空）")}<input type="date" value={editor.input.expires_at ?? ""} onChange={e => setEditor({ ...editor, input: { ...editor.input, expires_at: e.target.value || null } })} /></label><p className="mail-hint">{text("Done or expired memories are left out of analysis.", "已完成或已到期的記憶不會納入分析。")}</p></>}
+      {editor.type === "account" && <><h2>{editor.account.email}</h2>
+        <p className="mail-hint">{editor.account.connected ? text(`Last complete sync: ${dateTime(editor.account.last_synced)}. ${editor.account.message_count} emails on this Mac.`, `上次完整同步：${dateTime(editor.account.last_synced)}。此 Mac 有 ${editor.account.message_count} 封郵件。`) : text("Google no longer accepts this connection. Reconnect with “Connect Gmail account”; local mail is kept.", "Google 已不接受此連接。請按「連接 Gmail 帳戶」重新連接；本機郵件會保留。")}</p>
+        <div className="mail-account-actions">
+          <button type="button" disabled={!editor.account.connected || !!busy} onClick={() => { const target = editor.account; setEditor(null); void sync(target, "recent"); }}>{text("Sync new mail", "同步新郵件")}</button>
+          <button type="button" disabled={!editor.account.connected || !editor.account.next_page_token || !!busy} onClick={() => { const target = editor.account; setEditor(null); void sync(target, "older"); }}>{text("Load 50 older emails", "載入 50 封較舊郵件")}</button>
+          <button type="button" disabled={!editor.account.connected || !!busy} onClick={() => { const target = editor.account; setEditor(null); void sync(target, "restart"); }}>{text("Rescan from newest", "由最新郵件重新掃描")}</button>
+          {editor.account.connected && <button type="button" disabled={!!busy} onClick={() => { const target = editor.account; setEditor(null); void run(text("Disconnect account", "斷開帳戶"), async () => { await mail.mailDisconnectAccount(target.id); setNotice(text("Disconnected; local mail is kept.", "已斷開；本機郵件仍然保留。")); }); }}>{text("Disconnect, keep mail", "斷開連接，保留郵件")}</button>}
+          <button type="button" className="mail-danger" onClick={() => setEditor({ type: "delete", kind: "account", id: editor.account.id, name: editor.account.email })}>{text("Delete account and local mail", "刪除帳戶及本機郵件")}</button>
+        </div>
+        <p className="mail-hint">{text("Rescan re-reads the newest 50 emails and restarts “Load older” from there. Use it to fill a gap left by an older version.", "重新掃描會重新讀取最新 50 封，並由此重新開始「載入較舊郵件」；可用來補回舊版本留下的缺口。")}</p></>}
+      {editor.type === "settings" && <>
+        <h2>{text("Analysis settings", "分析設定")}</h2>
+        <section className="mail-settings-block">
+          <h3>{text("AI sorting", "AI 自動整理")}</h3>
+          <p className="mail-hint">{text("Each new email is read once. TypeSafe Jev gets the sender, recipients, subject, the first 1,500 characters and your mailbox addresses to decide its category and whether it needs you. Only emails that need a summary or mention a date go to OpenAI (up to 6,000 characters). Nothing is sent from your Gmail or added to your calendar without your click.", "每封新郵件只讀取一次：TypeSafe Jev 會收到寄件人、收件人、主旨、正文開頭 1,500 字及你的信箱地址，用來判斷分類及是否需要你處理；只有需要摘要或含日期的郵件，才會把最多 6,000 字傳送至 OpenAI。未經你按下按鈕，不會寄出郵件或加入日曆。")}</p>
+          <label>{text("TypeSafe API key", "TypeSafe API 密鑰")}<input type="password" autoComplete="off" value={editor.typesafeKey} placeholder={workspace?.triage.typesafe_key ? text("Saved. Enter a new key to replace it.", "已儲存；輸入新密鑰即可取代。") : text("Paste your key", "貼上密鑰")} onChange={e => setEditor({ ...editor, typesafeKey: e.target.value })} /></label>
+          <p className="mail-hint">{workspace?.triage.openai_key ? text(`Summaries use ${editor.input.openai_model || "gpt-6-luna"} with the OpenAI key saved in Settings.`, `摘要使用設定頁已儲存的 OpenAI 密鑰及 ${editor.input.openai_model || "gpt-6-luna"}。`) : text("No OpenAI key saved: emails are sorted, but get no summary or dates.", "未儲存 OpenAI 密鑰：郵件仍會分類，但不會有摘要及日期。")}</p>
+          <label className="mail-consent"><input type="checkbox" checked={editor.triage} onChange={e => setEditor({ ...editor, triage: e.target.checked, triageConsent: e.target.checked && editor.triageConsent })} />{text("Sort new mail with AI", "以 AI 整理新郵件")}</label>
+          {editor.triage && <label className="mail-consent"><input type="checkbox" required checked={editor.triageConsent} onChange={e => setEditor({ ...editor, triageConsent: e.target.checked })} />{text("I understand that email text is sent to TypeSafe and, for some emails, OpenAI, as described above.", "我明白郵件內容會按上述方式傳送至 TypeSafe，部分郵件亦會傳送至 OpenAI。")}</label>}
+        </section>
+        <section className="mail-settings-block">
+          <h3>{text("Group analysis", "群組分析")}</h3>
+          <label>{text("Processing", "處理方式")}<select value={editor.input.processing_mode} onChange={e => setEditor({ ...editor, consent: false, input: { ...editor.input, processing_mode: e.target.value } })}>
+            <option value="local">{text("Ollama on this Mac", "此 Mac 的 Ollama")}</option>
+            <option value="openai">OpenAI</option>
+            <option value="bedrock">{text("Your AWS Bedrock account", "自備 AWS Bedrock 帳戶")}</option>
+          </select></label>
+          {editor.input.processing_mode === "local" ? <>
+            <label>{text("Ollama model name", "Ollama 模型名稱")}<input value={editor.input.local_model} onChange={e => setEditor({ ...editor, input: { ...editor.input, local_model: e.target.value } })} placeholder={text("An installed model, e.g. qwen3:8b", "已安裝的模型，例如 qwen3:8b")} /></label>
+            <p className="mail-hint">{text("Install and start Ollama in Settings → Local AI first.", "請先在設定的「本機 AI」安裝並啟動 Ollama。")}</p>
+          </> : editor.input.processing_mode === "openai" ? <>
+            <label>{text("OpenAI model", "OpenAI 模型")}<input required value={editor.input.openai_model} onChange={e => setEditor({ ...editor, input: { ...editor.input, openai_model: e.target.value } })} placeholder="gpt-6-luna" /></label>
+            <p className="mail-hint">{text("Uses the OpenAI key saved in Settings. Your OpenAI account pays; gpt-6-luna costs about US$0.10 per million input tokens.", "使用設定頁儲存的 OpenAI 密鑰，費用由你的 OpenAI 帳戶支付；gpt-6-luna 每百萬輸入 token 約 US$0.10。")}</p>
+            <label className="mail-consent"><input type="checkbox" required checked={editor.consent} onChange={e => setEditor({ ...editor, consent: e.target.checked })} />{text("I understand that analysis sends the group's emails, instructions and active memories to OpenAI.", "我明白分析時，群組郵件、指示及有效記憶會傳送至 OpenAI。")}</label>
+          </> : <>
+            <label>{text("Bedrock model ID", "Bedrock 模型 ID")}<input required value={editor.input.bedrock_model} onChange={e => setEditor({ ...editor, input: { ...editor.input, bedrock_model: e.target.value } })} /></label>
+            <p className="mail-hint">{text("Add your AWS credentials and region in Settings → Models first. Your AWS account pays.", "請先在設定的「模型」頁面填入 AWS 憑證及地區；費用由你的 AWS 帳戶支付。")}</p>
+            <label className="mail-consent"><input type="checkbox" required checked={editor.consent} onChange={e => setEditor({ ...editor, consent: e.target.checked })} />{text("I understand that analysis sends the group's emails, instructions and active memories to AWS Bedrock.", "我明白分析時，群組郵件、指示及有效記憶會傳送至 AWS Bedrock。")}</label>
+          </>}
+        </section>
       </>}
-      {editor.type === "delete" && <><h2>確認刪除</h2><p className="mail-preserve">{editor.name}</p><p>{editor.kind === "account" ? "將刪除帳戶、本機郵件、相關群組連結，以及以此帳戶郵件為來源的記憶；其他自行新增的記憶會保留。Gmail 中的原始郵件不受影響。" : editor.kind === "group" ? "將刪除群組、指示及記憶；本機郵件仍然保留。" : "此記憶刪除後無法還原。"}</p></>}
-      {error && <p role="alert" className="mail-alert">{error}</p>}<footer className="mail-actions"><button type="button" onClick={() => setEditor(null)}>取消</button><button type="submit" className={editor.type === "delete" ? "mail-danger" : "mail-primary"} disabled={(editor.type === "group" && !editor.name.trim()) || (editor.type === "memory" && !editor.input.content.trim())}>{busy ? "處理中…" : editor.type === "delete" ? "確認刪除" : "儲存"}</button></footer>
+      {editor.type === "delete" && <><h2>{text("Confirm deletion", "確認刪除")}</h2><p className="mail-preserve">{editor.name}</p><p>{editor.kind === "account" ? text("This deletes the account, its local emails, their group memberships, AI results and memories sourced from them. Your Gmail is not affected.", "將刪除帳戶、其本機郵件、相關群組連結、AI 整理結果，以及以這些郵件為來源的記憶。Gmail 中的原信不受影響。") : editor.kind === "group" ? text("This deletes the group, its instructions and memories. Emails are kept.", "將刪除群組、指示及記憶；郵件仍然保留。") : text("A deleted memory cannot be restored.", "記憶刪除後無法還原。")}</p></>}
+      {error && <p role="alert" className="mail-alert">{error}</p>}
+      <footer className="mail-actions">
+        <button type="button" onClick={() => setEditor(null)}>{editor.type === "account" ? text("Close", "關閉") : text("Cancel", "取消")}</button>
+        {editor.type !== "account" && <button type="submit" className={editor.type === "delete" ? "mail-danger" : "mail-primary"} disabled={(editor.type === "group" && !editor.name.trim()) || (editor.type === "memory" && !editor.input.content.trim())}>{busy ? text("Working…", "處理中…") : editor.type === "delete" ? text("Delete", "刪除") : text("Save", "儲存")}</button>}
+      </footer>
     </fieldset></form></dialog>}
   </div>;
 }

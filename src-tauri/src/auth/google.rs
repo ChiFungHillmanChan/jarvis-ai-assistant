@@ -293,7 +293,15 @@ impl GoogleAuth {
         )
         .await
         .map_err(|_| "Google did not respond within 30 seconds while refreshing the access token.".to_string())?
-        .map_err(|e| format!("Token refresh failed: {}", e))?;
+        .map_err(|e| match e {
+            // Keep Google's error code: "invalid_grant" means the grant was
+            // revoked or expired and only a new consent can fix it, which
+            // callers must tell apart from a network failure.
+            oauth2::RequestTokenError::ServerResponse(response) => {
+                format!("Token refresh failed: {}", response.error())
+            }
+            other => format!("Token refresh failed: {}", other),
+        })?;
 
         self.store_access_token(
             token_result.access_token().secret().clone(),

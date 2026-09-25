@@ -2813,6 +2813,7 @@ dependencies = [
  "croner",
  "dirs 5.0.1",
  "dotenvy",
+ "encoding_rs",
  "env_logger",
  "futures-util",
  "hound",

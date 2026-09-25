@@ -144,7 +144,14 @@ async fn run_notion_sync(db: &Arc<Database>) -> Result<String, String> {
 async fn run_github_digest(db: &Arc<Database>) -> Result<String, String> {
     // The detailed form: `save_to_db` only reconciles the halves of the fetch
     // that actually succeeded, and the warning is what tells it which.
-    let fetched = crate::integrations::github_auth::sync_connected(db).await?;
+    let fetched = match crate::integrations::github_auth::sync_connected(db).await {
+        Ok(fetched) => fetched,
+        // Same as the Google syncs: an integration the user never connected is
+        // skipped, not failed. As a failure it tripped the "jobs failed" alert
+        // every hour for anyone who does not use GitHub.
+        Err(error) if error.starts_with("GitHub 尚未連接") => return Ok("Skipped: GitHub not connected".to_string()),
+        Err(error) => return Err(error),
+    };
     let count = fetched.items.len();
     Ok(format!("Synced {} GitHub items", count))
 }
@@ -157,8 +164,8 @@ async fn run_github_digest(db: &Arc<Database>) -> Result<String, String> {
 /// three definitions as assistant::context and commands::dashboard. Shared with
 /// the tests below.
 const DEADLINE_WINDOW_QUERY: &str = "SELECT id, title, deadline FROM tasks WHERE status != 'completed' AND deadline IS NOT NULL AND deadline <= date('now', 'localtime', '+3 days') ORDER BY deadline ASC";
-const OVERDUE_TASKS_QUERY: &str = "SELECT COUNT(*) FROM tasks WHERE status != 'completed' AND deadline IS NOT NULL AND deadline < date('now', 'localtime')";
-const DUE_TODAY_QUERY: &str = "SELECT COUNT(*) FROM tasks WHERE status != 'completed' AND deadline = date('now', 'localtime')";
+const OVERDUE_TASKS_QUERY: &str = "SELECT title FROM tasks WHERE status != 'completed' AND deadline IS NOT NULL AND deadline < date('now', 'localtime') ORDER BY deadline ASC, id ASC";
+const DUE_TODAY_QUERY: &str = "SELECT title FROM tasks WHERE status != 'completed' AND deadline = date('now', 'localtime') ORDER BY id ASC";
 
 async fn run_deadline_monitor(db: &Arc<Database>) -> Result<String, String> {
     let warnings: Vec<(i64, String, String)> = {
@@ -195,22 +202,77 @@ const FAILED_RUNS_ALERT_QUERY: &str = "SELECT COUNT(*) FROM cron_runs WHERE stat
 /// dismisses it by hand. Shared with the test below.
 const CLEAR_ALERTS_QUERY: &str = "DELETE FROM user_preferences WHERE key = 'last_alerts'";
 
+/// Alerts are shown to the user as macOS notifications, so they follow the
+/// interface language the frontend stores in user_preferences.ui_locale.
+#[derive(Clone, Copy, Debug, PartialEq)]
+enum AlertLocale { En, ZhHk }
+
+impl AlertLocale {
+    fn from_preference(value: Option<&str>) -> Self {
+        if value == Some("zh-HK") { AlertLocale::ZhHk } else { AlertLocale::En }
+    }
+}
+
+#[derive(Clone, Copy)]
+enum TaskAlert { Overdue, DueToday }
+
+/// A notification body is truncated by macOS well before this many names.
+const ALERT_TASK_NAMES: usize = 3;
+
+/// last_alerts holds one alert per line, so every alert has to be one line.
+fn one_line(text: &str) -> String {
+    text.split_whitespace().collect::<Vec<_>>().join(" ")
+}
+
+fn task_alert(locale: AlertLocale, kind: TaskAlert, titles: &[String]) -> Option<String> {
+    if titles.is_empty() { return None; }
+    let shown: Vec<String> = titles.iter().take(ALERT_TASK_NAMES).map(|t| one_line(t)).collect();
+    let more = titles.len() - shown.len();
+    Some(match locale {
+        AlertLocale::En => {
+            let label = match kind { TaskAlert::Overdue => "Overdue", TaskAlert::DueToday => "Due today" };
+            let extra = if more > 0 { format!(" and {more} more") } else { String::new() };
+            format!("{label}: {}{extra}", shown.join(", "))
+        }
+        AlertLocale::ZhHk => {
+            let label = match kind { TaskAlert::Overdue => "已逾期", TaskAlert::DueToday => "今天到期" };
+            let extra = if more > 0 { format!(" 及另外 {more} 項") } else { String::new() };
+            format!("{label}：{}{extra}", shown.join("、"))
+        }
+    })
+}
+
+/// The alert lines the previous check had not already stored. The check runs
+/// every five minutes, so notifying on every line would repeat a reminder
+/// until the task is done.
+fn alerts_to_notify<'a>(previous: Option<&str>, current: &'a [String]) -> Vec<&'a str> {
+    let seen: std::collections::HashSet<&str> = previous.unwrap_or("").lines().collect();
+    current.iter().map(String::as_str).filter(|line| !seen.contains(line)).collect()
+}
+
 async fn run_proactive_check(db: &Arc<Database>) -> Result<String, String> {
     // Each query acquires and releases the lock independently to avoid blocking
     // other jobs and UI commands during the check.
     let mut alerts = Vec::new();
 
-    let overdue: i64 = {
+    let (locale, previous): (AlertLocale, Option<String>) = {
         let conn = db.conn.lock().map_err(|e| e.to_string())?;
-        conn.query_row(OVERDUE_TASKS_QUERY, [], |r| r.get(0)).unwrap_or(0)
+        let pref = |key: &str| conn
+            .query_row("SELECT value FROM user_preferences WHERE key = ?1", [key], |r| r.get::<_, String>(0))
+            .ok();
+        (AlertLocale::from_preference(pref("ui_locale").as_deref()), pref("last_alerts"))
     };
-    if overdue > 0 { alerts.push(format!("{} overdue task(s)", overdue)); }
+    let zh = locale == AlertLocale::ZhHk;
 
-    let due_today: i64 = {
-        let conn = db.conn.lock().map_err(|e| e.to_string())?;
-        conn.query_row(DUE_TODAY_QUERY, [], |r| r.get(0)).unwrap_or(0)
-    };
-    if due_today > 0 { alerts.push(format!("{} task(s) due today", due_today)); }
+    for (query, kind) in [(OVERDUE_TASKS_QUERY, TaskAlert::Overdue), (DUE_TODAY_QUERY, TaskAlert::DueToday)] {
+        let titles: Vec<String> = {
+            let conn = db.conn.lock().map_err(|e| e.to_string())?;
+            let mut stmt = conn.prepare(query).map_err(|e| e.to_string())?;
+            let rows = stmt.query_map([], |r| r.get::<_, String>(0)).map_err(|e| e.to_string())?;
+            rows.collect::<Result<Vec<_>, _>>().map_err(|e| e.to_string())?
+        };
+        alerts.extend(task_alert(locale, kind, &titles));
+    }
 
     let upcoming_meeting: Option<(String, Option<String>, Option<String>)> = {
         let conn = db.conn.lock().map_err(|e| e.to_string())?;
@@ -220,9 +282,11 @@ async fn run_proactive_check(db: &Arc<Database>) -> Result<String, String> {
         ).ok()
     };
     if let Some((summary, description, attendees)) = upcoming_meeting {
-        let mut prep = format!("Meeting in 15 min: {}", summary);
+        let mut prep = if zh { format!("15 分鐘後會議：{}", summary) } else { format!("Meeting in 15 min: {}", summary) };
         if let Some(desc) = description { if !desc.is_empty() { prep.push_str(&format!(" -- {}", desc)); } }
-        if let Some(att) = attendees { if !att.is_empty() { prep.push_str(&format!(" [with: {}]", att)); } }
+        if let Some(att) = attendees {
+            if !att.is_empty() { prep.push_str(&if zh { format!(" [參與者：{}]", att) } else { format!(" [with: {}]", att) }); }
+        }
         let related_tasks: Vec<String> = {
             let conn = db.conn.lock().map_err(|e| e.to_string())?;
             let mut stmt = conn.prepare(
@@ -235,30 +299,67 @@ async fn run_proactive_check(db: &Arc<Database>) -> Result<String, String> {
                 .map_err(|e| e.to_string())?
         };
         if !related_tasks.is_empty() {
-            prep.push_str(&format!(" | Related tasks: {}", related_tasks.join(", ")));
+            let label = if zh { "相關工作：" } else { "Related tasks: " };
+            prep.push_str(&format!(" | {}{}", label, related_tasks.join(", ")));
         }
-        alerts.push(prep);
+        alerts.push(one_line(&prep));
     }
 
     let failed: i64 = {
         let conn = db.conn.lock().map_err(|e| e.to_string())?;
         conn.query_row(FAILED_RUNS_ALERT_QUERY, [], |r| r.get(0)).unwrap_or(0)
     };
-    if failed > 0 { alerts.push(format!("{} cron job(s) failed in the last hour", failed)); }
+    if failed > 0 {
+        // No count in the line: the digest re-notifies whenever a line
+        // changes, so "2 failed", "4 failed"... chimed every 5 minutes while
+        // the Mac was offline.
+        alerts.push(if zh { "過去一小時有排程執行失敗，請查看「自動排程」".to_string() } else { "Scheduled jobs failed in the last hour; see Automations".to_string() });
+    }
+
+    // Email follow-ups the user asked to be reminded about. Each fires once,
+    // at its own time, independent of the digest lines above.
+    let now_local = chrono::Local::now().format("%Y-%m-%dT%H:%M").to_string();
+    for item in crate::mail::store::due_reminders(db, &now_local).unwrap_or_default() {
+        let when = match (item.due_date.as_deref(), item.due_time.as_deref()) {
+            (Some(date), Some(time)) => format!("{date} {time}"),
+            (Some(date), None) => date.to_string(),
+            _ => String::new(),
+        };
+        let body = match (zh, when.is_empty()) {
+            (true, false) => format!("{}（{}）", item.title, when),
+            (false, false) => format!("{} ({})", item.title, when),
+            _ => item.title.clone(),
+        };
+        // Marked first, like last_alerts: a failed post is not retried forever.
+        if crate::mail::store::mark_reminded(db, item.id).is_ok() {
+            let title = if zh { "JARVIS 電郵提醒" } else { "JARVIS reminder" };
+            if let Err(e) = crate::system::control::send_notification(title, &one_line(&body), true).await {
+                log::warn!("Mail reminder could not post a notification: {}", e);
+            }
+        }
+    }
 
     if alerts.is_empty() {
         let conn = db.conn.lock().map_err(|e| e.to_string())?;
         conn.execute(CLEAR_ALERTS_QUERY, []).map_err(|e| e.to_string())?;
         Ok("No alerts".to_string())
     } else {
-        let alert_text = alerts.join("; ");
-        let conn = db.conn.lock().map_err(|e| e.to_string())?;
-        conn.execute(
-            "INSERT INTO user_preferences (key, value, updated_at) VALUES ('last_alerts', ?1, datetime('now'))
-             ON CONFLICT(key) DO UPDATE SET value = ?1, updated_at = datetime('now')",
-            rusqlite::params![alert_text],
-        ).map_err(|e| e.to_string())?;
-        Ok(format!("Alerts: {}", alert_text))
+        let alert_text = alerts.join("\n");
+        {
+            let conn = db.conn.lock().map_err(|e| e.to_string())?;
+            conn.execute(
+                "INSERT INTO user_preferences (key, value, updated_at) VALUES ('last_alerts', ?1, datetime('now'))
+                 ON CONFLICT(key) DO UPDATE SET value = ?1, updated_at = datetime('now')",
+                rusqlite::params![alert_text],
+            ).map_err(|e| e.to_string())?;
+        }
+        // Stored first, so a notification that fails is not retried every tick.
+        for line in alerts_to_notify(previous.as_deref(), &alerts) {
+            if let Err(e) = crate::system::control::send_notification("JARVIS", line, true).await {
+                log::warn!("Proactive check could not post a notification: {}", e);
+            }
+        }
+        Ok(format!("Alerts: {}", alerts.join("; ")))
     }
 }
 
@@ -495,11 +596,20 @@ mod tests {
                 .replace("'now'", "'2026-07-26 23:00:00'")
         };
 
-        let overdue: i64 = conn.query_row(&pin(OVERDUE_TASKS_QUERY), [], |r| r.get(0)).unwrap();
-        assert_eq!(overdue, 2, "yesterday's and older open tasks are overdue");
-
-        let due_today: i64 = conn.query_row(&pin(DUE_TODAY_QUERY), [], |r| r.get(0)).unwrap();
-        assert_eq!(due_today, 2, "tasks dated today must count as due today");
+        let titles_for = |q: &str| -> Vec<String> {
+            let mut stmt = conn.prepare(&pin(q)).unwrap();
+            stmt.query_map([], |r| r.get::<_, String>(0)).unwrap().map(|r| r.unwrap()).collect()
+        };
+        assert_eq!(
+            titles_for(OVERDUE_TASKS_QUERY),
+            vec!["Older chase-up".to_string(), "Yesterday invoice".to_string()],
+            "yesterday's and older open tasks are overdue, oldest first"
+        );
+        assert_eq!(
+            titles_for(DUE_TODAY_QUERY),
+            vec!["File HKSTP milestone".to_string(), "Call mentor".to_string()],
+            "tasks dated today must count as due today"
+        );
 
         let mut stmt = conn.prepare(&pin(DEADLINE_WINDOW_QUERY)).unwrap();
         let titles: Vec<String> = stmt
@@ -608,6 +718,63 @@ mod tests {
         .unwrap();
         let alerted: i64 = conn.query_row(FAILED_RUNS_ALERT_QUERY, [], |r| r.get(0)).unwrap();
         assert_eq!(alerted, 1, "a real failure must still surface");
+    }
+
+    /// An alert has to say which task it is about: "1 overdue task(s)" gave the
+    /// user nothing to act on, and the app has no task list to look it up in.
+    #[test]
+    fn task_alerts_name_the_tasks_in_the_interface_language() {
+        let titles = vec!["Send invoice".to_string(), "Call Brian".to_string()];
+        assert_eq!(
+            task_alert(AlertLocale::En, TaskAlert::Overdue, &titles).as_deref(),
+            Some("Overdue: Send invoice, Call Brian")
+        );
+        assert_eq!(
+            task_alert(AlertLocale::ZhHk, TaskAlert::DueToday, &titles).as_deref(),
+            Some("今天到期：Send invoice、Call Brian")
+        );
+        assert_eq!(task_alert(AlertLocale::En, TaskAlert::Overdue, &[]), None);
+    }
+
+    #[test]
+    fn task_alerts_cap_the_names_and_stay_on_one_line() {
+        let titles: Vec<String> = ["A", "B", "C", "D", "E"].iter().map(|s| s.to_string()).collect();
+        assert_eq!(
+            task_alert(AlertLocale::En, TaskAlert::DueToday, &titles).as_deref(),
+            Some("Due today: A, B, C and 2 more")
+        );
+        assert_eq!(
+            task_alert(AlertLocale::ZhHk, TaskAlert::Overdue, &titles).as_deref(),
+            Some("已逾期：A、B、C 及另外 2 項")
+        );
+        // A title with a line break would split one alert into two lines of
+        // last_alerts and defeat the comparison in alerts_to_notify.
+        let multiline = vec!["Reply to\nlandlord".to_string()];
+        assert_eq!(
+            task_alert(AlertLocale::En, TaskAlert::Overdue, &multiline).as_deref(),
+            Some("Overdue: Reply to landlord")
+        );
+    }
+
+    /// The check runs every five minutes. Notifying on every alert line would
+    /// repeat the same reminder until the task is done, so only lines the
+    /// previous check did not already store are sent.
+    #[test]
+    fn only_alerts_new_since_the_last_check_are_notified() {
+        let current = vec!["Overdue: A".to_string(), "Due today: B".to_string()];
+        assert_eq!(alerts_to_notify(None, &current), vec!["Overdue: A", "Due today: B"]);
+        assert_eq!(alerts_to_notify(Some("Overdue: A\nDue today: B"), &current), Vec::<&str>::new());
+        assert_eq!(alerts_to_notify(Some("Overdue: A"), &current), vec!["Due today: B"]);
+        // A changed line is a new alert: another task became overdue.
+        let grown = vec!["Overdue: A, C".to_string()];
+        assert_eq!(alerts_to_notify(Some("Overdue: A"), &grown), vec!["Overdue: A, C"]);
+    }
+
+    #[test]
+    fn interface_locale_defaults_to_english() {
+        assert_eq!(AlertLocale::from_preference(Some("zh-HK")), AlertLocale::ZhHk);
+        assert_eq!(AlertLocale::from_preference(Some("en")), AlertLocale::En);
+        assert_eq!(AlertLocale::from_preference(None), AlertLocale::En);
     }
 
     /// A resolved alert must disappear from the banner on the next check.

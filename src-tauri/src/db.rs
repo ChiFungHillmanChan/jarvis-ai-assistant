@@ -7,11 +7,9 @@ mod embedded {
     embed_migrations!("migrations");
 }
 
-/// WAL mode with no ceiling lets `jarvis.db-wal` outgrow the database itself --
-/// it was already 4 MB against a 768 KB database on the author's machine, and
-/// JARVIS is a login-item process that stays open for days. `journal_size_limit`
-/// truncates the WAL back down after each checkpoint; `wal_autocheckpoint` keeps
-/// those checkpoints frequent enough that the limit is actually reached.
+/// Periodically checkpoint the WAL and limit the file retained when it resets.
+/// This is not a hard disk quota: large transactions or readers that prevent a
+/// complete checkpoint can keep the WAL above `journal_size_limit` temporarily.
 pub const CONNECTION_PRAGMAS: &str = "PRAGMA journal_mode=WAL; \
      PRAGMA foreign_keys=ON; \
      PRAGMA journal_size_limit=67108864; \

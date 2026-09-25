@@ -1,6 +1,7 @@
 use base64::Engine;
 use futures_util::stream::StreamExt;
 use reqwest::Client;
+use crate::mail::models::MailAttachment;
 use serde::{Deserialize, Serialize};
 use std::collections::HashSet;
 use std::sync::LazyLock;
@@ -36,6 +37,9 @@ pub struct GmailMessage {
     pub label_ids: Vec<String>,
     pub is_read: bool,
     pub received_at: Option<String>,
+    /// Filled only by `get_message_full`; the metadata fetch does not see parts.
+    #[serde(default)]
+    pub attachments: Vec<MailAttachment>,
 }
 
 #[derive(Deserialize)]
@@ -63,6 +67,7 @@ struct MessageDetail {
 
 #[derive(Deserialize)]
 struct Payload {
+    filename: Option<String>,
     headers: Option<Vec<Header>>,
     parts: Option<Vec<Part>>,
     body: Option<BodyData>,
@@ -72,6 +77,8 @@ struct Payload {
 
 #[derive(Deserialize)]
 struct Part {
+    filename: Option<String>,
+    headers: Option<Vec<Header>>,
     #[serde(rename = "mimeType")]
     mime_type: Option<String>,
     body: Option<BodyData>,
@@ -81,6 +88,7 @@ struct Part {
 #[derive(Deserialize)]
 struct BodyData {
     data: Option<String>,
+    size: Option<u64>,
 }
 
 #[derive(Deserialize)]
@@ -361,10 +369,11 @@ pub async fn fetch_message_detail(
         thread_id: detail.thread_id,
         subject,
         sender,
-        snippet: detail.snippet,
+        snippet: snippet_text(detail.snippet),
         label_ids: labels,
         is_read,
         received_at: normalise_received_at(detail.internal_date.as_deref(), date.as_deref()),
+        attachments: Vec::new(),
     })
 }
 
@@ -535,6 +544,8 @@ pub async fn get_message_full(
         .map(|h| h.value.clone());
     let labels = detail.label_ids.unwrap_or_default();
     let is_read = !labels.contains(&"UNREAD".to_string());
+    let snippet = snippet_text(detail.snippet);
+    let attachments = payload.map(collect_attachments).unwrap_or_default();
 
     // Extract body from payload; fall back to the Gmail-provided snippet if extraction yields nothing.
     let mut body_text = if let Some(ref pl) = detail.payload {
@@ -543,7 +554,7 @@ pub async fn get_message_full(
         String::new()
     };
     if body_text.trim().is_empty() {
-        if let Some(ref snippet) = detail.snippet {
+        if let Some(ref snippet) = snippet {
             if !snippet.is_empty() {
                 body_text = snippet.clone();
                 log::warn!(
@@ -560,10 +571,11 @@ pub async fn get_message_full(
         thread_id: detail.thread_id,
         subject: subject.clone(),
         sender: sender.clone(),
-        snippet: detail.snippet,
+        snippet,
         label_ids: labels,
         is_read,
         received_at: normalise_received_at(detail.internal_date.as_deref(), date.as_deref()),
+        attachments,
     };
 
     let formatted = format!(
@@ -579,12 +591,16 @@ pub async fn get_message_full(
 }
 
 fn extract_body_from_payload(payload: &Payload) -> String {
+    if is_attachment(payload.filename.as_deref(), payload.headers.as_deref()) {
+        return String::new();
+    }
     // Try direct body on the payload itself
-    if let Some(ref body) = payload.body {
+    let mime = payload.mime_type.as_deref().unwrap_or("");
+    if let Some(ref body) = payload.body.as_ref().filter(|_| mime.eq_ignore_ascii_case("text/plain") || mime.eq_ignore_ascii_case("text/html")) {
         if let Some(ref data) = body.data {
             if !data.is_empty() {
-                if let Ok(decoded) = decode_base64url(data) {
-                    let is_html = payload.mime_type.as_deref() == Some("text/html");
+                if let Ok(decoded) = decode_base64url_charset(data, charset_of(payload.headers.as_deref())) {
+                    let is_html = mime.eq_ignore_ascii_case("text/html");
                     return if is_html {
                         strip_html(&decoded)
                     } else {
@@ -594,26 +610,54 @@ fn extract_body_from_payload(payload: &Payload) -> String {
             }
         }
     }
-    // Recursively search parts for text/plain first, then text/html
+    // Prefer text/plain, unless it is a stub next to a real HTML body
+    // ("To view the message, please use an HTML compatible email viewer!").
     if let Some(ref parts) = payload.parts {
-        if let Some(text) = find_body_in_parts(parts, "text/plain") {
-            return text;
-        }
-        if let Some(text) = find_body_in_parts(parts, "text/html") {
-            return strip_html(&text);
-        }
+        let plain = find_body_in_parts(parts, "text/plain");
+        let html = find_body_in_parts(parts, "text/html").map(|html| strip_html(&html));
+        return choose_body(plain, html);
     }
     String::new()
 }
 
+/// Plain text wins unless it is short and the HTML carries several times more
+/// text, which is what a placeholder plain part looks like.
+fn choose_body(plain: Option<String>, html: Option<String>) -> String {
+    match (plain, html) {
+        (Some(plain), Some(html)) => {
+            let plain_len = plain.trim().chars().count();
+            let html_len = html.trim().chars().count();
+            if plain_len < 300 && html_len > plain_len * 3 { html } else { plain }
+        }
+        (Some(plain), None) => plain,
+        (None, Some(html)) => html,
+        (None, None) => String::new(),
+    }
+}
+
+/// The `charset` parameter of a part's Content-Type header, if any.
+fn charset_of(headers: Option<&[Header]>) -> Option<&str> {
+    let content_type = headers?.iter().find(|h| h.name.eq_ignore_ascii_case("Content-Type"))?;
+    content_type.value.split(';').skip(1).find_map(|param| {
+        let (key, value) = param.split_once('=')?;
+        key.trim().eq_ignore_ascii_case("charset").then(|| value.trim().trim_matches('"'))
+    })
+}
+
 fn find_body_in_parts(parts: &[Part], target_mime: &str) -> Option<String> {
     for part in parts {
-        if part.mime_type.as_deref() == Some(target_mime) {
+        if is_attachment(part.filename.as_deref(), part.headers.as_deref())
+            || part.mime_type.as_deref().is_some_and(|mime| mime.eq_ignore_ascii_case("message/rfc822")) {
+            continue;
+        }
+        if part.mime_type.as_deref().is_some_and(|mime| mime.eq_ignore_ascii_case(target_mime)) {
             if let Some(ref body) = part.body {
                 if let Some(ref data) = body.data {
                     if !data.is_empty() {
-                        if let Ok(decoded) = decode_base64url(data) {
-                            return Some(decoded);
+                        if let Ok(decoded) = decode_base64url_charset(data, charset_of(part.headers.as_deref())) {
+                            if !decoded.trim().is_empty() {
+                                return Some(decoded);
+                            }
                         }
                     }
                 }
@@ -627,6 +671,83 @@ fn find_body_in_parts(parts: &[Part], target_mime: &str) -> Option<String> {
         }
     }
     None
+}
+
+fn is_attachment(filename: Option<&str>, headers: Option<&[Header]>) -> bool {
+    filename.is_some_and(|name| !name.trim().is_empty())
+        || headers.unwrap_or(&[]).iter().any(|header| {
+            header.name.eq_ignore_ascii_case("Content-Disposition")
+                && header.value.split(';').next().unwrap_or("").trim().eq_ignore_ascii_case("attachment")
+        })
+}
+
+/// Gmail returns `snippet` HTML-escaped (`I&#39;ll`), unlike every other field.
+fn snippet_text(raw: Option<String>) -> Option<String> {
+    raw.map(|snippet| decode_html_entities(&snippet))
+}
+
+/// Named files in the message, metadata only. An image with a Content-ID inside
+/// multipart/related is part of the HTML body, usually a signature logo, not a
+/// file the sender attached. A forwarded message counts as one file; the files
+/// inside it are not listed.
+fn collect_attachments(payload: &Payload) -> Vec<MailAttachment> {
+    fn named(filename: Option<&str>, mime_type: Option<&str>, body: Option<&BodyData>) -> Option<MailAttachment> {
+        let filename = filename.map(str::trim).filter(|name| !name.is_empty())?;
+        Some(MailAttachment {
+            filename: filename.to_string(),
+            mime_type: mime_type.unwrap_or("application/octet-stream").to_string(),
+            size: body.and_then(|b| b.size).unwrap_or(0),
+        })
+    }
+    fn walk(parts: &[Part], parent_mime: &str, out: &mut Vec<MailAttachment>) {
+        for part in parts {
+            let mime = part.mime_type.as_deref().unwrap_or("");
+            let embedded = parent_mime.eq_ignore_ascii_case("multipart/related")
+                && part.headers.as_deref().unwrap_or(&[]).iter().any(|h| h.name.eq_ignore_ascii_case("Content-ID"));
+            if !embedded {
+                if let Some(file) = named(part.filename.as_deref(), part.mime_type.as_deref(), part.body.as_ref()) {
+                    out.push(file);
+                    continue;
+                }
+            }
+            if let Some(children) = part.parts.as_deref().filter(|_| !mime.eq_ignore_ascii_case("message/rfc822")) {
+                walk(children, mime, out);
+            }
+        }
+    }
+    if let Some(file) = named(payload.filename.as_deref(), payload.mime_type.as_deref(), payload.body.as_ref()) {
+        return vec![file];
+    }
+    let mut out = Vec::new();
+    walk(payload.parts.as_deref().unwrap_or(&[]), payload.mime_type.as_deref().unwrap_or(""), &mut out);
+    out
+}
+
+/// Gmail returns the part's bytes in their original charset. Decode Big5,
+/// GB2312, ISO-8859-x and friends properly instead of as lossy UTF-8.
+fn decode_base64url_charset(data: &str, charset: Option<&str>) -> Result<String, String> {
+    let encoding = charset
+        .and_then(|label| encoding_rs::Encoding::for_label(label.as_bytes()))
+        .filter(|encoding| *encoding != encoding_rs::UTF_8);
+    match encoding {
+        None => decode_base64url(data),
+        Some(encoding) => {
+            let bytes = decode_base64url_bytes(data)?;
+            Ok(encoding.decode(&bytes).0.into_owned())
+        }
+    }
+}
+
+fn decode_base64url_bytes(data: &str) -> Result<Vec<u8>, String> {
+    let cleaned: String = data
+        .chars()
+        .filter(|c| !c.is_whitespace())
+        .collect::<String>()
+        .trim_end_matches('=')
+        .to_string();
+    base64::engine::general_purpose::URL_SAFE_NO_PAD
+        .decode(&cleaned)
+        .map_err(|e| format!("Base64 decode error: {}", e))
 }
 
 fn decode_base64url(data: &str) -> Result<String, String> {
@@ -655,18 +776,14 @@ fn strip_html(html: &str) -> String {
         while i < html.len() {
             let rest_lower = &lower[i..];
             let rest = &html[i..];
-            if let Some(start) = rest_lower.find("<script") {
+            let next = [("<script", "</script>"), ("<style", "</style>")]
+                .into_iter()
+                .filter_map(|(open, close)| rest_lower.find(open).map(|start| (start, close)))
+                .min_by_key(|(start, _)| *start);
+            if let Some((start, close)) = next {
                 out.push_str(&rest[..start]);
-                if let Some(end) = rest_lower[start..].find("</script>") {
-                    i += start + end + "</script>".len();
-                    continue;
-                }
-                break;
-            }
-            if let Some(start) = rest_lower.find("<style") {
-                out.push_str(&rest[..start]);
-                if let Some(end) = rest_lower[start..].find("</style>") {
-                    i += start + end + "</style>".len();
+                if let Some(end) = rest_lower[start..].find(close) {
+                    i += start + end + close.len();
                     continue;
                 }
                 break;
@@ -702,14 +819,7 @@ fn strip_html(html: &str) -> String {
     }
 
     // Decode the common HTML entities we care about.
-    let text = text
-        .replace("&nbsp;", " ")
-        .replace("&amp;", "&")
-        .replace("&lt;", "<")
-        .replace("&gt;", ">")
-        .replace("&quot;", "\"")
-        .replace("&#39;", "'")
-        .replace("&apos;", "'");
+    let text = decode_html_entities(&text);
 
     // Collapse runs of blank lines to at most one blank line so paragraphs remain visible.
     let mut cleaned = String::with_capacity(text.len());
@@ -728,6 +838,42 @@ fn strip_html(html: &str) -> String {
         }
     }
     cleaned.trim().to_string()
+}
+
+fn decode_html_entities(text: &str) -> String {
+    let mut output = String::with_capacity(text.len());
+    let mut rest = text;
+    while let Some(start) = rest.find('&') {
+        output.push_str(&rest[..start]);
+        rest = &rest[start..];
+        // Entity names and Unicode numeric references are short. Bound the
+        // scan so malformed input with many ampersands stays linear.
+        let end = rest.bytes().take(16).position(|byte| byte == b';');
+        let decoded = end.and_then(|end| {
+            let entity = &rest[1..end];
+            match entity {
+                "nbsp" => Some(' '), "amp" => Some('&'), "lt" => Some('<'),
+                "gt" => Some('>'), "quot" => Some('"'), "apos" => Some('\''),
+                _ => {
+                    let value = if let Some(hex) = entity.strip_prefix("#x").or_else(|| entity.strip_prefix("#X")) {
+                        u32::from_str_radix(hex, 16).ok()
+                    } else {
+                        entity.strip_prefix('#').and_then(|digits| digits.parse::<u32>().ok())
+                    };
+                    value.and_then(char::from_u32).filter(|ch| *ch != '\0')
+                }
+            }
+        });
+        if let (Some(end), Some(ch)) = (end, decoded) {
+            output.push(ch);
+            rest = &rest[end + 1..];
+        } else {
+            output.push('&');
+            rest = &rest[1..];
+        }
+    }
+    output.push_str(rest);
+    output
 }
 
 /// Remove CR/LF (and surrounding whitespace) from a value destined for an
@@ -825,7 +971,109 @@ pub async fn send_message(
 
 #[cfg(test)]
 mod tests {
+
+    /// Live finding (2026-09-25): a recruiter mail's plain part was only
+    /// "To view the message, please use an HTML compatible email viewer!",
+    /// so the stored body and every AI summary of it were empty.
+    #[test]
+    fn a_placeholder_plain_part_loses_to_the_real_html_body() {
+        let stub = "To view the message, please use an HTML compatible email viewer!".to_string();
+        let html = "15 software development apprentice jobs in London. ".repeat(10);
+        assert_eq!(choose_body(Some(stub.clone()), Some(html.clone())), html);
+        let real = "Hi Hillman, can we meet on Tuesday at 3pm to go through the contract terms?".to_string();
+        assert_eq!(choose_body(Some(real.clone()), Some(format!("{real} footer"))), real);
+        assert_eq!(choose_body(None, Some(html.clone())), html);
+        assert_eq!(choose_body(Some(stub.clone()), None), stub);
+    }
+
+    #[test]
+    fn declared_charsets_are_decoded_instead_of_lossy_utf8() {
+        use base64::Engine;
+        let (big5, _, _) = encoding_rs::BIG5.encode("付款通知");
+        let data = base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(&big5);
+        let headers = vec![Header { name: "Content-Type".into(), value: "text/plain; charset=\"big5\"".into() }];
+        assert_eq!(charset_of(Some(&headers)), Some("big5"));
+        assert_eq!(decode_base64url_charset(&data, Some("big5")).unwrap(), "付款通知");
+        let utf8 = base64::engine::general_purpose::URL_SAFE_NO_PAD.encode("付款通知".as_bytes());
+        assert_eq!(decode_base64url_charset(&utf8, Some("UTF-8")).unwrap(), "付款通知");
+        assert_eq!(decode_base64url_charset(&utf8, None).unwrap(), "付款通知");
+    }
     use super::*;
+
+    fn body_fixture(value: serde_json::Value) -> String {
+        extract_body_from_payload(&serde_json::from_value::<Payload>(value).unwrap())
+    }
+
+    fn encoded_body(text: &str) -> serde_json::Value {
+        serde_json::json!({"data": base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(text)})
+    }
+
+    #[test]
+    fn mail_body_skips_text_attachments_and_attached_messages() {
+        let result = body_fixture(serde_json::json!({"mimeType":"multipart/mixed", "parts":[
+            {"mimeType":"text/plain", "filename":"notes.txt", "body":encoded_body("Attachment text")},
+            {"mimeType":"multipart/mixed", "headers":[{"name":"content-disposition","value":"Attachment; filename=mail.eml"}],
+             "parts":[{"mimeType":"text/plain","body":encoded_body("Forwarded attachment")}]},
+            {"mimeType":"text/plain", "body":encoded_body("  \n ")},
+            {"mimeType":"text/html", "body":encoded_body("<p>Actual message</p>")}
+        ]}));
+        assert_eq!(result, "Actual message");
+    }
+
+    #[test]
+    fn mail_body_does_not_display_binary_or_named_root_attachments() {
+        assert_eq!(body_fixture(serde_json::json!({"mimeType":"application/pdf", "body":encoded_body("%PDF-binary")})), "");
+        assert_eq!(body_fixture(serde_json::json!({"mimeType":"text/plain", "filename":"notes.txt", "body":encoded_body("Private attachment")})), "");
+    }
+
+    /// Outlook and Gmail signatures embed their logos as named image parts
+    /// inside multipart/related. Listing those would mark nearly every business
+    /// email as having attachments.
+    #[test]
+    fn attachments_list_named_files_but_not_embedded_signature_images() {
+        let payload = serde_json::from_value::<Payload>(serde_json::json!({"mimeType":"multipart/mixed", "parts":[
+            {"mimeType":"multipart/related", "parts":[
+                {"mimeType":"text/html", "body":encoded_body("<p>Hi</p><img src=\"cid:logo\">")},
+                {"mimeType":"image/png", "filename":"image001.png", "headers":[{"name":"Content-ID","value":"<logo>"}], "body":{"size":2048}}
+            ]},
+            {"mimeType":"application/pdf", "filename":"Invoice 0925.pdf",
+             "headers":[{"name":"Content-Disposition","value":"attachment; filename=\"Invoice 0925.pdf\""}], "body":{"size":184320}},
+            {"mimeType":"image/jpeg", "filename":"site.jpg",
+             "headers":[{"name":"Content-ID","value":"<site>"},{"name":"Content-Disposition","value":"inline; filename=site.jpg"}], "body":{"size":90000}},
+            {"mimeType":"message/rfc822", "filename":"Fwd.eml", "body":{"size":5000},
+             "parts":[{"mimeType":"application/pdf", "filename":"inner.pdf", "body":{"size":1}}]}
+        ]})).unwrap();
+        let listed: Vec<(String, String, u64)> = collect_attachments(&payload)
+            .into_iter().map(|a| (a.filename, a.mime_type, a.size)).collect();
+        assert_eq!(listed, vec![
+            ("Invoice 0925.pdf".into(), "application/pdf".into(), 184320),
+            // A photo shown inline by Apple Mail is still a file the sender attached.
+            ("site.jpg".into(), "image/jpeg".into(), 90000),
+            // A forwarded message is one attachment; its own files belong to it.
+            ("Fwd.eml".into(), "message/rfc822".into(), 5000),
+        ]);
+
+        let single = serde_json::from_value::<Payload>(serde_json::json!(
+            {"mimeType":"application/pdf", "filename":"scan.pdf", "body":{"size":10}})).unwrap();
+        assert_eq!(collect_attachments(&single).len(), 1, "a message that is only a file lists that file");
+    }
+
+    /// Gmail returns snippets HTML-escaped, so `I&#39;ll` reached the inbox list.
+    #[test]
+    fn gmail_snippets_are_unescaped_once() {
+        assert_eq!(snippet_text(Some("I&#39;ll send it &amp;lt;today&amp;gt;".into())).as_deref(), Some("I'll send it &lt;today&gt;"));
+        assert_eq!(snippet_text(None), None);
+    }
+
+    #[test]
+    fn mail_html_removes_scripts_and_styles_in_document_order() {
+        assert_eq!(strip_html("<style>.hidden {color:red}</style><p>First</p><script>alert(1)</script><style>.later{}</style><p>Second</p>"), "First\nSecond");
+    }
+
+    #[test]
+    fn mail_html_decodes_numeric_entities_once_and_keeps_unknown_entities() {
+        assert_eq!(strip_html("<p>&#25991;&#x4EF6; &amp;lt; &unknown;</p>"), "文件 &lt; &unknown;");
+    }
 
     #[test]
     fn strip_header_value_removes_crlf_injection() {
@@ -1047,6 +1295,7 @@ mod sync_tests {
             label_ids: vec!["INBOX".to_string()],
             is_read: false,
             received_at: Some(received_at.to_string()),
+            attachments: Vec::new(),
         }
     }
 

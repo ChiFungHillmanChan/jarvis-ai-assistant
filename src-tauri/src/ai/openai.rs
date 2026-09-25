@@ -13,6 +13,10 @@ struct OpenAIRequest {
     messages: Vec<OpenAIMessage>,
     tools: Vec<serde_json::Value>,
     max_completion_tokens: u32,
+    /// gpt-6-luna rejects function tools on Chat Completions unless reasoning
+    /// is off ("Function tools with reasoning_effort are not supported"),
+    /// verified live 2026-09-25.
+    reasoning_effort: &'static str,
     stream: bool,
     stream_options: StreamOptions,
 }
@@ -87,6 +91,9 @@ struct SseFunctionDelta {
     arguments: Option<String>,
 }
 
+/// The OpenAI model used by chat and the mail workspace.
+pub const OPENAI_MODEL: &str = "gpt-6-luna";
+
 pub async fn send(
     api_key: &str,
     messages: Vec<(String, String)>,
@@ -100,7 +107,7 @@ pub async fn send(
     let started_at = std::time::Instant::now();
     let mut total_prompt_tokens: i64 = 0;
     let mut total_completion_tokens: i64 = 0;
-    let model_id = "gpt-5.6-luna".to_string();
+    let model_id = OPENAI_MODEL.to_string();
     let client = Client::builder()
         .read_timeout(std::time::Duration::from_secs(60))
         .build()?;
@@ -135,6 +142,7 @@ pub async fn send(
             messages: openai_messages.clone(),
             tools: openai_tools.clone(),
             max_completion_tokens: 4096,
+            reasoning_effort: "none",
             stream: true,
             stream_options: StreamOptions { include_usage: true },
         };
