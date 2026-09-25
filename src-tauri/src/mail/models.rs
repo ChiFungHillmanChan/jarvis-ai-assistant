@@ -26,6 +26,81 @@ pub struct MailMessage {
     pub received_at: String,
     /// None: saved before V26 recorded attachments, so unknown rather than empty.
     pub attachments: Option<Vec<MailAttachment>>,
+    /// None until the message has been triaged.
+    #[serde(default)]
+    pub triage: Option<MailTriage>,
+    /// Earliest open follow-up date extracted from this message.
+    #[serde(default)]
+    pub next_due: Option<String>,
+}
+
+/// Categories a message can be triaged into. The order is the display order.
+pub const MAIL_CATEGORIES: [&str; 7] =
+    ["work", "jobs", "finance", "schedule", "account", "personal", "promotions"];
+
+/// One message's triage. The probabilities are Jev's raw answers; `attention`
+/// and `sent_by_owner` are decided in code (mail/triage.rs), not by a model.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct MailTriage {
+    pub category: String,
+    pub category_confidence: f64,
+    pub needs_reply: f64,
+    pub action_required: f64,
+    pub has_date: f64,
+    pub importance: f64,
+    pub sent_by_owner: bool,
+    pub attention: bool,
+    pub summary: Option<String>,
+    /// "jev", or "luna" when gpt-6-luna overrode an uncertain category.
+    pub decided_by: String,
+}
+
+/// A dated follow-up extracted from a message. Local only until the user
+/// adds it to Google Calendar.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct MailItem {
+    pub id: i64,
+    pub message_id: i64,
+    pub kind: String,
+    pub title: String,
+    pub due_date: Option<String>,
+    pub due_time: Option<String>,
+    pub end_time: Option<String>,
+    pub location: Option<String>,
+    pub evidence: String,
+    pub evidence_verified: bool,
+    pub status: String,
+    pub remind_at: Option<String>,
+    pub reminded_at: Option<String>,
+    pub calendar_event_id: Option<String>,
+    pub subject: String,
+    pub sender: String,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct MailTriageStatus {
+    pub enabled: bool,
+    pub typesafe_key: bool,
+    pub openai_key: bool,
+    pub untriaged: i64,
+    pub attention: i64,
+    pub open_items: i64,
+    /// (category, message count), in MAIL_CATEGORIES order.
+    pub categories: Vec<(String, i64)>,
+}
+
+#[derive(Debug, Clone, Default, Serialize)]
+pub struct MailTriageRun {
+    pub triaged: usize,
+    pub summarized: usize,
+    pub items: usize,
+    pub failed: usize,
+    pub remaining: i64,
+    pub jev_input_tokens: i64,
+    pub luna_input_tokens: i64,
+    pub luna_output_tokens: i64,
+    pub cost_usd: f64,
+    pub warning: Option<String>,
 }
 
 /// A file attached to a message. Metadata only: the file stays with the provider.
@@ -77,7 +152,7 @@ pub struct MailSettings {
 }
 
 fn default_openai_model() -> String {
-    "gpt-5.6-luna".into()
+    crate::ai::openai::OPENAI_MODEL.into()
 }
 
 #[derive(Serialize)]
@@ -85,6 +160,7 @@ pub struct MailWorkspace {
     pub accounts: Vec<MailAccount>,
     pub groups: Vec<MailGroup>,
     pub settings: MailSettings,
+    pub triage: MailTriageStatus,
 }
 
 #[derive(Serialize)]
@@ -115,4 +191,8 @@ pub struct MailAnalysis {
     pub model: String,
     pub source_ids: Vec<i64>,
     pub omitted_messages: usize,
+    /// Reported by OpenAI; zero for local and Bedrock analysis.
+    pub input_tokens: i64,
+    pub output_tokens: i64,
+    pub cached_tokens: i64,
 }

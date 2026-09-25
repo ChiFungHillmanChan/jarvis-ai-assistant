@@ -16,11 +16,12 @@ pub struct Settings {
 ///
 /// Keyed on the preference name, not on where the value is stored, so the filter
 /// stays correct once these credentials move to the Keychain.
-const SECRET_PREFERENCE_KEYS: [&str; 5] = [
+const SECRET_PREFERENCE_KEYS: [&str; 6] = [
     "github_token",
     "notion_api_key",
     "obsidian_api_key",
     "minimax_api_key",
+    "typesafe_api_key",
     "google_refresh_token",
 ];
 
@@ -165,12 +166,13 @@ pub fn set_api_key(
     // Keychain item plus the marker row that `store` writes. Routing it through
     // the provider branch below would save the secret but leave
     // `minimax_api_key_configured` false forever.
-    if provider == "minimax" {
+    if provider == "minimax" || provider == "typesafe" {
         let secret = match change {
             KeyChange::Save(ref s) => s.as_str(),
             KeyChange::Remove => "",
         };
-        return crate::integration_keys::store(&db, "minimax_api_key", secret);
+        let key = if provider == "minimax" { "minimax_api_key" } else { "typesafe_api_key" };
+        return crate::integration_keys::store(&db, key, secret);
     }
     let account = match provider.as_str() {
         "gemini" => "gemini_api_key",

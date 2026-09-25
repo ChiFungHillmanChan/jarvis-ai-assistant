@@ -45,12 +45,37 @@ fn persist_refresh(auth: &GoogleAuth, account_id: &str) -> Result<(), String> {
         .map_err(|_| "未能儲存信箱憑證，請解鎖 macOS 鑰匙圈後重試。".to_string())
 }
 
-async fn refresh(auth: &GoogleAuth, account_id: &str) -> Result<String, String> {
-    auth.refresh_access_token()
-        .await
-        .map_err(|_| "信箱登入更新失敗，請檢查網絡或重新連接信箱。".to_string())?;
-    // Google can rotate a refresh token; persist before using its access token.
-    persist_refresh(auth, account_id)?;
+/// Pages listed per click when catching up on new mail, and the most new
+/// messages downloaded per click. A larger backlog continues on the next
+/// click, because last_synced only moves once its whole window is stored.
+const CATCH_UP_PAGES: usize = 200;
+const CATCH_UP_LIMIT: usize = 200;
+/// A window that has been retried this long (one message that always fails
+/// to download) is accepted as done, with a warning, instead of growing and
+/// being re-listed forever.
+const GIVE_UP_WINDOW_SECS: i64 = 8 * 86_400;
+/// Newest stored messages whose read and inbox state each sync refreshes.
+const LABEL_REFRESH: usize = 50;
+
+async fn refresh(db: &Database, auth: &GoogleAuth, account_id: &str) -> Result<String, String> {
+    let before = auth.refresh_token.lock().ok().and_then(|t| t.clone());
+    auth.refresh_access_token().await.map_err(|error| {
+        if error.contains("invalid_grant") {
+            // Only a new consent fixes this. Say so, and show the mailbox as
+            // disconnected instead of "connected" with a dead credential.
+            let _ = store::set_connected(db, account_id, false);
+            "Google 授權已過期或已被撤銷。請按「連接 Gmail 帳戶」重新連接此信箱；本機郵件會保留。".to_string()
+        } else {
+            "信箱登入更新失敗，請檢查網絡後重試。".to_string()
+        }
+    })?;
+    // Google can rotate a refresh token; persist a new one before using its
+    // access token. An unchanged token is not rewritten: that was a Keychain
+    // write on every sync, each one a chance for a password prompt.
+    let after = auth.refresh_token.lock().ok().and_then(|t| t.clone());
+    if after != before {
+        persist_refresh(auth, account_id)?;
+    }
     auth.get_access_token()
         .ok_or_else(|| "信箱登入未完成，請重新連接。".to_string())
 }
@@ -78,6 +103,7 @@ async fn gmail_json<T: DeserializeOwned>(
     path: &str,
     token: &str,
     page: Option<&str>,
+    query: Option<&str>,
 ) -> Result<T, String> {
     let client = reqwest::Client::builder()
         .timeout(std::time::Duration::from_secs(30))
@@ -89,6 +115,9 @@ async fn gmail_json<T: DeserializeOwned>(
         request = request.query(&[("maxResults", "50")]);
         if let Some(page) = page {
             request = request.query(&[("pageToken", page)]);
+        }
+        if let Some(query) = query {
+            request = request.query(&[("q", query)]);
         }
     }
     let response = request
@@ -122,7 +151,7 @@ pub async fn connect(db: &Database, state: &MailSyncState) -> Result<MailAccount
         .ensure_access_token()
         .await
         .map_err(|_| "Google 登入失敗，請重試。".to_string())?;
-    let profile: Profile = gmail_json("profile", &token, None)
+    let profile: Profile = gmail_json("profile", &token, None, None)
         .await
         .map_err(|_| "未能讀取 Gmail 帳戶資料，請重新連接信箱。".to_string())?;
     let email = profile.email_address.trim().to_lowercase();
@@ -220,16 +249,63 @@ async fn sync_account_inner(
         .refresh_token
         .lock()
         .map_err(|_| "暫時未能讀取登入狀態，請重試。".to_string())? = Some(secret);
-    let mut token = refresh(&auth, account_id).await?;
+    let mut token = refresh(db, &auth, account_id).await?;
+    if !older && !restart {
+        if let Some(after) = account.last_synced.as_deref().and_then(window_start) {
+            return catch_up(db, &auth, account_id, token, after).await;
+        }
+    }
     let page_token = if older {
         account.next_page_token.as_deref()
     } else {
         None
     };
-    let page = match gmail_json::<MessagePage>("messages", &token, page_token).await {
+    let page = list_page(db, &auth, account_id, &mut token, page_token, None).await?;
+    let mut ids: Vec<String> = page.messages.into_iter().map(|m| m.id).collect();
+    if older {
+        // Older pages are rarely stored already; skipping any that are saves
+        // a full download each. A rescan still re-reads everything.
+        let known = store::known_provider_ids(db, account_id, &ids)?;
+        ids.retain(|id| !known.contains(id));
+    }
+    let (rows, failures) = download(db, &auth, account_id, &token, ids).await;
+    let saved = store::save_messages(db, account_id, &rows)?;
+    let advance = advance_cursor(older, account.next_page_token.is_some(), restart, failures);
+    // Partial pages must not initialize pagination or move past missing rows.
+    if failures == 0 {
+        // Only the very first sync sets last_synced here; "load older" and
+        // "rescan" must not move it, or the next normal sync skips new mail.
+        store::finish_sync(db, account_id, page.next_page_token.as_deref(), advance, account.last_synced.is_none())?;
+    }
+    let current = store::get_account(db, account_id)?;
+    Ok(MailSyncResult {
+        saved,
+        has_more: current.next_page_token.is_some(),
+        warning: (failures > 0).then(|| format!("有 {failures} 封郵件未能下載，成功下載的 {saved} 封已儲存。請重試相同的同步操作；若持續失敗，請重新連接信箱。")),
+    })
+}
+
+/// The start of the next catch-up window: one day before the last complete
+/// sync (SQLite UTC "YYYY-MM-DD HH:MM:SS"), as Unix seconds for Gmail's
+/// `after:`. The overlap absorbs clock skew and late-delivered mail.
+fn window_start(last_synced: &str) -> Option<i64> {
+    chrono::NaiveDateTime::parse_from_str(last_synced, "%Y-%m-%d %H:%M:%S")
+        .ok()
+        .map(|at| at.and_utc().timestamp() - 86_400)
+}
+
+async fn list_page(
+    db: &Database,
+    auth: &GoogleAuth,
+    account_id: &str,
+    token: &mut String,
+    page: Option<&str>,
+    query: Option<&str>,
+) -> Result<MessagePage, String> {
+    match gmail_json::<MessagePage>("messages", token, page, query).await {
         Err(error) if error == "UNAUTHORIZED" => {
-            token = refresh(&auth, account_id).await?;
-            gmail_json::<MessagePage>("messages", &token, page_token)
+            *token = refresh(db, auth, account_id).await?;
+            gmail_json::<MessagePage>("messages", token, page, query)
                 .await
                 .map_err(|error| {
                     if error == "UNAUTHORIZED" {
@@ -237,15 +313,26 @@ async fn sync_account_inner(
                     } else {
                         error
                     }
-                })?
+                })
         }
-        result => result?,
-    };
-    let results = stream::iter(page.messages.into_iter().map(|message| {
-        let token = token.clone();
+        result => result,
+    }
+}
+
+/// Download full messages, retrying only the ones that failed with 401 after
+/// one refresh, so a mid-page token expiry keeps every body already read.
+async fn download(
+    db: &Database,
+    auth: &GoogleAuth,
+    account_id: &str,
+    token: &str,
+    ids: Vec<String>,
+) -> (Vec<(gmail::GmailMessage, String)>, usize) {
+    let results = stream::iter(ids.into_iter().map(|id| {
+        let token = token.to_string();
         async move {
-            let result = gmail::get_message_full(&token, &message.id).await;
-            (message.id, result)
+            let result = gmail::get_message_full(&token, &id).await;
+            (id, result)
         }
     }))
     .buffer_unordered(4)
@@ -262,9 +349,7 @@ async fn sync_account_inner(
         }
     }
     if !unauthorized.is_empty() {
-        // Retry only failed 401 reads, preserving every successful body even
-        // when re-authentication fails halfway through a page.
-        match refresh(&auth, account_id).await {
+        match refresh(db, auth, account_id).await {
             Ok(refreshed) => {
                 let retries = stream::iter(unauthorized.into_iter().map(|id| {
                     let token = refreshed.clone();
@@ -283,17 +368,96 @@ async fn sync_account_inner(
             Err(_) => failures += unauthorized.len(),
         }
     }
+    (rows, failures)
+}
+
+#[derive(Deserialize)]
+struct MinimalMessage {
+    #[serde(rename = "labelIds", default)]
+    label_ids: Vec<String>,
+}
+
+/// Mail read or archived in Gmail should look the same here. A catch-up only
+/// downloads new messages, so re-read the labels of the newest stored ones
+/// (format=minimal, a few hundred bytes each). Best effort: failures are
+/// ignored and retried on the next sync.
+async fn refresh_labels(db: &Database, account_id: &str, token: &str, ids: Vec<String>) {
+    let results = stream::iter(ids.into_iter().map(|id| async move {
+        let found = gmail_json::<MinimalMessage>(&format!("messages/{id}?format=minimal"), token, None, None).await;
+        (id, found)
+    }))
+    .buffer_unordered(8)
+    .collect::<Vec<_>>()
+    .await;
+    for (id, found) in results {
+        if let Ok(message) = found {
+            let is_read = !message.label_ids.iter().any(|l| l == "UNREAD");
+            let is_inbox = message.label_ids.iter().any(|l| l == "INBOX");
+            let _ = store::update_labels(db, account_id, &id, is_read, is_inbox);
+        }
+    }
+}
+
+/// Normal sync once an account has history: list every message since the
+/// last complete sync (not just the newest page of 50, which silently skipped
+/// anything beyond it) and download only the ones not stored yet.
+async fn catch_up(
+    db: &Database,
+    auth: &GoogleAuth,
+    account_id: &str,
+    mut token: String,
+    after: i64,
+) -> Result<MailSyncResult, String> {
+    let query = format!("after:{after}");
+    let mut page_token: Option<String> = None;
+    let mut new_ids = Vec::new();
+    let mut stored_recent = Vec::new();
+    let mut complete = false;
+    for _ in 0..CATCH_UP_PAGES {
+        let page = list_page(db, auth, account_id, &mut token, page_token.as_deref(), Some(&query)).await?;
+        let ids: Vec<String> = page.messages.into_iter().map(|m| m.id).collect();
+        let known = store::known_provider_ids(db, account_id, &ids)?;
+        for id in ids {
+            if !known.contains(&id) {
+                new_ids.push(id);
+            } else if stored_recent.len() < LABEL_REFRESH {
+                stored_recent.push(id);
+            }
+        }
+        page_token = page.next_page_token;
+        if page_token.is_none() {
+            complete = true;
+            break;
+        }
+        if new_ids.len() >= CATCH_UP_LIMIT {
+            break;
+        }
+    }
+    if new_ids.len() > CATCH_UP_LIMIT {
+        new_ids.truncate(CATCH_UP_LIMIT);
+        complete = false;
+    }
+    let (rows, failures) = download(db, auth, account_id, &token, new_ids).await;
     let saved = store::save_messages(db, account_id, &rows)?;
-    let advance = advance_cursor(older, account.next_page_token.is_some(), restart, failures);
-    // Partial pages must not initialize pagination or move past missing rows.
-    if failures == 0 {
-        store::finish_sync(db, account_id, page.next_page_token.as_deref(), advance)?;
+    refresh_labels(db, account_id, &token, stored_recent).await;
+    let give_up = chrono::Utc::now().timestamp() - after > GIVE_UP_WINDOW_SECS;
+    let finished = complete && (failures == 0 || give_up);
+    if finished {
+        store::finish_sync(db, account_id, None, false, true)?;
     }
     let current = store::get_account(db, account_id)?;
     Ok(MailSyncResult {
         saved,
         has_more: current.next_page_token.is_some(),
-        warning: (failures > 0).then(|| format!("有 {failures} 封郵件未能下載，成功下載的 {saved} 封已儲存。請重試相同的同步操作；若持續失敗，請重新連接信箱。")),
+        warning: if failures > 0 && finished {
+            Some(format!("有 {failures} 封郵件多日未能下載，已略過；如需補回，請在信箱「管理」選擇「由最新郵件重新掃描」。"))
+        } else if failures > 0 {
+            Some(format!("有 {failures} 封郵件未能下載，成功下載的 {saved} 封已儲存。請再按「同步」重試。"))
+        } else if !finished {
+            Some("仍有較新的郵件未下載，請再按「同步」繼續。".to_string())
+        } else {
+            None
+        },
     })
 }
 
@@ -405,6 +569,12 @@ mod tests {
             .unwrap();
         assert_eq!(groups, 1);
         KeychainStore::delete(KEYCHAIN_SERVICE, &b).unwrap();
+    }
+
+    #[test]
+    fn catch_up_window_starts_a_day_before_the_last_complete_sync() {
+        assert_eq!(window_start("2026-09-25 18:01:23"), Some(1_790_359_283 - 86_400));
+        assert_eq!(window_start("not a date"), None);
     }
 
     #[test]

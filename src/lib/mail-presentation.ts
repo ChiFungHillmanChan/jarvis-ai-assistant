@@ -43,3 +43,110 @@ export function readableBody(body: string): string {
   const headers = /^From: [^\n]*\nTo: [^\n]*\nDate: [^\n]*\nSubject: [^\n]*\n\n/.exec(body);
   return headers ? body.slice(headers[0].length) : body;
 }
+
+/**
+ * Gmail returns snippets HTML-escaped. Sync decodes new ones, but rows saved
+ * before that fix still read "Here&#39;s your label &amp; …" in the list.
+ */
+export function decodeEntities(value: string): string {
+  const named: Record<string, string> = { amp: '&', lt: '<', gt: '>', quot: '"', apos: "'", nbsp: ' ' };
+  return value.replace(/&(#x[\da-f]+|#\d+|[a-z]+);/gi, (match, code: string) => {
+    if (code[0] === '#') {
+      const point = code[1].toLowerCase() === 'x' ? parseInt(code.slice(2), 16) : parseInt(code.slice(1), 10);
+      return Number.isFinite(point) && point > 0 && point <= 0x10ffff ? String.fromCodePoint(point) : match;
+    }
+    return named[code.toLowerCase()] ?? match;
+  });
+}
+
+export type Text = (en: string, zh: string) => string;
+export const MAIL_CATEGORIES = ['work', 'jobs', 'finance', 'schedule', 'account', 'personal', 'promotions'] as const;
+export type Category = typeof MAIL_CATEGORIES[number];
+
+export function categoryLabel(category: string, text: Text): string {
+  switch (category) {
+    case 'work': return text('Work and projects', '工作及項目');
+    case 'jobs': return text('Jobs and recruiting', '求職及招聘');
+    case 'finance': return text('Bills and money', '帳單及財務');
+    case 'schedule': return text('Bookings and events', '預約及活動');
+    case 'account': return text('Accounts and security', '帳戶及安全');
+    case 'personal': return text('Personal', '個人事務');
+    case 'promotions': return text('Promotions and newsletters', '推廣及電子報');
+    default: return category;
+  }
+}
+
+export function itemKindLabel(kind: string, text: Text): string {
+  switch (kind) {
+    case 'task': return text('To do', '待辦');
+    case 'deadline': return text('Deadline', '截止');
+    case 'event': return text('Event', '活動');
+    case 'reply': return text('Reply', '待回覆');
+    default: return kind;
+  }
+}
+
+/** Local calendar date as YYYY-MM-DD. */
+export function dayKey(value: Date): string {
+  return `${value.getFullYear()}-${String(value.getMonth() + 1).padStart(2, '0')}-${String(value.getDate()).padStart(2, '0')}`;
+}
+
+export type DueBucket = 'overdue' | 'today' | 'week' | 'later' | 'undated';
+export const DUE_BUCKETS: DueBucket[] = ['overdue', 'today', 'week', 'later', 'undated'];
+
+/** Where an item belongs on the agenda, by its due date against `today`. */
+export function dueBucket(dueDate: string | null, today: Date): DueBucket {
+  if (!dueDate) return 'undated';
+  const key = dayKey(today);
+  if (dueDate < key) return 'overdue';
+  if (dueDate === key) return 'today';
+  const weekEnd = new Date(today); weekEnd.setDate(today.getDate() + 7);
+  return dueDate <= dayKey(weekEnd) ? 'week' : 'later';
+}
+
+export function dueBucketLabel(bucket: DueBucket, text: Text): string {
+  switch (bucket) {
+    case 'overdue': return text('Overdue', '已過期');
+    case 'today': return text('Today', '今日');
+    case 'week': return text('Next 7 days', '未來 7 日');
+    case 'later': return text('Later', '較後');
+    case 'undated': return text('No date', '未定日期');
+  }
+}
+
+/** "Wed 30 Sep 15:00" / "9月30日（週三）15:00" for a local date and optional time. */
+export function formatDue(date: string | null, time: string | null, locale: string, weekday = true): string {
+  if (!date) return '';
+  const day = new Date(`${date}T12:00:00`);
+  if (Number.isNaN(day.getTime())) return date;
+  let label: string;
+  if (locale.startsWith('zh')) {
+    const week = weekday ? `（${day.toLocaleDateString(locale, { weekday: 'short' })}）` : '';
+    label = `${day.getMonth() + 1}月${day.getDate()}日${week}`;
+  } else {
+    label = day.toLocaleDateString(locale, weekday ? { weekday: 'short', day: 'numeric', month: 'short' } : { day: 'numeric', month: 'short' });
+  }
+  return time ? `${label} ${time}` : label;
+}
+
+function localMinute(value: Date): string {
+  return `${dayKey(value)}T${String(value.getHours()).padStart(2, '0')}:${String(value.getMinutes()).padStart(2, '0')}`;
+}
+
+/**
+ * A sensible first reminder: an hour before a timed item, 09:00 on the day
+ * for a dated one, 09:00 tomorrow for an undated one. Never in the past.
+ */
+export function defaultRemindAt(dueDate: string | null, dueTime: string | null, now: Date): string {
+  let at: Date;
+  if (dueDate && dueTime) { at = new Date(`${dueDate}T${dueTime}:00`); at.setHours(at.getHours() - 1); }
+  else if (dueDate) at = new Date(`${dueDate}T09:00:00`);
+  else { at = new Date(now); at.setDate(now.getDate() + 1); at.setHours(9, 0, 0, 0); }
+  if (Number.isNaN(at.getTime()) || at <= now) { at = new Date(now); at.setMinutes(0, 0, 0); at.setHours(at.getHours() + 1); }
+  return localMinute(at);
+}
+
+/** SQLite datetime('now') values are UTC without a zone marker. */
+export function backendUtc(value: string): Date {
+  return new Date(/^\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}$/.test(value) ? `${value.replace(' ', 'T')}Z` : value);
+}

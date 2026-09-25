@@ -599,7 +599,7 @@ fn extract_body_from_payload(payload: &Payload) -> String {
     if let Some(ref body) = payload.body.as_ref().filter(|_| mime.eq_ignore_ascii_case("text/plain") || mime.eq_ignore_ascii_case("text/html")) {
         if let Some(ref data) = body.data {
             if !data.is_empty() {
-                if let Ok(decoded) = decode_base64url(data) {
+                if let Ok(decoded) = decode_base64url_charset(data, charset_of(payload.headers.as_deref())) {
                     let is_html = mime.eq_ignore_ascii_case("text/html");
                     return if is_html {
                         strip_html(&decoded)
@@ -610,16 +610,38 @@ fn extract_body_from_payload(payload: &Payload) -> String {
             }
         }
     }
-    // Recursively search parts for text/plain first, then text/html
+    // Prefer text/plain, unless it is a stub next to a real HTML body
+    // ("To view the message, please use an HTML compatible email viewer!").
     if let Some(ref parts) = payload.parts {
-        if let Some(text) = find_body_in_parts(parts, "text/plain") {
-            return text;
-        }
-        if let Some(text) = find_body_in_parts(parts, "text/html") {
-            return strip_html(&text);
-        }
+        let plain = find_body_in_parts(parts, "text/plain");
+        let html = find_body_in_parts(parts, "text/html").map(|html| strip_html(&html));
+        return choose_body(plain, html);
     }
     String::new()
+}
+
+/// Plain text wins unless it is short and the HTML carries several times more
+/// text, which is what a placeholder plain part looks like.
+fn choose_body(plain: Option<String>, html: Option<String>) -> String {
+    match (plain, html) {
+        (Some(plain), Some(html)) => {
+            let plain_len = plain.trim().chars().count();
+            let html_len = html.trim().chars().count();
+            if plain_len < 300 && html_len > plain_len * 3 { html } else { plain }
+        }
+        (Some(plain), None) => plain,
+        (None, Some(html)) => html,
+        (None, None) => String::new(),
+    }
+}
+
+/// The `charset` parameter of a part's Content-Type header, if any.
+fn charset_of(headers: Option<&[Header]>) -> Option<&str> {
+    let content_type = headers?.iter().find(|h| h.name.eq_ignore_ascii_case("Content-Type"))?;
+    content_type.value.split(';').skip(1).find_map(|param| {
+        let (key, value) = param.split_once('=')?;
+        key.trim().eq_ignore_ascii_case("charset").then(|| value.trim().trim_matches('"'))
+    })
 }
 
 fn find_body_in_parts(parts: &[Part], target_mime: &str) -> Option<String> {
@@ -632,7 +654,7 @@ fn find_body_in_parts(parts: &[Part], target_mime: &str) -> Option<String> {
             if let Some(ref body) = part.body {
                 if let Some(ref data) = body.data {
                     if !data.is_empty() {
-                        if let Ok(decoded) = decode_base64url(data) {
+                        if let Ok(decoded) = decode_base64url_charset(data, charset_of(part.headers.as_deref())) {
                             if !decoded.trim().is_empty() {
                                 return Some(decoded);
                             }
@@ -699,6 +721,33 @@ fn collect_attachments(payload: &Payload) -> Vec<MailAttachment> {
     let mut out = Vec::new();
     walk(payload.parts.as_deref().unwrap_or(&[]), payload.mime_type.as_deref().unwrap_or(""), &mut out);
     out
+}
+
+/// Gmail returns the part's bytes in their original charset. Decode Big5,
+/// GB2312, ISO-8859-x and friends properly instead of as lossy UTF-8.
+fn decode_base64url_charset(data: &str, charset: Option<&str>) -> Result<String, String> {
+    let encoding = charset
+        .and_then(|label| encoding_rs::Encoding::for_label(label.as_bytes()))
+        .filter(|encoding| *encoding != encoding_rs::UTF_8);
+    match encoding {
+        None => decode_base64url(data),
+        Some(encoding) => {
+            let bytes = decode_base64url_bytes(data)?;
+            Ok(encoding.decode(&bytes).0.into_owned())
+        }
+    }
+}
+
+fn decode_base64url_bytes(data: &str) -> Result<Vec<u8>, String> {
+    let cleaned: String = data
+        .chars()
+        .filter(|c| !c.is_whitespace())
+        .collect::<String>()
+        .trim_end_matches('=')
+        .to_string();
+    base64::engine::general_purpose::URL_SAFE_NO_PAD
+        .decode(&cleaned)
+        .map_err(|e| format!("Base64 decode error: {}", e))
 }
 
 fn decode_base64url(data: &str) -> Result<String, String> {
@@ -922,6 +971,33 @@ pub async fn send_message(
 
 #[cfg(test)]
 mod tests {
+
+    /// Live finding (2026-09-25): a recruiter mail's plain part was only
+    /// "To view the message, please use an HTML compatible email viewer!",
+    /// so the stored body and every AI summary of it were empty.
+    #[test]
+    fn a_placeholder_plain_part_loses_to_the_real_html_body() {
+        let stub = "To view the message, please use an HTML compatible email viewer!".to_string();
+        let html = "15 software development apprentice jobs in London. ".repeat(10);
+        assert_eq!(choose_body(Some(stub.clone()), Some(html.clone())), html);
+        let real = "Hi Hillman, can we meet on Tuesday at 3pm to go through the contract terms?".to_string();
+        assert_eq!(choose_body(Some(real.clone()), Some(format!("{real} footer"))), real);
+        assert_eq!(choose_body(None, Some(html.clone())), html);
+        assert_eq!(choose_body(Some(stub.clone()), None), stub);
+    }
+
+    #[test]
+    fn declared_charsets_are_decoded_instead_of_lossy_utf8() {
+        use base64::Engine;
+        let (big5, _, _) = encoding_rs::BIG5.encode("付款通知");
+        let data = base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(&big5);
+        let headers = vec![Header { name: "Content-Type".into(), value: "text/plain; charset=\"big5\"".into() }];
+        assert_eq!(charset_of(Some(&headers)), Some("big5"));
+        assert_eq!(decode_base64url_charset(&data, Some("big5")).unwrap(), "付款通知");
+        let utf8 = base64::engine::general_purpose::URL_SAFE_NO_PAD.encode("付款通知".as_bytes());
+        assert_eq!(decode_base64url_charset(&utf8, Some("UTF-8")).unwrap(), "付款通知");
+        assert_eq!(decode_base64url_charset(&utf8, None).unwrap(), "付款通知");
+    }
     use super::*;
 
     fn body_fixture(value: serde_json::Value) -> String {

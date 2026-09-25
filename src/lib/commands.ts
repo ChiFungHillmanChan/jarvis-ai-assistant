@@ -98,7 +98,7 @@ export async function getEmailStats(): Promise<EmailStats> { return invoke("get_
 
 // Calendar
 export async function getEvents(days?: number, dateFrom?: string, dateTo?: string): Promise<CalendarEventView[]> { return invoke("get_events", { days, dateFrom, dateTo }); }
-export async function syncCalendar(): Promise<string> { return invoke("sync_calendar"); }
+export async function syncCalendar(dateFrom?: string, dateTo?: string): Promise<string> { return invoke("sync_calendar", dateFrom && dateTo ? { dateFrom, dateTo } : {}); }
 export async function createEvent(summary: string, start: string, end: string, description?: string): Promise<string> { return invoke("create_event", { summary, start, end, description }); }
 export async function getTodaysEvents(): Promise<CalendarEventView[]> { return invoke("get_todays_events"); }
 

@@ -144,7 +144,14 @@ async fn run_notion_sync(db: &Arc<Database>) -> Result<String, String> {
 async fn run_github_digest(db: &Arc<Database>) -> Result<String, String> {
     // The detailed form: `save_to_db` only reconciles the halves of the fetch
     // that actually succeeded, and the warning is what tells it which.
-    let fetched = crate::integrations::github_auth::sync_connected(db).await?;
+    let fetched = match crate::integrations::github_auth::sync_connected(db).await {
+        Ok(fetched) => fetched,
+        // Same as the Google syncs: an integration the user never connected is
+        // skipped, not failed. As a failure it tripped the "jobs failed" alert
+        // every hour for anyone who does not use GitHub.
+        Err(error) if error.starts_with("GitHub 尚未連接") => return Ok("Skipped: GitHub not connected".to_string()),
+        Err(error) => return Err(error),
+    };
     let count = fetched.items.len();
     Ok(format!("Synced {} GitHub items", count))
 }
@@ -303,7 +310,33 @@ async fn run_proactive_check(db: &Arc<Database>) -> Result<String, String> {
         conn.query_row(FAILED_RUNS_ALERT_QUERY, [], |r| r.get(0)).unwrap_or(0)
     };
     if failed > 0 {
-        alerts.push(if zh { format!("過去一小時有 {} 項排程執行失敗", failed) } else { format!("{} cron job(s) failed in the last hour", failed) });
+        // No count in the line: the digest re-notifies whenever a line
+        // changes, so "2 failed", "4 failed"... chimed every 5 minutes while
+        // the Mac was offline.
+        alerts.push(if zh { "過去一小時有排程執行失敗，請查看「自動排程」".to_string() } else { "Scheduled jobs failed in the last hour; see Automations".to_string() });
+    }
+
+    // Email follow-ups the user asked to be reminded about. Each fires once,
+    // at its own time, independent of the digest lines above.
+    let now_local = chrono::Local::now().format("%Y-%m-%dT%H:%M").to_string();
+    for item in crate::mail::store::due_reminders(db, &now_local).unwrap_or_default() {
+        let when = match (item.due_date.as_deref(), item.due_time.as_deref()) {
+            (Some(date), Some(time)) => format!("{date} {time}"),
+            (Some(date), None) => date.to_string(),
+            _ => String::new(),
+        };
+        let body = match (zh, when.is_empty()) {
+            (true, false) => format!("{}（{}）", item.title, when),
+            (false, false) => format!("{} ({})", item.title, when),
+            _ => item.title.clone(),
+        };
+        // Marked first, like last_alerts: a failed post is not retried forever.
+        if crate::mail::store::mark_reminded(db, item.id).is_ok() {
+            let title = if zh { "JARVIS 電郵提醒" } else { "JARVIS reminder" };
+            if let Err(e) = crate::system::control::send_notification(title, &one_line(&body), true).await {
+                log::warn!("Mail reminder could not post a notification: {}", e);
+            }
+        }
     }
 
     if alerts.is_empty() {

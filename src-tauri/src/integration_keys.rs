@@ -19,11 +19,12 @@ pub const KEYCHAIN_MARKER: &str = "__keychain__";
 /// The integration credentials, as (preference key, environment variable).
 /// The preference key doubles as the Keychain account, so there is exactly one
 /// name per credential to keep straight.
-pub const INTEGRATION_KEYS: [(&str, &str); 4] = [
+pub const INTEGRATION_KEYS: [(&str, &str); 5] = [
     ("github_token", "GITHUB_TOKEN"),
     ("notion_api_key", "NOTION_API_KEY"),
     ("obsidian_api_key", "OBSIDIAN_API_KEY"),
     ("minimax_api_key", "MINIMAX_API_KEY"),
+    ("typesafe_api_key", "TYPESAFE_API_KEY"),
 ];
 
 fn env_var_for(key: &str) -> Option<&'static str> {
@@ -633,10 +634,10 @@ mod tests {
         KeychainStore::delete(service, &local_endpoint_account("ep-legacy-1")).ok();
     }
 
-    /// These four names must stay in step with `SECRET_PREFERENCE_KEYS` in
+    /// These names must stay in step with `SECRET_PREFERENCE_KEYS` in
     /// `commands::settings`, which is what keeps them out of `get_settings`.
     #[test]
-    fn the_integration_credential_set_is_exactly_these_four() {
+    fn the_integration_credential_set_is_exactly_these() {
         let names: Vec<&str> = INTEGRATION_KEYS.iter().map(|(k, _)| *k).collect();
         assert_eq!(
             names,
@@ -645,6 +646,7 @@ mod tests {
                 "notion_api_key",
                 "obsidian_api_key",
                 "minimax_api_key",
+                "typesafe_api_key",
             ]
         );
     }

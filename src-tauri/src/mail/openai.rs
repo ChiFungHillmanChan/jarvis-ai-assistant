@@ -18,6 +18,32 @@ struct Response {
     error: Option<Value>,
     incomplete_details: Option<Value>,
     output: Vec<OutputItem>,
+    #[serde(default)]
+    usage: Option<WireUsage>,
+}
+
+#[derive(Deserialize, Default)]
+struct WireUsage {
+    #[serde(default)]
+    input_tokens: i64,
+    #[serde(default)]
+    output_tokens: i64,
+    #[serde(default)]
+    input_tokens_details: Option<InputDetails>,
+}
+
+#[derive(Deserialize, Default)]
+struct InputDetails {
+    #[serde(default)]
+    cached_tokens: i64,
+}
+
+/// Token counts OpenAI reported for one request, for cost telemetry.
+#[derive(Debug, Clone, Copy, Default, PartialEq)]
+pub struct Usage {
+    pub input_tokens: i64,
+    pub output_tokens: i64,
+    pub cached_tokens: i64,
 }
 
 #[derive(Deserialize)]
@@ -51,7 +77,68 @@ pub(super) async fn send(
     model: &str,
     prompt: &str,
     endpoint: Endpoint,
-) -> Result<String, String> {
+) -> Result<(String, Usage), String> {
+    request(
+        key,
+        json!({
+            "model": model,
+            "input": prompt,
+            "store": false,
+            "stream": false,
+            "max_output_tokens": 4096,
+            "reasoning": {"effort": "low"},
+            "truncation": "disabled"
+        }),
+        endpoint,
+        120,
+        0,
+    )
+    .await
+}
+
+/// One Responses API call whose output must match `schema` (strict JSON
+/// schema). Trusted rules go in `instructions`; untrusted mail text goes in
+/// `input` only, so a message cannot forge the rules around it. No tools.
+pub(super) async fn send_json(
+    key: &str,
+    model: &str,
+    instructions: &str,
+    input: &str,
+    schema_name: &str,
+    schema: Value,
+    endpoint: Endpoint,
+) -> Result<(Value, Usage), String> {
+    let (text, usage) = request(
+        key,
+        json!({
+            "model": model,
+            "instructions": instructions,
+            "input": input,
+            "store": false,
+            "stream": false,
+            "max_output_tokens": 2000,
+            "reasoning": {"effort": "low"},
+            "truncation": "disabled",
+            "text": {"format": {"type": "json_schema", "name": schema_name, "strict": true, "schema": schema}}
+        }),
+        endpoint,
+        60,
+        // Triage runs several requests at once; ride out a brief rate limit.
+        // Group analysis above never retries (a test holds it to one call).
+        2,
+    )
+    .await?;
+    let value = serde_json::from_str(&text).map_err(|_| "OpenAI 回覆格式無效，請重試。".to_string())?;
+    Ok((value, usage))
+}
+
+async fn request(
+    key: &str,
+    body: Value,
+    endpoint: Endpoint,
+    timeout_secs: u64,
+    retries: u32,
+) -> Result<(String, Usage), String> {
     let url = match endpoint {
         Endpoint::Production => RESPONSES_URL.to_string(),
         #[cfg(test)]
@@ -60,24 +147,22 @@ pub(super) async fn send(
     let client = reqwest::Client::builder()
         .no_proxy()
         .redirect(reqwest::redirect::Policy::none())
-        .timeout(Duration::from_secs(120))
+        .timeout(Duration::from_secs(timeout_secs))
         .build()
         .map_err(|_| "未能建立 OpenAI 連線。".to_string())?;
-    let response = client
-        .post(url)
-        .bearer_auth(key)
-        .json(&json!({
-            "model": model,
-            "input": prompt,
-            "store": false,
-            "stream": false,
-            "max_output_tokens": 4096,
-            "reasoning": {"effort": "low"},
-            "truncation": "disabled"
-        }))
-        .send()
-        .await
-        .map_err(|_| "未能連接 OpenAI，請檢查網絡後再試。".to_string())?;
+    let mut attempt = 0;
+    let response = loop {
+        let sent = client.post(&url).bearer_auth(key).json(&body).send().await;
+        let retryable = match &sent {
+            Ok(r) => matches!(r.status().as_u16(), 429 | 500 | 502 | 503),
+            Err(_) => true,
+        };
+        if !retryable || attempt >= retries {
+            break sent.map_err(|_| "未能連接 OpenAI，請檢查網絡後再試。".to_string())?;
+        }
+        attempt += 1;
+        tokio::time::sleep(Duration::from_millis(1_000 * 3u64.pow(attempt - 1))).await;
+    };
     if !response.status().is_success() {
         // Error bodies can echo input or credential details. Never surface them.
         return Err("OpenAI 分析失敗，請檢查 API Key、模型權限及帳戶額度，或者稍後重試。".into());
@@ -127,5 +212,13 @@ pub(super) async fn send(
     if text.trim().is_empty() {
         return Err("OpenAI 沒有文字回覆，請更換模型或重試。".into());
     }
-    Ok(text)
+    let usage = response.usage.unwrap_or_default();
+    Ok((
+        text,
+        Usage {
+            input_tokens: usage.input_tokens,
+            output_tokens: usage.output_tokens,
+            cached_tokens: usage.input_tokens_details.map(|d| d.cached_tokens).unwrap_or(0),
+        },
+    ))
 }

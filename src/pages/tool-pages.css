@@ -49,6 +49,11 @@
 .tool-page .calendar-day { display: grid; gap: 2px; padding: 7px; border: 1px solid var(--border-primary); border-radius: 8px; background: var(--surface); color: var(--text-secondary); cursor: pointer; }
 .tool-page .calendar-day strong { color: var(--text-primary); font-size: 16px; }
 .tool-page .calendar-day.is-selected { border-color: var(--cyan); background: var(--surface-solid); }
+.tool-page .calendar-day { position: relative; }
+.tool-page .calendar-day__dot { position: absolute; top: 8px; right: 8px; width: 6px; height: 6px; border-radius: 50%; background: var(--cyan); }
+.tool-page .calendar-week__nav { display: flex; gap: 4px; align-items: stretch; }
+.tool-page .calendar-event--mail { box-shadow: inset 2px 0 var(--accent-warning); }
+.tool-page .mail-embedded { height: auto; padding: 0; }
 .tool-page .calendar-event { justify-content: flex-start; }
 .tool-page .calendar-event__time { width: 128px; flex: 0 0 128px; color: var(--text-secondary); font-variant-numeric: tabular-nums; }
 .tool-page .automation-create { display: grid; grid-template-columns: minmax(200px, .7fr) minmax(360px, 1.3fr); gap: 24px; margin-bottom: 16px; padding: 18px; }
