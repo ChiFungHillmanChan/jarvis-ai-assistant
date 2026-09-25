@@ -27,6 +27,15 @@ export function installWorkspacePreview() {
   const triageStatus = () => ({ enabled: true, typesafe_key: true, openai_key: true, untriaged: 3, attention: messages.filter(m => m.triage.attention).length, open_items: mailItems.filter(i => i.status === 'open').length, categories: ['work', 'jobs', 'finance', 'schedule', 'account', 'personal', 'promotions'].map(c => [c, messages.filter(m => m.triage.category === c).length]) });
   let tasks = [['Reply to the proposal', -1], ['Send the review notes', 0], ['Confirm Friday planning', 2], ['Quarterly review', 10]].map(([title, days], index) => ({ id: index + 1, title: title as string, description: null, deadline: shift(days as number), priority: 1, status: 'pending', source: 'manual', created_at: null }));
   const events = [{ id: 1, google_id: 'sample-event', summary: 'Customer onboarding review', description: 'Review the rollout plan and answer open questions.', location: 'Meeting room 2', start_time: day + 'T14:00:00Z', end_time: day + 'T14:45:00Z', attendees: '', status: 'confirmed' }];
+  // A realistic week around today for the Calendar views: overlaps, all-day, multi-day and cross-midnight.
+  const localIso = (days: number, hour: number, minute = 0) => { const d = new Date(now); d.setDate(d.getDate() + days); d.setHours(hour, minute, 0, 0); return d.toISOString(); };
+  const weekEvents = ([
+    [-2, 9, 0, 10, 0, 'Team standup'], [-1, 10, 0, 11, 30, 'Investor prep'], [-1, 10, 30, 11, 0, 'Call with Jordan'], [0, 9, 30, 10, 0, 'Standup'],
+    [0, 11, 0, 12, 30, 'Evoke pilot check-in'], [0, 16, 0, 17, 0, 'HKSTP mentor session'], [1, 13, 0, 14, 0, 'Lunch with Sam'], [2, 22, 0, 25, 30, 'Overnight deploy'],
+    [3, 15, 0, 16, 30, 'Design review'], [5, 10, 0, 11, 0, 'Weekly planning'],
+  ] as [number, number, number, number, number, string][]).map(([days, h1, m1, h2, m2, summary], index) => ({ id: 100 + index, google_id: `sample-week-${index}`, summary, description: null, location: index === 4 ? 'Cyberport' : null, start_time: localIso(days, h1, m1), end_time: localIso(days, h2, m2), attendees: '', status: 'confirmed' }));
+  weekEvents.push({ id: 120, google_id: 'sample-allday', summary: 'Public holiday', description: null, location: null, start_time: shift(1), end_time: shift(2), attendees: '', status: 'confirmed' });
+  weekEvents.push({ id: 121, google_id: 'sample-trip', summary: 'Trip to Shenzhen', description: null, location: null, start_time: shift(-3), end_time: shift(0), attendees: '', status: 'confirmed' });
   const github = [{ id: 1, title: 'Improve onboarding checklist', repo: 'example/workspace', number: 42, state: 'open', item_type: 'issue', url: 'https://github.com/example/workspace/issues/42', updated_at: now.toISOString() }];
   const notes = [{ id: 1, notion_id: '12345678901234567890123456789012ab', title: 'Customer onboarding playbook', url: 'https://www.notion.so/12345678901234567890123456789012ab', parent_type: 'workspace', last_edited: now.toISOString() }];
   const jobs = [{ id: 1, name: 'Morning briefing', schedule: '0 0 9 * * MON-FRI', action_type: 'briefing', status: 'active', last_run: day + ' 09:00:00', next_run: null, description: 'Review my calendar every weekday at 9 am.' }, { id: 2, name: 'Weekly project review', schedule: '0 0 16 * * FRI', action_type: 'summary', status: 'paused', last_run: null, next_run: null, description: 'Summarize project progress on Friday.' }];
@@ -60,7 +69,7 @@ export function installWorkspacePreview() {
       case 'get_tasks': return tasks;
       case 'update_task': tasks = tasks.map(t => t.id === args.id ? { ...t, status: args.status } : t); return null;
       case 'get_emails': case 'mail_list_memories': return [];
-      case 'get_events': case 'get_todays_events': return events;
+      case 'get_events': case 'get_todays_events': return [...events, ...weekEvents];
       case 'get_github_items': return github;
       case 'get_notion_pages': return notes;
       case 'get_cron_jobs': return jobs.map(j => ({ ...j }));
