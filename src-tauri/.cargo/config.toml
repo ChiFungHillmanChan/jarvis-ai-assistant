@@ -5,3 +5,11 @@ GGML_NATIVE = "OFF"
 # disagreed (11.0 here, 12.0 there) the shipped binary advertised support for a
 # release the bundle refused to install on.
 MACOSX_DEPLOYMENT_TARGET = "12.0"
+
+# Sign the dev binary with a stable identity before running it, so Keychain
+# "Always Allow" survives rebuilds. See scripts/dev-run.sh.
+[target.aarch64-apple-darwin]
+runner = "scripts/dev-run.sh"
+
+[target.x86_64-apple-darwin]
+runner = "scripts/dev-run.sh"
