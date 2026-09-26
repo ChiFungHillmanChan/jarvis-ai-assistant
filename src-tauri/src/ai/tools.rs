@@ -1579,7 +1579,7 @@ mod injection_tests {
     /// before the tool ships.
     const ALLOWED_OUTBOUND: &[(&str, &str)] = &[
         // Writes a Gmail draft the user reviews and sends by hand. Nothing
-        // leaves the account on its own -- gmail::send_message has no callers.
+        // leaves the account on its own -- JARVIS has no code that sends mail.
         ("draft_email", "draft only, never sent"),
         // Fixed destination: the user's own primary calendar. The `attendees`
         // property was removed so the model cannot copy the event body onto
