@@ -32,6 +32,11 @@ pub(crate) fn test_database() -> Database {
 #[cfg(test)]
 pub(crate) fn test_database_at(path: &std::path::Path) -> Database {
     let mut conn = Connection::open(path).unwrap();
+    // Live tests run against a copy of the real, encrypted database. The key:
+    // security find-generic-password -s com.jarvis.db -a sqlcipher-key -w
+    if let Ok(key) = std::env::var("JARVIS_DB_KEY") {
+        encryption::apply_key(&conn, &key).unwrap();
+    }
     conn.execute_batch(CONNECTION_PRAGMAS).unwrap();
     embedded::migrations::runner().run(&mut conn).unwrap();
     Database {
@@ -79,6 +84,11 @@ impl Database {
         if let Some(parent) = db_path.parent() {
             std::fs::create_dir_all(parent)?;
         }
+        #[cfg(not(feature = "native-qa"))]
+        let mut conn = encryption::open(&db_path)?;
+        // Native QA runs on a throwaway folder with an in-memory Keychain, so a
+        // key would not survive a relaunch; its data is synthetic.
+        #[cfg(feature = "native-qa")]
         let mut conn = Connection::open(&db_path)?;
         conn.execute_batch(CONNECTION_PRAGMAS)?;
         restrict_to_owner(&db_path);
@@ -122,5 +132,274 @@ mod permission_tests {
         assert_eq!(mode(&dir.join("jarvis.db-wal")), 0o600);
         drop(conn);
         std::fs::remove_dir_all(&dir).unwrap();
+    }
+}
+
+/// Encryption at rest. The database holds synced mail, so it is a SQLCipher
+/// file (AES-256) keyed with 256 random bits kept in the macOS Keychain.
+/// Databases written by earlier builds are converted once, on first launch.
+pub(crate) mod encryption {
+    use crate::security::keychain::KeychainStore;
+    use rusqlite::Connection;
+    use std::path::{Path, PathBuf};
+
+    const KEY_SERVICE: &str = "com.jarvis.db";
+    const KEY_ACCOUNT: &str = "sqlcipher-key";
+    const PLAINTEXT_HEADER: &[u8; 16] = b"SQLite format 3\0";
+
+    type Result<T> = std::result::Result<T, Box<dyn std::error::Error>>;
+
+    /// Open the app database, encrypting a plaintext one first.
+    ///
+    /// Nothing here may leave someone unable to open JARVIS over something
+    /// recoverable: if a plaintext database cannot be converted, or a new one
+    /// cannot get a key, it opens unencrypted and the next launch tries again.
+    /// Only an encrypted database whose key is gone is a hard failure, because
+    /// its contents are unreadable without that key.
+    pub fn open(path: &Path) -> Result<Connection> {
+        if is_plaintext(path)? {
+            match key(true).and_then(|key| encrypt_in_place(path, &key).map(|_| key)) {
+                Ok(key) => return open_with_key(path, &key),
+                Err(e) => {
+                    log::error!("Database encryption failed; opening it unencrypted: {e}");
+                    return Ok(Connection::open(path)?);
+                }
+            }
+        }
+        let is_new = !path.exists() || std::fs::metadata(path)?.len() == 0;
+        match key(is_new) {
+            Ok(key) => open_with_key(path, &key),
+            Err(e) if is_new => {
+                log::error!("No database key; creating the database unencrypted: {e}");
+                Ok(Connection::open(path)?)
+            }
+            Err(e) => Err(format!(
+                "The database is encrypted, but its key could not be read from the Keychain ({e})."
+            )
+            .into()),
+        }
+    }
+
+    /// True for a database file an earlier build wrote without encryption.
+    fn is_plaintext(path: &Path) -> Result<bool> {
+        use std::io::Read;
+        let mut header = [0u8; 16];
+        match std::fs::File::open(path) {
+            Ok(mut file) => Ok(file.read_exact(&mut header).is_ok() && &header == PLAINTEXT_HEADER),
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(false),
+            Err(e) => Err(e.into()),
+        }
+    }
+
+    /// The key from the Keychain, generated first when `create` allows it.
+    fn key(create: bool) -> Result<String> {
+        match KeychainStore::get(KEY_SERVICE, KEY_ACCOUNT) {
+            Ok(key) if is_key(&key) => return Ok(key),
+            Ok(_) => return Err("the stored database key is malformed".into()),
+            Err(e) if !KeychainStore::is_not_found(&e) || !create => return Err(e.into()),
+            Err(_) => {}
+        }
+        let mut bytes = [0u8; 32];
+        security_framework::random::SecRandom::default().copy_bytes(&mut bytes)?;
+        let key: String = bytes.iter().map(|b| format!("{b:02x}")).collect();
+        KeychainStore::put(KEY_SERVICE, KEY_ACCOUNT, &key)?;
+        Ok(key)
+    }
+
+    fn is_key(key: &str) -> bool {
+        key.len() == 64 && key.bytes().all(|b| b.is_ascii_hexdigit())
+    }
+
+    /// Key a connection. A raw 256-bit key skips SQLCipher's passphrase
+    /// derivation; `key` is validated hex, so the statement cannot be altered.
+    pub fn apply_key(conn: &Connection, key: &str) -> Result<()> {
+        if !is_key(key) {
+            return Err("invalid database key".into());
+        }
+        conn.execute_batch(&format!("PRAGMA key = \"x'{key}'\";"))?;
+        Ok(())
+    }
+
+    fn open_with_key(path: &Path, key: &str) -> Result<Connection> {
+        let conn = Connection::open(path)?;
+        apply_key(&conn, key)?;
+        // The first read fails with "file is not a database" on a wrong key.
+        conn.query_row("SELECT count(*) FROM sqlite_master", [], |row| row.get::<_, i64>(0))?;
+        Ok(conn)
+    }
+
+    fn sibling(path: &Path, suffix: &str) -> PathBuf {
+        PathBuf::from(format!("{}{}", path.display(), suffix))
+    }
+
+    fn remove_with_sidecars(path: &Path) {
+        for suffix in ["", "-wal", "-shm", "-journal"] {
+            let _ = std::fs::remove_file(sibling(path, suffix));
+        }
+    }
+
+    fn row_counts(conn: &Connection) -> Result<Vec<(String, i64)>> {
+        let tables: Vec<String> = conn
+            .prepare("SELECT name FROM sqlite_master WHERE type='table' ORDER BY name")?
+            .query_map([], |row| row.get(0))?
+            .collect::<std::result::Result<_, _>>()?;
+        tables
+            .into_iter()
+            .map(|table| {
+                let quoted = table.replace('"', "\"\"");
+                let count = conn.query_row(&format!("SELECT count(*) FROM \"{quoted}\""), [], |row| row.get(0))?;
+                Ok((table, count))
+            })
+            .collect()
+    }
+
+    /// Copy a plaintext database into an encrypted one next to it, check that
+    /// every table arrived intact, then put the encrypted copy in its place.
+    /// The plaintext file is only removed after the swap.
+    pub(crate) fn encrypt_in_place(path: &Path, key: &str) -> Result<()> {
+        let staged = sibling(path, ".encrypting");
+        let retired = sibling(path, ".unencrypted");
+        remove_with_sidecars(&staged);
+        let expected = {
+            let plain = Connection::open(path)?;
+            plain.query_row("PRAGMA wal_checkpoint(TRUNCATE)", [], |_| Ok(()))?;
+            let target = staged.display().to_string().replace('\'', "''");
+            apply_attach(&plain, &target, key)?;
+            plain.query_row("SELECT sqlcipher_export('encrypted')", [], |_| Ok(()))?;
+            let version: i64 = plain.query_row("PRAGMA user_version", [], |row| row.get(0))?;
+            plain.execute_batch(&format!("PRAGMA encrypted.user_version = {version}; DETACH DATABASE encrypted;"))?;
+            row_counts(&plain)?
+        };
+        let copied = row_counts(&open_with_key(&staged, key)?)?;
+        if copied != expected {
+            remove_with_sidecars(&staged);
+            return Err("the encrypted copy does not match the original".into());
+        }
+        std::fs::rename(path, &retired)?;
+        for suffix in ["-wal", "-shm"] {
+            let _ = std::fs::remove_file(sibling(path, suffix));
+        }
+        if let Err(e) = std::fs::rename(&staged, path) {
+            // Put the original back so nothing is lost.
+            let _ = std::fs::rename(&retired, path);
+            return Err(e.into());
+        }
+        remove_with_sidecars(&retired);
+        log::info!("Database encrypted");
+        Ok(())
+    }
+
+    fn apply_attach(conn: &Connection, target: &str, key: &str) -> Result<()> {
+        if !is_key(key) {
+            return Err("invalid database key".into());
+        }
+        conn.execute_batch(&format!("ATTACH DATABASE '{target}' AS encrypted KEY \"x'{key}'\";"))?;
+        Ok(())
+    }
+
+    #[cfg(test)]
+    mod tests {
+        use super::*;
+
+        const KEY: &str = "00112233445566778899aabbccddeeff00112233445566778899aabbccddeeff";
+
+        fn temp_db() -> PathBuf {
+            let dir = std::env::temp_dir().join(format!("jarvis-enc-{}", uuid::Uuid::new_v4()));
+            std::fs::create_dir_all(&dir).unwrap();
+            dir.join("jarvis.db")
+        }
+
+        #[test]
+        fn a_keyed_database_is_not_readable_as_plain_sqlite() {
+            let path = temp_db();
+            let conn = open_with_key(&path, KEY).unwrap();
+            conn.execute_batch("CREATE TABLE mail(body TEXT); INSERT INTO mail VALUES ('secret body');").unwrap();
+            drop(conn);
+            let bytes = std::fs::read(&path).unwrap();
+            assert_ne!(&bytes[..16], PLAINTEXT_HEADER);
+            assert!(!bytes.windows(11).any(|w| w == b"secret body"));
+            assert!(open_with_key(&path, &KEY.replace('0', "1")).is_err(), "a wrong key must not open it");
+            std::fs::remove_dir_all(path.parent().unwrap()).unwrap();
+        }
+
+        #[test]
+        fn a_plaintext_database_is_encrypted_with_its_data_intact() {
+            let path = temp_db();
+            {
+                let conn = Connection::open(&path).unwrap();
+                conn.execute_batch(
+                    "PRAGMA journal_mode=WAL; PRAGMA user_version=7;
+                     CREATE TABLE mail(body TEXT); INSERT INTO mail VALUES ('first'),('second');
+                     CREATE TABLE \"odd\"\"name\"(x); INSERT INTO \"odd\"\"name\" VALUES (1);",
+                )
+                .unwrap();
+            }
+            assert!(is_plaintext(&path).unwrap());
+            encrypt_in_place(&path, KEY).unwrap();
+            assert!(!is_plaintext(&path).unwrap());
+            let conn = open_with_key(&path, KEY).unwrap();
+            let bodies: Vec<String> = conn
+                .prepare("SELECT body FROM mail ORDER BY body").unwrap()
+                .query_map([], |row| row.get(0)).unwrap()
+                .collect::<std::result::Result<_, _>>().unwrap();
+            assert_eq!(bodies, ["first", "second"]);
+            let version: i64 = conn.query_row("PRAGMA user_version", [], |row| row.get(0)).unwrap();
+            assert_eq!(version, 7);
+            let dir = path.parent().unwrap();
+            let leftovers: Vec<_> = std::fs::read_dir(dir).unwrap()
+                .map(|e| e.unwrap().file_name().to_string_lossy().to_string())
+                .filter(|name| name.contains("encrypting") || name.contains("unencrypted"))
+                .collect();
+            assert!(leftovers.is_empty(), "no staged or retired copies left: {leftovers:?}");
+            drop(conn);
+            std::fs::remove_dir_all(dir).unwrap();
+        }
+
+        #[test]
+        fn open_encrypts_old_databases_and_reopens_them_with_the_stored_key() {
+            let path = temp_db();
+            {
+                let conn = Connection::open(&path).unwrap();
+                conn.execute_batch("CREATE TABLE mail(body TEXT); INSERT INTO mail VALUES ('kept');").unwrap();
+            }
+            drop(open(&path).unwrap());
+            assert!(!is_plaintext(&path).unwrap(), "first launch converts it");
+            let conn = open(&path).unwrap();
+            let body: String = conn.query_row("SELECT body FROM mail", [], |row| row.get(0)).unwrap();
+            assert_eq!(body, "kept");
+            drop(conn);
+
+            let fresh = temp_db();
+            drop(open(&fresh).unwrap().execute_batch("CREATE TABLE t(x)"));
+            assert!(!is_plaintext(&fresh).unwrap(), "a new database starts encrypted");
+            for p in [&path, &fresh] {
+                std::fs::remove_dir_all(p.parent().unwrap()).unwrap();
+            }
+        }
+
+        /// Live: convert a copy of a real database (never the original):
+        /// sqlite3 jarvis.db ".backup /tmp/copy.db"
+        /// JARVIS_ENCRYPT_DB_COPY=/tmp/copy.db cargo test live_encrypt -- --ignored --nocapture
+        #[test]
+        #[ignore]
+        fn live_encrypt_a_copy_of_a_real_database() {
+            let path = PathBuf::from(std::env::var("JARVIS_ENCRYPT_DB_COPY").expect("JARVIS_ENCRYPT_DB_COPY"));
+            let before = row_counts(&Connection::open(&path).unwrap()).unwrap();
+            encrypt_in_place(&path, KEY).unwrap();
+            assert!(!is_plaintext(&path).unwrap());
+            let mut conn = open_with_key(&path, KEY).unwrap();
+            assert_eq!(row_counts(&conn).unwrap(), before);
+            // The app's own migrations still run on the encrypted file.
+            crate::db::embedded::migrations::runner().run(&mut conn).unwrap();
+            let rows: i64 = before.iter().map(|(_, n)| n).sum();
+            println!("encrypted {} tables, {} rows, all counts match", before.len(), rows);
+        }
+
+        #[test]
+        fn keys_are_64_hex_characters_only() {
+            assert!(is_key(KEY));
+            assert!(!is_key("x'00'; DROP TABLE mail; --"));
+            assert!(!is_key(&KEY[..63]));
+        }
     }
 }
