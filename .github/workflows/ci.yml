@@ -1,8 +1,11 @@
 name: CI
 
+# Only a push or merge to main runs CI. Branch pushes and pull requests do
+# not: run `npm test`, `npm run build` and `npm run test:frontend` locally
+# before merging. Private-repo macOS minutes count ten-fold against the plan.
 on:
   push:
-  pull_request:
+    branches: [main]
 
 concurrency:
   group: ci-${{ github.ref }}
@@ -13,7 +16,11 @@ jobs:
     name: Verify (type-check, build, cargo test)
     # macOS only, and not a preference: this crate depends on cocoa,
     # security-framework and whisper-rs, none of which build on ubuntu.
-    runs-on: macos-latest
+    # The repository variable CI_RUNS_ON picks the runner. Until the included
+    # minutes reset on 1 October 2026 it is ["self-hosted","jarvis-mac"] (the
+    # founder's Mac); a job on that Mac deletes it on 1 October, which puts CI
+    # back on GitHub's macos-latest without a code change.
+    runs-on: ${{ fromJSON(vars.CI_RUNS_ON || '"macos-latest"') }}
     steps:
       - uses: actions/checkout@v5
 
@@ -25,7 +32,10 @@ jobs:
       # Cargo registry, git checkouts and build artifacts. Keyed on the lockfile
       # so a dependency change invalidates it; the restore-key still gives a
       # warm target/ dir when only source changed.
+      # The self-hosted workspace keeps target/ between runs, and restoring into
+      # ~/.cargo would overwrite the Mac's own registry.
       - name: Cache cargo
+        if: runner.environment == 'github-hosted'
         uses: actions/cache@v4
         with:
           path: |
