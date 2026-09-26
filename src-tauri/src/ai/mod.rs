@@ -1,6 +1,7 @@
 pub mod bedrock;
 pub mod claude;
 pub mod compat;
+pub mod mail_policy;
 pub mod complete;
 pub mod cost;
 pub mod gemini;

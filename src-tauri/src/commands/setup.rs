@@ -328,6 +328,15 @@ pub async fn test_mail_ai_connection(
     if status.state == "not_configured" || !credential.available {
         return Ok(status);
     }
+    // Real mail will only go to an AI allowed to read it; say so now rather
+    // than passing a synthetic test the first real analysis would fail.
+    if settings.processing_mode == "assistant" {
+        if let Err(blocked) = crate::ai::mail_policy::check(&db) {
+            status.state = "action_required";
+            status.error_code = Some(blocked.code());
+            return Ok(status);
+        }
+    }
     // Only this explicit command sends a synthetic message to the selected provider.
     let assistant = if settings.processing_mode == "assistant" {
         Some(analysis::AssistantRoute {

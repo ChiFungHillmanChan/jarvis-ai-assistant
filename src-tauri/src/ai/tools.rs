@@ -1278,6 +1278,14 @@ async fn execute_tool_inner(
 ) -> String {
     let args: serde_json::Value = serde_json::from_str(args_str).unwrap_or_default();
 
+    // Google's rules for Gmail data: email content reaches the model only when
+    // the chosen AI does not train on it (see ai::mail_policy).
+    if matches!(name, "search_emails" | "read_email" | "list_follow_ups" | "update_follow_up" | "list_inbox_triage") {
+        if let Err(blocked) = crate::ai::mail_policy::check(db) {
+            return blocked.tool_message();
+        }
+    }
+
     let result = match name {
         "open_app" => {
             let app = args["name"].as_str().unwrap_or("");
@@ -2439,9 +2447,25 @@ mod local_data_tests {
                (5,3,'reply','Reply to newsletter',NULL,'done',NULL,NULL);
              INSERT INTO mail_triage(message_id,category,category_confidence,needs_reply,action_required,has_date,importance,attention,summary,jev_model) VALUES
                (2,'work',0.9,0.0,0.9,0.9,2.5,1,'Gold Badge due 16 Oct','jev'),
-               (3,'promotions',0.9,0.0,0.0,0.0,0.1,0,'Newsletter','jev');",
+               (3,'promotions',0.9,0.0,0.0,0.0,0.1,0,'Newsletter','jev');
+             DELETE FROM provider_chain;
+             INSERT INTO provider_chain(position,provider_type,enabled) VALUES (0,'openai',1);",
         ).unwrap();
         db
+    }
+
+    #[tokio::test]
+    async fn email_tools_refuse_an_ai_that_may_train_on_email() {
+        let db = mail_db();
+        db.conn.lock().unwrap().execute_batch(
+            "DELETE FROM provider_chain;
+             INSERT INTO provider_chain(position,provider_type,enabled,base_url) VALUES (0,'openai',1,'https://api.moonshot.ai/v1');",
+        ).unwrap();
+        for tool in ["list_follow_ups", "list_inbox_triage", "read_email", "search_emails"] {
+            let out = run(tool, serde_json::json!({}), &db).await;
+            assert!(out.starts_with("Email content is not shared with Kimi"), "{tool}: {out}");
+            assert!(!out.contains("Gold Badge"), "{tool} leaked mail content");
+        }
     }
 
     async fn run(name: &str, args: serde_json::Value, db: &crate::db::Database) -> String {
