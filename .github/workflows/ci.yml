@@ -24,10 +24,12 @@ jobs:
     steps:
       - uses: actions/checkout@v5
 
+      # On the self-hosted Mac, setup-node's npm cache is the founder's whole
+      # ~/.npm (10 GB): saving it to GitHub stalled the job. GitHub-hosted only.
       - uses: actions/setup-node@v5
         with:
           node-version: "22"
-          cache: npm
+          cache: ${{ runner.environment == 'github-hosted' && 'npm' || '' }}
 
       # Cargo registry, git checkouts and build artifacts. Keyed on the lockfile
       # so a dependency change invalidates it; the restore-key still gives a
