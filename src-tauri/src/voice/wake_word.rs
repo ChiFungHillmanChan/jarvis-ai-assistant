@@ -82,7 +82,11 @@ impl WakeWordService {
                 router.start()?;
             }
             router.set_wake_word_resting(true);
-            router.unmute();
+            // A push-to-talk recording keeps capturing; stop_ptt hands the
+            // microphone to the wake word when that recording ends.
+            if !push_to_talk_active(&self.voice_engine.get_state()) {
+                router.unmute();
+            }
         }
 
         let token = {
@@ -91,8 +95,9 @@ impl WakeWordService {
             guard.clone()
         };
 
-        self.voice_engine
-            .set_state_and_emit(VoiceState::WakeWordListening);
+        if !push_to_talk_active(&self.voice_engine.get_state()) {
+            self.voice_engine.set_state_and_emit(VoiceState::WakeWordListening);
+        }
 
         let voice_engine = Arc::clone(&self.voice_engine);
         let db = Arc::clone(&self.db);
@@ -125,7 +130,7 @@ impl WakeWordService {
             let _ = handle.await;
         }
 
-        let ptt_active = matches!(self.voice_engine.get_state(), VoiceState::Listening);
+        let ptt_active = push_to_talk_active(&self.voice_engine.get_state());
         {
             let mut router = self
                 .voice_engine
@@ -141,10 +146,11 @@ impl WakeWordService {
             }
         }
 
-        if *self.voice_engine.muted.lock().map_err(|e| e.to_string())? {
-            self.voice_engine.set_state_and_emit(VoiceState::Disabled);
-        } else {
-            self.voice_engine.set_state_and_emit(VoiceState::Idle);
+        // stop_listening only finishes a recording whose state is still
+        // Listening, so leave a push-to-talk session's state alone.
+        if !ptt_active {
+            let muted = *self.voice_engine.muted.lock().map_err(|e| e.to_string())?;
+            self.voice_engine.set_state_and_emit(if muted { VoiceState::Disabled } else { VoiceState::Idle });
         }
 
         Ok(())
@@ -240,7 +246,9 @@ async fn detection_loop(
     token: CancellationToken,
     local_transcriber: LocalTranscriber,
 ) -> Result<(), String> {
-    voice_engine.set_state_and_emit(VoiceState::WakeWordListening);
+    if !push_to_talk_active(&voice_engine.get_state()) {
+        voice_engine.set_state_and_emit(VoiceState::WakeWordListening);
+    }
     let mut gate = SpeechGate::new();
 
     loop {
@@ -316,6 +324,7 @@ async fn detection_loop(
                     app_handle.clone(),
                     token.clone(),
                     local_transcriber.clone(),
+                    command_speech_threshold(gate.noise_floor()),
                 ).await?;
 
                 // Capture was muted for the whole exchange, so the ring still
@@ -326,6 +335,13 @@ async fn detection_loop(
             }
         }
     }
+}
+
+/// Push-to-talk owns the microphone and the voice state from start_listening
+/// until stop_listening finishes; switching listening on or off must not
+/// overwrite either, or the recording can no longer be finished.
+fn push_to_talk_active(state: &VoiceState) -> bool {
+    matches!(state, VoiceState::Listening | VoiceState::Processing | VoiceState::Speaking)
 }
 
 /// JARVIS speaking (the microphone would only hear JARVIS), or another
@@ -342,6 +358,7 @@ async fn handle_wake_word_detection(
     app_handle: JarvisAppHandle,
     token: CancellationToken,
     local_transcriber: LocalTranscriber,
+    speech_threshold: f32,
 ) -> Result<(), String> {
     let _assistant_guard = match crate::chat_session::FOREGROUND.try_lock() {
         Ok(guard) => guard,
@@ -369,7 +386,7 @@ async fn handle_wake_word_detection(
         .unmute();
 
     voice_engine.set_state_and_emit(VoiceState::WakeWordProcessing);
-    let command_audio = record_command_audio(Arc::clone(&voice_engine), token.clone()).await?;
+    let command_audio = record_command_audio(Arc::clone(&voice_engine), token.clone(), speech_threshold).await?;
     if command_audio.is_empty() {
         voice_engine
             .audio_router
@@ -517,6 +534,16 @@ const COMMAND_NO_SPEECH_TIMEOUT: Duration = Duration::from_secs(8);
 /// mid-sentence does not send half of it.
 const COMMAND_END_QUIET_POLLS: u32 = 6;
 
+/// The quietest a stretch after "Yes?" can be and still count as speech.
+const COMMAND_MIN_SPEECH_RMS: f32 = 0.02;
+
+/// Speech after "Yes?" has to stand clear of the room the wake gate measured,
+/// as the wake phrase did. A fixed bar let music or a crowd above it count as
+/// speech, so every request in a loud room ran to COMMAND_MAX_DURATION.
+fn command_speech_threshold(noise_floor: f32) -> f32 {
+    (noise_floor * SPEECH_OVER_NOISE).max(COMMAND_MIN_SPEECH_RMS)
+}
+
 fn command_finished(elapsed: Duration, heard_speech: bool, quiet_polls: u32) -> bool {
     if !heard_speech {
         return elapsed >= COMMAND_NO_SPEECH_TIMEOUT;
@@ -527,6 +554,7 @@ fn command_finished(elapsed: Duration, heard_speech: bool, quiet_polls: u32) -> 
 async fn record_command_audio(
     voice_engine: Arc<VoiceEngine>,
     token: CancellationToken,
+    speech_threshold: f32,
 ) -> Result<Vec<f32>, String> {
     voice_engine
         .audio_router
@@ -556,7 +584,7 @@ async fn record_command_audio(
                 }
 
                 let trailing_rms = trailing_rms(&samples, 0.35);
-                if trailing_rms > 0.02 {
+                if trailing_rms > speech_threshold {
                     heard_speech = true;
                     silent_windows = 0;
                 } else if heard_speech && duration_secs > 0.8 {
@@ -679,6 +707,11 @@ impl SpeechGate {
             noise_floor: None,
             suppressed_until: None,
         }
+    }
+
+    /// The room's level as measured so far.
+    fn noise_floor(&self) -> f32 {
+        self.noise_floor.unwrap_or(INITIAL_NOISE_FLOOR)
     }
 
     /// Forget the adapted floor. Used when capture is interrupted: the room the
@@ -1073,6 +1106,31 @@ mod tests {
         let body = &source[start..start + source[start..].find("\nasync fn handle_wake_word_detection(").unwrap()];
         let pause = body.find("wake_check_paused()").expect("detection_loop must check wake_check_paused()");
         assert!(pause < body.find("transcribe_local_window(").unwrap(), "the pause must come before the Whisper pass");
+    }
+
+    #[test]
+    fn push_to_talk_keeps_the_microphone_while_listening_is_switched() {
+        for state in [VoiceState::Listening, VoiceState::Processing, VoiceState::Speaking] {
+            assert!(push_to_talk_active(&state), "{state:?}");
+        }
+        for state in [VoiceState::Idle, VoiceState::WakeWordListening, VoiceState::Error("x".into())] {
+            assert!(!push_to_talk_active(&state), "{state:?}");
+        }
+        let source = include_str!("wake_word.rs");
+        for function in ["pub async fn enable(", "pub async fn disable(", "async fn detection_loop("] {
+            let start = source.find(function).unwrap();
+            let body = &source[start..start + 4000.min(source.len() - start)];
+            assert!(body.contains("push_to_talk_active("), "{function} must leave a push-to-talk session alone");
+        }
+    }
+
+    #[test]
+    fn a_loud_room_does_not_count_as_speech_after_the_wake_word() {
+        assert_eq!(command_speech_threshold(0.003), 0.02, "a quiet room keeps the old bar");
+        let loud_room = 0.03;
+        let threshold = command_speech_threshold(loud_room);
+        assert!(loud_room < threshold, "music or a crowd at the measured floor must not keep a request open");
+        assert!(0.1 > threshold, "a voice well above the room still counts");
     }
 
     #[test]

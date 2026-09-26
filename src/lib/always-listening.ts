@@ -1,4 +1,4 @@
-import type { WakeWordStatus } from './types';
+import type { VoiceState, WakeWordStatus } from './types';
 
 export interface ListeningApi {
   status: () => Promise<WakeWordStatus>;
@@ -20,4 +20,19 @@ export async function setAlwaysListening(on: boolean, api: ListeningApi): Promis
     await api.disable();
   }
   return api.status();
+}
+
+/**
+ * The switch stays still while the model downloads (a second download would
+ * write the same file) and while push-to-talk owns the microphone.
+ */
+export function canSwitchListening(status: WakeWordStatus | null, busy: boolean, state: VoiceState): boolean {
+  if (!status || busy) return false;
+  if (typeof state === 'object') return !('ModelDownloading' in state);
+  return state !== 'Listening' && state !== 'Processing' && state !== 'Speaking';
+}
+
+/** The voice state without its payload, so a download's progress is one kind. */
+export function voiceStateKind(state: VoiceState): string {
+  return typeof state === 'object' ? Object.keys(state)[0] : state;
 }

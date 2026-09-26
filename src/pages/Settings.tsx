@@ -59,6 +59,7 @@ import { UserRound } from "lucide-react";
 import { useWorkspace, useWorkspaceValue } from "../workspace/WorkspaceContext";
 import "./settings-workspace.css";
 import { MAX_ADDRESS_CHARS, MAX_INSTRUCTIONS_CHARS, PERSONA_CHOICES, personaLabel, personaValue, type PersonaKey } from "../lib/persona";
+import { canSwitchListening, voiceStateKind } from "../lib/always-listening";
 import { Cpu, Key, Globe, Gem, Mic, Bot, Palette, HardDrive, GithubMark, NotionMark } from "../components/icons";
 
 const API_KEY_PROVIDERS = [
@@ -259,8 +260,12 @@ export default function Settings() {
   useEffect(() => {
     getVoiceSettings().then(setVoiceSettingsState).catch(() => setWakeError("Could not load voice settings."));
     listTtsVoices().then(setTtsVoices).catch(() => setWakeError("Could not load the available voices."));
-    void refreshWakeStatus();
   }, []);
+
+  // This tab stays mounted while hidden, and the home switch or a download can
+  // change listening meanwhile: re-read whenever the voice state changes kind.
+  const voiceKind = voiceStateKind(voiceState);
+  useEffect(() => { void refreshWakeStatus(); }, [voiceKind]);
 
   useEffect(() => {
     listLocalEndpoints().then(setEndpoints).catch(() => {});
@@ -1121,7 +1126,7 @@ export default function Settings() {
             <h2 className="settings-heading">{text('Wake word', '喚醒詞')}</h2>
             <div style={styles.hint}>{text('Experimental. Listen locally for "Hey Jarvis" to start voice input.', '實驗功能：在本機偵測「Hey Jarvis」以啟動語音輸入。')}</div>
             <label style={styles.option}>
-              <input type="checkbox" checked={wakeStatus?.enabled ?? false} disabled={!wakeCanEnable || wakeBusy || modelDownloading !== null} onChange={(e) => { void handleWakeToggle(e.target.checked); }} style={styles.radio} />
+              <input type="checkbox" checked={wakeStatus?.running ?? false} disabled={!wakeCanEnable || !canSwitchListening(wakeStatus, wakeBusy, voiceState)} onChange={(e) => { void handleWakeToggle(e.target.checked); }} style={styles.radio} />
               <span style={styles.optionLabel}>{text('Enable wake word', '啟用喚醒詞')}</span>
             </label>
             <div style={styles.statusText}>{getWakeStatusLine(voiceState)}</div>
