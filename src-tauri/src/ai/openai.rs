@@ -407,9 +407,9 @@ pub async fn send(
                 }
                 executed_tools.insert(call_key);
                 log::info!(
-                    "JARVIS tool call: {}({})",
+                    "JARVIS tool call: {} ({} bytes of arguments)",
                     tc.function.name,
-                    tc.function.arguments
+                    tc.function.arguments.len()
                 );
                 let label = tools::tool_status_label(&tc.function.name);
                 let _ = app_handle.emit(

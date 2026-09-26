@@ -20,7 +20,8 @@ pub const ALREADY_CONNECTED: &str = "Already connected to Google";
 /// "there" for the life of the install.
 const REQUESTED_SCOPES: &[&str] = &[
     "https://www.googleapis.com/auth/gmail.modify",
-    "https://www.googleapis.com/auth/calendar",
+    // Events on the primary calendar are all JARVIS reads or writes.
+    "https://www.googleapis.com/auth/calendar.events",
     "https://www.googleapis.com/auth/userinfo.profile",
 ];
 
@@ -152,6 +153,7 @@ async fn unlink(auth: &GoogleAuth, db: &Database) -> Result<(), String> {
         conn.execute("DELETE FROM calendar_events", []).map_err(|e| e.to_string())?;
         conn.execute("DELETE FROM daily_briefings", []).map_err(|e| e.to_string())?;
     }
+    crate::commands::storage::reclaim_db(db);
     Ok(())
 }
 
@@ -199,6 +201,14 @@ mod tests {
             "the userinfo call needs its own scope: {:?}",
             REQUESTED_SCOPES
         );
+    }
+
+    #[test]
+    fn calendar_access_is_limited_to_events() {
+        // Google's review asks for the narrowest scope; JARVIS only touches
+        // events on the primary calendar.
+        assert!(REQUESTED_SCOPES.contains(&"https://www.googleapis.com/auth/calendar.events"));
+        assert!(!REQUESTED_SCOPES.contains(&"https://www.googleapis.com/auth/calendar"));
     }
 
     #[test]

@@ -9,6 +9,36 @@ use oauth2::{
 type GoogleClient =
     BasicClient<EndpointSet, EndpointNotSet, EndpointNotSet, EndpointNotSet, EndpointSet>;
 
+#[cfg(test)]
+pub(crate) static REVOKED_IN_TESTS: Mutex<Vec<String>> = Mutex::new(Vec::new());
+
+/// Revoke a Google grant. The token goes in the POST body, never the URL.
+/// Google revokes per OAuth client and account, so this also ends every other
+/// token this app holds for the same Google account.
+pub(crate) async fn revoke_grant(token: &str) -> Result<(), String> {
+    // Tests record the call instead of reaching Google, like KeychainStore's
+    // memory backend.
+    #[cfg(test)]
+    {
+        REVOKED_IN_TESTS.lock().unwrap().push(token.to_string());
+        return Ok(());
+    }
+    #[cfg(not(test))]
+    match crate::util::http_client()
+        .post(REVOKE_URL)
+        .form(&[("token", token)])
+        .send()
+        .await
+    {
+        Ok(resp) if resp.status().is_success() => {
+            log::info!("Google grant revoked");
+            Ok(())
+        }
+        Ok(resp) => Err(format!("Google revocation returned HTTP {}", resp.status())),
+        Err(e) => Err(format!("Google revocation call failed: {}", e)),
+    }
+}
+
 /// HTTP client for the token endpoint. Redirects are refused so an
 /// authorization code or refresh token is never re-sent to another host.
 fn token_http_client() -> Result<reqwest::Client, String> {
@@ -24,6 +54,7 @@ use crate::security::keychain::KeychainStore;
 
 const AUTH_URL: &str = "https://accounts.google.com/o/oauth2/v2/auth";
 const TOKEN_URL: &str = "https://oauth2.googleapis.com/token";
+#[cfg_attr(test, allow(dead_code))] // tests record revocations instead
 const REVOKE_URL: &str = "https://oauth2.googleapis.com/revoke";
 
 /// Google access tokens live about an hour. Treat one as spent slightly early
@@ -440,15 +471,8 @@ impl GoogleAuth {
             refresh.or_else(|| self.access_token.lock().unwrap().clone())
         };
         if let Some(token) = token {
-            match crate::util::http_client()
-                .post(REVOKE_URL)
-                .form(&[("token", token.as_str())])
-                .send()
-                .await
-            {
-                Ok(resp) if resp.status().is_success() => log::info!("Google grant revoked"),
-                Ok(resp) => log::warn!("Google revocation returned HTTP {}", resp.status()),
-                Err(e) => log::warn!("Google revocation call failed: {}", e),
+            if let Err(e) = revoke_grant(&token).await {
+                log::warn!("{}", e);
             }
         }
 

@@ -161,7 +161,7 @@ pub async fn send(
                         .to_string()
                 } else {
                     executed_tools.insert(call_key);
-                    log::info!("JARVIS tool call: {}({})", name, args_str);
+                    log::info!("JARVIS tool call: {} ({} bytes of arguments)", name, args_str.len());
 
                     let label = tools::tool_status_label(name);
                     let _ = app_handle.emit(

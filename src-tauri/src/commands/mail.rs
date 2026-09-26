@@ -184,17 +184,19 @@ pub async fn mail_connect_account(
 pub async fn mail_disconnect_account(
     db: State<'_, Arc<Database>>,
     state: State<'_, MailSyncState>,
+    google: State<'_, Arc<crate::auth::google::GoogleAuth>>,
     account_id: String,
 ) -> Result<(), String> {
-    sync::disconnect(&db, &state, &account_id).await
+    sync::disconnect(&db, &state, &google, &account_id).await
 }
 #[tauri::command]
 pub async fn mail_remove_account(
     db: State<'_, Arc<Database>>,
     state: State<'_, MailSyncState>,
+    google: State<'_, Arc<crate::auth::google::GoogleAuth>>,
     account_id: String,
 ) -> Result<(), String> {
-    sync::remove(&db, &state, &account_id).await
+    sync::remove(&db, &state, &google, &account_id).await
 }
 #[tauri::command]
 pub async fn mail_sync_account(

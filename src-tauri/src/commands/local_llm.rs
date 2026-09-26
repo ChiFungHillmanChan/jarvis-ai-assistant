@@ -52,6 +52,8 @@ pub async fn add_local_endpoint(
     backend_type: Option<String>,
     api_key: Option<String>,
 ) -> Result<LocalEndpoint, String> {
+    // Prompts sent here can include email: https, or plain http only to this Mac.
+    let url = crate::ai::compat::normalize_base_url(&url)?;
     // Auto-detect backend if not specified
     let detected = match backend_type {
         Some(ref bt) => BackendType::from_str(bt),
@@ -134,6 +136,9 @@ pub async fn update_local_endpoint(
     keep_alive_minutes: Option<u32>,
     is_active: Option<bool>,
 ) -> Result<(), String> {
+    let url = url
+        .map(|url| crate::ai::compat::normalize_base_url(&url))
+        .transpose()?;
     // Keychain FFI before the DB lock, same as `add_local_endpoint`. `Some("")`
     // is an explicit clear; `None` means the caller did not touch the key.
     let stored_column = match api_key {

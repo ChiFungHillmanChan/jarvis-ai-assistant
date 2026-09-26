@@ -24,7 +24,10 @@ use db::Database;
 use tauri::Manager;
 
 pub fn run() {
-    #[cfg(not(feature = "native-qa"))]
+    // Development only. A release build must not take its OAuth client, account
+    // domain or payment endpoint from a file anyone can drop next to the app;
+    // those values are compiled in by scripts/release.sh.
+    #[cfg(all(debug_assertions, not(feature = "native-qa")))]
     {
         if let Some(data_dir) = dirs::data_dir() {
             let env_path = data_dir.join("jarvis").join(".env");

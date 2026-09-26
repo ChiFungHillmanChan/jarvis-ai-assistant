@@ -200,6 +200,15 @@ pub fn sweep(conn: &Connection, retention_days: i64) -> Result<SweepReport, Stri
 /// Return freed pages to the filesystem. Deleting rows only marks pages reusable
 /// inside the file, so without this the database never shrinks and the Storage
 /// panel keeps reporting the high-water mark.
+/// Reclaim free pages after local data is deleted outside the retention sweep,
+/// so removed mail cannot be read back from the database file.
+pub(crate) fn reclaim_db(db: &crate::db::Database) {
+    match db.conn.lock() {
+        Ok(conn) => reclaim(&conn),
+        Err(_) => log::warn!("storage: reclaim skipped, database busy"),
+    }
+}
+
 fn reclaim(conn: &Connection) {
     // VACUUM itself writes into the WAL. Checkpoint afterwards so those pages
     // do not stay allocated until the next automatic checkpoint or shutdown.

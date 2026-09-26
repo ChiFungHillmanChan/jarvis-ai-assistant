@@ -533,9 +533,9 @@ pub async fn send_local(
                 }
                 executed_tools.insert(call_key);
                 log::info!(
-                    "Local LLM tool call: {}({})",
+                    "Local LLM tool call: {} ({} bytes of arguments)",
                     tc.function.name,
-                    tc.function.arguments
+                    tc.function.arguments.len()
                 );
                 let label = tools::tool_status_label(&tc.function.name);
                 let _ = app_handle.emit(
