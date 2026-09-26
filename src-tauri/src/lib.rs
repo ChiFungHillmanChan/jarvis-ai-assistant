@@ -44,6 +44,18 @@ pub fn run() {
         .plugin(tauri_plugin_updater::Builder::new().build())
         .plugin(tauri_plugin_process::init())
         .plugin(tauri_plugin_global_shortcut::Builder::new().build())
+        // Reopen at the size and position the user left. Fullscreen is left
+        // out: wallpaper mode is fullscreen, and wallpaper.rs restores the
+        // normal frame itself when it ends.
+        .plugin(
+            tauri_plugin_window_state::Builder::new()
+                .with_state_flags(
+                    tauri_plugin_window_state::StateFlags::SIZE
+                        | tauri_plugin_window_state::StateFlags::POSITION
+                        | tauri_plugin_window_state::StateFlags::MAXIMIZED,
+                )
+                .build(),
+        )
         .setup(|app| {
             // A failure here is total -- no database, no app -- and in a
             // packaged .app the panic message goes to a stderr nobody reads, so

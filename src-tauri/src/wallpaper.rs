@@ -1,4 +1,6 @@
+use crate::db::Database;
 use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::Arc;
 use tauri::{Emitter, Manager};
 
 static WALLPAPER_ACTIVE: AtomicBool = AtomicBool::new(false);
@@ -14,6 +16,38 @@ pub fn is_active() -> bool {
 
 pub fn is_raised() -> bool {
     WALLPAPER_RAISED.load(Ordering::SeqCst)
+}
+
+/// Preference holding the normal window frame (x, y, width, height in
+/// physical pixels) while wallpaper mode is on. The window-state plugin keeps
+/// recording the window during wallpaper mode, so it only knows the fullscreen
+/// frame; leaving wallpaper mode restores from here instead.
+const NORMAL_FRAME_KEY: &str = "window_frame_before_wallpaper";
+
+/// Keeps the first frame: after a restart in wallpaper mode the window comes
+/// back at screen size, which is not the frame to return to.
+fn remember_frame(conn: &rusqlite::Connection, frame: (i32, i32, u32, u32)) -> rusqlite::Result<()> {
+    let (x, y, width, height) = frame;
+    conn.execute(
+        "INSERT OR IGNORE INTO user_preferences (key, value) VALUES (?1, ?2)",
+        rusqlite::params![NORMAL_FRAME_KEY, format!("{},{},{},{}", x, y, width, height)],
+    )?;
+    Ok(())
+}
+
+fn take_frame(conn: &rusqlite::Connection) -> Option<(i32, i32, u32, u32)> {
+    let value: String = conn
+        .query_row("SELECT value FROM user_preferences WHERE key = ?1", [NORMAL_FRAME_KEY], |row| row.get(0))
+        .ok()?;
+    let _ = conn.execute("DELETE FROM user_preferences WHERE key = ?1", [NORMAL_FRAME_KEY]);
+    let mut parts = value.split(',');
+    let frame = (
+        parts.next()?.parse().ok()?,
+        parts.next()?.parse().ok()?,
+        parts.next()?.parse().ok()?,
+        parts.next()?.parse().ok()?,
+    );
+    (frame.2 > 0 && frame.3 > 0).then_some(frame)
 }
 
 fn emit_wallpaper_state(app_handle: &tauri::AppHandle) {
@@ -62,6 +96,15 @@ pub fn enable(app_handle: &tauri::AppHandle) -> Result<(), String> {
         .get_webview_window("main")
         .ok_or("Main window not found")?;
 
+    if !main_win.is_fullscreen().unwrap_or(false) {
+        if let (Ok(position), Ok(size)) = (main_win.outer_position(), main_win.inner_size()) {
+            let db = app_handle.state::<Arc<Database>>();
+            let remembered = db.conn.lock().map(|conn| remember_frame(&conn, (position.x, position.y, size.width, size.height)));
+            if let Ok(Err(e)) = remembered {
+                log::warn!("Could not remember the window frame before wallpaper mode: {}", e);
+            }
+        }
+    }
     let _ = main_win.set_fullscreen(true);
 
     #[cfg(target_os = "macos")]
@@ -119,10 +162,19 @@ pub fn disable(app_handle: &tauri::AppHandle) -> Result<(), String> {
     }
 
     let _ = main_win.set_fullscreen(false);
-    let _ = main_win.set_size(tauri::Size::Logical(tauri::LogicalSize {
-        width: 1200.0,
-        height: 800.0,
-    }));
+    let frame = app_handle.state::<Arc<Database>>().conn.lock().ok().and_then(|conn| take_frame(&conn));
+    match frame {
+        Some((x, y, width, height)) => {
+            let _ = main_win.set_size(tauri::Size::Physical(tauri::PhysicalSize { width, height }));
+            let _ = main_win.set_position(tauri::Position::Physical(tauri::PhysicalPosition { x, y }));
+        }
+        None => {
+            let _ = main_win.set_size(tauri::Size::Logical(tauri::LogicalSize {
+                width: 1200.0,
+                height: 800.0,
+            }));
+        }
+    }
 
     WALLPAPER_ACTIVE.store(false, Ordering::SeqCst);
     WALLPAPER_RAISED.store(false, Ordering::SeqCst);
@@ -263,4 +315,43 @@ pub async fn enable_on_startup(app_handle: tauri::AppHandle) -> Result<(), Strin
     }
 
     Err("Wallpaper startup failed: native window never became ready".to_string())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use rusqlite::Connection;
+
+    fn prefs() -> Connection {
+        let conn = Connection::open_in_memory().unwrap();
+        conn.execute_batch("CREATE TABLE user_preferences (key TEXT PRIMARY KEY, value TEXT NOT NULL, updated_at TEXT NOT NULL DEFAULT (datetime('now')));").unwrap();
+        conn
+    }
+
+    #[test]
+    fn leaving_wallpaper_returns_the_frame_from_before_it() {
+        let conn = prefs();
+        remember_frame(&conn, (120, 80, 2400, 1600)).unwrap();
+        assert_eq!(take_frame(&conn), Some((120, 80, 2400, 1600)));
+        assert_eq!(take_frame(&conn), None, "the frame is used once");
+    }
+
+    #[test]
+    fn a_restart_in_wallpaper_mode_keeps_the_original_frame() {
+        // After a restart the window comes back at screen size; that must not
+        // replace the frame the user had before turning wallpaper mode on.
+        let conn = prefs();
+        remember_frame(&conn, (120, 80, 2400, 1600)).unwrap();
+        remember_frame(&conn, (0, 0, 3024, 1964)).unwrap();
+        assert_eq!(take_frame(&conn), Some((120, 80, 2400, 1600)));
+    }
+
+    #[test]
+    fn a_damaged_or_empty_frame_is_ignored() {
+        let conn = prefs();
+        conn.execute("INSERT INTO user_preferences (key, value) VALUES (?1, 'not,a,frame')", [NORMAL_FRAME_KEY]).unwrap();
+        assert_eq!(take_frame(&conn), None);
+        remember_frame(&conn, (0, 0, 0, 800)).unwrap();
+        assert_eq!(take_frame(&conn), None);
+    }
 }
