@@ -14,6 +14,7 @@ pub mod payments;
 pub mod scheduler;
 pub mod security;
 pub mod system;
+pub mod tool_approval;
 pub mod tray;
 pub mod util;
 pub mod voice;
@@ -60,6 +61,7 @@ pub fn run() {
                 .build(),
         )
         .setup(|app| {
+            tool_approval::init(app.handle().clone());
             // A failure here is total -- no database, no app -- and in a
             // packaged .app the panic message goes to a stderr nobody reads, so
             // JARVIS just fails to launch with no window and no explanation.
@@ -553,6 +555,7 @@ pub fn run() {
             commands::ai_choice::list_ai_models,
             commands::local_llm::update_model_override,
             commands::system::open_url,
+            tool_approval::resolve_tool_approval,
             wallpaper::enable_wallpaper,
             wallpaper::disable_wallpaper,
             wallpaper::toggle_wallpaper,

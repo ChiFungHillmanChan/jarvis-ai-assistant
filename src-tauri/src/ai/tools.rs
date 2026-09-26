@@ -1269,6 +1269,32 @@ pub async fn execute_tool(
         })).await
 }
 
+/// What the approval card shows: the memory text, or the email, event or
+/// follow-up the action applies to, looked up so the user sees a title and
+/// not an ID.
+fn approval_detail(name: &str, args: &serde_json::Value, db: &crate::db::Database) -> String {
+    let lookup = |sql: &str, key: &str| -> Option<String> {
+        let conn = db.conn.lock().ok()?;
+        conn.query_row(sql, [key], |row| row.get::<_, String>(0)).ok()
+    };
+    let id = |field: &str| match &args[field] {
+        serde_json::Value::String(s) => s.clone(),
+        other => other.to_string(),
+    };
+    let found = match name {
+        "remember" => args["content"].as_str().map(str::to_string),
+        "archive_email" => lookup("SELECT '\u{201c}' || coalesce(subject, '') || '\u{201d} ' || sender FROM emails WHERE gmail_id = ?1", &id("email_id")),
+        "delete_event" => lookup("SELECT '\u{201c}' || summary || '\u{201d} ' || start_time FROM calendar_events WHERE google_id = ?1", &id("event_id")),
+        "update_follow_up" => lookup("SELECT '\u{201c}' || title || '\u{201d}' FROM mail_items WHERE id = ?1", &id("item_id")),
+        _ => None,
+    };
+    found.unwrap_or_else(|| format!("ID {}", id(match name {
+        "archive_email" => "email_id",
+        "delete_event" => "event_id",
+        _ => "item_id",
+    })))
+}
+
 async fn execute_tool_inner(
     name: &str,
     args_str: &str,
@@ -1283,6 +1309,16 @@ async fn execute_tool_inner(
     if matches!(name, "search_emails" | "read_email" | "list_follow_ups" | "update_follow_up" | "list_inbox_triage") {
         if let Err(blocked) = crate::ai::mail_policy::check(db) {
             return blocked.tool_message();
+        }
+    }
+
+    // A crafted email can ask the model to change the user's data: these wait
+    // for the user's click (see tool_approval).
+    if crate::tool_approval::NEEDS_APPROVAL.contains(&name) {
+        let detail = approval_detail(name, &args, db);
+        let status = args["status"].as_str().filter(|_| name == "update_follow_up");
+        if !crate::tool_approval::confirm(name, detail, status).await {
+            return format!("The user did not allow {name}, so nothing was changed. Do not try again unless the user asks.");
         }
     }
 
@@ -2504,6 +2540,11 @@ mod local_data_tests {
 
     #[tokio::test]
     async fn update_follow_up_dismisses_one_item_and_keeps_its_reminder() {
+        // The user allows each change on the approval card.
+        crate::tool_approval::TEST_ANSWER.scope(true, update_follow_up_allowed()).await;
+    }
+
+    async fn update_follow_up_allowed() {
         let db = mail_db();
         let out = run("update_follow_up", serde_json::json!({"item_id": 19, "status": "dismissed"}), &db).await;
         assert!(out.contains("dismissed"), "{out}");
@@ -2523,6 +2564,18 @@ mod local_data_tests {
         assert_eq!(status_of(&db, 19).0, "open", "{bad}");
         let missing = run("update_follow_up", serde_json::json!({"item_id": 999, "status": "done"}), &db).await;
         assert!(missing.contains("999"), "{missing}");
+    }
+
+    #[tokio::test]
+    async fn a_declined_change_leaves_everything_as_it_was() {
+        let db = mail_db();
+        let out = crate::tool_approval::TEST_ANSWER
+            .scope(false, run("update_follow_up", serde_json::json!({"item_id": 19, "status": "dismissed"}), &db))
+            .await;
+        assert!(out.starts_with("The user did not allow update_follow_up"), "{out}");
+        assert_eq!(status_of(&db, 19).0, "open");
+        // The card names the follow-up, not just its ID.
+        assert_eq!(approval_detail("update_follow_up", &serde_json::json!({"item_id": 19}), &db), "\u{201c}Submit Gold Badge\u{201d}");
     }
 
     /// Same list the Mail page's "Needs attention" view shows.
