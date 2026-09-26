@@ -150,6 +150,27 @@ impl Transcriber {
     }
 }
 
+/// How hard local Whisper works on one pass.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct DecodeProfile {
+    pub threads: Option<i32>,
+    pub audio_ctx: Option<i32>,
+    /// Re-decode at higher temperatures when a pass is low-confidence.
+    pub fallback: bool,
+    pub max_tokens: Option<i32>,
+}
+
+impl DecodeProfile {
+    /// A spoken request, up to 28 s: whisper.cpp's defaults.
+    pub const REQUEST: Self = Self { threads: None, audio_ctx: None, fallback: true, max_tokens: None };
+    /// The 2 s wake window, checked about once a second whenever someone is
+    /// talking near the Mac. The defaults encode a full 30 s context (1500
+    /// positions) on 4 threads and may decode six times; 256 positions still
+    /// cover about 5 s. Measured on an M5 with ggml-base: 0.7-1.3 CPU-seconds
+    /// per pass with the defaults, 72-91 ms with this profile.
+    pub const WAKE: Self = Self { threads: Some(2), audio_ctx: Some(256), fallback: false, max_tokens: Some(16) };
+}
+
 #[derive(Clone)]
 pub struct LocalTranscriber {
     ctx: Arc<WhisperContext>,
@@ -168,11 +189,11 @@ impl LocalTranscriber {
     }
 
     pub fn transcribe(&self, audio_data: &[f32], db: &crate::db::Database) -> Result<String, String> {
-        self.transcribe_as(audio_data, whisper_language(&read_stt_language(db)))
+        self.transcribe_as(audio_data, whisper_language(&read_stt_language(db)), DecodeProfile::REQUEST)
     }
 
     /// Transcribe in a fixed language, or let Whisper detect it when `None`.
-    pub fn transcribe_as(&self, audio_data: &[f32], language: Option<&str>) -> Result<String, String> {
+    pub fn transcribe_as(&self, audio_data: &[f32], language: Option<&str>, profile: DecodeProfile) -> Result<String, String> {
         if audio_data.len() < 1600 {
             return Ok(String::new());
         }
@@ -191,6 +212,20 @@ impl LocalTranscriber {
         params.set_print_timestamps(false);
         params.set_suppress_blank(true);
         params.set_single_segment(true);
+        if let Some(threads) = profile.threads {
+            params.set_n_threads(threads);
+        }
+        if let Some(audio_ctx) = profile.audio_ctx {
+            params.set_audio_ctx(audio_ctx);
+        }
+        if !profile.fallback {
+            params.set_temperature_inc(0.0);
+        }
+        if let Some(max_tokens) = profile.max_tokens {
+            // Timestamp tokens would count against a cap this small.
+            params.set_max_tokens(max_tokens);
+            params.set_no_timestamps(true);
+        }
 
         state
             .full(params, audio_data)
@@ -219,6 +254,35 @@ impl LocalTranscriber {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn the_wake_profile_is_light_and_requests_keep_the_defaults() {
+        assert_eq!(DecodeProfile::REQUEST, DecodeProfile { threads: None, audio_ctx: None, fallback: true, max_tokens: None });
+        assert_eq!(DecodeProfile::WAKE.threads, Some(2));
+        assert!(DecodeProfile::WAKE.audio_ctx.unwrap() >= 256, "at 128 the base model repeated itself in testing");
+        assert!(!DecodeProfile::WAKE.fallback);
+        assert_eq!(DecodeProfile::WAKE.max_tokens, Some(16));
+    }
+
+    /// Run by hand against the real model and a 16 kHz mono clip of someone saying "Hey Jarvis":
+    /// `JARVIS_WHISPER_MODEL=.../ggml-base.bin JARVIS_WAKE_SAMPLE=.../hey.wav cargo test
+    /// --release --lib the_wake_profile_still_hears_hey_jarvis -- --ignored --nocapture`
+    #[test]
+    #[ignore]
+    fn the_wake_profile_still_hears_hey_jarvis() {
+        let model = std::env::var("JARVIS_WHISPER_MODEL").expect("JARVIS_WHISPER_MODEL");
+        let sample = std::env::var("JARVIS_WAKE_SAMPLE").expect("JARVIS_WAKE_SAMPLE");
+        let mut reader = hound::WavReader::open(sample).unwrap();
+        assert_eq!((reader.spec().sample_rate, reader.spec().channels), (16_000, 1));
+        let audio: Vec<f32> = reader.samples::<i16>().map(|s| s.unwrap() as f32 / 32768.0).collect();
+        let transcriber = LocalTranscriber::new(std::path::Path::new(&model)).unwrap();
+        for profile in [DecodeProfile::REQUEST, DecodeProfile::WAKE] {
+            let started = std::time::Instant::now();
+            let text = transcriber.transcribe_as(&audio, Some("en"), profile).unwrap();
+            println!("{profile:?}: {:?} in {:?}", text, started.elapsed());
+            assert!(text.to_lowercase().contains("jarvis"), "{profile:?} heard {text:?}");
+        }
+    }
 
     #[test]
     fn whisper_language_follows_the_dictation_setting() {

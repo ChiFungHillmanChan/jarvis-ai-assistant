@@ -45,6 +45,11 @@ pub fn playback_lock() -> &'static AsyncMutex<()> {
     LOCK.get_or_init(|| AsyncMutex::new(()))
 }
 
+/// Whether anything is being spoken right now: every playback path holds `playback_lock`.
+pub fn is_playing() -> bool {
+    playback_lock().try_lock().is_err()
+}
+
 /// Process-wide utterance lock.
 ///
 /// `playback_lock` is taken per `say` child so a cancel can land between

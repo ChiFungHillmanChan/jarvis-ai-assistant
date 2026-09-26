@@ -2,7 +2,7 @@ use crate::ai::{AiRouter, Workload};
 use crate::auth::google::GoogleAuth;
 use crate::db::Database;
 use crate::voice::model_manager;
-use crate::voice::transcribe::LocalTranscriber;
+use crate::voice::transcribe::{DecodeProfile, LocalTranscriber};
 use crate::voice::tts::StreamingTts;
 use crate::voice::{JarvisAppHandle, VoiceEngine, VoiceState};
 use serde_json::json;
@@ -254,6 +254,9 @@ async fn detection_loop(
                 if !matches!(voice_engine.get_state(), VoiceState::WakeWordListening | VoiceState::Idle) {
                     continue;
                 }
+                if wake_check_paused() {
+                    continue;
+                }
 
                 let audio_window = {
                     let audio_router = voice_engine
@@ -323,6 +326,13 @@ async fn detection_loop(
             }
         }
     }
+}
+
+/// JARVIS speaking (the microphone would only hear JARVIS), or another
+/// assistant turn holding the FOREGROUND guard (a detection would be dropped
+/// there anyway): skip the tick rather than spend a Whisper pass on it.
+fn wake_check_paused() -> bool {
+    crate::voice::tts::is_playing() || crate::chat_session::FOREGROUND.try_lock().is_err()
 }
 
 async fn handle_wake_word_detection(
@@ -474,7 +484,7 @@ async fn transcribe_local_window(
     local_transcriber: LocalTranscriber,
     audio_window: Vec<f32>,
 ) -> Result<String, String> {
-    tauri::async_runtime::spawn_blocking(move || local_transcriber.transcribe_as(&audio_window, WAKE_PHRASE_LANGUAGE))
+    tauri::async_runtime::spawn_blocking(move || local_transcriber.transcribe_as(&audio_window, WAKE_PHRASE_LANGUAGE, DecodeProfile::WAKE))
         .await
         .map_err(|e| format!("Wake-word transcription task failed: {}", e))?
 }
@@ -1048,9 +1058,21 @@ mod tests {
             .expect("transcribe_with_fallback must follow transcribe_local_window");
         let body = &source[start..start + len];
         assert!(
-            body.contains("transcribe_as(") && body.contains("WAKE_PHRASE_LANGUAGE"),
+            body.contains("transcribe_as(") && body.contains("WAKE_PHRASE_LANGUAGE") && body.contains("DecodeProfile::WAKE"),
             "the wake window must be transcribed in WAKE_PHRASE_LANGUAGE, not the dictation language"
         );
+    }
+
+    /// While JARVIS is speaking, the microphone hears JARVIS; while another
+    /// assistant turn runs, a detection is dropped at the FOREGROUND guard in
+    /// handle_wake_word_detection. Neither is worth a Whisper pass.
+    #[test]
+    fn the_wake_check_pauses_before_whisper_runs() {
+        let source = include_str!("wake_word.rs");
+        let start = source.find("async fn detection_loop(").expect("detection_loop must exist");
+        let body = &source[start..start + source[start..].find("\nasync fn handle_wake_word_detection(").unwrap()];
+        let pause = body.find("wake_check_paused()").expect("detection_loop must check wake_check_paused()");
+        assert!(pause < body.find("transcribe_local_window(").unwrap(), "the pause must come before the Whisper pass");
     }
 
     #[test]
