@@ -10,6 +10,10 @@ use crate::db::Database;
 use serde_json::{json, Value};
 use std::time::Instant;
 
+/// Context window asked of Ollama: a triaged email (6,000 characters), its
+/// instructions and the sender's known follow-ups fit with room to answer.
+const OLLAMA_CONTEXT: u32 = 8_192;
+
 pub struct Request<'a> {
     pub system: &'a str,
     pub user: &'a str,
@@ -74,6 +78,22 @@ async fn complete_one(router: &AiRouter, db: &Database, entry: &ProviderChainEnt
             let endpoint = router.find_endpoint(endpoint_id).ok_or("本機 AI 端點不存在或已停用。")?;
             let model = entry.model_id.clone().ok_or("尚未選擇本機模型。")?;
             let base = endpoint.url.trim_end_matches('/');
+            if matches!(endpoint.backend_type, super::local::backend::BackendType::Ollama) {
+                // Ollama's OpenAI endpoint keeps its small default context and
+                // drops the start of a long prompt (the instructions) silently.
+                let mut messages = Vec::new();
+                if !request.system.is_empty() {
+                    messages.push(json!({"role": "system", "content": request.system}));
+                }
+                messages.push(json!({"role": "user", "content": request.user}));
+                let mut body = json!({"model": model, "messages": messages, "stream": false, "options": {"num_ctx": OLLAMA_CONTEXT, "num_predict": request.max_tokens}});
+                if request.json {
+                    body["format"] = json!("json");
+                }
+                let value = post(&client, &format!("{base}/api/chat"), "Ollama", |r| r, &body).await?;
+                let text = value.pointer("/message/content").and_then(Value::as_str).unwrap_or_default().to_string();
+                return done(text, "Ollama".into(), model, value.get("prompt_eval_count"), value.get("eval_count"));
+            }
             let body = chat_completions_body(&model, request, false);
             let key = endpoint.api_key.clone();
             let value = post(&client, &format!("{base}/v1/chat/completions"), "本機 AI", |r| match &key {

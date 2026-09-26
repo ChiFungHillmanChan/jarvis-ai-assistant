@@ -796,7 +796,7 @@ pub fn set_auto_triage(db: &Database, enabled: bool) -> Result<(), String> {
 
 /// Counts for the sidebar. With `account_id`, they match what the message
 /// list shows for that mailbox; without it, every mailbox.
-pub fn triage_status(db: &Database, account_id: Option<&str>, typesafe_key: bool, openai_key: bool) -> Result<MailTriageStatus, String> {
+pub fn triage_status(db: &Database, account_id: Option<&str>, typesafe_key: bool, openai_key: bool, chosen_ai: Option<String>) -> Result<MailTriageStatus, String> {
     let conn = db.conn.lock().map_err(err)?;
     let count = |sql: &str| -> Result<i64, String> { conn.query_row(sql, [account_id], |r| r.get(0)).map_err(err) };
     let enabled: bool = conn.query_row("SELECT auto_triage FROM mail_settings WHERE id=1", [], |r| r.get(0)).map_err(err)?;
@@ -808,7 +808,7 @@ pub fn triage_status(db: &Database, account_id: Option<&str>, typesafe_key: bool
         let n: i64 = conn.query_row("SELECT COUNT(*) FROM mail_triage t JOIN mail_messages m ON m.id=t.message_id WHERE t.category=?1 AND (?2 IS NULL OR m.account_id=?2)", params![category, account_id], |r| r.get(0)).map_err(err)?;
         categories.push((category.to_string(), n));
     }
-    Ok(MailTriageStatus { enabled, typesafe_key, openai_key, untriaged, attention, open_items, categories })
+    Ok(MailTriageStatus { enabled, typesafe_key, openai_key, chosen_ai, untriaged, attention, open_items, categories })
 }
 
 const ITEM_SELECT: &str = "SELECT i.id,i.message_id,i.kind,i.title,i.due_date,i.due_time,i.end_time,i.location,i.evidence,i.evidence_verified,i.status,i.remind_at,i.reminded_at,i.calendar_event_id,m.subject,m.sender,i.superseded_by FROM mail_items i JOIN mail_messages m ON m.id=i.message_id";
@@ -1000,7 +1000,7 @@ mod tests {
         let replaced = only_item(&db, 1);
         assert_eq!((replaced.status.as_str(), replaced.superseded_by), ("dismissed", Some(corrected.id)));
         assert_eq!(list_items(&db, None, false).unwrap().iter().map(|i| i.id).collect::<Vec<_>>(), [corrected.id]);
-        assert_eq!(triage_status(&db, None, true, true).unwrap().attention, 1, "the corrected email stops asking");
+        assert_eq!(triage_status(&db, None, true, true, None).unwrap().attention, 1, "the corrected email stops asking");
         // The later reply restates the new date: still one follow-up.
         assert_eq!(known_ids(&db, 3), [corrected.id], "a replaced item is not offered again");
         save_triage(&db, 3, AWS, &work_triage(), "jev", None, false, &[deadline("提交第二階段里程碑材料", "2026-10-16", &[corrected.id])]).unwrap();
@@ -1106,9 +1106,9 @@ mod tests {
         save_triage(&db, 1, "x@y.com", &triage, "jev", None, false, &[task.clone(), NewItem { title: "B".into(), ..task }]).unwrap();
         let items = list_items(&db, Some(1), true).unwrap();
         update_item(&db, items[0].id, "done", None).unwrap();
-        assert_eq!(triage_status(&db, None, true, true).unwrap().attention, 1);
+        assert_eq!(triage_status(&db, None, true, true, None).unwrap().attention, 1);
         update_item(&db, items[1].id, "dismissed", None).unwrap();
-        assert_eq!(triage_status(&db, None, true, true).unwrap().attention, 0);
+        assert_eq!(triage_status(&db, None, true, true, None).unwrap().attention, 0);
     }
 
     use super::*;

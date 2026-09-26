@@ -84,6 +84,8 @@ pub struct MailTriageStatus {
     pub enabled: bool,
     pub typesafe_key: bool,
     pub openai_key: bool,
+    /// Name of the AI chosen in setup, which sorts mail without TypeSafe.
+    pub chosen_ai: Option<String>,
     pub untriaged: i64,
     pub attention: i64,
     pub open_items: i64,

@@ -74,8 +74,10 @@ export function MailAiCard({ triage, items, text, locale, onChanged, onError, on
     <p className="mail-ai-meta">
       <CategoryTag category={triage.category} text={text} />
       {triage.attention && <span className="mail-attention-tag">{text("Needs attention", "需要處理")}</span>}
-      <span title={text("How sure Jev was about the category", "Jev 對分類的把握程度")}>{text(`Jev ${confidence}% sure`, `Jev 把握 ${confidence}%`)}</span>
-      {triage.decided_by === "luna" && <span>{text("category checked by gpt-6-luna", "分類經 gpt-6-luna 覆核")}</span>}
+      {triage.decided_by === "ai"
+        ? <span>{text("Sorted by your AI", "由你選擇的 AI 整理")}</span>
+        : <span title={text("How sure Jev was about the category", "Jev 對分類的把握程度")}>{text(`Jev ${confidence}% sure`, `Jev 把握 ${confidence}%`)}</span>}
+      {triage.decided_by === "luna" && <span>{text("category checked by your AI", "分類經你選擇的 AI 覆核")}</span>}
       {!triage.sent_by_owner && <button type="button" className="mail-quiet mail-ai-toggle" onClick={() => onAttention(!triage.attention)}>{triage.attention ? text("Mark as handled", "標記為已處理") : text("Needs my attention", "標記為需要處理")}</button>}
     </p>
     {items.length > 0 && <ul className="mail-items">{items.map(item => <MailItemRow key={item.id} item={item} text={text} locale={locale} onChanged={onChanged} onError={onError} />)}</ul>}

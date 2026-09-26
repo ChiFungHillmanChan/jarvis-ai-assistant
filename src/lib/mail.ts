@@ -10,10 +10,10 @@ export interface MailMemoryInput { id: number | null; group_id: number; content:
 export interface MailSettings { processing_mode: string; local_model: string; bedrock_model: string; openai_model: string }
 export interface MailWorkspace { accounts: MailAccount[]; groups: MailGroup[]; settings: MailSettings; triage: MailTriageStatus }
 /** Jev's raw answers plus the policy decided in code (src-tauri/src/mail/triage.rs). */
-export interface MailTriage { category: MailCategory; category_confidence: number; needs_reply: number; action_required: number; has_date: number; importance: number; sent_by_owner: boolean; attention: boolean; summary: string | null; decided_by: 'jev' | 'luna' }
+export interface MailTriage { category: MailCategory; category_confidence: number; needs_reply: number; action_required: number; has_date: number; importance: number; sent_by_owner: boolean; attention: boolean; summary: string | null; decided_by: 'jev' | 'luna' | 'ai' }
 export type MailCategory = 'work' | 'jobs' | 'finance' | 'schedule' | 'account' | 'personal' | 'promotions';
 export type MailView = 'attention' | 'due' | 'untriaged' | MailCategory;
-export interface MailTriageStatus { enabled: boolean; typesafe_key: boolean; openai_key: boolean; untriaged: number; attention: number; open_items: number; categories: [MailCategory, number][] }
+export interface MailTriageStatus { enabled: boolean; typesafe_key: boolean; openai_key: boolean; chosen_ai: string | null; untriaged: number; attention: number; open_items: number; categories: [MailCategory, number][] }
 export interface MailTriageRun { triaged: number; summarized: number; items: number; failed: number; remaining: number; jev_input_tokens: number; luna_input_tokens: number; luna_output_tokens: number; cost_usd: number; warning: string | null }
 export interface MailItem { id: number; message_id: number; kind: 'task' | 'deadline' | 'event' | 'reply'; title: string; due_date: string | null; due_time: string | null; end_time: string | null; location: string | null; evidence: string; evidence_verified: boolean; status: 'open' | 'done' | 'dismissed'; remind_at: string | null; reminded_at: string | null; calendar_event_id: string | null; subject: string; sender: string; superseded_by: number | null }
 export interface MailPage { messages: MailMessage[]; total: number }

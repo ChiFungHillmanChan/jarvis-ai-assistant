@@ -12,6 +12,9 @@
 //!    was unsure about, and CJK-heavy mail, where Jev is weaker. Code then
 //!    validates every date and checks each quoted piece of evidence against
 //!    the message text.
+//! Without a TypeSafe key, the AI chosen in setup answers Jev's questions
+//! in the same call as the extraction (`parse_combined`), so triage works
+//! with that one AI alone; the policy in `finalize` is the same either way.
 //! 4. Follow-ups are reconciled across emails: gpt-6-luna sees the sender's
 //!    open follow-ups and links repeats and corrections to them, and
 //!    store::save_triage keeps one current version of each. A sender's mail
@@ -43,9 +46,13 @@ const CONCURRENCY: usize = 6;
 const MAX_ITEMS: usize = 5;
 
 pub struct TriageKeys {
-    pub typesafe: String,
+    /// Optional: Jev classifies when the user added a TypeSafe key.
+    pub typesafe: Option<String>,
+    /// Summaries and dates on api.openai.com, when OpenAI is the chosen AI.
     pub openai: Option<String>,
     pub openai_model: String,
+    /// The AI chosen in setup, for everything the keys above do not cover.
+    pub assistant: Option<crate::ai::AiRouter>,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -525,6 +532,70 @@ struct Outcome {
     error: Option<String>,
 }
 
+/// What Jev would otherwise answer, asked of the chosen AI in the same call
+/// as the extraction when the user has no TypeSafe key.
+fn combined_rules() -> &'static str {
+    "Also answer these about the email, for its owner:\n\
+     - needs_reply: true if a person is waiting for the owner's answer or input; false for automated notices, newsletters, receipts, alerts, or mail the owner sent.\n\
+     - action_required: true if it asks the owner to do a concrete task such as pay, submit, sign, book, confirm, upload, prepare or attend; false for nothing to do or a generic marketing call to action.\n\
+     - has_date: true if it mentions a deadline, appointment, meeting, interview or event date that matters to the owner; sale end dates and newsletter dates do not count.\n\
+     - importance: 0 can be ignored (marketing, newsletters, routine notices); 1 worth knowing, nothing to do; 2 needs attention this week (a task, a reply, a booking or a bill); 3 urgent or high-stakes (money, legal, an important person waiting, or a deadline within days).\n\
+     - category_confidence: how sure you are of the category, from 0 to 1."
+}
+
+/// The extraction schema plus the classification fields.
+fn combined_schema() -> Value {
+    let mut schema = luna_schema();
+    let extra = json!({
+        "needs_reply": {"type": "boolean"},
+        "action_required": {"type": "boolean"},
+        "has_date": {"type": "boolean"},
+        "importance": {"type": "integer", "enum": [0, 1, 2, 3]},
+        "category_confidence": {"type": "number"},
+    });
+    if let (Some(properties), Some(extra)) = (schema["properties"].as_object_mut(), extra.as_object()) {
+        properties.extend(extra.clone());
+    }
+    if let Some(required) = schema["required"].as_array_mut() {
+        required.extend(["needs_reply", "action_required", "has_date", "importance", "category_confidence"].map(|k| json!(k)));
+    }
+    schema
+}
+
+/// Jev-shaped answers from the one-call path, so `finalize` applies the same
+/// policy whichever AI classified the email.
+pub fn parse_combined(value: &Value, category: &str) -> JevAnswers {
+    let flag = |key: &str| if value.get(key).and_then(Value::as_bool).unwrap_or(false) { 0.9 } else { 0.1 };
+    JevAnswers {
+        category: category.to_string(),
+        category_confidence: value.get("category_confidence").and_then(Value::as_f64).unwrap_or(0.8).clamp(0.0, 1.0),
+        needs_reply: flag("needs_reply"),
+        action_required: flag("action_required"),
+        has_date: flag("has_date"),
+        importance: value.get("importance").and_then(Value::as_f64).unwrap_or(1.0).clamp(0.0, 3.0),
+        // No Jev was involved; mail_triage.jev_model stays empty.
+        model: String::new(),
+        input_tokens: 0,
+    }
+}
+
+/// The JSON object a model wrote, without code fences or prose around it.
+fn json_object(text: &str) -> Option<Value> {
+    let start = text.find('{')?;
+    let end = text.rfind('}')?;
+    serde_json::from_str(text.get(start..=end)?).ok()
+}
+
+/// A structured answer from the AI chosen in setup. There is no strict
+/// schema mode on every provider, so the schema goes in the instructions and
+/// `parse_luna` validates what comes back.
+async fn ask_chosen_ai(router: &crate::ai::AiRouter, db: &Database, instructions: &str, input: &str, schema: Value) -> Result<(Value, crate::ai::complete::Completion), String> {
+    let system = format!("{instructions}\n\nReply with only one JSON object that matches this JSON Schema, with every field present:\n{schema}");
+    let done = crate::ai::complete::complete(router, db, crate::ai::complete::Request { system: &system, user: input, json: true, max_tokens: 4_096 }).await?;
+    let value = json_object(&done.text).ok_or_else(|| format!("{} 回覆的格式無效，請稍後重試。", done.provider))?;
+    Ok((value, done))
+}
+
 async fn triage_one(
     db: &Database,
     client: &reqwest::Client,
@@ -534,18 +605,6 @@ async fn triage_one(
     message: TriageInput,
 ) -> Outcome {
     let mut outcome = Outcome { cost_micro: 0, triaged: false, summarized: false, items: 0, jev_input: 0, luna_input: 0, luna_output: 0, error: None };
-    let started = Instant::now();
-    let jev = match ask_jev(client, &keys.typesafe, jev_state(&message, owners)).await {
-        Ok(answers) => answers,
-        Err(error) => {
-            outcome.error = Some(error);
-            return outcome;
-        }
-    };
-    crate::ai::cost::record_inference(db, "typesafe", Workload::Volume, &jev.model, jev.input_tokens, 0, 0, 0, started.elapsed().as_millis() as i64);
-    outcome.jev_input = jev.input_tokens;
-    outcome.cost_micro += crate::ai::cost::compute_usd_cost_micro(&jev.model, jev.input_tokens, 0, 0, 0);
-
     let sent = sent_by_owner(&message.sender, owners);
     let replied_later = match message.thread_id.as_deref() {
         Some(thread) if !sent => store::later_senders_in_thread(db, thread, &message.received_at)
@@ -559,6 +618,73 @@ async fn triage_one(
     let facts = Facts { sent_by_owner: sent, replied_later, age_days: (today - received_date).num_days(), today };
     let (to, text) = message_text(&message);
     let cjk = cjk_share(&format!("{} {}", message.subject, take_chars(&text, 2_000)));
+    let received_local = received_at
+        .map(|at| at.format("%Y-%m-%d %H:%M (%a, UTC%:z)").to_string())
+        .unwrap_or_else(|_| message.received_at.clone());
+    let today_text = Local::now().format("%Y-%m-%d (%a)").to_string();
+    let known = store::known_items_from_sender(db, message.id, &sender_address(&message.sender), &message.received_at).unwrap_or_default();
+    let known_ids: Vec<i64> = known.iter().map(|k| k.id).collect();
+    let input = json!({
+        "from": take_chars(&message.sender, 300),
+        "to": take_chars(&to, 300),
+        "subject": take_chars(&message.subject, 300),
+        "text": take_chars(&text, LUNA_TEXT_CHARS),
+        "known_follow_ups": known.iter().map(|k| json!({
+            "id": k.id,
+            "kind": k.kind,
+            "title": k.title,
+            "due_date": k.due_date,
+            "due_time": k.due_time,
+            "email": if k.this_email { "this email; the user already acted on it" } else if k.later { "a later email" } else { "an earlier email" },
+            "email_subject": take_chars(&k.subject, 200),
+        })).collect::<Vec<_>>(),
+    })
+    .to_string();
+
+    // Classification: Jev when the user added a TypeSafe key, otherwise the
+    // chosen AI answers the same questions in one call with the extraction.
+    let mut combined: Option<(LunaExtraction, String)> = None;
+    let jev = match (keys.typesafe.as_deref(), keys.assistant.as_ref()) {
+        (Some(key), _) => {
+            let started = Instant::now();
+            match ask_jev(client, key, jev_state(&message, owners)).await {
+                Ok(answers) => {
+                    crate::ai::cost::record_inference(db, "typesafe", Workload::Volume, &answers.model, answers.input_tokens, 0, 0, 0, started.elapsed().as_millis() as i64);
+                    outcome.jev_input = answers.input_tokens;
+                    outcome.cost_micro += crate::ai::cost::compute_usd_cost_micro(&answers.model, answers.input_tokens, 0, 0, 0);
+                    answers
+                }
+                Err(error) => {
+                    outcome.error = Some(error);
+                    return outcome;
+                }
+            }
+        }
+        (None, Some(router)) => {
+            let instructions = format!("{}\n{}", luna_instructions(language, &today_text, &received_local), combined_rules());
+            let parsed = ask_chosen_ai(router, db, &instructions, &input, combined_schema()).await.and_then(|(value, done)| {
+                outcome.luna_input = done.input_tokens;
+                outcome.luna_output = done.output_tokens;
+                outcome.cost_micro += crate::ai::cost::compute_usd_cost_micro(&done.model, done.input_tokens, done.output_tokens, 0, 0);
+                let extraction = parse_luna(&value, &message.subject, &text, received_date, &Local, &known_ids)?;
+                Ok((parse_combined(&value, &extraction.category), extraction, format!("{} · {}", done.provider, done.model)))
+            });
+            match parsed {
+                Ok((answers, extraction, model)) => {
+                    combined = Some((extraction, model));
+                    answers
+                }
+                Err(error) => {
+                    outcome.error = Some(error);
+                    return outcome;
+                }
+            }
+        }
+        (None, None) => {
+            outcome.error = Some(crate::ai::NO_AI_CHOSEN.into());
+            return outcome;
+        }
+    };
     let mut triage = MailTriage {
         category: jev.category.clone(),
         category_confidence: jev.category_confidence,
@@ -569,57 +695,58 @@ async fn triage_one(
         sent_by_owner: sent,
         attention: false,
         summary: None,
-        decided_by: "jev".into(),
+        decided_by: if combined.is_some() { "ai" } else { "jev" }.into(),
     };
     let mut extraction = None;
-    let mut luna_model = None;
-    if let (true, Some(openai_key)) = (needs_luna(&jev, sent, cjk), keys.openai.as_deref()) {
-        let received_local = received_at
-            .map(|at| at.format("%Y-%m-%d %H:%M (%a, UTC%:z)").to_string())
-            .unwrap_or_else(|_| message.received_at.clone());
-        let today = Local::now().format("%Y-%m-%d (%a)").to_string();
-        let known = store::known_items_from_sender(db, message.id, &sender_address(&message.sender), &message.received_at).unwrap_or_default();
-        let known_ids: Vec<i64> = known.iter().map(|k| k.id).collect();
-        let input = json!({
-            "from": take_chars(&message.sender, 300),
-            "to": take_chars(&to, 300),
-            "subject": take_chars(&message.subject, 300),
-            "text": take_chars(&text, LUNA_TEXT_CHARS),
-            "known_follow_ups": known.iter().map(|k| json!({
-                "id": k.id,
-                "kind": k.kind,
-                "title": k.title,
-                "due_date": k.due_date,
-                "due_time": k.due_time,
-                "email": if k.this_email { "this email; the user already acted on it" } else if k.later { "a later email" } else { "an earlier email" },
-                "email_subject": take_chars(&k.subject, 200),
-            })).collect::<Vec<_>>(),
-        })
-        .to_string();
-        let started = Instant::now();
-        match openai::send_json(openai_key, &keys.openai_model, &luna_instructions(language, &today, &received_local), &input, "mail_triage", luna_schema(), OpenAiEndpoint::Production).await {
-            Ok((value, usage)) => {
+    let mut luna_model: Option<String> = None;
+    if let Some((parsed, model)) = combined {
+        triage.summary = Some(parsed.summary.clone()).filter(|s| !s.is_empty());
+        outcome.summarized = triage.summary.is_some();
+        luna_model = Some(model);
+        extraction = Some(parsed);
+    } else if needs_luna(&jev, sent, cjk) {
+        // Summaries and dates come from the chosen AI; api.openai.com keeps
+        // the Responses API path with a strict schema.
+        let instructions = luna_instructions(language, &today_text, &received_local);
+        let answer: Option<Result<(Value, String), String>> = if let Some(openai_key) = keys.openai.as_deref() {
+            let started = Instant::now();
+            Some(openai::send_json(openai_key, &keys.openai_model, &instructions, &input, "mail_triage", luna_schema(), OpenAiEndpoint::Production).await.map(|(value, usage)| {
                 crate::ai::cost::record_inference(db, "openai-mail", Workload::Volume, &keys.openai_model, usage.input_tokens, usage.output_tokens, usage.cached_tokens, 0, started.elapsed().as_millis() as i64);
                 outcome.luna_input = usage.input_tokens;
                 outcome.luna_output = usage.output_tokens;
                 outcome.cost_micro += crate::ai::cost::compute_usd_cost_micro(&keys.openai_model, usage.input_tokens, usage.output_tokens, usage.cached_tokens, 0);
-                match parse_luna(&value, &message.subject, &text, received_date, &Local, &known_ids) {
-                    Ok(parsed) => {
-                        if luna_overrides_category(&jev, cjk) && parsed.category != triage.category {
-                            triage.category = parsed.category.clone();
-                            triage.decided_by = "luna".into();
-                        }
-                        triage.summary = Some(parsed.summary.clone()).filter(|s| !s.is_empty());
-                        outcome.summarized = triage.summary.is_some();
-                        luna_model = Some(keys.openai_model.as_str());
-                        extraction = Some(parsed);
+                (value, keys.openai_model.clone())
+            }))
+        } else if let Some(router) = keys.assistant.as_ref() {
+            Some(ask_chosen_ai(router, db, &instructions, &input, luna_schema()).await.map(|(value, done)| {
+                outcome.luna_input = done.input_tokens;
+                outcome.luna_output = done.output_tokens;
+                outcome.cost_micro += crate::ai::cost::compute_usd_cost_micro(&done.model, done.input_tokens, done.output_tokens, 0, 0);
+                (value, format!("{} · {}", done.provider, done.model))
+            }))
+        } else {
+            // TypeSafe only: the email is sorted, without a summary or dates.
+            None
+        };
+        let asked = answer.is_some();
+        match answer {
+            Some(Ok((value, model))) => match parse_luna(&value, &message.subject, &text, received_date, &Local, &known_ids) {
+                Ok(parsed) => {
+                    if luna_overrides_category(&jev, cjk) && parsed.category != triage.category {
+                        triage.category = parsed.category.clone();
+                        triage.decided_by = "luna".into();
                     }
-                    Err(error) => outcome.error = Some(error),
+                    triage.summary = Some(parsed.summary.clone()).filter(|s| !s.is_empty());
+                    outcome.summarized = triage.summary.is_some();
+                    luna_model = Some(model);
+                    extraction = Some(parsed);
                 }
-            }
-            Err(error) => outcome.error = Some(error),
+                Err(error) => outcome.error = Some(error),
+            },
+            Some(Err(error)) => outcome.error = Some(error),
+            None => {}
         }
-        if extraction.is_none() {
+        if asked && extraction.is_none() {
             // Leave the message untriaged so the next run retries the
             // summary; saving now would keep it summary-less forever.
             return outcome;
@@ -628,7 +755,7 @@ async fn triage_one(
     let (attention, items) = finalize(&jev, &triage.category, extraction.as_ref(), facts);
     triage.attention = attention;
     let corrects_earlier = extraction.as_ref().is_some_and(|e| e.corrects_earlier);
-    match store::save_triage(db, message.id, &message.sender, &triage, &jev.model, luna_model, corrects_earlier, &items) {
+    match store::save_triage(db, message.id, &message.sender, &triage, &jev.model, luna_model.as_deref(), corrects_earlier, &items) {
         Ok(()) => {
             outcome.triaged = true;
             outcome.items = items.len();
@@ -944,6 +1071,29 @@ mod tests {
     }
 
     #[test]
+    fn one_ai_answers_become_the_same_signals_jev_gives() {
+        let value = json!({"needs_reply": true, "action_required": false, "has_date": true, "importance": 3, "category_confidence": 0.7});
+        let answers = parse_combined(&value, "work");
+        assert_eq!((answers.category.as_str(), answers.category_confidence, answers.importance), ("work", 0.7, 3.0));
+        assert!(answers.needs_reply >= 0.7 && answers.has_date >= 0.7 && answers.action_required < 0.5);
+        assert!(needs_attention(&answers, false), "a waiting person plus a date needs attention");
+        let sparse = parse_combined(&json!({"importance": 9}), "promotions");
+        assert_eq!((sparse.importance, sparse.needs_reply, sparse.category_confidence), (3.0, 0.1, 0.8), "missing or wild values are bounded");
+        assert!(sparse.model.is_empty(), "no Jev involved");
+        let schema = combined_schema();
+        for field in ["summary", "items", "correction_evidence", "needs_reply", "importance", "category_confidence"] {
+            assert!(schema["required"].as_array().unwrap().contains(&json!(field)), "{field}");
+        }
+    }
+
+    #[test]
+    fn json_is_found_inside_fences_and_prose() {
+        assert_eq!(json_object("```json\n{\"a\": 1}\n```").unwrap()["a"], 1);
+        assert_eq!(json_object("Here you go: {\"a\": {\"b\": 2}} Thanks!").unwrap()["a"]["b"], 2);
+        assert!(json_object("no json here").is_none());
+    }
+
+    #[test]
     fn each_sender_is_triaged_oldest_first_in_its_own_chain() {
         let message = |id: i64, sender: &str, at: &str| TriageInput { id, thread_id: None, sender: sender.into(), subject: String::new(), snippet: String::new(), body: None, received_at: at.into() };
         // As untriaged_messages returns them: newest first.
@@ -967,10 +1117,30 @@ mod tests {
         let path = std::env::var("JARVIS_TRIAGE_DB").expect("JARVIS_TRIAGE_DB");
         let db = crate::db::test_database_at(std::path::Path::new(&path));
         let keys = TriageKeys {
-            typesafe: std::env::var("TYPESAFE_API_KEY").expect("TYPESAFE_API_KEY"),
+            typesafe: std::env::var("TYPESAFE_API_KEY").ok(),
             openai: std::env::var("OPENAI_API_KEY").ok(),
             openai_model: crate::ai::openai::OPENAI_MODEL.into(),
+            assistant: None,
         };
+        let started = Instant::now();
+        let result = run(&db, keys, "zh-HK").await.unwrap();
+        println!("{result:?}\nelapsed {:?}", started.elapsed());
+        assert!(result.triaged > 0);
+    }
+
+    /// The production pipeline with only the AI chosen in setup: no TypeSafe
+    /// and no OpenAI key. On a COPY of a real database:
+    /// JARVIS_TRIAGE_DB=/path/copy.db GEMINI_API_KEY=... \
+    ///   cargo test live_triage_with_only_the_chosen_ai -- --ignored --nocapture
+    #[tokio::test]
+    #[ignore]
+    async fn live_triage_with_only_the_chosen_ai() {
+        let path = std::env::var("JARVIS_TRIAGE_DB").expect("JARVIS_TRIAGE_DB");
+        let db = crate::db::test_database_at(std::path::Path::new(&path));
+        let mut router = crate::ai::AiRouter::new("gemini_primary");
+        router.set_gemini_key(&std::env::var("GEMINI_API_KEY").expect("GEMINI_API_KEY"));
+        router.set_provider_chain(vec![crate::ai::ProviderChainEntry { position: 0, provider_type: "gemini".into(), endpoint_id: None, model_id: None, enabled: true, base_url: None }]);
+        let keys = TriageKeys { typesafe: None, openai: None, openai_model: String::new(), assistant: Some(router) };
         let started = Instant::now();
         let result = run(&db, keys, "zh-HK").await.unwrap();
         println!("{result:?}\nelapsed {:?}", started.elapsed());
