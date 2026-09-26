@@ -93,6 +93,13 @@ export function useChat() {
     }
   }, [update, hydrate]);
   const acceptsRun = useCallback((payload: Scoped) => matchesRun(payload, stream.current), []);
+  // After the database rows are deleted, drop the cached copy too; a view left
+  // on the deleted conversation moves to a fresh, empty one.
+  const forget = useCallback((id: string) => {
+    historyLoads.current.delete(id);
+    setSessions(prev => { const next = { ...prev }; delete next[id]; return next; });
+    if (selected.current === id) setSessionId(crypto.randomUUID());
+  }, []);
   const current = sessions[sessionId] ?? empty();
-  return { ...current, reloadHistory: () => hydrate(sessionId).catch(() => {}), acceptsRun, sessionId, selectSession: setSessionId, sessions, runningSessionId, busy: runningSessionId !== null, send, aiState: runningSessionId ? 'thinking' as const : 'idle' as const };
+  return { ...current, reloadHistory: () => hydrate(sessionId).catch(() => {}), acceptsRun, sessionId, selectSession: setSessionId, forget, sessions, runningSessionId, busy: runningSessionId !== null, send, aiState: runningSessionId ? 'thinking' as const : 'idle' as const };
 }

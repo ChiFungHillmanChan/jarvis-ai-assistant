@@ -65,6 +65,7 @@ export function installWorkspacePreview() {
         conversations[sessionId].push(answer); localStorage.setItem('jarvis-preview-conversations', JSON.stringify(conversations)); return answer;
       }
       case 'get_voice_state': return 'Idle';
+      case 'clear_conversations': delete conversations[args.sessionId]; localStorage.setItem('jarvis-preview-conversations', JSON.stringify(conversations)); return null;
       case 'get_wallpaper_status': case 'is_wallpaper_raised': return false;
       case 'get_tasks': return tasks;
       case 'update_task': tasks = tasks.map(t => t.id === args.id ? { ...t, status: args.status } : t); return null;

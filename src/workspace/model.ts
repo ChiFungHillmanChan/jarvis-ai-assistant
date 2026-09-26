@@ -19,6 +19,7 @@ export type WorkspaceAction =
   | { type: 'activate' | 'close' | 'pin'; id: string }
   | { type: 'rename'; id: string; title: string }
   | { type: 'notice'; id: string }
+  | { type: 'forget'; sessionId: string }
   | { type: 'restore'; state: WorkspaceState };
 export function initialWorkspace(): WorkspaceState { return { tabs: [{ id: 'automation', view: 'home', title: 'Automation', pinned: true }], activeId: 'automation', history: [] }; }
 export function workspaceReducer(state: WorkspaceState, action: WorkspaceAction): WorkspaceState {
@@ -30,6 +31,14 @@ export function workspaceReducer(state: WorkspaceState, action: WorkspaceAction)
     const tab: WorkspaceTab = old && action.view === 'result' ? { ...old, sessionId: action.sessionId, title: action.title ?? old.title } : old ?? { id, view: action.view, title: action.title ?? viewNames[action.view], sessionId: action.sessionId };
     const tabs = existing ? state.tabs : [...state.tabs, tab];
     return { ...state, tabs: tabs.map(t => t.id === id ? { ...tab, notice: action.background && id !== state.activeId } : t), activeId: action.background ? state.activeId : id, previousId: action.background || id === state.activeId ? state.previousId : state.activeId, history: state.history.filter(t => t.id !== id) };
+  }
+  if (action.type === 'forget') {
+    // A deleted conversation takes its task and every result it produced with it.
+    const keep = (t: WorkspaceTab) => !(t.sessionId === action.sessionId && (t.view === 'chat' || t.view === 'result'));
+    const tabs = state.tabs.filter(keep);
+    const previousId = tabs.some(t => t.id === state.previousId) ? state.previousId : undefined;
+    const activeId = tabs.some(t => t.id === state.activeId) ? state.activeId : previousId ?? 'automation';
+    return { ...state, tabs, history: state.history.filter(keep), activeId, previousId: activeId === previousId ? undefined : previousId };
   }
   const tab = state.tabs.find(t => t.id === action.id);
   if (action.type === 'rename') {
@@ -73,4 +82,24 @@ export function shouldFocusResult(activeId: string, originId: string, activeView
 
 const viewKeys = { home: 'navAutomation', chat: 'navAssistant', email: 'navMail', calendar: 'navCalendar', github: 'navGitHub', notion: 'navNotes', cron: 'navAutomations', connections: 'navConnections', settings: 'navSettings', result: 'navResult' } as const;
 export function viewName(view: WorkspaceView, locale: UiLocale) { return translate(locale, viewKeys[view]); }
-export function displayTabTitle(tab: WorkspaceTab, locale: UiLocale) { return tab.title === viewNames[tab.view] || (tab.view === 'chat' && tab.title === 'New task') ? (tab.view === 'chat' && tab.title === 'New task' ? (locale === 'zh-HK' ? '新工作' : 'New task') : viewName(tab.view, locale)) : tab.title; }
+export const LEGACY_TITLE = 'Voice and earlier conversations';
+const defaultChatTitles = ['New task', viewNames.chat];
+export interface SavedChat { id: string; title: string; updated_at: string }
+/**
+ * Every saved conversation, newest first, after any open task that has no
+ * message yet. A conversation typed into the assistant dock has no tab, so the
+ * database is the list; a tab only lends its (renamed) title and notice dot.
+ * Without the saved list, fall back to the tabs this window knows about.
+ */
+export function recentChats(state: WorkspaceState, saved: SavedChat[] | null): WorkspaceTab[] {
+  const known = [...state.tabs.slice().reverse(), ...state.history].filter(t => t.view === 'chat' && t.sessionId);
+  if (!saved) return known;
+  const ids = new Set(saved.map(s => s.id));
+  const unsent = state.tabs.slice().reverse().filter(t => t.view === 'chat' && t.sessionId && !ids.has(t.sessionId));
+  return [...unsent, ...saved.map(s => {
+    const tab = known.find(t => t.sessionId === s.id);
+    const title = s.id === 'legacy' ? LEGACY_TITLE : tab && !defaultChatTitles.includes(tab.title) ? tab.title : s.title;
+    return { id: tab?.id ?? `task:${s.id}`, view: 'chat' as const, sessionId: s.id, title, notice: tab?.notice };
+  })];
+}
+export function displayTabTitle(tab: WorkspaceTab, locale: UiLocale) { if (tab.view === 'chat' && tab.sessionId === 'legacy' && tab.title === LEGACY_TITLE) return locale === 'zh-HK' ? '語音及較早對話' : LEGACY_TITLE; return tab.title === viewNames[tab.view] || (tab.view === 'chat' && tab.title === 'New task') ? (tab.view === 'chat' && tab.title === 'New task' ? (locale === 'zh-HK' ? '新工作' : 'New task') : viewName(tab.view, locale)) : tab.title; }

@@ -83,6 +83,15 @@
 .sidebar-history { flex:1; overflow:auto; min-height:20px; }
 .sidebar-history .sidebar-item { font-size:12px; }
 .sidebar-history p { padding:0 10px; font-size:12px; color:var(--text-muted); line-height:1.6; }
+.sidebar-chat { display:flex; align-items:center; gap:2px; margin-bottom:3px; }
+.sidebar-chat .sidebar-item { flex:1; min-width:0; margin-bottom:0; }
+.sidebar-delete { width:26px; height:26px; opacity:0; }
+.sidebar-chat:hover .sidebar-delete, .sidebar-delete:focus-visible { opacity:1; }
+.sidebar-confirm { display:flex; flex-direction:column; gap:4px; padding:8px 10px; margin-bottom:3px; border:1px solid var(--border-strong); border-radius:6px; font-size:12px; }
+.sidebar-confirm span { color:var(--text-secondary); white-space:nowrap; overflow:hidden; text-overflow:ellipsis; }
+.sidebar-confirm small { color:var(--text-muted); line-height:1.5; }
+.sidebar-confirm div { display:flex; gap:14px; }
+.text-button.is-danger { color:var(--accent-urgent); }
 .sidebar-bottom { border-top:1px solid var(--border-primary); padding-top:12px; }
 
 /* Account row: the name from Settings, with its destinations in a menu above. */
