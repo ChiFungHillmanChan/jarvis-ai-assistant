@@ -2,7 +2,7 @@ import { useCallback, useEffect, useRef, useState, useSyncExternalStore } from '
 import { useUiLocale } from '../i18n';
 import { openUrl } from '../lib/commands';
 import {
-  cancelConnect, connectionStatus, connectionsChanged, disconnectService,
+  cancelConnect, connectionStatuses, connectionsChanged, disconnectService,
   githubBeginConnect, githubCompleteConnect, githubSetClientId, notionConnect,
   obsidianSelectVault, openObsidian,
   type ConnectionStatus, type GitHubDevicePrompt, type IntegrationService,
@@ -15,11 +15,14 @@ const names = { github: 'GitHub', notion: 'Notion', obsidian: 'Obsidian' };
 export default function IntegrationConnection({ service }: { service: IntegrationService }) {
   const { text } = useUiLocale();
   const name = names[service];
-  const [status, setStatus] = useState<ConnectionStatus | null>(null);
+  // The last checked status shows at once; checking again waits on the service.
+  const [status, setStatus] = useState<ConnectionStatus | null>(() => connectionStatuses.peek(service));
+  const statusRef = useRef(status);
+  const show = (value: ConnectionStatus | null) => { statusRef.current = value; setStatus(value); };
   const activeOperation = useSyncExternalStore(subscribeOperations, () => currentOperation(service));
   const busy = activeOperation !== null;
   const ownOperation = useRef<ConnectionOperation | null>(null);
-  const [checking, setChecking] = useState(false);
+  const [checking, setChecking] = useState(() => status === null);
   const [error, setError] = useState<string | null>(null);
   const [notice, setNotice] = useState<string | null>(null);
   const [device, setDevice] = useState<GitHubDevicePrompt | null>(null);
@@ -28,16 +31,18 @@ export default function IntegrationConnection({ service }: { service: Integratio
   const revision = useRef(0);
 
 
-  const refresh = useCallback(async () => {
+  // `force` is the user asking; otherwise a recent status is reused, and a
+  // known status stays on screen while it is checked again.
+  const refresh = useCallback(async (force = false) => {
     if (currentOperation(service)) return;
     const current = ++revision.current;
-    setChecking(true);
+    setChecking(force || statusRef.current === null);
     try {
-      const value = await connectionStatus(service);
-      if (mounted.current && revision.current === current) { setStatus(value); }
+      const value = await connectionStatuses.load(service, force);
+      if (mounted.current && revision.current === current) { show(value); }
     } catch {
       if (mounted.current && revision.current === current) {
-        setStatus(null);
+        show(null);
         setError(previous => previous ?? text('Could not check the connection. Open JARVIS on your Mac and try again.', '未能檢查連接。請在 Mac 上開啟 JARVIS 後重試。'));
       }
     } finally { if (mounted.current && revision.current === current) setChecking(false); }
@@ -88,7 +93,7 @@ export default function IntegrationConnection({ service }: { service: Integratio
       } else if (service === 'notion') result = await notionConnect();
       else result = await obsidianSelectVault();
       if (mounted.current && isCurrentOperation(operation)) {
-        setStatus(result);
+        show(result);
         setNotice(result.message ?? (result.status === 'connected' ? text('Connection verified. JARVIS can now use this service.', '已驗證連接。JARVIS 現在可以使用此服務。') : null));
       }
     } catch (e) { if (mounted.current) setError(String(e)); }
@@ -127,10 +132,15 @@ export default function IntegrationConnection({ service }: { service: Integratio
   }
   async function saveClient() {
     setError(null);
-    try { await githubSetClientId(clientId.trim()); setClientId(''); await refresh(); connectionsChanged(); }
+    try { await githubSetClientId(clientId.trim()); setClientId(''); connectionsChanged(); }
     catch (e) { setError(String(e)); }
   }
   const missingClient = service === 'github' && status?.oauth_ready === false;
+  // Once verified, Connect is hidden until the service needs reconnecting.
+  // An advanced token or REST connection keeps it: it switches to the official one.
+  const switchable = (service === 'notion' && status?.method === 'token') || (service === 'obsidian' && status?.method === 'rest');
+  const needsConnect = status ? status.status !== 'connected' || switchable : !checking;
+  const showConnect = activeOperation?.kind === 'connect' || (!busy && needsConnect);
   return <section className="integration-connection" aria-label={`${name} ${text('connection', '連接')}`}>
     <div className="integration-connection__heading">
       <h3>{name}</h3>
@@ -149,13 +159,13 @@ export default function IntegrationConnection({ service }: { service: Integratio
           ? text('Using the Local REST API plugin. Read and write access depends on the plugin and API key. Select a local vault to switch to read-only access without a key.', '目前使用 Local REST API 外掛，讀寫權限取決於外掛及 API key。選取本機資料庫可切換至毋須密鑰的唯讀存取。')
           : text('Select an existing Obsidian vault to allow read-only access to its Markdown notes. No plugin or API key is needed. Content used in a cloud AI conversation is sent to your selected AI provider.', '選取現有 Obsidian 資料庫，允許 JARVIS 唯讀存取其中的 Markdown 筆記。毋須外掛或 API key；在雲端 AI 對話中使用的筆記內容會傳送至所選 AI 供應商。')}</p>
     <div className="integration-actions">
-      <button className="connections-primary" onClick={() => { void connect(); }} disabled={busy || missingClient}>
-        {busy ? text('Connecting…', '處理中…') : service === 'obsidian' ? text('Select vault and allow access', '選取資料庫並允許存取') : `${text('Connect', '連接')} ${name}`}
-      </button>
+      {showConnect && <button className="connections-primary" onClick={() => { void connect(); }} disabled={busy || missingClient}>
+        {busy ? text('Connecting…', '處理中…') : service === 'obsidian' ? text('Select vault and allow access', '選取資料庫並允許存取') : status?.status === 'configured' && !switchable ? `${text('Reconnect', '重新連接')} ${name}` : `${text('Connect', '連接')} ${name}`}
+      </button>}
       <button onClick={() => { void openService(); }}>{text('Open', '開啟')} {name}</button>
       {busy && activeOperation === ownOperation.current && activeOperation?.kind === 'connect' && service !== 'obsidian' && <button onClick={() => { void cancel(); }}>{text('Cancel authorization', '取消授權')}</button>}
       {!busy && status && status.status !== 'not_connected' && <button onClick={() => { void disconnect(); }}>{text('Disconnect', '中斷連接')}</button>}
-      <button disabled={busy || checking} onClick={() => { setError(null); void refresh(); }}>{text('Check connection', '檢查連接')}</button>
+      <button disabled={busy || checking} onClick={() => { setError(null); void refresh(true); }}>{text('Check connection', '檢查連接')}</button>
     </div>
     {device && <div className="integration-device" role="status">
       <p>{text('Enter this code on GitHub to authorize JARVIS:', '請在 GitHub 輸入此驗證碼以授權 JARVIS：')}</p>

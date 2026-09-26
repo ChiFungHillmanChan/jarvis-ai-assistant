@@ -3,6 +3,10 @@ use std::collections::HashSet;
 
 const CALENDAR_API: &str = "https://www.googleapis.com/calendar/v3";
 
+/// `calendar_events.account_id` of the main account (Settings > Google).
+/// Additional accounts use their Mail mailbox id (see mail::additional).
+pub const MAIN_ACCOUNT: &str = "";
+
 #[derive(Debug, Serialize, Deserialize, Clone)]
 pub struct CalendarEvent {
     pub id: String,
@@ -251,7 +255,7 @@ const COVERED_BY_WINDOW: &str = "datetime(start_time) >= datetime(?1) \
 
 fn covered_events_query() -> String {
     format!(
-        "SELECT google_id FROM calendar_events WHERE {}",
+        "SELECT google_id FROM calendar_events WHERE account_id = ?3 AND {}",
         COVERED_BY_WINDOW
     )
 }
@@ -259,22 +263,25 @@ fn covered_events_query() -> String {
 /// `time_min` and `time_max` must be the window `fetch_events_detailed` was
 /// called with:
 /// the reconciliation below reads them as the range Google was asked about, and
-/// a wider one would delete events that were never requested.
+/// a wider one would delete events that were never requested. `account_id` is
+/// the calendar the fetch read ([`MAIN_ACCOUNT`] or a mailbox id); only that
+/// account's rows are reconciled.
 pub fn save_to_db(
     db: &crate::db::Database,
     fetched: &EventsFetch,
     time_min: &str,
     time_max: &str,
+    account_id: &str,
 ) -> Result<(), String> {
     let events = &fetched.events;
     let mut conn = db.conn.lock().map_err(|e| e.to_string())?;
     let tx = conn.transaction().map_err(|e| e.to_string())?;
     for event in events {
         tx.execute(
-            "INSERT INTO calendar_events (google_id, summary, description, location, start_time, end_time, attendees, status)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)
-             ON CONFLICT(google_id) DO UPDATE SET summary = ?2, description = ?3, location = ?4, start_time = ?5, end_time = ?6, attendees = ?7, status = ?8, synced_at = datetime('now')",
-            rusqlite::params![event.id, event.summary, event.description, event.location, event.start_time, event.end_time, event.attendees.join(","), event.status],
+            "INSERT INTO calendar_events (google_id, summary, description, location, start_time, end_time, attendees, status, account_id)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)
+             ON CONFLICT(account_id, google_id) DO UPDATE SET summary = ?2, description = ?3, location = ?4, start_time = ?5, end_time = ?6, attendees = ?7, status = ?8, synced_at = datetime('now')",
+            rusqlite::params![event.id, event.summary, event.description, event.location, event.start_time, event.end_time, event.attendees.join(","), event.status, account_id],
         ).map_err(|e| e.to_string())?;
     }
 
@@ -292,7 +299,7 @@ pub fn save_to_db(
             .prepare(&covered_events_query())
             .map_err(|e| e.to_string())?;
         let covered = stmt
-            .query_map(rusqlite::params![time_min, time_max], |r| {
+            .query_map(rusqlite::params![time_min, time_max, account_id], |r| {
                 r.get::<_, String>(0)
             })
             .map_err(|e| e.to_string())?
@@ -305,8 +312,8 @@ pub fn save_to_db(
     };
     for google_id in gone {
         tx.execute(
-            "DELETE FROM calendar_events WHERE google_id = ?1",
-            rusqlite::params![google_id],
+            "DELETE FROM calendar_events WHERE account_id = ?1 AND google_id = ?2",
+            rusqlite::params![account_id, google_id],
         )
         .map_err(|e| e.to_string())?;
     }
@@ -341,8 +348,6 @@ mod tests {
 #[cfg(test)]
 mod sync_tests {
     use super::*;
-    use rusqlite::Connection;
-    use std::sync::Mutex;
 
     // The window a 7-day sync asks Google about. The upper bound is mid-day on
     // purpose: it is what separates an all-day row the window fully covers from
@@ -351,44 +356,36 @@ mod sync_tests {
     const TIME_MAX: &str = "2026-09-11T10:00:00Z";
 
     fn events_db() -> crate::db::Database {
-        let conn = Connection::open_in_memory().unwrap();
-        conn.execute_batch(
-            "CREATE TABLE calendar_events (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                google_id TEXT UNIQUE NOT NULL,
-                summary TEXT NOT NULL,
-                description TEXT,
-                location TEXT,
-                start_time TEXT NOT NULL,
-                end_time TEXT NOT NULL,
-                attendees TEXT,
-                status TEXT DEFAULT 'confirmed',
-                synced_at TEXT NOT NULL DEFAULT (datetime('now'))
-            );",
-        )
-        .unwrap();
-        crate::db::Database { conn: Mutex::new(conn) }
+        crate::db::test_database()
     }
 
     fn seed(db: &crate::db::Database, google_id: &str, start_time: &str) {
+        seed_for(db, MAIN_ACCOUNT, google_id, start_time);
+    }
+
+    fn seed_for(db: &crate::db::Database, account_id: &str, google_id: &str, start_time: &str) {
         db.conn
             .lock()
             .unwrap()
             .execute(
-                "INSERT INTO calendar_events (google_id, summary, start_time, end_time)
-                 VALUES (?1, 'meeting', ?2, ?2)",
-                rusqlite::params![google_id, start_time],
+                "INSERT INTO calendar_events (account_id, google_id, summary, start_time, end_time)
+                 VALUES (?1, ?2, 'meeting', ?3, ?3)",
+                rusqlite::params![account_id, google_id, start_time],
             )
             .unwrap();
     }
 
     fn stored_ids(db: &crate::db::Database) -> Vec<String> {
+        stored_ids_for(db, MAIN_ACCOUNT)
+    }
+
+    fn stored_ids_for(db: &crate::db::Database, account_id: &str) -> Vec<String> {
         let conn = db.conn.lock().unwrap();
         let mut stmt = conn
-            .prepare("SELECT google_id FROM calendar_events ORDER BY google_id")
+            .prepare("SELECT google_id FROM calendar_events WHERE account_id = ?1 ORDER BY google_id")
             .unwrap();
         let ids = stmt
-            .query_map([], |r| r.get::<_, String>(0))
+            .query_map([account_id], |r| r.get::<_, String>(0))
             .unwrap()
             .collect::<Result<Vec<String>, _>>()
             .unwrap();
@@ -430,6 +427,7 @@ mod sync_tests {
             &complete(vec![event("in-window", "2026-09-05T09:00:00Z")]),
             TIME_MIN,
             TIME_MAX,
+            MAIN_ACCOUNT,
         )
         .unwrap();
         assert_eq!(stored_ids(&db), vec!["in-window", "next-month"]);
@@ -446,6 +444,7 @@ mod sync_tests {
             &complete(vec![event("still-on", "2026-09-06T09:00:00Z")]),
             TIME_MIN,
             TIME_MAX,
+            MAIN_ACCOUNT,
         )
         .unwrap();
         assert_eq!(stored_ids(&db), vec!["still-on"]);
@@ -464,6 +463,7 @@ mod sync_tests {
             &truncated(vec![event("on-page-one", "2026-09-06T09:00:00Z")]),
             TIME_MIN,
             TIME_MAX,
+            MAIN_ACCOUNT,
         )
         .unwrap();
         assert_eq!(
@@ -481,15 +481,17 @@ mod sync_tests {
             &complete(vec![event("meeting", "2026-09-05T09:00:00Z")]),
             TIME_MIN,
             TIME_MAX,
+            MAIN_ACCOUNT,
         )
         .unwrap();
-        save_to_db(&db, &complete(vec![]), TIME_MIN, TIME_MAX).unwrap();
+        save_to_db(&db, &complete(vec![]), TIME_MIN, TIME_MAX, MAIN_ACCOUNT).unwrap();
         assert!(stored_ids(&db).is_empty(), "an empty window clears it");
         save_to_db(
             &db,
             &complete(vec![event("meeting", "2026-09-05T09:00:00Z")]),
             TIME_MIN,
             TIME_MAX,
+            MAIN_ACCOUNT,
         )
         .unwrap();
         assert_eq!(stored_ids(&db), vec!["meeting"]);
@@ -504,7 +506,52 @@ mod sync_tests {
         let db = events_db();
         seed(&db, "edge-day", "2026-09-11");
         seed(&db, "inside-day", "2026-09-05");
-        save_to_db(&db, &complete(vec![]), TIME_MIN, TIME_MAX).unwrap();
+        save_to_db(&db, &complete(vec![]), TIME_MIN, TIME_MAX, MAIN_ACCOUNT).unwrap();
         assert_eq!(stored_ids(&db), vec!["edge-day"]);
+    }
+
+    /// An invitation between two of the user's own accounts is in both
+    /// calendars under the same id. Keyed by id alone, the second account's
+    /// sync overwrote the first account's row.
+    #[test]
+    fn the_same_event_id_is_kept_once_per_account() {
+        let db = events_db();
+        let window = |id: &str| complete(vec![event(id, "2026-09-05T09:00:00Z")]);
+        save_to_db(&db, &window("shared-invite"), TIME_MIN, TIME_MAX, MAIN_ACCOUNT).unwrap();
+        save_to_db(&db, &window("shared-invite"), TIME_MIN, TIME_MAX, "work").unwrap();
+        assert_eq!(stored_ids(&db), vec!["shared-invite"]);
+        assert_eq!(stored_ids_for(&db, "work"), vec!["shared-invite"]);
+    }
+
+    /// Each account's fetch covers only its own calendar, so it is evidence
+    /// of absence for that account's rows and nothing else.
+    #[test]
+    fn reconciling_one_account_leaves_the_others_alone() {
+        let db = events_db();
+        seed(&db, "main-meeting", "2026-09-05T09:00:00Z");
+        seed_for(&db, "work", "work-cancelled", "2026-09-05T10:00:00Z");
+        save_to_db(&db, &complete(vec![]), TIME_MIN, TIME_MAX, "work").unwrap();
+        assert_eq!(stored_ids(&db), vec!["main-meeting"]);
+        assert!(stored_ids_for(&db, "work").is_empty());
+    }
+
+    #[test]
+    fn events_stored_before_v31_belong_to_the_main_account() {
+        let directory = std::env::temp_dir().join(format!("jarvis-calendar-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir(&directory).unwrap();
+        let path = directory.join("calendar.db");
+        {
+            let db = crate::db::test_database_at_version(&path, 30);
+            db.conn.lock().unwrap().execute(
+                "INSERT INTO calendar_events (google_id, summary, start_time, end_time) VALUES ('kept', 'Standup', '2026-09-05T09:00:00Z', '2026-09-05T09:30:00Z')",
+                [],
+            ).unwrap();
+        }
+        let db = crate::db::test_database_at(&path);
+        assert_eq!(stored_ids(&db), vec!["kept"]);
+        save_to_db(&db, &complete(vec![event("kept", "2026-09-05T09:00:00Z")]), TIME_MIN, TIME_MAX, MAIN_ACCOUNT).unwrap();
+        assert_eq!(stored_ids(&db), vec!["kept"], "the upgraded row is updated in place, not duplicated");
+        drop(db);
+        std::fs::remove_dir_all(&directory).unwrap();
     }
 }

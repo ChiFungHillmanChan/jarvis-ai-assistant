@@ -1,6 +1,7 @@
 import { invoke as tauriInvoke } from "@tauri-apps/api/core";
 import type { CheckoutPage, PaymentPage } from "./types";
 import type { UiLocale } from "../i18n/catalog";
+import type { MailAccount } from "./mail";
 import { beginAccountSessionChange, finishAccountSessionChange } from "./account.ts";
 import type { Task, ChatMessage, DashboardData, Settings, EmailSummary, EmailStats, CalendarEventView, CronJobView, CronRunView, NotionPageView, GitHubItemView, GitHubStats, VoiceState, VoiceSettings, WakeWordStatus, EmailRule, BriefingResult, LocalEndpoint, LocalModel, ProviderChainEntry, EndpointHealth, SystemCompatibility, PrerequisiteCheck, RecommendedModel, LaunchReadiness, BetaTesterInput, BetaTesterView, BetaFeedbackInput, AwsCredsStatus, StorageUsage, SweepReport, StorageScope, AccountStatus } from "./types";
 
@@ -115,7 +116,11 @@ export async function setCronJobStatus(jobId: number, status: "active" | "paused
 // grant and drops the local mirror before re-running the OAuth flow. Without it
 // an already-linked account is reused and the call returns GOOGLE_ALREADY_CONNECTED.
 export async function googleConnect(force = false): Promise<string> { return invoke("google_connect", { force }); }
+export async function googleCancelConnect(): Promise<void> { return invoke("google_cancel_connect"); }
 export async function googleStatus(): Promise<boolean> { return invoke("google_status"); }
+/** Settings > Google. "reconnect": Google no longer accepts the main account's grant. */
+export interface GoogleAccounts { main: { state: "connected" | "reconnect" | "not_connected"; name: string | null; email: string | null }; others: MailAccount[] }
+export async function googleAccounts(): Promise<GoogleAccounts> { return invoke("google_accounts"); }
 // Revokes the grant at Google, deletes the refresh token from the Keychain and
 // clears the mail, events and briefings cached from that account.
 export async function googleDisconnect(): Promise<string> { return invoke("google_disconnect"); }

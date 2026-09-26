@@ -10,7 +10,7 @@ const iso = (d: number, h: number, m = 0, month = 8) => at(d, h, m, month).toISO
 
 let nextId = 1;
 const event = (start_time: string, end_time: string, summary = 'Event'): CalendarEventView =>
-  ({ id: nextId++, google_id: `g${nextId}`, summary, description: null, location: null, start_time, end_time, attendees: '', status: 'confirmed' });
+  ({ id: nextId++, google_id: `g${nextId}`, summary, description: null, location: null, start_time, end_time, attendees: '', status: 'confirmed', account: null });
 const mailItem = (over: Partial<MailItem>): MailItem => ({
   id: nextId++, message_id: 1, kind: 'deadline', title: 'Mail item', due_date: '2026-09-26', due_time: null, end_time: null,
   location: null, evidence: '', evidence_verified: true, status: 'open', remind_at: null, reminded_at: null,

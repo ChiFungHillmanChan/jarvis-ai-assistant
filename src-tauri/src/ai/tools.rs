@@ -105,7 +105,7 @@ pub fn get_tool_definitions() -> Vec<Tool> {
         },
         Tool {
             name: "search_emails".into(),
-            description: "Search Gmail messages using Gmail search syntax. Examples: 'from:user@example.com', 'subject:meeting', 'is:unread', 'after:2026/01/01 before:2026/03/01', 'has:attachment'. Returns up to 10 results.".into(),
+            description: "Search Gmail messages using Gmail search syntax. Examples: 'from:user@example.com', 'subject:meeting', 'is:unread', 'after:2026/01/01 before:2026/03/01', 'has:attachment'. Returns up to 10 results per account: the main account first, then the user's additional Google accounts, whose lines start with Account.".into(),
             parameters: json!({
                 "type": "object",
                 "properties": {
@@ -120,7 +120,8 @@ pub fn get_tool_definitions() -> Vec<Tool> {
             parameters: json!({
                 "type": "object",
                 "properties": {
-                    "email_id": { "type": "string", "description": "Gmail message ID" }
+                    "email_id": { "type": "string", "description": "Gmail message ID" },
+                    "account": { "type": "string", "description": "For a message from an additional Google account: the Account address shown next to it. Omit for the main account." }
                 },
                 "required": ["email_id"]
             }),
@@ -178,7 +179,7 @@ pub fn get_tool_definitions() -> Vec<Tool> {
         },
         Tool {
             name: "list_inbox_triage".into(),
-            description: "List messages from the JARVIS Mail page with JARVIS's triage: category, whether it needs attention, next due date and a one-line summary. Use view 'attention' for 'what needs my attention' or 'anything important'. The Gmail ID works with read_email. Use search_emails for mail JARVIS has not synced.".into(),
+            description: "List messages from the JARVIS Mail page with JARVIS's triage: category, whether it needs attention, next due date and a one-line summary. Use view 'attention' for 'what needs my attention' or 'anything important'. The Gmail ID works with read_email, passing the line's Account. Use search_emails for mail JARVIS has not synced.".into(),
             parameters: json!({
                 "type": "object",
                 "properties": {
@@ -193,7 +194,7 @@ pub fn get_tool_definitions() -> Vec<Tool> {
         },
         Tool {
             name: "list_events".into(),
-            description: "List upcoming Google Calendar events. Defaults to next 7 days if no dates specified.".into(),
+            description: "List upcoming Google Calendar events: the main account's, then the user's additional Google accounts' (lines start with Account; read-only, so update_event and delete_event cannot change them). Defaults to next 7 days if no dates specified.".into(),
             parameters: json!({
                 "type": "object",
                 "properties": {
@@ -790,8 +791,9 @@ fn execute_local_data_tool(
                         ),
                     };
                     format!(
-                        "Gmail ID: {} | {} | From: {} | Subject: {}{}",
+                        "Gmail ID: {} | Account: {} | {} | From: {} | Subject: {}{}",
                         m.provider_id,
+                        m.account_email,
                         m.received_at.get(..10).unwrap_or(&m.received_at),
                         m.sender,
                         m.subject,
@@ -901,22 +903,7 @@ async fn execute_calendar_tool(
     use crate::integrations::calendar;
     match name {
         "list_events" => {
-            let now = chrono::Local::now();
-            let tz_offset = now.format("%:z").to_string();
-            let date_from = args["date_from"]
-                .as_str()
-                .map(|s| s.to_string())
-                .unwrap_or_else(|| now.format("%Y-%m-%d").to_string());
-            let date_to = args["date_to"]
-                .as_str()
-                .map(|s| s.to_string())
-                .unwrap_or_else(|| {
-                    (now + chrono::TimeDelta::days(7))
-                        .format("%Y-%m-%d")
-                        .to_string()
-                });
-            let time_min = format!("{}T00:00:00{}", date_from, tz_offset);
-            let time_max = format!("{}T23:59:59{}", date_to, tz_offset);
+            let (date_from, date_to, time_min, time_max) = event_window(args);
             let events = calendar::fetch_events(token, &time_min, &time_max).await?;
             crate::chat_session::tool_result(name, json!({"view":"calendar","accountId":"legacy-google","dateRange":{"from":date_from,"to":date_to}}), json!({"events":events}));
             if events.is_empty() {
@@ -989,6 +976,35 @@ async fn execute_calendar_tool(
     }
 }
 
+/// list_events' days (YYYY-MM-DD) and the local-time window they span.
+fn event_window(args: &serde_json::Value) -> (String, String, String, String) {
+    let now = chrono::Local::now();
+    let tz_offset = now.format("%:z").to_string();
+    let date_from = args["date_from"]
+        .as_str()
+        .map(|s| s.to_string())
+        .unwrap_or_else(|| now.format("%Y-%m-%d").to_string());
+    let date_to = args["date_to"]
+        .as_str()
+        .map(|s| s.to_string())
+        .unwrap_or_else(|| {
+            (now + chrono::TimeDelta::days(7))
+                .format("%Y-%m-%d")
+                .to_string()
+        });
+    let time_min = format!("{}T00:00:00{}", date_from, tz_offset);
+    let time_max = format!("{}T23:59:59{}", date_to, tz_offset);
+    (date_from, date_to, time_min, time_max)
+}
+
+/// The main account's answer followed by the additional accounts' lines.
+fn with_other_accounts(main: String, others: Vec<String>) -> String {
+    if others.is_empty() {
+        return main;
+    }
+    format!("{}\n\nOther Google accounts (read-only):\n{}", main, others.join("\n"))
+}
+
 /// Drop the local mirror row for an event Google has confirmed deleted.
 /// Without this the event stayed on the Calendar page and in the briefing until
 /// a sync whose window still covered it ran. Failures are logged, never
@@ -998,7 +1014,7 @@ fn forget_local_event(db: &crate::db::Database, event_id: &str) {
     match db.conn.lock() {
         Ok(conn) => {
             if let Err(e) = conn.execute(
-                "DELETE FROM calendar_events WHERE google_id = ?1",
+                "DELETE FROM calendar_events WHERE account_id = '' AND google_id = ?1",
                 rusqlite::params![event_id],
             ) {
                 log::warn!("[calendar] local row for deleted event {} not removed: {}", event_id, e);
@@ -1203,7 +1219,7 @@ fn event_content_is_editable(db: &crate::db::Database, event_id: &str) -> bool {
     };
     let cached: Option<Option<String>> = conn
         .query_row(
-            "SELECT attendees FROM calendar_events WHERE google_id = ?1",
+            "SELECT attendees FROM calendar_events WHERE account_id = '' AND google_id = ?1",
             rusqlite::params![event_id],
             |row| row.get::<_, Option<String>>(0),
         )
@@ -1284,7 +1300,7 @@ fn approval_detail(name: &str, args: &serde_json::Value, db: &crate::db::Databas
     let found = match name {
         "remember" => args["content"].as_str().map(str::to_string),
         "archive_email" => lookup("SELECT '\u{201c}' || coalesce(subject, '') || '\u{201d} ' || sender FROM emails WHERE gmail_id = ?1", &id("email_id")),
-        "delete_event" => lookup("SELECT '\u{201c}' || summary || '\u{201d} ' || start_time FROM calendar_events WHERE google_id = ?1", &id("event_id")),
+        "delete_event" => lookup("SELECT '\u{201c}' || summary || '\u{201d} ' || start_time FROM calendar_events WHERE account_id = '' AND google_id = ?1", &id("event_id")),
         "update_follow_up" => lookup("SELECT '\u{201c}' || title || '\u{201d}' FROM mail_items WHERE id = ?1", &id("item_id")),
         _ => None,
     };
@@ -1378,31 +1394,58 @@ async fn execute_tool_inner(
             crate::system::control::send_notification(title, message, sound).await.unwrap_or_else(|e| format!("Error: {}", e))
         }
         "search_emails" | "read_email" | "draft_email" | "archive_email" => {
-            let token = match google_token_or_err(google_auth, "Gmail").await {
-                Ok(t) => t,
-                Err(msg) => return msg,
-            };
-            match execute_gmail_tool(name, &args, &token).await {
-                Ok(r) => r,
-                Err(e) if e.contains("UNAUTHORIZED") => match refresh_google_token(google_auth).await {
-                    Ok(t) => execute_gmail_tool(name, &args, &t).await.unwrap_or_else(|e| format!("Gmail error: {}", e)),
-                    Err(e) => e,
-                },
-                Err(e) => format!("Gmail error: {}", e),
+            // A message in an additional account is read with that account's
+            // own read-only access.
+            let account = args["account"].as_str().filter(|a| !a.trim().is_empty());
+            if let (true, Some(account)) = (name == "read_email", account) {
+                let id = args["email_id"].as_str().unwrap_or("");
+                if let Some(result) = crate::mail::additional::read_message(db, account, id).await {
+                    return result.unwrap_or_else(|e| format!("Gmail error: {}", e));
+                }
+            }
+            let main = async {
+                let token = match google_token_or_err(google_auth, "Gmail").await {
+                    Ok(t) => t,
+                    Err(msg) => return msg,
+                };
+                match execute_gmail_tool(name, &args, &token).await {
+                    Ok(r) => r,
+                    Err(e) if e.contains("UNAUTHORIZED") => match refresh_google_token(google_auth).await {
+                        Ok(t) => execute_gmail_tool(name, &args, &t).await.unwrap_or_else(|e| format!("Gmail error: {}", e)),
+                        Err(e) => e,
+                    },
+                    Err(e) => format!("Gmail error: {}", e),
+                }
+            }
+            .await;
+            if name == "search_emails" {
+                let query = args["query"].as_str().unwrap_or("");
+                with_other_accounts(main, crate::mail::additional::search_lines(db, query).await)
+            } else {
+                main
             }
         }
         "list_events" | "create_event" | "update_event" | "delete_event" => {
-            let token = match google_token_or_err(google_auth, "Calendar").await {
-                Ok(t) => t,
-                Err(msg) => return msg,
-            };
-            match execute_calendar_tool(name, &args, &token, db).await {
-                Ok(r) => r,
-                Err(e) if e.contains("UNAUTHORIZED") => match refresh_google_token(google_auth).await {
-                    Ok(t) => execute_calendar_tool(name, &args, &t, db).await.unwrap_or_else(|e| format!("Calendar error: {}", e)),
-                    Err(e) => e,
-                },
-                Err(e) => format!("Calendar error: {}", e),
+            let main = async {
+                let token = match google_token_or_err(google_auth, "Calendar").await {
+                    Ok(t) => t,
+                    Err(msg) => return msg,
+                };
+                match execute_calendar_tool(name, &args, &token, db).await {
+                    Ok(r) => r,
+                    Err(e) if e.contains("UNAUTHORIZED") => match refresh_google_token(google_auth).await {
+                        Ok(t) => execute_calendar_tool(name, &args, &t, db).await.unwrap_or_else(|e| format!("Calendar error: {}", e)),
+                        Err(e) => e,
+                    },
+                    Err(e) => format!("Calendar error: {}", e),
+                }
+            }
+            .await;
+            if name == "list_events" {
+                let (_, _, time_min, time_max) = event_window(&args);
+                with_other_accounts(main, crate::mail::additional::event_lines(db, &time_min, &time_max).await)
+            } else {
+                main
             }
         }
         "list_github_items" | "create_github_issue" => {
@@ -2170,14 +2213,16 @@ mod calendar_scope_tests {
         conn.execute_batch(
             "CREATE TABLE calendar_events (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
-                google_id TEXT UNIQUE NOT NULL,
+                account_id TEXT NOT NULL DEFAULT '',
+                google_id TEXT NOT NULL,
                 summary TEXT NOT NULL,
                 description TEXT,
                 location TEXT,
                 start_time TEXT NOT NULL,
                 end_time TEXT NOT NULL,
                 attendees TEXT,
-                status TEXT DEFAULT 'confirmed'
+                status TEXT DEFAULT 'confirmed',
+                UNIQUE(account_id, google_id)
             );",
         )
         .unwrap();

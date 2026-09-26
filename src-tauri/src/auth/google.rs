@@ -73,6 +73,59 @@ const CALLBACK_READ_TIMEOUT: std::time::Duration = std::time::Duration::from_sec
 /// Total time the user has to finish consent in the browser.
 const CALLBACK_DEADLINE: std::time::Duration = std::time::Duration::from_secs(180);
 
+/// Returned when the user cancels a sign-in that is waiting for the browser.
+pub const SIGN_IN_CANCELLED: &str = "Google sign-in cancelled";
+
+/// Returned once Google has refused the stored grant (`invalid_grant`).
+pub const REVOKED: &str = "Google authorization expired or was revoked. Reconnect Google in Settings.";
+
+/// Which browser sign-in a cancel is for. The Assistant connection and a Mail
+/// mailbox run separate flows, and cancelling one must not end the other.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum SignIn {
+    Assistant,
+    Mailbox,
+}
+
+/// Sign-ins waiting for Google's redirect. Closing the browser tab tells
+/// JARVIS nothing, so without a cancel the button stayed busy until
+/// CALLBACK_DEADLINE, and a mailbox sign-in held the Mail lock that whole time.
+static WAITING: Mutex<Vec<(SignIn, oneshot::Sender<()>)>> = Mutex::new(Vec::new());
+
+fn wait_for_cancel(kind: SignIn) -> oneshot::Receiver<()> {
+    let (tx, rx) = oneshot::channel();
+    let mut waiting = WAITING.lock().unwrap_or_else(|e| e.into_inner());
+    // A finished sign-in dropped its receiver; forget it.
+    waiting.retain(|(_, tx)| !tx.is_closed());
+    waiting.push((kind, tx));
+    rx
+}
+
+/// Stop the sign-in of this kind that is waiting for the browser, if any.
+pub fn cancel_sign_in(kind: SignIn) -> bool {
+    let mut waiting = WAITING.lock().unwrap_or_else(|e| e.into_inner());
+    let (cancel, keep): (Vec<_>, Vec<_>) = waiting.drain(..).partition(|(k, _)| *k == kind);
+    *waiting = keep;
+    cancel
+        .into_iter()
+        .fold(false, |any, (_, tx)| tx.send(()).is_ok() || any)
+}
+
+/// The authorization code from Google's redirect, unless the user cancels or
+/// the consent deadline passes first.
+async fn wait_for_code(
+    redirect: oneshot::Receiver<Result<String, String>>,
+    cancel: oneshot::Receiver<()>,
+) -> Result<String, String> {
+    tokio::select! {
+        result = tokio::time::timeout(CALLBACK_DEADLINE, redirect) => result
+            .map_err(|_| "OAuth timeout: no response within 3 minutes. Please try again.".to_string())?
+            .map_err(|_| "OAuth cancelled".to_string())?
+            .map_err(|e| format!("Google OAuth denied: {}", e)),
+        Ok(()) = cancel => Err(SIGN_IN_CANCELLED.to_string()),
+    }
+}
+
 // The Google refresh token is a long-lived credential and lives in the macOS
 // Keychain, never in plaintext SQLite. The DB keeps only this non-secret marker
 // so existence checks keep working.
@@ -92,6 +145,14 @@ pub struct GoogleAuth {
     /// Serialises refreshes so a burst of calls that all find the token expired
     /// produces one round trip to Google, not one per caller.
     refresh_lock: tokio::sync::Mutex<()>,
+    /// The scopes Google granted at the last sign-in. The consent screen lets
+    /// the user untick some, so this can be less than what was requested.
+    pub granted_scopes: Mutex<Vec<String>>,
+    /// Set when Google answered a refresh with `invalid_grant`: the grant was
+    /// revoked or expired, and only a new sign-in fixes it. Until then no call
+    /// goes back to Google, and status reports "reconnect" instead of a stale
+    /// "connected".
+    revoked: std::sync::atomic::AtomicBool,
 }
 
 /// Resolve a credential by checking the runtime env var first, then falling back to
@@ -125,6 +186,8 @@ impl GoogleAuth {
             access_token_expiry: Mutex::new(None),
             refresh_token: Mutex::new(None),
             refresh_lock: tokio::sync::Mutex::new(()),
+            granted_scopes: Mutex::new(Vec::new()),
+            revoked: std::sync::atomic::AtomicBool::new(false),
         })
     }
 
@@ -136,6 +199,8 @@ impl GoogleAuth {
             access_token_expiry: Mutex::new(None),
             refresh_token: Mutex::new(None),
             refresh_lock: tokio::sync::Mutex::new(()),
+            granted_scopes: Mutex::new(Vec::new()),
+            revoked: std::sync::atomic::AtomicBool::new(false),
         }
     }
 
@@ -163,17 +228,19 @@ impl GoogleAuth {
         Ok(client)
     }
 
+    /// The Assistant's sign-in; `cancel_sign_in(SignIn::Assistant)` stops it.
     pub async fn start_auth_flow(&self, scopes: Vec<String>) -> Result<(), String> {
-        self.start_auth_flow_with_prompt(scopes, "consent").await
+        self.start_auth_flow_with_prompt(scopes, "consent", SignIn::Assistant).await
     }
 
     /// Separate mailbox grants need an explicit chooser without changing the
-    /// existing Calendar/chat sign-in behavior.
+    /// existing Calendar/chat sign-in behavior. `cancel_sign_in(SignIn::Mailbox)`
+    /// stops it.
     pub async fn start_auth_flow_with_account_selection(&self, scopes: Vec<String>) -> Result<(), String> {
-        self.start_auth_flow_with_prompt(scopes, "consent select_account").await
+        self.start_auth_flow_with_prompt(scopes, "consent select_account", SignIn::Mailbox).await
     }
 
-    async fn start_auth_flow_with_prompt(&self, scopes: Vec<String>, prompt: &str) -> Result<(), String> {
+    async fn start_auth_flow_with_prompt(&self, scopes: Vec<String>, prompt: &str, kind: SignIn) -> Result<(), String> {
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
             .await.map_err(|e| format!("Failed to bind listener: {}", e))?;
         let port = listener.local_addr().map_err(|e| e.to_string())?.port();
@@ -191,6 +258,7 @@ impl GoogleAuth {
         let (auth_url, csrf_token) = auth_request.set_pkce_challenge(pkce_challenge).url();
         let expected_state = csrf_token.secret().clone();
 
+        let cancel = wait_for_cancel(kind);
         open::that(auth_url.to_string()).map_err(|e| format!("Failed to open browser: {}", e))?;
         log::info!("Opened browser for Google OAuth at port {}", port);
 
@@ -202,8 +270,15 @@ impl GoogleAuth {
             // port scanner, a browser probe -- consumed the flow's only chance
             // and freed the port before the real redirect arrived.
             let deadline = tokio::time::Instant::now() + CALLBACK_DEADLINE;
+            let mut tx = tx;
             loop {
-                let (mut stream, _) = match tokio::time::timeout_at(deadline, listener.accept()).await {
+                let accepted = tokio::select! {
+                    // Cancelled: free the port instead of answering a late
+                    // redirect with "successful" for a sign-in nobody finishes.
+                    _ = tx.closed() => return,
+                    accepted = tokio::time::timeout_at(deadline, listener.accept()) => accepted,
+                };
+                let (mut stream, _) = match accepted {
                     Ok(Ok(accepted)) => accepted,
                     Ok(Err(e)) => {
                         // The listener itself is broken; retrying would spin.
@@ -268,10 +343,7 @@ impl GoogleAuth {
             }
         });
 
-        let code = tokio::time::timeout(CALLBACK_DEADLINE, rx)
-            .await.map_err(|_| "OAuth timeout: no response within 3 minutes. Please try again.".to_string())?
-            .map_err(|_| "OAuth cancelled".to_string())?
-            .map_err(|e| format!("Google OAuth denied: {}", e))?;
+        let code = wait_for_code(rx, cancel).await?;
 
         let http = token_http_client()?;
         let exchange_future = client
@@ -292,9 +364,17 @@ impl GoogleAuth {
 
         let access = token_result.access_token().secret().clone();
         let refresh = token_result.refresh_token().map(|t| t.secret().clone());
+        // Google lists what was granted; a response without the list granted
+        // everything requested.
+        let granted = token_result
+            .scopes()
+            .map(|granted| granted.iter().map(|scope| scope.to_string()).collect())
+            .unwrap_or(scopes);
 
         self.store_access_token(access, token_result.expires_in());
         *self.refresh_token.lock().unwrap() = refresh;
+        *self.granted_scopes.lock().unwrap() = granted;
+        self.revoked.store(false, std::sync::atomic::Ordering::SeqCst);
 
         log::info!("Google OAuth completed successfully");
         Ok(())
@@ -340,6 +420,9 @@ impl GoogleAuth {
             // revoked or expired and only a new consent can fix it, which
             // callers must tell apart from a network failure.
             oauth2::RequestTokenError::ServerResponse(response) => {
+                if response.error().to_string() == "invalid_grant" {
+                    self.revoked.store(true, std::sync::atomic::Ordering::SeqCst);
+                }
                 format!("Token refresh failed: {}", response.error())
             }
             other => format!("Token refresh failed: {}", other),
@@ -373,6 +456,15 @@ impl GoogleAuth {
         self.is_authenticated() || self.has_refresh_token()
     }
 
+    /// Linked, but Google no longer honours the grant: only a new sign-in
+    /// fixes it. A refresh that failed for any other reason (offline, Google
+    /// down) is not this.
+    pub fn needs_reconnect(&self) -> bool {
+        self.is_linked()
+            && (self.revoked.load(std::sync::atomic::Ordering::SeqCst) || !self.has_refresh_token())
+            && self.live_access_token().is_none()
+    }
+
     /// Ensures a usable access token is available, refreshing from the stored
     /// refresh token when the cached one is expired or about to be. Callers
     /// still keep their 401 retry as a backstop; this stops them needing it
@@ -383,6 +475,11 @@ impl GoogleAuth {
         }
         if !self.has_refresh_token() {
             return Err("Not authenticated with Google".to_string());
+        }
+        // A revoked grant stays revoked; asking again every tick only spends
+        // a round trip to be told so.
+        if self.revoked.load(std::sync::atomic::Ordering::SeqCst) {
+            return Err(REVOKED.to_string());
         }
         // One refresh at a time. Without this, every caller that finds the
         // token expired at the same moment starts its own round trip to Google.
@@ -464,13 +561,15 @@ impl GoogleAuth {
     /// Unlink the Google account: revoke the grant at Google, delete the
     /// Keychain item and forget the in-memory tokens. Revocation is best
     /// effort -- someone disconnecting on a plane must still end up
-    /// disconnected locally.
-    pub async fn disconnect(&self, db: &crate::db::Database) -> Result<(), String> {
+    /// disconnected locally. `revoke` is false when a Mail mailbox still uses
+    /// the same Google account: Google revokes per app and account, so
+    /// revoking here would sign that mailbox out too.
+    pub async fn disconnect(&self, db: &crate::db::Database, revoke: bool) -> Result<(), String> {
         let token = {
             let refresh = self.refresh_token.lock().unwrap().clone();
             refresh.or_else(|| self.access_token.lock().unwrap().clone())
         };
-        if let Some(token) = token {
+        if let Some(token) = token.filter(|_| revoke) {
             if let Err(e) = revoke_grant(&token).await {
                 log::warn!("{}", e);
             }
@@ -479,6 +578,8 @@ impl GoogleAuth {
         *self.access_token.lock().unwrap() = None;
         *self.access_token_expiry.lock().unwrap() = None;
         *self.refresh_token.lock().unwrap() = None;
+        self.granted_scopes.lock().unwrap().clear();
+        self.revoked.store(false, std::sync::atomic::Ordering::SeqCst);
 
         if let Err(e) = KeychainStore::delete(REFRESH_KEYCHAIN_SERVICE, REFRESH_KEYCHAIN_ACCOUNT) {
             // Absent is the desired end state, so a "not found" is fine here.
@@ -488,7 +589,7 @@ impl GoogleAuth {
         let conn = db.conn.lock().map_err(|e| e.to_string())?;
         conn.execute(
             "DELETE FROM user_preferences WHERE key IN \
-             ('google_refresh_token', 'user_name', 'cached_briefing', 'last_briefing_date')",
+             ('google_refresh_token', 'user_name', 'google_account_email', 'cached_briefing', 'last_briefing_date')",
             [],
         )
         .map_err(|e| e.to_string())?;
@@ -584,6 +685,52 @@ mod tests {
 
         auth.store_access_token("spent".to_string(), Some(std::time::Duration::from_secs(0)));
         assert_eq!(auth.live_access_token(), None);
+    }
+
+    /// Closing the browser tab tells JARVIS nothing, so the button stayed busy
+    /// (and a mailbox sign-in held the Mail lock) until the 3-minute deadline.
+    #[tokio::test]
+    async fn a_waiting_sign_in_can_be_cancelled_without_ending_the_other_kind() {
+        let (_redirect_tx, redirect) = oneshot::channel::<Result<String, String>>();
+        let waiting = tokio::spawn(wait_for_code(redirect, wait_for_cancel(SignIn::Mailbox)));
+        tokio::task::yield_now().await;
+
+        assert!(!cancel_sign_in(SignIn::Assistant), "no Assistant sign-in is waiting");
+        assert!(!waiting.is_finished(), "cancelling the other kind must not end this one");
+
+        assert!(cancel_sign_in(SignIn::Mailbox));
+        let result = tokio::time::timeout(std::time::Duration::from_secs(1), waiting)
+            .await
+            .expect("a cancelled sign-in stops waiting at once")
+            .unwrap();
+        assert_eq!(result, Err(SIGN_IN_CANCELLED.to_string()));
+        assert!(!cancel_sign_in(SignIn::Mailbox), "nothing is left waiting");
+    }
+
+    #[tokio::test]
+    async fn the_redirect_still_completes_a_sign_in_that_could_be_cancelled() {
+        let (redirect_tx, redirect) = oneshot::channel::<Result<String, String>>();
+        redirect_tx.send(Ok("4/code".to_string())).unwrap();
+        let (_cancel_tx, cancel) = oneshot::channel();
+        assert_eq!(wait_for_code(redirect, cancel).await, Ok("4/code".to_string()));
+    }
+
+    /// A revoked grant used to read as connected until restart: any cached
+    /// access token, even an expired one, counted.
+    #[tokio::test]
+    async fn a_revoked_grant_needs_reconnecting_and_stops_asking_google() {
+        let auth = GoogleAuth::new_empty();
+        *auth.refresh_token.lock().unwrap() = Some("1//stored".to_string());
+        auth.store_access_token("expired".to_string(), Some(std::time::Duration::from_secs(0)));
+        assert!(!auth.needs_reconnect(), "not known to be revoked: offline is not revoked");
+
+        auth.revoked.store(true, std::sync::atomic::Ordering::SeqCst);
+        assert!(auth.needs_reconnect());
+        // Returns at once: build_client would fail first if this reached Google.
+        assert_eq!(auth.ensure_access_token().await, Err(REVOKED.to_string()));
+
+        auth.store_access_token("fresh".to_string(), Some(std::time::Duration::from_secs(3600)));
+        assert!(!auth.needs_reconnect(), "a live token is still usable");
     }
 
     #[test]

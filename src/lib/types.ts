@@ -89,6 +89,8 @@ export interface CalendarEventView {
   end_time: string;
   attendees: string;
   status: string;
+  /** The additional Google account the event came from; null for the main account. */
+  account: string | null;
 }
 
 export interface CronJobView {

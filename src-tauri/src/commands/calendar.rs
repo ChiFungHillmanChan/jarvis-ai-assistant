@@ -5,10 +5,18 @@ use serde::Serialize;
 use std::sync::Arc;
 use tauri::State;
 
+/// `account` is the address of the additional account the event came from,
+/// or None for the main account's calendar.
 #[derive(Serialize)]
-pub struct CalendarEventView { pub id: i64, pub google_id: String, pub summary: String, pub description: Option<String>, pub location: Option<String>, pub start_time: String, pub end_time: String, pub attendees: String, pub status: String }
+pub struct CalendarEventView { pub id: i64, pub google_id: String, pub summary: String, pub description: Option<String>, pub location: Option<String>, pub start_time: String, pub end_time: String, pub attendees: String, pub status: String, pub account: Option<String> }
 
-const EVENT_COLUMNS: &str = "id, google_id, summary, description, location, start_time, end_time, attendees, status";
+const EVENT_COLUMNS: &str = "e.id, e.google_id, e.summary, e.description, e.location, e.start_time, e.end_time, e.attendees, e.status, a.email";
+/// An event row with the address of the additional account it came from.
+const EVENT_SOURCE: &str = "calendar_events e LEFT JOIN mail_accounts a ON a.id = e.account_id";
+
+fn event_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<CalendarEventView> {
+    Ok(CalendarEventView { id: row.get(0)?, google_id: row.get(1)?, summary: row.get(2)?, description: row.get(3)?, location: row.get(4)?, start_time: row.get(5)?, end_time: row.get(6)?, attendees: row.get::<_, Option<String>>(7)?.unwrap_or_default(), status: row.get::<_, Option<String>>(8)?.unwrap_or_default(), account: row.get(9)? })
+}
 
 /// calendar_events.start_time carries two different shapes and a date predicate
 /// has to be correct for both:
@@ -47,20 +55,20 @@ const UPCOMING_EVENTS_PREDICATE: &str = "(CASE WHEN length(start_time) = 10 \
 
 fn upcoming_events_query() -> String {
     format!(
-        "SELECT {} FROM calendar_events WHERE {} ORDER BY datetime(start_time) ASC",
-        EVENT_COLUMNS, UPCOMING_EVENTS_PREDICATE
+        "SELECT {} FROM {} WHERE {} ORDER BY datetime(start_time) ASC",
+        EVENT_COLUMNS, EVENT_SOURCE, UPCOMING_EVENTS_PREDICATE
     )
 }
 
 fn todays_events_query() -> String {
     format!(
-        "SELECT {} FROM calendar_events WHERE {} ORDER BY datetime(start_time) ASC",
-        EVENT_COLUMNS, TODAYS_EVENT_PREDICATE
+        "SELECT {} FROM {} WHERE {} ORDER BY datetime(start_time) ASC",
+        EVENT_COLUMNS, EVENT_SOURCE, TODAYS_EVENT_PREDICATE
     )
 }
 
 fn date_range_query() -> String {
-    format!("SELECT {} FROM calendar_events WHERE (CASE WHEN length(start_time)=10 THEN start_time ELSE date(start_time,'localtime') END) BETWEEN ?1 AND ?2 ORDER BY datetime(start_time) ASC", EVENT_COLUMNS)
+    format!("SELECT {} FROM {} WHERE (CASE WHEN length(start_time)=10 THEN start_time ELSE date(start_time,'localtime') END) BETWEEN ?1 AND ?2 ORDER BY datetime(start_time) ASC", EVENT_COLUMNS, EVENT_SOURCE)
 }
 fn validate_date_range(from: &str, to: &str) -> Result<(), String> {
     let parse = |value: &str| chrono::NaiveDate::parse_from_str(value, "%Y-%m-%d")
@@ -79,15 +87,13 @@ pub fn get_events(db: State<Arc<Database>>, days: Option<i32>, date_from: Option
     };
     let conn = db.conn.lock().map_err(|e|e.to_string())?;
     let mut stmt = conn.prepare(&query).map_err(|e|e.to_string())?;
-    let events = stmt.query_map(rusqlite::params_from_iter(params.iter()), |row| {
-        Ok(CalendarEventView { id: row.get(0)?, google_id: row.get(1)?, summary: row.get(2)?, description: row.get(3)?, location: row.get(4)?, start_time: row.get(5)?, end_time: row.get(6)?, attendees: row.get(7)?, status: row.get(8)? })
-    }).map_err(|e|e.to_string())?.collect::<Result<Vec<_>,_>>().map_err(|e|e.to_string())?;
+    let events = stmt.query_map(rusqlite::params_from_iter(params.iter()), event_row)
+        .map_err(|e|e.to_string())?.collect::<Result<Vec<_>,_>>().map_err(|e|e.to_string())?;
     Ok(events)
 }
 
 #[tauri::command]
 pub async fn sync_calendar(db: State<'_, Arc<Database>>, auth: State<'_, Arc<GoogleAuth>>, date_from: Option<String>, date_to: Option<String>) -> Result<String, String> {
-    let token = auth.ensure_access_token().await?;
     let (time_min,time_max) = match (date_from,date_to) {
         (Some(from),Some(to)) => {
             validate_date_range(&from,&to)?;
@@ -101,10 +107,36 @@ pub async fn sync_calendar(db: State<'_, Arc<Database>>, auth: State<'_, Arc<Goo
         (None,None) => { let now = chrono::Utc::now(); (now.to_rfc3339(),(now+chrono::TimeDelta::days(7)).to_rfc3339()) },
         _ => return Err("Both dateFrom and dateTo are required".into()),
     };
-    let fetched = cal::fetch_events_detailed(&token, &time_min, &time_max).await?;
-    let count = fetched.events.len();
-    cal::save_to_db(&db, &fetched, &time_min, &time_max)?;
-    Ok(format!("Synced {} events", count))
+    // The main calendar, when one is connected, then each additional one; a
+    // failing main account does not stop the others.
+    let main = if auth.is_linked() {
+        Some(async {
+            let token = auth.ensure_access_token().await?;
+            let fetched = cal::fetch_events_detailed(&token, &time_min, &time_max).await?;
+            cal::save_to_db(&db, &fetched, &time_min, &time_max, cal::MAIN_ACCOUNT)?;
+            Ok::<usize, String>(fetched.events.len())
+        }
+        .await)
+    } else {
+        None
+    };
+    let has_others = crate::mail::additional::accounts(&db)?.iter().any(|a| a.calendar);
+    let (others, mut problems) = crate::mail::additional::sync_calendars(&db, &time_min, &time_max).await?;
+    let main = match main {
+        Some(Ok(count)) => count,
+        Some(Err(e)) if !has_others => return Err(e),
+        Some(Err(e)) => {
+            problems.insert(0, format!("主帳戶：{}", e));
+            0
+        }
+        None if !has_others => return Err("Not authenticated with Google".to_string()),
+        None => 0,
+    };
+    let mut summary = format!("Synced {} events", main + others);
+    if !problems.is_empty() {
+        summary.push_str(&format!(" ({})", problems.join(" ")));
+    }
+    Ok(summary)
 }
 
 #[tauri::command]
@@ -117,9 +149,8 @@ pub async fn create_event(auth: State<'_, Arc<GoogleAuth>>, summary: String, sta
 pub fn get_todays_events(db: State<Arc<Database>>) -> Result<Vec<CalendarEventView>, String> {
     let conn = db.conn.lock().map_err(|e| e.to_string())?;
     let mut stmt = conn.prepare(&todays_events_query()).map_err(|e| e.to_string())?;
-    let events = stmt.query_map([], |row| {
-        Ok(CalendarEventView { id: row.get(0)?, google_id: row.get(1)?, summary: row.get(2)?, description: row.get(3)?, location: row.get(4)?, start_time: row.get(5)?, end_time: row.get(6)?, attendees: row.get(7)?, status: row.get(8)? })
-    }).map_err(|e| e.to_string())?.collect::<Result<Vec<_>, _>>().map_err(|e| e.to_string())?;
+    let events = stmt.query_map([], event_row)
+        .map_err(|e| e.to_string())?.collect::<Result<Vec<_>, _>>().map_err(|e| e.to_string())?;
     Ok(events)
 }
 
@@ -133,14 +164,17 @@ mod tests {
         conn.execute_batch(
             "CREATE TABLE calendar_events (
                  id INTEGER PRIMARY KEY AUTOINCREMENT,
-                 google_id TEXT UNIQUE NOT NULL,
+                 account_id TEXT NOT NULL DEFAULT '',
+                 google_id TEXT NOT NULL,
                  summary TEXT NOT NULL,
                  description TEXT,
                  location TEXT,
                  start_time TEXT NOT NULL,
                  end_time TEXT NOT NULL,
                  attendees TEXT,
-                 status TEXT DEFAULT 'confirmed');",
+                 status TEXT DEFAULT 'confirmed',
+                 UNIQUE(account_id, google_id));
+             CREATE TABLE mail_accounts (id TEXT PRIMARY KEY, email TEXT NOT NULL);",
         )
         .unwrap();
         conn.execute_batch(inserts).unwrap();

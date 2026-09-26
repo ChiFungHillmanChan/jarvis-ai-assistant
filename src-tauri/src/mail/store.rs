@@ -19,7 +19,7 @@ fn text(value: &str, max: usize, allow_empty: bool) -> Result<&str, String> {
     }
     Ok(value)
 }
-const ACCOUNT_SELECT: &str = "SELECT a.id,a.email,a.connected,a.last_synced,a.next_page_token,(SELECT COUNT(*) FROM mail_messages m WHERE m.account_id=a.id) FROM mail_accounts a";
+const ACCOUNT_SELECT: &str = "SELECT a.id,a.email,a.connected,a.last_synced,a.next_page_token,(SELECT COUNT(*) FROM mail_messages m WHERE m.account_id=a.id),a.calendar FROM mail_accounts a";
 fn account_row(r: &Row<'_>) -> rusqlite::Result<MailAccount> {
     Ok(MailAccount {
         id: r.get(0)?,
@@ -28,6 +28,7 @@ fn account_row(r: &Row<'_>) -> rusqlite::Result<MailAccount> {
         last_synced: r.get(3)?,
         next_page_token: r.get(4)?,
         message_count: r.get(5)?,
+        calendar: r.get(6)?,
     })
 }
 pub fn get_account(db: &Database, id: &str) -> Result<MailAccount, String> {
@@ -75,23 +76,54 @@ pub fn upsert_account(
     db.conn.lock().map_err(err)?.execute("INSERT INTO mail_accounts(id,email,connected) VALUES (?1,?2,?3) ON CONFLICT(id) DO UPDATE SET email=excluded.email,connected=excluded.connected",params![id,email,connected]).map_err(err)?;
     get_account(db, id)
 }
+/// A disconnected mailbox also loses its calendar: with no credential to
+/// refresh it, its events would stay on the Calendar page going stale.
 pub fn set_connected(db: &Database, id: &str, connected: bool) -> Result<(), String> {
+    let mut conn = db.conn.lock().map_err(err)?;
+    let tx = conn.transaction().map_err(err)?;
     required(
-        db.conn
-            .lock()
-            .map_err(err)?
-            .execute(
-                "UPDATE mail_accounts SET connected=?2 WHERE id=?1",
-                params![id, connected],
-            )
-            .map_err(err)?,
-    )
+        tx.execute(
+            "UPDATE mail_accounts SET connected=?2,calendar=calendar AND ?2 WHERE id=?1",
+            params![id, connected],
+        )
+        .map_err(err)?,
+    )?;
+    if !connected {
+        tx.execute("DELETE FROM calendar_events WHERE account_id=?1", [id]).map_err(err)?;
+    }
+    tx.commit().map_err(err)
+}
+/// Whether the mailbox's credential carries Calendar access. Without it the
+/// account's events are dropped instead of left to go stale.
+pub fn set_calendar(db: &Database, id: &str, calendar: bool) -> Result<(), String> {
+    let mut conn = db.conn.lock().map_err(err)?;
+    let tx = conn.transaction().map_err(err)?;
+    required(tx.execute("UPDATE mail_accounts SET calendar=?2 WHERE id=?1", params![id, calendar]).map_err(err)?)?;
+    if !calendar {
+        tx.execute("DELETE FROM calendar_events WHERE account_id=?1", [id]).map_err(err)?;
+    }
+    tx.commit().map_err(err)
+}
+/// Remove local copies of messages deleted, trashed or marked spam in Gmail.
+/// Their triage and follow-ups go with them; notes that cite them are kept.
+pub fn delete_messages(db: &Database, account_id: &str, provider_ids: &[String]) -> Result<usize, String> {
+    let mut conn = db.conn.lock().map_err(err)?;
+    let tx = conn.transaction().map_err(err)?;
+    let mut removed = 0;
+    for id in provider_ids {
+        removed += tx
+            .execute("DELETE FROM mail_messages WHERE account_id=?1 AND provider_id=?2", params![account_id, id])
+            .map_err(err)?;
+    }
+    tx.commit().map_err(err)?;
+    Ok(removed)
 }
 pub fn delete_account(db: &Database, id: &str) -> Result<(), String> {
     let mut conn = db.conn.lock().map_err(err)?;
     let tx = conn.transaction().map_err(err)?;
     // Explicit local deletion also removes notes sourced from that account.
     tx.execute("DELETE FROM mail_memories WHERE source_message_id IN (SELECT id FROM mail_messages WHERE account_id=?1)",[id]).map_err(err)?;
+    tx.execute("DELETE FROM calendar_events WHERE account_id=?1", [id]).map_err(err)?;
     required(
         tx.execute("DELETE FROM mail_accounts WHERE id=?1", [id])
             .map_err(err)?,
@@ -2063,5 +2095,47 @@ mod tests {
         assert_eq!(loaded.memories.len(), 1);
         assert_eq!(loaded.memories[0].id, memory.id);
         assert_eq!(loaded.memories[0].source_message_id, Some(1));
+    }
+
+    fn calendar_rows(db: &Database, account_id: &str) -> i64 {
+        db.conn.lock().unwrap()
+            .query_row("SELECT COUNT(*) FROM calendar_events WHERE account_id=?1", [account_id], |r| r.get(0))
+            .unwrap()
+    }
+
+    /// A disconnected mailbox has no credential to refresh its calendar with,
+    /// so its events would sit on the Calendar page going stale.
+    #[test]
+    fn disconnecting_a_mailbox_drops_its_calendar_and_only_its_calendar() {
+        let db = crate::db::test_database();
+        upsert_account(&db, "work", "work@example.com", true).unwrap();
+        set_calendar(&db, "work", true).unwrap();
+        assert!(get_account(&db, "work").unwrap().calendar);
+        db.conn.lock().unwrap().execute_batch("INSERT INTO calendar_events(account_id,google_id,summary,start_time,end_time) VALUES
+            ('work','w1','Work meeting','2026-09-30T09:00:00Z','2026-09-30T10:00:00Z'),
+            ('','m1','Main meeting','2026-09-30T09:00:00Z','2026-09-30T10:00:00Z');").unwrap();
+        set_connected(&db, "work", false).unwrap();
+        assert!(!get_account(&db, "work").unwrap().calendar, "no credential, no calendar");
+        assert_eq!(calendar_rows(&db, "work"), 0);
+        assert_eq!(calendar_rows(&db, ""), 1, "the main account's events stay");
+    }
+
+    #[test]
+    fn deleting_messages_removes_only_that_mailboxs_copies_and_their_triage() {
+        let db = crate::db::test_database();
+        upsert_account(&db, "a", "a@example.com", true).unwrap();
+        upsert_account(&db, "b", "b@example.com", true).unwrap();
+        db.conn.lock().unwrap().execute_batch("INSERT INTO mail_messages(id,account_id,provider_id,received_at) VALUES
+            (1,'a','gone','2026-09-20T10:00:00Z'),(2,'a','kept','2026-09-20T10:00:00Z'),(3,'b','gone','2026-09-20T10:00:00Z');
+            INSERT INTO mail_items(message_id,kind,title,evidence) VALUES (1,'task','Reply to client','');").unwrap();
+        assert_eq!(delete_messages(&db, "a", &["gone".to_string(), "never-stored".to_string()]).unwrap(), 1);
+        let left: Vec<(String, String)> = {
+            let conn = db.conn.lock().unwrap();
+            let mut stmt = conn.prepare("SELECT account_id,provider_id FROM mail_messages ORDER BY id").unwrap();
+            let rows = stmt.query_map([], |r| Ok((r.get(0)?, r.get(1)?))).unwrap().collect::<Result<_, _>>().unwrap();
+            rows
+        };
+        assert_eq!(left, vec![("a".into(), "kept".into()), ("b".into(), "gone".into())]);
+        assert!(list_items(&db, None, true).unwrap().is_empty(), "the deleted email's follow-up goes with it");
     }
 }

@@ -1,10 +1,11 @@
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import {
   accountStatus,
   getSettings,
   updateSetting,
   googleConnect,
-  googleStatus,
+  googleCancelConnect,
+  googleAccounts,
   googleDisconnect,
   saveNotionToken,
   saveGitHubToken,
@@ -39,6 +40,7 @@ import {
   purgeStorage,
   setRetentionPolicy,
 } from "../lib/commands";
+import type { GoogleAccounts } from "../lib/commands";
 import { listen } from "@tauri-apps/api/event";
 import { invoke } from "@tauri-apps/api/core";
 import type { AccountStatus, VoiceSettings, WakeWordStatus, VoiceState, LocalEndpoint, LocalModel, ProviderChainEntry, EndpointHealth, StorageUsage, StorageScope } from "../lib/types";
@@ -46,7 +48,8 @@ import { GOOGLE_ALREADY_CONNECTED } from "../lib/types";
 import { useVoiceState } from "../hooks/useVoiceState";
 import { useUiLocale } from "../i18n";
 import IntegrationConnection from "../components/IntegrationConnection";
-import { connectionsChanged } from "../lib/connections";
+import OtherGoogleAccounts from "../components/OtherGoogleAccounts";
+import { connectionStatuses, connectionsChanged } from "../lib/connections";
 import { DISPLAY_NAME_KEY, accountSectionVisible, displayNameChanged } from "../lib/account";
 import LocalAiSetup from "../components/LocalAiSetup";
 import ChooseAi from "../components/ChooseAi";
@@ -94,9 +97,9 @@ export default function Settings() {
   const [accountInfo, setAccountInfo] = useState<AccountStatus | null>(null);
   const [loaded, setLoaded] = useState(false);
   const [loadError, setLoadError] = useState(false);
-  const [googleConnected, setGoogleConnected] = useState<boolean | null>(null);
-  const [googleAccount, setGoogleAccount] = useState<string | null>(null);
+  const [google, setGoogle] = useState<GoogleAccounts | null>(null);
   const [connecting, setConnecting] = useState(false);
+  const googleCancelled = useRef(false);
   const [disconnecting, setDisconnecting] = useState(false);
   const [googleError, setGoogleError] = useState<string | null>(null);
   const [googleNotice, setGoogleNotice] = useState<string | null>(null);
@@ -127,6 +130,14 @@ export default function Settings() {
 
   useEffect(() => {
     accountStatus().then(setAccountInfo).catch(() => {});
+  }, []);
+
+  // Check the three services once, so moving between their pages shows a
+  // status at once instead of waiting on a new check each time.
+  useEffect(() => {
+    for (const service of ["notion", "github", "obsidian"] as const) {
+      void connectionStatuses.load(service).catch(() => {});
+    }
   }, []);
 
   // Absent row throws, which just means "still on the plugin default".
@@ -458,41 +469,31 @@ export default function Settings() {
 
   // Connection state is always read back from the backend rather than assumed,
   // so DISCONNECT and SWITCH ACCOUNT settle on the truth without a relaunch.
-  // The account label is the Google profile name persisted at OAuth
-  // (user_preferences.user_name); disconnect deletes that row, so an absent row
-  // correctly reads as "no account".
+  // The main account's label is the Google profile name and address saved at
+  // sign-in; disconnect deletes both.
   async function refreshGoogle() {
-    let connected = false;
     try {
-      connected = await googleStatus();
+      setGoogle(await googleAccounts());
     } catch (e) {
       setGoogleError(String(e));
-      setGoogleConnected(null);
-      setGoogleAccount(null);
-      return;
-    }
-    setGoogleConnected(connected);
-    if (!connected) {
-      setGoogleAccount(null);
-      return;
-    }
-    try {
-      const name = (await getPreference("user_name")).trim();
-      setGoogleAccount(name || null);
-    } catch {
-      setGoogleAccount(null);
+      setGoogle(null);
     }
   }
+
+  const mainLabel = google?.main.name && google.main.email
+    ? `${google.main.name}（${google.main.email}）`
+    : google?.main.name ?? google?.main.email ?? null;
 
   async function handleGoogleConnect(force: boolean) {
     // Switching revokes the current grant and wipes the cached mail before the
     // new flow starts, so it gets the same confirm-then-act treatment as CLEAR.
     if (force && !window.confirm(
-      text("Switch Assistant Google account? This revokes this Google access and deletes the Assistant mail cache, Calendar events and briefings on this Mac. Mail workspace copies are kept.", "是否切換助手 Google 帳戶？此操作會撤銷目前的 Google 連接，並刪除此 Mac 上的助手郵件快取、日曆活動及簡報；郵件工作區副本會保留。")
+      text("Switch the main Google account? This revokes this Google access (unless Mail still uses the same account) and deletes its Assistant mail cache, Calendar events and briefings on this Mac. Mail workspace copies and other accounts are kept.", "是否切換主 Google 帳戶？此操作會撤銷目前的 Google 連接（郵件工作區仍使用同一帳戶時除外），並刪除此 Mac 上該帳戶的助手郵件快取、日曆活動及簡報；郵件工作區副本及其他帳戶會保留。")
     )) {
       return;
     }
     setConnecting(true);
+    googleCancelled.current = false;
     setGoogleError(null);
     setGoogleNotice(null);
     try {
@@ -503,16 +504,24 @@ export default function Settings() {
           : result
       );
     } catch (e) {
-      setGoogleError(String(e));
+      // Cancelling a sign-in the user abandoned is not a failure.
+      if (googleCancelled.current) setGoogleNotice(text("Google sign-in cancelled.", "已取消 Google 登入。"));
+      else setGoogleError(String(e));
     } finally {
       await refreshGoogle();
       setConnecting(false);
     }
   }
 
+  // Closing the browser tab tells JARVIS nothing; this stops the wait.
+  function cancelGoogleConnect() {
+    googleCancelled.current = true;
+    void googleCancelConnect().catch(() => {});
+  }
+
   async function handleGoogleDisconnect() {
     if (!window.confirm(
-      text("Disconnect Assistant Google? This revokes this Google access and deletes the Assistant mail cache, Calendar events and briefings on this Mac. Mail workspace copies are kept. You can reconnect later.", "是否中斷助手 Google 帳戶連接？此操作會撤銷 Google 連接，並刪除此 Mac 上的助手郵件快取、日曆活動及簡報；郵件工作區副本會保留。之後可以重新連接。")
+      text("Disconnect the main Google account? This revokes this Google access (unless Mail still uses the same account) and deletes its Assistant mail cache, Calendar events and briefings on this Mac. Mail workspace copies and other accounts are kept. You can reconnect later.", "是否中斷主 Google 帳戶連接？此操作會撤銷 Google 連接（郵件工作區仍使用同一帳戶時除外），並刪除此 Mac 上該帳戶的助手郵件快取、日曆活動及簡報；郵件工作區副本及其他帳戶會保留。之後可以重新連接。")
     )) {
       return;
     }
@@ -880,24 +889,34 @@ export default function Settings() {
         {section === "google" && (
           <div className="settings-panel">
             <h2 className="settings-heading">{text('Google for Assistant and Calendar', '助手及日曆的 Google 連接')}</h2>
-            <div style={styles.hint}>{text('Connect Google for Assistant mail tools, Calendar and briefings. Mail workspaces use a separate Gmail connection.', '連接 Google 供助手郵件工具、日曆及簡報使用。郵件工作區使用獨立的 Gmail 連接。')}</div>
-            {googleConnected === null ? (
+            <div style={styles.hint}>{text('The main account powers Assistant mail tools, Calendar and briefings, and is the only one JARVIS writes to (drafts and new events). Other accounts add their mail and calendar, read-only.', '主帳戶供助手郵件工具、日曆及簡報使用，亦是 JARVIS 唯一會寫入的帳戶（草稿及新活動）。其他帳戶會加入其郵件及日曆，權限為唯讀。')}</div>
+            <h3 style={{ margin: "18px 0 8px", fontSize: 15 }}>{text('Main account', '主帳戶')}</h3>
+            {google === null ? (
               <div style={styles.hint}>
                 {googleError ? text('Google connection status is unavailable.', '未能取得 Google 連接狀態。') : text('Checking Google connection…', '正在檢查 Google 連接…')}
                 {googleError && <button style={{ ...styles.saveBtn, marginLeft: 10 }} onClick={() => { setGoogleError(null); void refreshGoogle(); }}>{text('Retry', '重試')}</button>}
               </div>
-            ) : googleConnected ? (
+            ) : google.main.state !== "not_connected" ? (
               <>
-                <div style={{ color: "var(--text-secondary)", fontSize: 12, marginBottom: 10 }}>
-                  {googleAccount ? `${text("Connected as", "已連接帳戶：")} ${googleAccount}` : text('Connected', '已連接')}
+                <div style={{ color: google.main.state === "reconnect" ? "var(--accent-urgent)" : "var(--text-secondary)", fontSize: 12, marginBottom: 10 }}>
+                  {google.main.state === "reconnect"
+                    ? text("Google no longer accepts this connection. Reconnect to keep using mail tools, Calendar and briefings.", "Google 已不接受此連接。請重新連接，以繼續使用郵件工具、日曆及簡報。")
+                    : mainLabel ? `${text("Connected as", "已連接帳戶：")} ${mainLabel}` : text('Connected', '已連接')}
                 </div>
-                <div style={{ display: "flex", gap: 8 }}>
+                <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
+                  {google.main.state === "reconnect" && <button
+                    onClick={() => { void handleGoogleConnect(false); }}
+                    disabled={connecting || disconnecting}
+                    style={{ ...styles.actionBtn, borderColor: "var(--cyan)" }}
+                  >
+                    {connecting ? text('Connecting…', '正在連接…') : text('Reconnect', '重新連接')}
+                  </button>}
                   <button
                     onClick={() => { void handleGoogleConnect(true); }}
                     disabled={connecting || disconnecting}
                     style={styles.actionBtn}
                   >
-                    {connecting ? text('Opening…', '正在開啟…') : text('Switch account', '切換帳戶')}
+                    {connecting && google.main.state !== "reconnect" ? text('Opening…', '正在開啟…') : text('Switch account', '切換帳戶')}
                   </button>
                   <button
                     onClick={() => { void handleGoogleDisconnect(); }}
@@ -906,18 +925,24 @@ export default function Settings() {
                   >
                     {disconnecting ? text('Disconnecting…', '正在中斷連接…') : text('Disconnect', '斷開')}
                   </button>
+                  {connecting && <button onClick={cancelGoogleConnect} style={styles.actionBtn}>{text('Cancel', '取消')}</button>}
                 </div>
                 <div style={{ ...styles.hint, marginTop: 8, marginBottom: 0 }}>
-                  {text("Disconnecting revokes this Google connection and removes its Assistant mail cache, Calendar events and briefings. Local copies in the separate Mail workspace are kept.", "中斷連接會撤銷此 Google 授權，並刪除助手郵件快取、日曆活動及簡報；獨立郵件工作區的本機副本會保留。")}
+                  {text("Disconnecting removes this account's Assistant mail cache, Calendar events and briefings. Local copies in the Mail workspace and other accounts are kept.", "中斷連接會刪除此帳戶的助手郵件快取、日曆活動及簡報；郵件工作區的本機副本及其他帳戶會保留。")}
                 </div>
               </>
             ) : (
-              <button onClick={() => { void handleGoogleConnect(false); }} disabled={connecting} style={styles.actionBtn}>
-                {connecting ? text('Connecting…', '正在連接…') : text('Connect Google', '連接 Google')}
-              </button>
+              <div style={{ display: "flex", gap: 8 }}>
+                <button onClick={() => { void handleGoogleConnect(false); }} disabled={connecting} style={styles.actionBtn}>
+                  {connecting ? text('Connecting…', '正在連接…') : text('Connect Google', '連接 Google')}
+                </button>
+                {connecting && <button onClick={cancelGoogleConnect} style={styles.actionBtn}>{text('Cancel', '取消')}</button>}
+              </div>
             )}
+            {connecting && <div style={{ ...styles.hint, marginTop: 8, marginBottom: 0 }}>{text('Finish signing in in your browser. If you closed the Google tab, choose Cancel.', '請在瀏覽器完成登入。如已關閉 Google 登入分頁，請按「取消」。')}</div>}
             {googleNotice && <div style={{ ...styles.hint, marginTop: 10, marginBottom: 0 }}>{googleNotice}</div>}
             {googleError && <div style={styles.errorText}>{googleError}</div>}
+            {google && <OtherGoogleAccounts accounts={google.others} canAdd={google.main.state === "connected"} onChanged={refreshGoogle} />}
           </div>
         )}
 

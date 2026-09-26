@@ -1,4 +1,5 @@
 import { invoke } from '@tauri-apps/api/core';
+import { createStatusCache } from './connection-status';
 
 export type IntegrationService = 'github' | 'notion' | 'obsidian';
 export interface ConnectionStatus {
@@ -23,4 +24,9 @@ export const notionConnect = (): Promise<ConnectionStatus> => invoke('notion_con
 export const obsidianSelectVault = (): Promise<ConnectionStatus> => invoke('obsidian_select_vault');
 export const openObsidian = (): Promise<void> => invoke('open_obsidian');
 export const githubSetClientId = (clientId: string): Promise<void> => invoke('github_set_client_id', { clientId });
-export function connectionsChanged() { window.dispatchEvent(new Event('jarvis:connections-changed')); }
+/** Last checked status per service, shared by every page that shows one. */
+export const connectionStatuses = createStatusCache(connectionStatus);
+export function connectionsChanged() {
+  connectionStatuses.invalidate();
+  window.dispatchEvent(new Event('jarvis:connections-changed'));
+}

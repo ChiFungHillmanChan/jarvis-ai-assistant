@@ -194,6 +194,12 @@ pub async fn mail_connect_account(
 ) -> Result<MailAccount, String> {
     sync::connect(&db, &state).await
 }
+/// Stop waiting for a mailbox sign-in the user abandoned, such as a closed
+/// browser tab; this also releases the Mail lock the sign-in holds.
+#[tauri::command]
+pub fn mail_cancel_connect() {
+    crate::auth::google::cancel_sign_in(crate::auth::google::SignIn::Mailbox);
+}
 #[tauri::command]
 pub async fn mail_disconnect_account(
     db: State<'_, Arc<Database>>,

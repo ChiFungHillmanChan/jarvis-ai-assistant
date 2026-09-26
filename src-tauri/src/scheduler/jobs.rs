@@ -93,25 +93,43 @@ pub async fn run_job(db: &Arc<Database>, auth: &Arc<GoogleAuth>, action_type: &s
     result
 }
 
+/// The main account's token, or why the job does nothing. A grant Google
+/// refused is a failed run the Cron page shows, not a quiet "skipped".
+async fn main_token(auth: &Arc<GoogleAuth>) -> Result<Option<String>, String> {
+    match auth.ensure_access_token().await {
+        Ok(token) => Ok(Some(token)),
+        Err(_) if auth.needs_reconnect() => Err(crate::auth::google::REVOKED.to_string()),
+        Err(_) => Ok(None),
+    }
+}
+
 pub(crate) async fn run_email_sync(db: &Arc<Database>, auth: &Arc<GoogleAuth>) -> Result<String, String> {
-    let token = match auth.ensure_access_token().await {
-        Ok(t) => t,
-        Err(_) => return Ok("Skipped: not authenticated".to_string()),
+    let Some(token) = main_token(auth).await? else {
+        return Ok("Skipped: not authenticated".to_string());
     };
+    crate::mail::additional::remember_main_email(db, &token).await;
     // The detailed form: `save_to_db` reconciles the local mirror against the
     // batch, and a batch missing messages to failed detail fetches must not
     // archive mail that is still in the inbox.
-    match gmail::fetch_inbox_detailed(&token, 20).await {
-        Ok(f) => { let c = f.messages.len(); gmail::save_to_db(db, &f)?; Ok(format!("Synced {} emails", c)) }
+    let (token, summary) = match gmail::fetch_inbox_detailed(&token, 20).await {
+        Ok(f) => { let c = f.messages.len(); gmail::save_to_db(db, &f)?; (token, format!("Synced {} emails", c)) }
         Err(ref e) if e == "UNAUTHORIZED" => {
             auth.refresh_access_token().await?;
             let t = auth.get_access_token().ok_or("No token after refresh")?;
             let f = gmail::fetch_inbox_detailed(&t, 20).await?;
             let c = f.messages.len(); gmail::save_to_db(db, &f)?;
-            Ok(format!("Synced {} emails (refreshed)", c))
+            (t, format!("Synced {} emails (refreshed)", c))
         }
-        Err(e) => Err(e),
+        Err(e) => return Err(e),
+    };
+    // Older mail read elsewhere is outside the newest 20; settle its read
+    // state too. Best effort: the sync above already succeeded.
+    match gmail::unread_inbox_ids(&token).await {
+        Ok(Some(unread)) => { gmail::mark_read_except(db, &unread)?; }
+        Ok(None) => {}
+        Err(e) => log::warn!("[gmail] unread reconciliation skipped: {}", e),
     }
+    Ok(summary)
 }
 
 /// Triage runs per background tick, 100 messages each: the same bound as a
@@ -156,23 +174,45 @@ pub(crate) async fn run_mail_workspace_sync(db: &Arc<Database>) -> Result<String
     }
 }
 
+/// The main account's calendar, then each additional account's (read-only).
+/// One failing does not stop the others.
 pub(crate) async fn run_calendar_sync(db: &Arc<Database>, auth: &Arc<GoogleAuth>) -> Result<String, String> {
-    let token = match auth.ensure_access_token().await {
-        Ok(t) => t,
-        Err(_) => return Ok("Skipped: not authenticated".to_string()),
-    };
     let now = chrono::Utc::now();
     let time_min = now.to_rfc3339();
     let time_max = (now + chrono::TimeDelta::days(7)).to_rfc3339();
+    let main = sync_main_calendar(db, auth, &time_min, &time_max).await;
+    let (others, problems) = crate::mail::additional::sync_calendars(db, &time_min, &time_max).await?;
+    let mut summary = match main {
+        Ok(summary) => summary,
+        Err(e) if others == 0 && problems.is_empty() => return Err(e),
+        Err(e) => format!("Main calendar failed: {}", e),
+    };
+    if others > 0 {
+        summary.push_str(&format!("; {} from other accounts", others));
+    }
+    if !problems.is_empty() {
+        summary.push_str(&format!("; {}", problems.join(" ")));
+    }
+    Ok(summary)
+}
+
+async fn sync_main_calendar(db: &Arc<Database>, auth: &Arc<GoogleAuth>, time_min: &str, time_max: &str) -> Result<String, String> {
+    use calendar::MAIN_ACCOUNT;
+    let Some(token) = main_token(auth).await? else {
+        return Ok("Skipped: not authenticated".to_string());
+    };
+    // Before the additional calendars sync, so a mailbox on the main account
+    // is not read a second time.
+    crate::mail::additional::remember_main_email(db, &token).await;
     // The detailed form: `save_to_db` reconciles the local mirror against the
     // window, so it has to know whether the fetch actually reached the end.
-    match calendar::fetch_events_detailed(&token, &time_min, &time_max).await {
-        Ok(f) => { let c = f.events.len(); calendar::save_to_db(db, &f, &time_min, &time_max)?; Ok(format!("Synced {} events", c)) }
+    match calendar::fetch_events_detailed(&token, time_min, time_max).await {
+        Ok(f) => { let c = f.events.len(); calendar::save_to_db(db, &f, time_min, time_max, MAIN_ACCOUNT)?; Ok(format!("Synced {} events", c)) }
         Err(ref e) if e == "UNAUTHORIZED" => {
             auth.refresh_access_token().await?;
             let t = auth.get_access_token().ok_or("No token after refresh")?;
-            let f = calendar::fetch_events_detailed(&t, &time_min, &time_max).await?;
-            let c = f.events.len(); calendar::save_to_db(db, &f, &time_min, &time_max)?;
+            let f = calendar::fetch_events_detailed(&t, time_min, time_max).await?;
+            let c = f.events.len(); calendar::save_to_db(db, &f, time_min, time_max, MAIN_ACCOUNT)?;
             Ok(format!("Synced {} events (refreshed)", c))
         }
         Err(e) => Err(e),
@@ -431,9 +471,8 @@ async fn refresh_and_archive(auth: &Arc<GoogleAuth>, gmail_id: &str) -> Result<S
 }
 
 async fn run_auto_archive(db: &Arc<Database>, auth: &Arc<GoogleAuth>) -> Result<String, String> {
-    let mut token = match auth.ensure_access_token().await {
-        Ok(t) => t,
-        Err(_) => return Ok("Skipped: not authenticated".to_string()),
+    let Some(mut token) = main_token(auth).await? else {
+        return Ok("Skipped: not authenticated".to_string());
     };
 
     // Get active rules (senders to auto-archive)
