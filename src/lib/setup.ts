@@ -44,6 +44,8 @@ export function setupError(code: string | null, text: (en: string, zh: string) =
     case 'credential_unavailable': return text('Saved credentials could not be read. Check Keychain access and retry; do not replace the key just because of this error.', '未能讀取已儲存的憑證。請檢查鑰匙圈存取權限後重試；無須因此重新申請密鑰。');
     case 'credential_missing': case 'missing_credentials': case 'missing_key': return text('Save the credentials for the selected provider, then test again.', '請先儲存所選供應商的憑證，再進行測試。');
     case 'incorrect_facts': case 'synthetic_check_failed': return text('The model did not pass the sample check. Try another model.', '模型未通過示範資料核對，請嘗試其他模型。');
+    case 'mail_ai_not_allowed': return text("Email is not sent to this AI: Google's rules for Gmail data allow only AI services that do not train on it. Choose OpenAI, Claude, a local Ollama model, or Gemini with billing enabled, or use AWS Bedrock for mail below.", '電郵內容不會傳送至這個 AI：Google 對 Gmail 資料的規定只容許不會以此訓練模型的 AI。請改選 OpenAI、Claude、本機 Ollama 模型或已啟用付費的 Gemini，或在下方改用 AWS Bedrock 處理電郵。');
+    case 'gemini_billing_unconfirmed': return text("Gemini's free tier may use submitted content to train Google's models. Confirm above that your Gemini API key has billing enabled, and JARVIS will check mail again.", 'Gemini 免費額度可能會以提交的內容訓練 Google 的模型。請在上方確認你的 Gemini API 金鑰已啟用付費，JARVIS 會再次檢查電郵。');
     case 'server_not_ready': return text('Ollama did not start in time. Open Ollama and retry.', 'Ollama 未能及時啟動。請開啟 Ollama 後重試。');
     default: return text('The test or setup did not finish. Check the selected model, credentials, balance and connection, then retry. Your mail settings have not been switched.', '測試或設定未完成。請檢查模型、憑證、餘額及連線後重試；電郵處理方式尚未切換。');
   }

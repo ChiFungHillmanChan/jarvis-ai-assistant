@@ -88,6 +88,12 @@ pub async fn run_briefing(
         }
     }
 
+    // The briefing sends senders, subjects and snippets to the AI.
+    if let Err(blocked) = crate::ai::mail_policy::check(&db) {
+        log::info!("[daily_briefing] email is not shared with the chosen AI ({}), skipping", blocked.code());
+        return Ok(());
+    }
+
     // Clone router out of the Mutex so we can call .send() (which is async)
     // without holding a non-Send MutexGuard across .await points.
     let router_val: AiRouter = router

@@ -1,0 +1,4 @@
+# Works around a linker bug that breaks newly built proc-macros on Xcode 27.
+# Details in scripts/cargo-linker.sh. The path is relative to this repo's root.
+[target.aarch64-apple-darwin]
+linker = "scripts/cargo-linker.sh"

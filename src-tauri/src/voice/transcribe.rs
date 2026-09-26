@@ -108,7 +108,7 @@ impl Transcriber {
             .trim()
             .to_string();
 
-        log::info!("Transcribed: \"{}\"", text);
+        log::info!("Transcribed {} characters", text.chars().count());
         Ok(text)
     }
 
@@ -202,7 +202,7 @@ impl LocalTranscriber {
         }
 
         let text = text.trim().to_string();
-        log::info!("Locally transcribed: \"{}\"", text);
+        log::info!("Locally transcribed {} characters", text.chars().count());
         Ok(text)
     }
 }

@@ -1,6 +1,7 @@
 pub mod bedrock;
 pub mod claude;
 pub mod compat;
+pub mod mail_policy;
 pub mod complete;
 pub mod cost;
 pub mod gemini;
@@ -367,6 +368,22 @@ pub struct AiRouter {
     compat_keys: HashMap<String, String>,
 }
 
+/// Endpoints the router may send prompts, which can carry email, and keys to:
+/// https, or plain http only to this Mac. An endpoint saved with plain http to
+/// another machine is skipped rather than sent in cleartext across a network.
+fn only_secure_endpoints(endpoints: Vec<LocalEndpoint>) -> Vec<LocalEndpoint> {
+    endpoints
+        .into_iter()
+        .filter(|endpoint| {
+            let secure = compat::normalize_base_url(&endpoint.url).is_ok();
+            if !secure {
+                log::warn!("AI endpoint {} skipped: not https and not on this Mac", endpoint.id);
+            }
+            secure
+        })
+        .collect()
+}
+
 impl AiRouter {
     pub fn new(provider_setting: &str) -> Self {
         // Keys start env-only; `reload_keys` layers the Keychain in
@@ -538,7 +555,7 @@ impl AiRouter {
                 );
                 endpoint.api_key = resolved;
             }
-            self.local_endpoints = endpoints;
+            self.local_endpoints = only_secure_endpoints(endpoints);
         }
     }
 
@@ -660,7 +677,7 @@ impl AiRouter {
     }
 
     pub fn set_local_endpoints(&mut self, endpoints: Vec<LocalEndpoint>) {
-        self.local_endpoints = endpoints;
+        self.local_endpoints = only_secure_endpoints(endpoints);
     }
 
     pub fn find_endpoint(&self, endpoint_id: &str) -> Option<&LocalEndpoint> {
@@ -1146,6 +1163,34 @@ impl AiRouter {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn plain_http_endpoints_off_this_mac_are_not_used() {
+        let endpoint = |id: &str, url: &str| LocalEndpoint {
+            id: id.to_string(),
+            name: id.to_string(),
+            url: url.to_string(),
+            backend_type: BackendType::Ollama,
+            api_key: None,
+            use_tls: false,
+            connection_timeout_ms: 5000,
+            keep_alive_minutes: 30,
+            is_active: true,
+            last_health_check: None,
+            last_health_status: None,
+        };
+        let kept: Vec<String> = only_secure_endpoints(vec![
+            endpoint("local", "http://localhost:11434"),
+            endpoint("loopback", "http://127.0.0.1:8080/v1"),
+            endpoint("tls", "https://llm.example.com/v1"),
+            endpoint("lan", "http://192.168.1.20:11434"),
+            endpoint("remote", "http://llm.example.com/v1"),
+        ])
+        .into_iter()
+        .map(|e| e.id)
+        .collect();
+        assert_eq!(kept, ["local", "loopback", "tls"]);
+    }
     use rusqlite::Connection;
 
     #[tokio::test]
@@ -2083,7 +2128,7 @@ mod tests {
         };
         KeychainStore::put(
             KEY_SERVICE,
-            "local_endpoint_api_key:r2-01-keychain",
+            "local_endpoint_api_key:r2-01-keychain", // gitleaks:allow (test account name)
             "sk-from-keychain",
         )
         .unwrap();
@@ -2105,6 +2150,6 @@ mod tests {
         // Nothing is still holding the connection once the call returns.
         assert!(db.conn.try_lock().is_ok());
 
-        KeychainStore::delete(KEY_SERVICE, "local_endpoint_api_key:r2-01-keychain").ok();
+        KeychainStore::delete(KEY_SERVICE, "local_endpoint_api_key:r2-01-keychain").ok(); // gitleaks:allow (test account name)
     }
 }

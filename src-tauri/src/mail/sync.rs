@@ -212,10 +212,46 @@ pub async fn connect(db: &Database, state: &MailSyncState) -> Result<MailAccount
     }
 }
 
+/// Revoke a mailbox's grant at Google before its credential is deleted, so a
+/// disconnected mailbox does not stay authorised in the user's Google account.
+/// Google revokes per OAuth client and account, and the assistant's main Google
+/// connection uses the same client, so a mailbox on that same account is left
+/// alone: revoking it would also sign out Calendar and chat. When the main
+/// account cannot be confirmed (offline, say), nothing is revoked.
+async fn revoke_unless_shared(db: &Database, main: &GoogleAuth, account_id: &str) {
+    let Ok(account) = store::get_account(db, account_id) else { return };
+    let refresh = match KeychainStore::get(KEYCHAIN_SERVICE, account_id) {
+        Ok(token) if !token.is_empty() => token,
+        _ => return,
+    };
+    if main.is_linked() {
+        let main_email = match main.ensure_access_token().await {
+            Ok(token) => gmail_get::<Profile>("profile", &token, &[])
+                .await
+                .ok()
+                .map(|p| p.email_address),
+            Err(_) => None,
+        };
+        match main_email {
+            Some(email) if !email.eq_ignore_ascii_case(&account.email) => {}
+            Some(_) => {
+                log::info!("[mail] mailbox is the assistant's Google account; grant kept");
+                return;
+            }
+            None => {
+                log::warn!("[mail] assistant's Google account not confirmed; mailbox grant kept");
+                return;
+            }
+        }
+    }
+    if let Err(e) = crate::auth::google::revoke_grant(&refresh).await {
+        log::warn!("[mail] {}", e);
+    }
+}
+
 fn disconnect_locked(db: &Database, account_id: &str) -> Result<(), String> {
     store::get_account(db, account_id)?;
-    // Local disconnect never revokes Google's shared client grant: revocation
-    // could also break the separate Calendar/chat integration.
+    // Revocation at Google happens first, in `revoke_unless_shared`.
     if let Err(error) = KeychainStore::delete(KEYCHAIN_SERVICE, account_id) {
         if !KeychainStore::is_not_found(&error) {
             return Err("未能刪除信箱憑證，請解鎖 macOS 鑰匙圈後重試。".to_string());
@@ -227,16 +263,28 @@ fn disconnect_locked(db: &Database, account_id: &str) -> Result<(), String> {
 pub async fn disconnect(
     db: &Database,
     state: &MailSyncState,
+    main: &GoogleAuth,
     account_id: &str,
 ) -> Result<(), String> {
     let _operation = state.operation.lock().await;
+    revoke_unless_shared(db, main, account_id).await;
     disconnect_locked(db, account_id)
 }
 
-pub async fn remove(db: &Database, state: &MailSyncState, account_id: &str) -> Result<(), String> {
+pub async fn remove(
+    db: &Database,
+    state: &MailSyncState,
+    main: &GoogleAuth,
+    account_id: &str,
+) -> Result<(), String> {
     let _operation = state.operation.lock().await;
+    revoke_unless_shared(db, main, account_id).await;
     disconnect_locked(db, account_id)?;
-    store::delete_account(db, account_id)
+    store::delete_account(db, account_id)?;
+    // Deleted mail would otherwise stay readable in free pages until the next
+    // retention sweep.
+    crate::commands::storage::reclaim_db(db);
+    Ok(())
 }
 
 pub async fn sync_account(
@@ -807,7 +855,13 @@ mod tests {
     async fn disconnect_keeps_local_mail_and_other_account_credentials() {
         let (db, a, b) = two_accounts();
         let state = MailSyncState::new();
-        disconnect(&db, &state, &a).await.unwrap();
+        // No assistant Google connection: nothing is shared, so the grant is revoked.
+        let main = GoogleAuth::new_empty();
+        disconnect(&db, &state, &main, &a).await.unwrap();
+        assert!(crate::auth::google::REVOKED_IN_TESTS
+            .lock()
+            .unwrap()
+            .contains(&"first-test-refresh".to_string()));
         assert!(!store::get_account(&db, &a).unwrap().connected);
         assert_eq!(store::get_account(&db, &a).unwrap().message_count, 1);
         assert!(KeychainStore::is_not_found(
@@ -826,14 +880,14 @@ mod tests {
             .unwrap();
         assert_eq!(notes, 3);
         // Repeated disconnect is valid even when its credential is already gone.
-        disconnect(&db, &state, &a).await.unwrap();
+        disconnect(&db, &state, &main, &a).await.unwrap();
         KeychainStore::delete(KEYCHAIN_SERVICE, &b).unwrap();
     }
 
     #[tokio::test]
     async fn remove_deletes_only_selected_mail_and_its_sourced_notes() {
         let (db, a, b) = two_accounts();
-        remove(&db, &MailSyncState::new(), &a).await.unwrap();
+        remove(&db, &MailSyncState::new(), &GoogleAuth::new_empty(), &a).await.unwrap();
         assert!(store::get_account(&db, &a).is_err());
         assert!(KeychainStore::is_not_found(
             &KeychainStore::get(KEYCHAIN_SERVICE, &a).unwrap_err()

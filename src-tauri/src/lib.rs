@@ -14,6 +14,7 @@ pub mod payments;
 pub mod scheduler;
 pub mod security;
 pub mod system;
+pub mod tool_approval;
 pub mod tray;
 pub mod util;
 pub mod voice;
@@ -24,7 +25,10 @@ use db::Database;
 use tauri::Manager;
 
 pub fn run() {
-    #[cfg(not(feature = "native-qa"))]
+    // Development only. A release build must not take its OAuth client, account
+    // domain or payment endpoint from a file anyone can drop next to the app;
+    // those values are compiled in by scripts/release.sh.
+    #[cfg(all(debug_assertions, not(feature = "native-qa")))]
     {
         if let Some(data_dir) = dirs::data_dir() {
             let env_path = data_dir.join("jarvis").join(".env");
@@ -57,6 +61,7 @@ pub fn run() {
                 .build(),
         )
         .setup(|app| {
+            tool_approval::init(app.handle().clone());
             // A failure here is total -- no database, no app -- and in a
             // packaged .app the panic message goes to a stderr nobody reads, so
             // JARVIS just fails to launch with no window and no explanation.
@@ -549,13 +554,8 @@ pub fn run() {
             commands::ai_choice::current_ai,
             commands::ai_choice::list_ai_models,
             commands::local_llm::update_model_override,
-            commands::system::open_application,
             commands::system::open_url,
-            commands::system::run_shell_command,
-            commands::system::find_files,
-            commands::system::open_file,
-            commands::system::get_system_info,
-            commands::system::write_quick_note,
+            tool_approval::resolve_tool_approval,
             wallpaper::enable_wallpaper,
             wallpaper::disable_wallpaper,
             wallpaper::toggle_wallpaper,

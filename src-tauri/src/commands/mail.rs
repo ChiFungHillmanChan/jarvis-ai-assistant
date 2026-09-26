@@ -57,10 +57,19 @@ fn chosen_ai(db: &Database) -> Option<crate::commands::ai_choice::CurrentAi> {
     crate::commands::ai_choice::describe(&crate::commands::ai_choice::saved_chain(db).ok()?)
 }
 
+/// The chosen AI, if it may read email (ai::mail_policy); otherwise why not.
+fn chosen_ai_for_mail(db: &Database) -> Result<Option<crate::commands::ai_choice::CurrentAi>, crate::ai::mail_policy::Blocked> {
+    match chosen_ai(db) {
+        Some(ai) => crate::ai::mail_policy::check(db).map(|_| Some(ai)),
+        None => Ok(None),
+    }
+}
+
 /// Whether the background sync should sort new mail: the user opted in, and
-/// either a TypeSafe key or a chosen AI can classify it.
+/// either a TypeSafe key or a chosen AI that may read email can classify it.
 pub(crate) fn triage_ready(db: &Database) -> bool {
-    store::auto_triage_enabled(db).unwrap_or(false) && (typesafe_key().is_some() || chosen_ai(db).is_some())
+    store::auto_triage_enabled(db).unwrap_or(false)
+        && (typesafe_key().is_some() || matches!(chosen_ai_for_mail(db), Ok(Some(_))))
 }
 
 pub(crate) async fn triage_untriaged(db: &Database, language: Option<&str>) -> Result<MailTriageRun, String> {
@@ -68,7 +77,12 @@ pub(crate) async fn triage_untriaged(db: &Database, language: Option<&str>) -> R
         return Err("請先在「分析設定」開啟自動整理。".into());
     }
     let typesafe = typesafe_key();
-    let chosen = chosen_ai(db);
+    // An AI that may not read email is left out; TypeSafe alone can still sort.
+    let chosen = match chosen_ai_for_mail(db) {
+        Ok(chosen) => chosen,
+        Err(blocked) if typesafe.is_none() => return Err(blocked.user_message()),
+        Err(_) => None,
+    };
     if typesafe.is_none() && chosen.is_none() {
         return Err(crate::ai::NO_AI_CHOSEN.into());
     }
@@ -184,17 +198,19 @@ pub async fn mail_connect_account(
 pub async fn mail_disconnect_account(
     db: State<'_, Arc<Database>>,
     state: State<'_, MailSyncState>,
+    google: State<'_, Arc<crate::auth::google::GoogleAuth>>,
     account_id: String,
 ) -> Result<(), String> {
-    sync::disconnect(&db, &state, &account_id).await
+    sync::disconnect(&db, &state, &google, &account_id).await
 }
 #[tauri::command]
 pub async fn mail_remove_account(
     db: State<'_, Arc<Database>>,
     state: State<'_, MailSyncState>,
+    google: State<'_, Arc<crate::auth::google::GoogleAuth>>,
     account_id: String,
 ) -> Result<(), String> {
-    sync::remove(&db, &state, &account_id).await
+    sync::remove(&db, &state, &google, &account_id).await
 }
 #[tauri::command]
 pub async fn mail_sync_account(
@@ -307,6 +323,7 @@ pub async fn mail_analyze_group(
         None
     };
     let assistant = if context.settings.processing_mode == "assistant" {
+        crate::ai::mail_policy::check(&db).map_err(|blocked| blocked.user_message())?;
         Some(analysis::AssistantRoute {
             router: router.lock().map_err(|e| e.to_string())?.clone(),
             db: db.inner().clone(),

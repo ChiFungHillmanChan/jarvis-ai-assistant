@@ -301,7 +301,7 @@ async fn detection_loop(
                 if transcript.is_empty() {
                     continue;
                 }
-                log::debug!("Wake word heard (peak RMS {:.4}): \"{}\"", peak_rms, transcript);
+                log::debug!("Wake word check (peak RMS {:.4}): {} characters", peak_rms, transcript.chars().count());
                 if !is_wake_phrase(&transcript) {
                     continue;
                 }

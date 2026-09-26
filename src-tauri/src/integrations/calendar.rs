@@ -322,7 +322,7 @@ mod tests {
     fn events_response_captures_next_page_token() {
         // A week past maxResults comes back with nextPageToken. Dropping it was
         // a silent truncation reported as a successful full sync.
-        let json = r#"{"items": [], "nextPageToken": "CigKGjBqM3BhZ2U"}"#;
+        let json = r#"{"items": [], "nextPageToken": "CigKGjBqM3BhZ2U"}"#; // gitleaks:allow (fake page token)
         let parsed: EventsResponse = serde_json::from_str(json).unwrap();
         assert_eq!(parsed.next_page_token.as_deref(), Some("CigKGjBqM3BhZ2U"));
     }

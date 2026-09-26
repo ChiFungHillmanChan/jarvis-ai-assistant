@@ -319,7 +319,7 @@ pub async fn send(
                     continue;
                 }
                 executed_tools.insert(call_key);
-                log::info!("JARVIS tool call: {}({})", fc.name, args_str);
+                log::info!("JARVIS tool call: {} ({} bytes of arguments)", fc.name, args_str.len());
                 let label = tools::tool_status_label(&fc.name);
                 let _ = app_handle.emit(
                     "chat-status",

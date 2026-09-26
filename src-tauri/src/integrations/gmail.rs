@@ -951,37 +951,6 @@ pub async fn create_draft(
     Ok(result["id"].as_str().unwrap_or("unknown").to_string())
 }
 
-pub async fn send_message(
-    access_token: &str,
-    to: &str,
-    subject: &str,
-    body: &str,
-    cc: Option<&str>,
-) -> Result<String, String> {
-    let encoded = encode_raw_message(to, subject, body, cc);
-
-    let client = &*HTTP;
-    let url = format!("{}/messages/send", GMAIL_API);
-    let payload = serde_json::json!({ "raw": encoded });
-    let resp = client
-        .post(&url)
-        .bearer_auth(access_token)
-        .json(&payload)
-        .send()
-        .await
-        .map_err(|e| format!("Gmail send error: {}", e))?;
-    if resp.status() == 401 {
-        return Err("UNAUTHORIZED".to_string());
-    }
-    if !resp.status().is_success() {
-        let status = resp.status();
-        let body_text = resp.text().await.unwrap_or_default();
-        return Err(format!("Gmail send failed ({}): {}", status, body_text));
-    }
-    let result: serde_json::Value = resp.json().await.map_err(|e| e.to_string())?;
-    Ok(result["id"].as_str().unwrap_or("unknown").to_string())
-}
-
 #[cfg(test)]
 mod tests {
 

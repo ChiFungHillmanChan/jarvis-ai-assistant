@@ -118,7 +118,12 @@ impl DayContext {
         }; // Lock released here -- scheduler and other jobs can proceed
 
         let tasks_summary = format!("{} pending tasks. {} overdue. {} due today.\n{}", pending_count, overdue_count, due_today, urgent_tasks);
-        let email_summary = format!("{} unread emails.\n{}", unread, important_senders);
+        // Senders and subjects are Gmail data: only for an AI allowed to see email.
+        let email_summary = if crate::ai::mail_policy::check(db).is_ok() {
+            format!("{} unread emails.\n{}", unread, important_senders)
+        } else {
+            format!("{} unread emails.", unread)
+        };
         let github_summary = format!("{} open PRs, {} assigned issues.", open_prs, assigned_issues);
         let deadlines = urgent_tasks.clone();
 

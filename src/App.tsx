@@ -6,6 +6,7 @@ import Sidebar from './components/Sidebar';
 import OnboardingWizard from './pages/OnboardingWizard';
 import WelcomeGuide from './pages/WelcomeGuide';
 import UpdateToast from './components/UpdateToast';
+import ToolApproval from './components/ToolApproval';
 import ErrorBoundary from './components/ErrorBoundary';
 import { checkOnboardingStatus, getOptionalPreference, stopSpeaking, listChatSessions } from './lib/commands';
 import { readStartupScreen, type StartupScreen } from './lib/onboarding-flow';
@@ -155,7 +156,7 @@ function AppShell() {
       if ((tab.view === 'home' || tab.view === 'chat') && !active) return null;
       return <section className={`workspace-page view-${tab.view}`} key={tab.id} id={`page-${tab.id}`} role="tabpanel" aria-labelledby={`tab-${tab.id}`} hidden={!active}><WorkspaceTabScope id={tab.id}><ErrorBoundary><Suspense fallback={<div className="workspace-loading">{text("Opening workspace…", "正在開啟工作區…")}</div>}>{render(tab)}</Suspense></ErrorBoundary></WorkspaceTabScope></section>;
     })}</div>{assistant && activeTab.view !== 'chat' && <div className="workspace-assistant-dock"><WorkspaceTabScope key={chat.sessionId} id={`task:${chat.sessionId}`}><AssistantPanel onClose={() => setAssistant(false)} onVoice={toggleVoice} /></WorkspaceTabScope></div>}</div><footer className="workspace-statusbar"><span className={`status-dot ${chat.busy || listening ? 'is-working' : ''}`} /><span>{listening ? text('Listening · Press ⌘⇧J to finish', '聆聽中 · 按 ⌘⇧J 完成') : chat.busy ? text('Assistant working · You can keep using your tools', 'AI 助理處理中 · 可繼續使用其他工具') : text('Ready', '就緒')}</span>{chat.busy && <button className="text-button" onClick={() => dispatch({ type: 'open', view: 'chat', id: `task:${chat.runningSessionId}`, sessionId: chat.runningSessionId!, title: 'Assistant' })}>{text("View task", "查看工作")}</button>}<span className="grow" /><button className="text-button" onClick={() => setSearch(true)}><Command size={12} />{text("K Search", "K 搜尋")}</button></footer></main></div>
-    {search && <CommandPicker onClose={() => setSearch(false)} />}<ToastContainer /><ModelPullToast progress={progress} visible={progress !== null} /><UpdateToast />
+    {search && <CommandPicker onClose={() => setSearch(false)} />}<ToastContainer /><ModelPullToast progress={progress} visible={progress !== null} /><UpdateToast /><ToolApproval />
   </div>;
 }
 function AppGate() {
