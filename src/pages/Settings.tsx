@@ -49,6 +49,8 @@ import IntegrationConnection from "../components/IntegrationConnection";
 import { connectionsChanged } from "../lib/connections";
 import { DISPLAY_NAME_KEY, accountSectionVisible, displayNameChanged } from "../lib/account";
 import LocalAiSetup from "../components/LocalAiSetup";
+import ChooseAi from "../components/ChooseAi";
+import { aiServiceLabel } from "../lib/ai-choice";
 import AccountPanel from "../components/AccountPanel";
 import { UserRound } from "lucide-react";
 import { useWorkspace, useWorkspaceValue } from "../workspace/WorkspaceContext";
@@ -701,10 +703,14 @@ export default function Settings() {
         {section === "account" && <AccountPanel />}
         {section === "ai" && (<>
           <div className="settings-info-row">
-            <p>{text('These providers handle Assistant conversations. Mail has its own analysis model and uses the API keys saved here.', '這些供應商負責處理助手對話。郵件分析設有獨立模型設定，並使用在此儲存的 API 密鑰。')}</p>
+            <p>{text('The AI you choose here answers the assistant and analyses mail. Mail analysis can use a different AI in its own settings.', '你在此選擇的 AI 會處理助手對話及電郵分析。電郵分析亦可在其設定中另選 AI。')}</p>
             <button style={styles.saveBtn} onClick={() => open("email")}>{text('Mail analysis settings', '郵件分析設定')}</button>
           </div>
           {llmError && <p role="alert" style={styles.errorText}>{llmError}</p>}
+          <div className="settings-panel">
+            <h2 className="settings-heading">{text('Your AI', '你的 AI')}</h2>
+            <ChooseAi onChosen={() => { getProviderChain().then(setChain).catch(() => {}); }} />
+          </div>
           <div className="settings-panel">
             <h2 className="settings-heading">{text('Provider priority', '供應商優先次序')}</h2>
             <div style={styles.hint}>{text('JARVIS tries enabled providers in this order. Use the arrows to change priority.', 'JARVIS 會依此次序嘗試已啟用的供應商。可使用箭頭調整優先次序。')}</div>
@@ -716,6 +722,8 @@ export default function Settings() {
                 ? `Gemini (${entry.model_id || text("default", "預設")})`
                 : entry.provider_type === "claude"
                 ? `Claude (${entry.model_id || text("default", "預設")})`
+                : entry.provider_type === "openai" && entry.base_url
+                ? `${aiServiceLabel(entry.base_url)} (${entry.model_id || text("default", "預設")})`
                 : entry.provider_type === "openai"
                 ? `OpenAI (${entry.model_id || text("default", "預設")})`
                 : entry.provider_type === "bedrock"

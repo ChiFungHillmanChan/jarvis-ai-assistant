@@ -1,5 +1,7 @@
 pub mod bedrock;
 pub mod claude;
+pub mod compat;
+pub mod complete;
 pub mod cost;
 pub mod gemini;
 pub mod local;
@@ -12,7 +14,7 @@ use crate::voice::tts::TtsCommand;
 use local::backend::{BackendType, LocalEndpoint};
 use serde::{Deserialize, Serialize};
 use serde_json::json;
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::Arc;
 use crate::chat_session::ScopedEmitter;
@@ -24,6 +26,10 @@ pub struct ProviderChainEntry {
     pub endpoint_id: Option<String>,
     pub model_id: Option<String>,
     pub enabled: bool,
+    /// Only for `openai` rows: an OpenAI-compatible service such as Kimi or
+    /// Qwen. None is api.openai.com.
+    #[serde(default)]
+    pub base_url: Option<String>,
 }
 
 /// Gemini model selection: a user-configured provider-chain override wins;
@@ -60,6 +66,8 @@ fn apply_inference_profile(model: &str, profile: &str) -> String {
 /// Keychain service holding the provider API keys the user pastes in
 /// onboarding or Settings.
 pub const KEY_SERVICE: &str = "com.jarvis.ai";
+
+pub const NO_AI_CHOSEN: &str = "尚未選擇 AI。請按上方「設定導引」，選擇你使用的 AI（例如 Ollama、OpenAI、Gemini、Claude、Kimi 或 Qwen）。";
 
 /// Credential lookup order: process env first (dev workflow and
 /// `~/Library/Application Support/jarvis/.env`), then the Keychain. An empty
@@ -306,9 +314,10 @@ pub(crate) fn classify_provider_error(err: &str) -> ErrorDisposition {
 /// and is sent as a per-endpoint bearer token, so one unreachable or
 /// misconfigured server must not disable the other local endpoints.
 fn credential_scope(entry: &ProviderChainEntry) -> String {
-    match entry.provider_type.as_str() {
-        "local" => format!("local:{}", entry.endpoint_id.as_deref().unwrap_or("")),
-        other => other.to_string(),
+    match (entry.provider_type.as_str(), entry.base_url.as_deref()) {
+        ("local", _) => format!("local:{}", entry.endpoint_id.as_deref().unwrap_or("")),
+        ("openai", Some(base)) => format!("openai:{}", compat::host(base)),
+        (other, _) => other.to_string(),
     }
 }
 
@@ -352,6 +361,10 @@ pub struct AiRouter {
     /// built-in default, so a chain the user deliberately edited (even down
     /// to zero rows re-added by hand) is never appended to behind their back.
     chain_loaded_from_db: bool,
+    /// Keys for OpenAI-compatible services by host, for a router built to
+    /// test a choice before it is saved. Otherwise the Keychain is read when
+    /// the service is used.
+    compat_keys: HashMap<String, String>,
 }
 
 impl AiRouter {
@@ -369,6 +382,7 @@ impl AiRouter {
                     endpoint_id: None,
                     model_id: Some(gemini::MODEL_FLASH.into()),
                     enabled: true,
+                    base_url: None,
                 },
                 ProviderChainEntry {
                     position: 1,
@@ -376,6 +390,7 @@ impl AiRouter {
                     endpoint_id: None,
                     model_id: Some(gemini::MODEL_PRO.into()),
                     enabled: true,
+                    base_url: None,
                 },
             ],
             "gemini_pro_only" => vec![ProviderChainEntry {
@@ -384,6 +399,7 @@ impl AiRouter {
                 endpoint_id: None,
                 model_id: Some(gemini::MODEL_PRO.into()),
                 enabled: true,
+                base_url: None,
             }],
             "gemini_flash_only" => vec![ProviderChainEntry {
                 position: 0,
@@ -391,6 +407,7 @@ impl AiRouter {
                 endpoint_id: None,
                 model_id: Some(gemini::MODEL_FLASH.into()),
                 enabled: true,
+                base_url: None,
             }],
             _ => vec![
                 // gemini_primary (default): position 0 is left unpinned so the
@@ -406,6 +423,7 @@ impl AiRouter {
                     endpoint_id: None,
                     model_id: None,
                     enabled: true,
+                    base_url: None,
                 },
                 ProviderChainEntry {
                     position: 1,
@@ -413,6 +431,7 @@ impl AiRouter {
                     endpoint_id: None,
                     model_id: Some(gemini::MODEL_PRO.into()),
                     enabled: true,
+                    base_url: None,
                 },
             ],
         };
@@ -424,6 +443,7 @@ impl AiRouter {
             provider_chain: chain,
             local_endpoints: Vec::new(),
             chain_loaded_from_db: false,
+            compat_keys: HashMap::new(),
         }
     }
 
@@ -479,7 +499,7 @@ impl AiRouter {
 
             let mut chain_stmt = conn
                 .prepare(
-                    "SELECT position, provider_type, endpoint_id, model_id, enabled \
+                    "SELECT position, provider_type, endpoint_id, model_id, enabled, base_url \
                      FROM provider_chain ORDER BY position ASC",
                 )
                 .ok();
@@ -493,6 +513,7 @@ impl AiRouter {
                             endpoint_id: row.get(2)?,
                             model_id: row.get(3)?,
                             enabled: row.get::<_, i32>(4).unwrap_or(1) != 0,
+                            base_url: row.get(5)?,
                         })
                     })
                     .ok()
@@ -571,6 +592,7 @@ impl AiRouter {
                 endpoint_id: None,
                 model_id: None,
                 enabled: true,
+                base_url: None,
             });
         }
         if self.openai_key.is_some()
@@ -585,6 +607,7 @@ impl AiRouter {
                 endpoint_id: None,
                 model_id: None,
                 enabled: true,
+                base_url: None,
             });
         }
     }
@@ -608,6 +631,32 @@ impl AiRouter {
     pub fn set_provider_chain(&mut self, chain: Vec<ProviderChainEntry>) {
         self.provider_chain = chain;
         self.chain_loaded_from_db = true;
+    }
+
+    pub fn set_compat_key(&mut self, base_url: &str, key: &str) {
+        self.compat_keys.insert(compat::host(base_url), key.trim().to_string());
+    }
+
+    /// Key for an OpenAI-compatible service: one given to this router, else
+    /// the Keychain (off the async threads; it can block on a prompt).
+    pub(crate) async fn compat_key(&self, base_url: &str) -> Option<String> {
+        if let Some(key) = self.compat_keys.get(&compat::host(base_url)) {
+            return Some(key.clone());
+        }
+        let base = base_url.to_string();
+        tokio::task::spawn_blocking(move || compat::resolve_key(&base)).await.ok().flatten()
+    }
+
+    pub fn set_gemini_key(&mut self, key: &str) {
+        self.gemini_key = Some(key.trim().to_string());
+    }
+
+    pub fn set_claude_key(&mut self, key: &str) {
+        self.claude_key = Some(key.trim().to_string());
+    }
+
+    pub fn set_openai_key(&mut self, key: &str) {
+        self.openai_key = Some(key.trim().to_string());
     }
 
     pub fn set_local_endpoints(&mut self, endpoints: Vec<LocalEndpoint>) {
@@ -736,6 +785,11 @@ impl AiRouter {
                         .unwrap_or_else(bedrock::default_model);
                     format!("bedrock ({})", model)
                 }
+                "openai" if entry.base_url.is_some() => format!(
+                    "{} ({})",
+                    compat::label(entry.base_url.as_deref().unwrap_or_default()),
+                    entry.model_id.as_deref().unwrap_or("?")
+                ),
                 other => other.to_string(),
             };
 
@@ -786,10 +840,30 @@ impl AiRouter {
                         Err("No Claude API key configured".to_string())
                     }
                 }
+                "openai" if entry.base_url.is_some() => {
+                    let base = entry.base_url.clone().unwrap_or_default();
+                    match self.compat_key(&base).await {
+                        Some(key) => openai::send(
+                            &key,
+                            openai::Target { base_url: Some(&base), model: entry.model_id.as_deref() },
+                            messages.clone(),
+                            db,
+                            google_auth,
+                            app_handle,
+                            tts_tx.clone(),
+                            workload,
+                            &ledger,
+                        )
+                        .await
+                        .map_err(|e| e.to_string()),
+                        None => Err(format!("No {} API key configured", compat::label(&base))),
+                    }
+                }
                 "openai" => {
                     if let Some(ref key) = self.openai_key {
                         openai::send(
                             key,
+                            openai::Target::OPENAI,
                             messages.clone(),
                             db,
                             google_auth,
@@ -1057,6 +1131,11 @@ impl AiRouter {
             }
         }
 
+        // Nothing set up yet: every entry lacked a key and the user never
+        // chose an AI. Say what to do instead of listing missing keys.
+        if !self.chain_loaded_from_db && !errors.is_empty() && errors.iter().all(|e| e.contains("API key configured")) {
+            return Err(NO_AI_CHOSEN.into());
+        }
         Err(format!(
             "All providers failed: {}",
             errors.join("; ")
@@ -1563,6 +1642,7 @@ mod tests {
             endpoint_id: Some("ollama-1".into()),
             model_id: Some("llama3".into()),
             enabled: true,
+            base_url: None,
         }]);
 
         // What `commands::settings::set_api_key` does on the next key save.
@@ -1891,6 +1971,7 @@ mod tests {
             endpoint_id: endpoint_id.map(|s| s.to_string()),
             model_id: None,
             enabled: true,
+            base_url: None,
         }
     }
 

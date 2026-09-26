@@ -9,6 +9,7 @@ import { useWorkspace } from './WorkspaceContext';
 import { useChatContext } from '../hooks/ChatContext';
 import MessageRenderer from '../components/chat/MessageRenderer';
 import { useUiLocale } from '../i18n';
+import { chatStatusText } from '../lib/chat-status';
 function timeLabel(value: string | null, empty: string, locale: string) { if (!value) return empty; const d = new Date(value.includes('T') || /Z$/.test(value) ? value : value.replace(' ', 'T') + 'Z'); return isNaN(d.getTime()) ? value : d.toLocaleString(locale, { month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit' }); }
 export default function AutomationOverview({ activity, onVoice, listening }: { activity: AssistantActivity; onVoice: () => void; listening: boolean }) {
   const { text, locale } = useUiLocale();
@@ -58,7 +59,7 @@ export default function AutomationOverview({ activity, onVoice, listening }: { a
   const enabled = jobs.filter(j => j.status === 'active');
   const running = Object.values(runs).filter(r => r.status === 'running');
   const selectedRun = selected === null ? undefined : runs[selected];
-  const currentStatus = listening ? text('Listening', '聆聽中') : activity.status || (running.length ? text(`${running.length} routines running`, `${running.length} 項排程執行中`) : text('Standing by', '待命中'));
+  const currentStatus = listening ? text('Listening', '聆聽中') : (activity.status ? chatStatusText(activity.status, text) : '') || (running.length ? text(`${running.length} routines running`, `${running.length} 項排程執行中`) : text('Standing by', '待命中'));
   const activityLevel = listening ? 'listening' : activity.state === 'speaking' ? 'active' : activity.state === 'thinking' || running.length ? 'processing' : 'idle';
   return <div className="automation-overview">
     <header className="workspace-heading"><div><h1>{text('Automation', '自動化')}</h1><p>{text('Your enabled routines, working in the background.', '已啟用的排程會在背景執行。')}</p></div><button className="workspace-button" onClick={() => open('cron')}><Clock3 size={16} />{text('Manage automations', '管理自動排程')}</button></header>

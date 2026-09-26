@@ -279,3 +279,9 @@
   .result-document-footer { flex-wrap:wrap; }
   .result-workspace .workspace-heading { flex-wrap:wrap; }
 }
+/* Long errors wrap instead of squeezing the action into a vertical strip. */
+.workspace-error { flex-wrap: wrap; }
+.workspace-error > button { flex-shrink: 0; white-space: nowrap; }
+.workspace-error .error-text { flex: 1 1 220px; min-width: 0; overflow-wrap: anywhere; }
+.workspace-error details { flex-basis: 100%; font-size: 12px; opacity: .85; }
+.workspace-error details summary { cursor: pointer; }

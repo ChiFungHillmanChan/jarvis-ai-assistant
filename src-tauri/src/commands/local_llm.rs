@@ -389,7 +389,7 @@ pub async fn get_provider_chain(
         let conn = db.conn.lock().map_err(|e| e.to_string())?;
         let mut stmt = conn
             .prepare(
-                "SELECT position, provider_type, endpoint_id, model_id, enabled \
+                "SELECT position, provider_type, endpoint_id, model_id, enabled, base_url \
                  FROM provider_chain ORDER BY position ASC",
             )
             .map_err(|e| e.to_string())?;
@@ -402,6 +402,7 @@ pub async fn get_provider_chain(
                     endpoint_id: row.get(2)?,
                     model_id: row.get(3)?,
                     enabled: row.get::<_, i32>(4).unwrap_or(1) != 0,
+                    base_url: row.get(5)?,
                 })
             })
             .map_err(|e| e.to_string())?
@@ -423,8 +424,17 @@ pub async fn get_provider_chain(
 pub async fn update_provider_chain(
     db: State<'_, Arc<Database>>,
     router: State<'_, Mutex<AiRouter>>,
-    chain: Vec<ProviderChainEntry>,
+    mut chain: Vec<ProviderChainEntry>,
 ) -> Result<(), String> {
+    // A base URL is where the key and messages go: only on OpenAI-compatible
+    // rows, and only a normalised https (or this Mac) address.
+    for entry in &mut chain {
+        entry.base_url = match (entry.provider_type.as_str(), entry.base_url.as_deref()) {
+            (_, None) => None,
+            ("openai", Some(url)) => Some(crate::ai::compat::normalize_base_url(url)?),
+            _ => return Err("Only OpenAI-compatible entries can have a base URL".to_string()),
+        };
+    }
     let conn = db.conn.lock().map_err(|e| e.to_string())?;
 
     // Validate local provider references
@@ -454,14 +464,15 @@ pub async fn update_provider_chain(
 
     for (i, entry) in chain.iter().enumerate() {
         conn.execute(
-            "INSERT INTO provider_chain (position, provider_type, endpoint_id, model_id, enabled) \
-             VALUES (?1, ?2, ?3, ?4, ?5)",
+            "INSERT INTO provider_chain (position, provider_type, endpoint_id, model_id, enabled, base_url) \
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
             rusqlite::params![
                 i as i32,
                 entry.provider_type,
                 entry.endpoint_id,
                 entry.model_id,
                 entry.enabled as i32,
+                entry.base_url,
             ],
         )
         .map_err(|e| e.to_string())?;
@@ -541,6 +552,7 @@ mod tests {
             endpoint_id: None,
             model_id: None,
             enabled: true,
+            base_url: None,
         });
 
         assert_eq!(
@@ -556,6 +568,7 @@ mod tests {
             endpoint_id: Some("ollama-1".into()),
             model_id: Some("llama3".into()),
             enabled: true,
+            base_url: None,
         }];
         assert_eq!(
             shape(&chain_to_show(persisted.clone(), running)),

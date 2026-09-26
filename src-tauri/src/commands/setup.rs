@@ -53,8 +53,22 @@ fn selected_model(settings: &MailSettings) -> &str {
         "local" => &settings.local_model,
         "bedrock" => &settings.bedrock_model,
         "openai" => &settings.openai_model,
+        // The model is the one chosen for the assistant.
+        "assistant" => "assistant",
         _ => "",
     }
+}
+
+/// The enabled chain rows, or None when no AI has been chosen.
+fn assistant_chain(db: &Database) -> Option<String> {
+    let conn = db.conn.lock().ok()?;
+    conn.query_row(
+        "SELECT group_concat(provider_type||':'||ifnull(model_id,'')||':'||ifnull(base_url,''),'|') FROM provider_chain WHERE enabled=1",
+        [],
+        |r| r.get::<_, Option<String>>(0),
+    )
+    .ok()
+    .flatten()
 }
 
 fn openai_key() -> Result<Option<String>, &'static str> {
@@ -84,6 +98,8 @@ fn credential_error(error: &str) -> &'static str {
 struct CredentialCheck {
     aws: Option<AwsCredentials>,
     openai: Option<String>,
+    /// 'assistant' mode: the chosen AI, so changing it needs a new test.
+    chain: Option<String>,
     available: bool,
     error_code: Option<&'static str>,
 }
@@ -95,12 +111,14 @@ async fn credentials(db: Arc<Database>, mode: &str) -> CredentialCheck {
                 available: key.is_some(),
                 aws: None,
                 openai: key,
+                chain: None,
                 error_code: None,
             },
             Err(code) => CredentialCheck {
                 available: false,
                 aws: None,
                 openai: None,
+                chain: None,
                 error_code: Some(code),
             },
         },
@@ -114,6 +132,7 @@ async fn credentials(db: Arc<Database>, mode: &str) -> CredentialCheck {
                     available: creds.is_some(),
                     aws: creds,
                     openai: None,
+                    chain: None,
                     error_code: None,
                 }
             }
@@ -121,19 +140,32 @@ async fn credentials(db: Arc<Database>, mode: &str) -> CredentialCheck {
                 available: false,
                 aws: None,
                 openai: None,
+                chain: None,
                 error_code: Some(credential_error(&error)),
             },
         },
+        "assistant" => {
+            let chain = assistant_chain(&db);
+            CredentialCheck {
+                available: chain.is_some(),
+                aws: None,
+                openai: None,
+                error_code: if chain.is_some() { None } else { Some("credential_missing") },
+                chain,
+            }
+        }
         "local" => CredentialCheck {
             available: true,
             aws: None,
             openai: None,
+            chain: None,
             error_code: None,
         },
         _ => CredentialCheck {
             available: false,
             aws: None,
             openai: None,
+            chain: None,
             error_code: None,
         },
     }
@@ -163,7 +195,7 @@ fn capability(
 ) -> CapabilityStatus {
     let mode = settings.processing_mode.as_str();
     let model = selected_model(settings).trim();
-    let configured = matches!(mode, "local" | "openai" | "bedrock") && !model.is_empty();
+    let configured = matches!(mode, "local" | "openai" | "bedrock" | "assistant") && !model.is_empty();
     let verified = verification().lock().ok().and_then(|record| {
         record
             .as_ref()
@@ -201,7 +233,7 @@ pub async fn get_setup_status(db: State<'_, Arc<Database>>) -> Result<SetupStatu
     let fp = fingerprint(
         &settings,
         credential.aws.as_ref(),
-        credential.openai.as_deref(),
+        credential.openai.as_deref().or(credential.chain.as_deref()),
     );
     Ok(SetupStatus {
         mail: capability(&settings, credential.available, fp, credential.error_code),
@@ -279,6 +311,7 @@ fn synthetic_facts_present(text: &str) -> bool {
 #[tauri::command]
 pub async fn test_mail_ai_connection(
     db: State<'_, Arc<Database>>,
+    router: State<'_, Mutex<crate::ai::AiRouter>>,
     input: Option<MailSettings>,
 ) -> Result<CapabilityStatus, String> {
     let settings = match input {
@@ -289,17 +322,26 @@ pub async fn test_mail_ai_connection(
     let fp = fingerprint(
         &settings,
         credential.aws.as_ref(),
-        credential.openai.as_deref(),
+        credential.openai.as_deref().or(credential.chain.as_deref()),
     );
     let mut status = capability(&settings, credential.available, fp, credential.error_code);
     if status.state == "not_configured" || !credential.available {
         return Ok(status);
     }
     // Only this explicit command sends a synthetic message to the selected provider.
+    let assistant = if settings.processing_mode == "assistant" {
+        Some(analysis::AssistantRoute {
+            router: router.lock().map_err(|e| e.to_string())?.clone(),
+            db: db.inner().clone(),
+        })
+    } else {
+        None
+    };
     match analysis::analyze(
         synthetic_context(settings),
         credential.aws,
         credential.openai,
+        assistant,
     )
     .await
     {
@@ -358,7 +400,7 @@ pub async fn apply_tested_mail_settings(
     let fingerprint = fingerprint(
         &input,
         credential.aws.as_ref(),
-        credential.openai.as_deref(),
+        credential.openai.as_deref().or(credential.chain.as_deref()),
     );
     apply_verified_settings(&db, &input, &expected, fingerprint)
 }
@@ -481,7 +523,7 @@ mod tests {
             bedrock_model: String::new(),
             openai_model: String::new(),
         };
-        let result = analysis::analyze(synthetic_context(settings), None, None)
+        let result = analysis::analyze(synthetic_context(settings), None, None, None)
             .await
             .expect("the production local setup probe must return an answer");
         assert!(synthetic_facts_present(&result.text), "synthetic facts failed: {}", result.text);

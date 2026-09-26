@@ -1,7 +1,9 @@
 .setup-screen { height: 100vh; display: flex; flex-direction: column; color: var(--text-primary, #e4edf6); background: var(--bg-primary, #10141b); overflow: hidden; }
 .setup-titlebar { display: flex; align-items: center; gap: 20px; min-height: 46px; padding: 0 18px; border-bottom: 1px solid rgba(130,160,190,.18); flex-shrink: 0; }
 .setup-titlebar > span { font-size: 12px; letter-spacing: 2px; opacity: .7; }
-.setup-content { width: min(780px, 100%); padding: 28px 32px 56px; margin: 0 auto; overflow-y: auto; }
+/* The scroll area spans the window so the scrollbar sits at its edge; the
+   text column stays 716px wide. */
+.setup-content { width: 100%; padding: 28px max(32px, calc((100% - 716px) / 2)) 56px; margin: 0; overflow-y: auto; }
 .setup-content h1 { font-size: 26px; letter-spacing: -.5px; margin: 22px 0 12px; }
 .setup-content h2, .setup-local h3 { font-size: 16px; margin: 0 0 12px; }
 .setup-content p, .setup-local p { line-height: 1.7; font-size: 13px; }
@@ -9,7 +11,7 @@
 .setup-topline { justify-content: space-between; color: #9fb3c8; font-size: 12px; }
 .setup-fields { border: 0; margin: 0; padding: 0; min-width: 0; }
 .setup-content label:not(.setup-checkbox), .setup-local label:not(.setup-checkbox) { display: flex; flex-direction: column; gap: 7px; font-size: 13px; margin: 14px 0; }
-.setup-content input:not([type=checkbox]), .setup-content select, .setup-content textarea, .setup-local select { width: 100%; padding: 10px 12px; border-radius: 6px; border: 1px solid rgba(130,160,190,.3); color: inherit; background: var(--bg-secondary, #181e28); font: inherit; }
+.setup-content input:not([type=checkbox]):not([type=radio]), .setup-content select, .setup-content textarea, .setup-local select { width: 100%; padding: 10px 12px; border-radius: 6px; border: 1px solid rgba(130,160,190,.3); color: inherit; background: var(--bg-secondary, #181e28); font: inherit; }
 .setup-content select option, .setup-local select option { background: #181e28; color: #e4edf6; }
 .setup-content button, .setup-local button { border: 1px solid rgba(130,160,190,.3); border-radius: 6px; padding: 9px 13px; color: inherit; background: transparent; font: inherit; font-size: 12px; cursor: pointer; }
 .setup-content button:disabled, .setup-local button:disabled { opacity: .45; cursor: default; }
@@ -28,15 +30,34 @@
 .setup-content details { margin: 18px 0; }
 .setup-content :focus-visible, .setup-local :focus-visible { outline: 2px solid #43b4ed; outline-offset: 3px; }
 @media(max-width:600px) { .setup-content { padding: 20px 18px 36px; } .setup-topline { align-items: flex-start; } }
-.welcome-dialog { width: min(520px, calc(100vw - 32px)); max-height: calc(100vh - 60px); padding: 0; color: var(--text-primary, #e4edf6); background: var(--bg-primary, #10141b); border: 1px solid rgba(130,160,190,.35); border-radius: 14px; }
-.welcome-dialog::backdrop { background: rgba(6,10,20,.78); }
-.welcome-dialog .setup-content { padding: 26px 30px; width: 100%; }
-.welcome-dialog h1 { font-size: 24px; line-height: 1.45; margin-top: 0; }
+.welcome-stage { flex: 1; min-height: 0; display: flex; align-items: center; justify-content: center; padding: 24px 16px; overflow-y: auto; }
+.welcome-stage .welcome-card { width: min(480px, 100%); margin: auto; padding: 30px 32px; overflow: visible; border: 1px solid rgba(130,160,190,.3); border-radius: 14px; background: var(--bg-secondary, #141a23); box-shadow: 0 24px 60px rgba(0,0,0,.35); }
+.welcome-card h1 { font-size: 24px; line-height: 1.4; margin-top: 6px; }
+.welcome-brand { margin: 0; color: #9fb3c8; font-size: 12px; letter-spacing: .2px; }
+.welcome-card .setup-primary { width: 100%; padding: 11px 14px; font-size: 13px; }
 .welcome-languages { border: 0; padding: 0; margin: 22px 0; }
 .welcome-languages legend { font-size: 12px; color: #9fb3c8; }
-.welcome-languages .setup-checkbox { padding: 13px 15px; border: 1px solid rgba(130,160,190,.3); border-radius: 8px; align-items: center; cursor: pointer; }
+.welcome-languages .setup-checkbox { padding: 13px 15px; border: 1px solid rgba(130,160,190,.3); border-radius: 8px; align-items: center; cursor: pointer; font-size: 14px; }
+.welcome-languages .setup-checkbox + .setup-checkbox { margin-top: 10px; }
+.welcome-languages .setup-checkbox:has(input:checked) { border-color: rgba(0,180,255,.6); background: rgba(0,180,255,.06); }
+.welcome-languages input { margin-top: 0; }
 .welcome-languages input { accent-color: #43b4ed; }
 .welcome-steps { padding-left: 24px; }
 .welcome-steps li { padding-left: 8px; margin: 24px 0; }
 .welcome-steps h2 { margin-bottom: 6px; }
 .welcome-steps p { margin: 0; }
+.setup-local input:not([type=checkbox]):not([type=radio]) { width: 100%; padding: 10px 12px; border-radius: 6px; border: 1px solid rgba(130,160,190,.3); color: inherit; background: var(--bg-secondary, #181e28); font: inherit; }
+.choose-ai-options { display: grid; grid-template-columns: repeat(auto-fill, minmax(210px, 1fr)); gap: 10px; border: 0; padding: 0; margin: 14px 0; }
+.choose-ai-options legend { font-size: 12px; color: #9fb3c8; margin-bottom: 8px; }
+.choose-ai-options .setup-checkbox { margin: 0; padding: 12px 14px; border: 1px solid rgba(130,160,190,.3); border-radius: 8px; cursor: pointer; }
+.choose-ai-options .setup-checkbox:has(input:checked) { border-color: rgba(0,180,255,.6); background: rgba(0,180,255,.06); }
+.choose-ai-options input { accent-color: #43b4ed; }
+.choose-ai-options small { display: block; color: #9fb3c8; margin-top: 2px; }
+.choose-ai-details button { margin: 4px 8px 4px 0; }
+.welcome-card .setup-hint { margin-top: 14px; }
+.setup-screen > .setup-guide { margin: auto; min-height: 0; }
+/* Native selects ignore padding, so they rendered shorter than inputs. */
+.setup-content select, .setup-local select { -webkit-appearance: none; appearance: none; padding-right: 34px; background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='12' height='12' viewBox='0 0 24 24' fill='none' stroke='%239fb3c8' stroke-width='2.5' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpath d='m6 9 6 6 6-6'/%3E%3C/svg%3E"); background-repeat: no-repeat; background-position: right 12px center; }
+.setup-topline select { width: auto; min-width: 190px; padding-top: 7px; padding-bottom: 7px; }
+.setup-content input[type=radio]:focus-visible, .setup-local input[type=radio]:focus-visible { outline-offset: 2px; border-radius: 50%; }
+.setup-content input[type=checkbox], .setup-content input[type=radio], .setup-local input[type=checkbox], .setup-local input[type=radio] { accent-color: #43b4ed; }

@@ -92,6 +92,8 @@ struct SseUsage {
     cache_creation_input_tokens: Option<i64>,
 }
 
+pub const CLAUDE_MODEL: &str = "claude-sonnet-4-6";
+
 pub async fn send(
     api_key: &str,
     messages: Vec<(String, String)>,
@@ -108,7 +110,7 @@ pub async fn send(
     let tool_defs = tools::get_tool_definitions();
     let claude_tools = tools::to_claude_format(&tool_defs);
     // Pre-compute static fields once to avoid re-allocating each iteration
-    let model: String = "claude-sonnet-4-6".into();
+    let model: String = CLAUDE_MODEL.into();
     let system: String = tools::build_system_prompt(db);
 
     let mut claude_messages: Vec<ClaudeMessage> = messages

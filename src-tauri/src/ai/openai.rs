@@ -12,13 +12,69 @@ struct OpenAIRequest {
     model: String,
     messages: Vec<OpenAIMessage>,
     tools: Vec<serde_json::Value>,
-    max_completion_tokens: u32,
+    /// api.openai.com only; compatible services take `max_tokens`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    max_completion_tokens: Option<u32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    max_tokens: Option<u32>,
     /// gpt-6-luna rejects function tools on Chat Completions unless reasoning
     /// is off ("Function tools with reasoning_effort are not supported"),
-    /// verified live 2026-09-25.
-    reasoning_effort: &'static str,
+    /// verified live 2026-09-25. Not sent to compatible services.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    reasoning_effort: Option<&'static str>,
     stream: bool,
     stream_options: StreamOptions,
+}
+
+/// Where a chat turn goes: api.openai.com, or an OpenAI-compatible service
+/// such as Kimi or Qwen (a chain row with a `base_url`).
+#[derive(Clone, Copy, Debug)]
+pub struct Target<'a> {
+    /// None is api.openai.com.
+    pub base_url: Option<&'a str>,
+    /// The chain row's model. api.openai.com always uses OPENAI_MODEL.
+    pub model: Option<&'a str>,
+}
+
+impl Target<'_> {
+    pub const OPENAI: Target<'static> = Target { base_url: None, model: None };
+
+    fn url(&self) -> String {
+        match self.base_url {
+            Some(base) => format!("{base}/chat/completions"),
+            None => "https://api.openai.com/v1/chat/completions".into(),
+        }
+    }
+
+    fn model(&self) -> Result<String, String> {
+        match self.base_url {
+            None => Ok(OPENAI_MODEL.to_string()),
+            Some(base) => self
+                .model
+                .map(str::to_string)
+                .filter(|m| !m.trim().is_empty())
+                .ok_or_else(|| format!("尚未為 {} 選擇模型，請在設定中選擇。", super::compat::label(base))),
+        }
+    }
+
+    /// Provider name in the cost table.
+    fn provider(&self) -> String {
+        self.base_url.map(|b| super::compat::label(b).to_lowercase()).unwrap_or_else(|| "openai".into())
+    }
+
+    fn request(&self, model: String, messages: Vec<OpenAIMessage>, tools: Vec<serde_json::Value>) -> OpenAIRequest {
+        let official = self.base_url.is_none();
+        OpenAIRequest {
+            model,
+            messages,
+            tools,
+            max_completion_tokens: official.then_some(4096),
+            max_tokens: (!official).then_some(4096),
+            reasoning_effort: official.then_some("none"),
+            stream: true,
+            stream_options: StreamOptions { include_usage: true },
+        }
+    }
 }
 
 #[derive(Serialize)]
@@ -49,6 +105,10 @@ struct ToolCall {
     #[serde(rename = "type")]
     call_type: String,
     function: FunctionCall,
+    /// Provider data that must go back with the call, e.g. Gemini's
+    /// `thought_signature` on its OpenAI-compatible endpoint.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    extra_content: Option<serde_json::Value>,
 }
 
 #[derive(Serialize, Deserialize, Clone, Debug)]
@@ -80,9 +140,14 @@ struct SseDeltaContent {
 
 #[derive(Deserialize)]
 struct SseToolCallDelta {
-    index: usize,
+    /// Some compatible services (Gemini's) leave it out; the position in
+    /// the list stands in.
+    #[serde(default)]
+    index: Option<usize>,
     id: Option<String>,
     function: Option<SseFunctionDelta>,
+    #[serde(default)]
+    extra_content: Option<serde_json::Value>,
 }
 
 #[derive(Deserialize)]
@@ -96,6 +161,7 @@ pub const OPENAI_MODEL: &str = "gpt-6-luna";
 
 pub async fn send(
     api_key: &str,
+    target: Target<'_>,
     messages: Vec<(String, String)>,
     db: &crate::db::Database,
     google_auth: &std::sync::Arc<crate::auth::google::GoogleAuth>,
@@ -107,9 +173,12 @@ pub async fn send(
     let started_at = std::time::Instant::now();
     let mut total_prompt_tokens: i64 = 0;
     let mut total_completion_tokens: i64 = 0;
-    let model_id = OPENAI_MODEL.to_string();
+    let model_id = target.model()?;
+    let provider = target.provider();
     let client = Client::builder()
         .read_timeout(std::time::Duration::from_secs(60))
+        // A redirect would carry the key and the conversation elsewhere.
+        .redirect(reqwest::redirect::Policy::none())
         .build()?;
     let tool_defs = tools::get_tool_definitions();
     let openai_tools = tools::to_openai_format(&tool_defs);
@@ -137,18 +206,10 @@ pub async fn send(
         // Per-round usage: OpenAI sends one usage chunk per request, so
         // overwrite within a round and fold into totals when it ends.
         let mut usage = OpenAIUsage::default();
-        let request = OpenAIRequest {
-            model: model_id.clone(),
-            messages: openai_messages.clone(),
-            tools: openai_tools.clone(),
-            max_completion_tokens: 4096,
-            reasoning_effort: "none",
-            stream: true,
-            stream_options: StreamOptions { include_usage: true },
-        };
+        let request = target.request(model_id.clone(), openai_messages.clone(), openai_tools.clone());
 
         let response = client
-            .post("https://api.openai.com/v1/chat/completions")
+            .post(target.url())
             .header("Authorization", format!("Bearer {}", api_key))
             .header("Content-Type", "application/json")
             .json(&request)
@@ -159,17 +220,18 @@ pub async fn send(
             let status = response.status();
             let body = response.text().await.unwrap_or_default();
             record_partial_usage(
-                db, workload, &model_id,
+                db, &provider, workload, &model_id,
                 total_prompt_tokens, total_completion_tokens,
                 &started_at,
             );
-            return Err(format!("OpenAI API error {}: {}", status, body).into());
+            let name = target.base_url.map(super::compat::label).unwrap_or_else(|| "OpenAI".into());
+            return Err(format!("{name} API error {}: {}", status, body).into());
         }
 
         let mut stream = response.bytes_stream();
         let mut buffer = super::SseByteBuffer::new();
         let mut text_parts: Vec<String> = Vec::new();
-        let mut tool_map: HashMap<usize, (String, String, String)> = HashMap::new(); // index -> (call_id, fn_name, arguments)
+        let mut tool_map: ToolSlots = HashMap::new(); // index -> (call_id, fn_name, arguments, extra_content)
         let mut announced_tools: HashSet<usize> = HashSet::new();
         let mut finish_reason: Option<String> = None;
         let mut response_started = false;
@@ -182,7 +244,7 @@ pub async fn send(
                     total_prompt_tokens += usage.prompt_tokens.unwrap_or(0);
                     total_completion_tokens += usage.completion_tokens.unwrap_or(0);
                     record_partial_usage(
-                        db, workload, &model_id,
+                        db, &provider, workload, &model_id,
                         total_prompt_tokens, total_completion_tokens,
                         &started_at,
                     );
@@ -244,12 +306,16 @@ pub async fn send(
 
                         // Tool calls
                         if let Some(ref tool_calls) = delta.tool_calls {
-                            for tc in tool_calls {
-                                let entry = tool_map.entry(tc.index).or_insert_with(|| {
-                                    (String::new(), String::new(), String::new())
+                            for (position, tc) in tool_calls.iter().enumerate() {
+                                let index = tool_slot(&tool_map, tc.index, tc.id.as_deref(), position);
+                                let entry = tool_map.entry(index).or_insert_with(|| {
+                                    (String::new(), String::new(), String::new(), None)
                                 });
                                 if let Some(ref id) = tc.id {
                                     entry.0 = id.clone();
+                                }
+                                if tc.extra_content.is_some() {
+                                    entry.3 = tc.extra_content.clone();
                                 }
                                 if let Some(ref func) = tc.function {
                                     if let Some(ref name) = func.name {
@@ -262,7 +328,7 @@ pub async fn send(
                                                 "phase": "planning"
                                             }),
                                         );
-                                        if announced_tools.insert(tc.index) {
+                                        if announced_tools.insert(index) {
                                             let _ = app_handle
                                                 .emit("chat-tool-call", json!({"tool_name": name}));
                                         }
@@ -285,14 +351,16 @@ pub async fn send(
         total_prompt_tokens += usage.prompt_tokens.unwrap_or(0);
         total_completion_tokens += usage.completion_tokens.unwrap_or(0);
 
-        // Handle tool calls
-        if finish_reason.as_deref() == Some("tool_calls") && !tool_map.is_empty() {
+        // Handle tool calls. Some compatible services finish a tool-call
+        // turn with "stop", so any complete call counts; a reply cut off by
+        // the length limit may carry half-written arguments.
+        if !tool_map.is_empty() && finish_reason.as_deref() != Some("length") {
             let text_content = text_parts.join("");
             let mut tool_calls_vec: Vec<ToolCall> = Vec::new();
             let mut sorted_indices: Vec<usize> = tool_map.keys().copied().collect();
             sorted_indices.sort();
             for idx in &sorted_indices {
-                let (ref call_id, ref fn_name, ref args) = tool_map[idx];
+                let (ref call_id, ref fn_name, ref args, ref extra) = tool_map[idx];
                 tool_calls_vec.push(ToolCall {
                     id: call_id.clone(),
                     call_type: "function".into(),
@@ -300,6 +368,7 @@ pub async fn send(
                         name: fn_name.clone(),
                         arguments: args.clone(),
                     },
+                    extra_content: extra.clone(),
                 });
             }
 
@@ -386,7 +455,7 @@ pub async fn send(
             log::warn!("[openai] no usage chunk received for non-empty response; recording zero tokens");
         }
         crate::ai::cost::record_inference(
-            db, "openai", workload, &model_id,
+            db, &provider, workload, &model_id,
             total_prompt_tokens,
             total_completion_tokens,
             0, 0,
@@ -397,7 +466,7 @@ pub async fn send(
 
     let _ = app_handle.emit("chat-token", json!({"token": "", "done": true}));
     crate::ai::cost::record_inference(
-        db, "openai", workload, &model_id,
+        db, &provider, workload, &model_id,
         total_prompt_tokens,
         total_completion_tokens,
         0, 0,
@@ -406,10 +475,30 @@ pub async fn send(
     Ok("I've completed the actions.".into())
 }
 
+type ToolSlots = HashMap<usize, (String, String, String, Option<serde_json::Value>)>;
+
+/// Which accumulating call a streamed tool-call piece belongs to. OpenAI
+/// numbers them with `index`. Gemini's compatible endpoint sends each call
+/// whole, without an index, one per chunk: a new `id` is a new call.
+fn tool_slot(slots: &ToolSlots, index: Option<usize>, id: Option<&str>, position: usize) -> usize {
+    if let Some(index) = index {
+        return index;
+    }
+    match id {
+        Some(id) => slots
+            .iter()
+            .find(|(_, slot)| slot.0 == id)
+            .map(|(existing, _)| *existing)
+            .unwrap_or_else(|| slots.keys().max().map_or(0, |max| max + 1)),
+        None => position,
+    }
+}
+
 /// Record usage accumulated so far when a turn ends abnormally, so tokens
 /// already billed by completed rounds are not lost from telemetry.
 fn record_partial_usage(
     db: &crate::db::Database,
+    provider: &str,
     workload: crate::ai::Workload,
     model_id: &str,
     prompt_tokens: i64,
@@ -418,7 +507,7 @@ fn record_partial_usage(
 ) {
     if prompt_tokens > 0 || completion_tokens > 0 {
         crate::ai::cost::record_inference(
-            db, "openai", workload, model_id,
+            db, provider, workload, model_id,
             prompt_tokens, completion_tokens, 0, 0,
             started_at.elapsed().as_millis() as i64,
         );
@@ -428,6 +517,35 @@ fn record_partial_usage(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn calls_without_an_index_are_kept_apart_by_id() {
+        let mut slots: ToolSlots = HashMap::new();
+        // OpenAI: the index decides, and argument pieces share a slot.
+        assert_eq!(tool_slot(&slots, Some(2), None, 0), 2);
+        // Gemini: two whole calls in two chunks, both at position 0.
+        let first = tool_slot(&slots, None, Some("call_a"), 0);
+        slots.insert(first, ("call_a".into(), "list_tasks".into(), "{}".into(), None));
+        let second = tool_slot(&slots, None, Some("call_b"), 0);
+        assert_ne!(first, second, "a second call must not append to the first");
+        slots.insert(second, ("call_b".into(), "list_follow_ups".into(), "{}".into(), None));
+        assert_eq!(tool_slot(&slots, None, Some("call_a"), 0), first, "the same id is the same call");
+    }
+
+    #[test]
+    fn a_tool_call_without_an_index_still_parses() {
+        // Gemini's OpenAI-compatible stream, 2026-09-26: no `index` on the
+        // call, a thought signature to send back, finish_reason "stop".
+        let data = r#"{"choices":[{"delta":{"role":"assistant","tool_calls":[{"extra_content":{"google":{"thought_signature":"sig"}},"function":{"arguments":"{}","name":"list_tasks"},"id":"call_1","type":"function"}]},"index":0}],"usage":{"completion_tokens":10,"prompt_tokens":31}}"#;
+        let chunk: SseChunk = serde_json::from_str(data).unwrap();
+        let call = &chunk.choices[0].delta.as_ref().unwrap().tool_calls.as_ref().unwrap()[0];
+        assert_eq!((call.index, call.id.as_deref()), (None, Some("call_1")));
+        assert_eq!(call.extra_content.as_ref().unwrap()["google"]["thought_signature"], "sig");
+        let echoed = serde_json::to_value(ToolCall { id: "call_1".into(), call_type: "function".into(), function: FunctionCall { name: "list_tasks".into(), arguments: "{}".into() }, extra_content: call.extra_content.clone() }).unwrap();
+        assert_eq!(echoed["extra_content"]["google"]["thought_signature"], "sig");
+        let plain = serde_json::to_value(ToolCall { id: "c".into(), call_type: "function".into(), function: FunctionCall { name: "x".into(), arguments: "{}".into() }, extra_content: None }).unwrap();
+        assert!(plain.get("extra_content").is_none(), "OpenAI itself never sees the field");
+    }
 
     #[test]
     fn sse_chunk_parses_final_usage_chunk_with_empty_choices() {
@@ -448,5 +566,36 @@ mod tests {
         let missing_choices: SseChunk =
             serde_json::from_str(r#"{"usage":{"prompt_tokens":1,"completion_tokens":2}}"#).unwrap();
         assert!(missing_choices.choices.is_empty());
+    }
+
+    /// The exact chat request a compatible service (Kimi, Qwen) receives, with
+    /// every JARVIS tool, sent to Gemini's OpenAI-compatible endpoint: it
+    /// must accept the request and answer with a tool call.
+    /// GEMINI_API_KEY=... cargo test live_compatible_service_takes_the_tool_request -- --ignored --nocapture
+    #[tokio::test]
+    #[ignore]
+    async fn live_compatible_service_takes_the_tool_request() {
+        let key = std::env::var("GEMINI_API_KEY").expect("GEMINI_API_KEY");
+        let target = Target { base_url: Some(crate::ai::complete::tests::GEMINI_COMPAT), model: Some(crate::ai::gemini::MODEL_FLASH) };
+        let messages = vec![
+            OpenAIMessage { role: "system".into(), content: Some("You are JARVIS. Use tools to answer.".into()), tool_calls: None, tool_call_id: None },
+            OpenAIMessage { role: "user".into(), content: Some("What is on my calendar today? Use the calendar tool.".into()), tool_calls: None, tool_call_id: None },
+        ];
+        let tools = tools::to_openai_format(&tools::get_tool_definitions());
+        let request = target.request(target.model().unwrap(), messages, tools);
+        let wire = serde_json::to_value(&request).unwrap();
+        assert!(wire.get("reasoning_effort").is_none() && wire.get("max_completion_tokens").is_none() && wire["max_tokens"] == 4096);
+        let response = Client::new().post(target.url()).bearer_auth(&key).json(&request).send().await.unwrap();
+        let status = response.status();
+        let body = response.text().await.unwrap();
+        assert!(status.is_success(), "{status}: {body}");
+        let calls: Vec<String> = body
+            .lines()
+            .filter_map(|line| line.strip_prefix("data: "))
+            .filter_map(|data| serde_json::from_str::<serde_json::Value>(data).ok())
+            .filter_map(|chunk| chunk.pointer("/choices/0/delta/tool_calls/0/function/name").and_then(|n| n.as_str()).map(str::to_string))
+            .collect();
+        println!("tool calls: {calls:?}; usage chunk: {}", body.contains("\"usage\""));
+        assert!(calls.iter().any(|c| c == "list_events"), "{body}");
     }
 }
