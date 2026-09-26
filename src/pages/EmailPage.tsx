@@ -18,6 +18,8 @@ type Editor =
   | { type: "delete"; kind: "account" | "group" | "memory"; id: string | number; name: string };
 
 const PAGE = 50;
+/** What the background sync can change: stored mail and how it is sorted. */
+const storedState = (data: MailWorkspace) => JSON.stringify([data.accounts.map(a => [a.id, a.connected, a.message_count]), data.triage.untriaged, data.triage.attention, data.triage.open_items]);
 
 export default function EmailPage({ onSetup }: { onSetup?: () => void }) {
   const { text, locale } = useUiLocale();
@@ -45,6 +47,7 @@ export default function EmailPage({ onSetup }: { onSetup?: () => void }) {
   const [notice, setNotice] = useState("");
   const [revision, setRevision] = useState(0);
   const operation = useRef(false);
+  const stored = useRef("");
   const dialog = useRef<HTMLDialogElement>(null);
   const reader = useRef<HTMLElement>(null);
   const requestedSource = useRef<number | null>(null);
@@ -59,9 +62,21 @@ export default function EmailPage({ onSetup }: { onSetup?: () => void }) {
 
   useEffect(() => {
     let current = true;
-    mail.mailWorkspace(accountId).then(data => { if (current) setWorkspace(data); }).catch(e => { if (current) setError(text(`Could not load the workspace: ${String(e)}`, `載入工作區失敗：${String(e)}`)); });
+    mail.mailWorkspace(accountId).then(data => { if (current) { stored.current = storedState(data); setWorkspace(data); } }).catch(e => { if (current) setError(text(`Could not load the workspace: ${String(e)}`, `載入工作區失敗：${String(e)}`)); });
     return () => { current = false; };
   }, [revision, accountId]);
+  // The background sync stores and sorts mail without this page knowing.
+  // Reload only when what is stored has changed, so an open message and the
+  // list are not refreshed under the reader for nothing.
+  useEffect(() => {
+    const timer = window.setInterval(() => {
+      if (document.hidden || operation.current || editor) return;
+      mail.mailWorkspace(accountId).then(data => {
+        if (stored.current && storedState(data) !== stored.current) setRevision(n => n + 1);
+      }).catch(() => undefined);
+    }, 60_000);
+    return () => window.clearInterval(timer);
+  }, [accountId, editor]);
   useEffect(() => {
     if (view === "due") return;
     let current = true;
@@ -111,7 +126,7 @@ export default function EmailPage({ onSetup }: { onSetup?: () => void }) {
     return () => window.removeEventListener("keydown", onKey);
   }, [page, messageId, editor, view]);
 
-  function refreshWorkspace() { mail.mailWorkspace(accountId).then(setWorkspace).catch(() => undefined); }
+  function refreshWorkspace() { mail.mailWorkspace(accountId).then(data => { stored.current = storedState(data); setWorkspace(data); }).catch(() => undefined); }
   async function run(label: string, action: () => Promise<void>, refresh = true) {
     if (operation.current) return;
     operation.current = true; setBusy(label); setError(""); setNotice("");
@@ -177,9 +192,15 @@ export default function EmailPage({ onSetup }: { onSetup?: () => void }) {
       const notes: string[] = [];
       let saved = 0;
       for (const item of accounts) {
-        const result = mode === "restart" ? await mail.mailRestartSync(item.id) : await mail.mailSyncAccount(item.id, mode === "older");
-        saved += result.saved;
-        if (result.warning) notes.push(accounts.length > 1 ? `${item.email}：${result.warning}` : result.warning);
+        // One broken mailbox must not stop the others from syncing.
+        try {
+          const result = mode === "restart" ? await mail.mailRestartSync(item.id) : await mail.mailSyncAccount(item.id, mode === "older");
+          saved += result.saved;
+          if (result.warning) notes.push(accounts.length > 1 ? `${item.email}：${result.warning}` : result.warning);
+        } catch (e) {
+          if (accounts.length === 1) throw e;
+          notes.push(`${item.email}：${String(e)}`);
+        }
       }
       let message = text(`Saved ${saved} new emails.`, `已儲存 ${saved} 封新郵件。`);
       if (notes.length) message += ` ${notes.join(" ")}`;

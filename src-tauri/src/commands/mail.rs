@@ -44,11 +44,25 @@ pub async fn mail_triage_run(
     db: State<'_, Arc<Database>>,
     language: Option<String>,
 ) -> Result<MailTriageRun, String> {
-    if !store::auto_triage_enabled(&db)? {
+    triage_untriaged(&db, language.as_deref()).await
+}
+
+/// Manual and background triage run one at a time: two runs would pick the
+/// same untriaged messages and pay for them twice.
+static TRIAGE_RUN: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+
+/// Whether the background sync should sort new mail: the user opted in and a
+/// TypeSafe key exists.
+pub(crate) fn triage_ready(db: &Database) -> bool {
+    store::auto_triage_enabled(db).unwrap_or(false) && typesafe_key().is_some()
+}
+
+pub(crate) async fn triage_untriaged(db: &Database, language: Option<&str>) -> Result<MailTriageRun, String> {
+    if !store::auto_triage_enabled(db)? {
         return Err("請先在「分析設定」開啟自動整理。".into());
     }
     let typesafe = typesafe_key().ok_or("尚未設定 TypeSafe API 密鑰，請在分析設定中加入。")?;
-    let settings = store::settings(&db)?;
+    let settings = store::settings(db)?;
     let keys = triage::TriageKeys {
         typesafe,
         // Without an OpenAI key, messages are still classified; they just get
@@ -60,8 +74,9 @@ pub async fn mail_triage_run(
             settings.openai_model.trim().to_string()
         },
     };
-    let language = if language.as_deref() == Some("en") { "en" } else { "zh-HK" };
-    triage::run(&db, keys, language).await
+    let language = if language == Some("en") { "en" } else { "zh-HK" };
+    let _run = TRIAGE_RUN.lock().await;
+    triage::run(db, keys, language).await
 }
 
 #[tauri::command]
