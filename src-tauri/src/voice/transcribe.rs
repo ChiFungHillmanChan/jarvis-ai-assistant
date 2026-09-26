@@ -258,10 +258,8 @@ mod tests {
     #[test]
     fn the_wake_profile_is_light_and_requests_keep_the_defaults() {
         assert_eq!(DecodeProfile::REQUEST, DecodeProfile { threads: None, audio_ctx: None, fallback: true, max_tokens: None });
-        assert_eq!(DecodeProfile::WAKE.threads, Some(2));
-        assert!(DecodeProfile::WAKE.audio_ctx.unwrap() >= 256, "at 128 the base model repeated itself in testing");
-        assert!(!DecodeProfile::WAKE.fallback);
-        assert_eq!(DecodeProfile::WAKE.max_tokens, Some(16));
+        // audio_ctx must stay at 256 or more: at 128 the base model repeated itself in testing.
+        assert_eq!(DecodeProfile::WAKE, DecodeProfile { threads: Some(2), audio_ctx: Some(256), fallback: false, max_tokens: Some(16) });
     }
 
     /// Run by hand against the real model and a 16 kHz mono clip of someone saying "Hey Jarvis":
