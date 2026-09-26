@@ -455,8 +455,8 @@ pub fn save_settings(db: &Database, input: &MailSettings) -> Result<(), String> 
 }
 
 fn validated_settings(input: &MailSettings) -> Result<(&str, &str, &str), String> {
-    if !["local", "bedrock", "openai"].contains(&input.processing_mode.as_str()) {
-        return Err("請選擇本機、AWS Bedrock 或 OpenAI。".into());
+    if !["local", "bedrock", "openai", "assistant"].contains(&input.processing_mode.as_str()) {
+        return Err("請選擇本機、AWS Bedrock、OpenAI 或所選 AI。".into());
     }
     let local = text(&input.local_model, 200, true)?;
     let bedrock = text(&input.bedrock_model, 256, true)?;

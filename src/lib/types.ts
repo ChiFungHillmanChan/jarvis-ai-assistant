@@ -251,6 +251,8 @@ export interface ProviderChainEntry {
   endpoint_id?: string;
   model_id?: string;
   enabled: boolean;
+  /** OpenAI-compatible service (Kimi, Qwen...); absent means api.openai.com. */
+  base_url?: string | null;
 }
 
 export interface EndpointHealth {
