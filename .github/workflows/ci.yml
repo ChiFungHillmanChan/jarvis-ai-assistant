@@ -1,11 +1,11 @@
 name: CI
 
-# Pushes to main, and pull requests. A push to a branch with an open pull
-# request used to run twice (push + pull_request) without cancelling either.
+# Only a push or merge to main runs CI. Branch pushes and pull requests do
+# not: run `npm test`, `npm run build` and `npm run test:frontend` locally
+# before merging. Private-repo macOS minutes count ten-fold against the plan.
 on:
   push:
     branches: [main]
-  pull_request:
 
 concurrency:
   group: ci-${{ github.ref }}
@@ -16,10 +16,11 @@ jobs:
     name: Verify (type-check, build, cargo test)
     # macOS only, and not a preference: this crate depends on cocoa,
     # security-framework and whisper-rs, none of which build on ubuntu.
-    # Runs on the founder's Mac (self-hosted, label jarvis-mac): GitHub-hosted
-    # macOS minutes count ten-fold against the plan and ran out in September.
-    # To go back, set runs-on to macos-latest.
-    runs-on: [self-hosted, jarvis-mac]
+    # The repository variable CI_RUNS_ON picks the runner. Until the included
+    # minutes reset on 1 October 2026 it is ["self-hosted","jarvis-mac"] (the
+    # founder's Mac); a job on that Mac deletes it on 1 October, which puts CI
+    # back on GitHub's macos-latest without a code change.
+    runs-on: ${{ fromJSON(vars.CI_RUNS_ON || '"macos-latest"') }}
     steps:
       - uses: actions/checkout@v5
 
