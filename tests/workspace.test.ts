@@ -126,9 +126,10 @@ test('deleting a conversation removes its task and result tabs, open or closed',
   s = workspaceReducer(s, { type: 'open', view: 'result', id: 'result:2', sessionId: 'a', title: 'Event' });
   s = workspaceReducer(s, { type: 'close', id: 'result:2' });
   s = workspaceReducer(s, { type: 'open', view: 'chat', id: 'task:b', sessionId: 'b' });
+  s = workspaceReducer(s, { type: 'open', view: 'result', id: 'result:b', sessionId: 'b', title: 'Other draft', background: true });
   s = workspaceReducer(s, { type: 'forget', sessionId: 'a' });
   assert.deepEqual([...s.tabs, ...s.history].filter(t => t.sessionId === 'a'), []);
-  assert.deepEqual(s.tabs.map(t => t.id), ['automation', 'task:b']);
+  assert.deepEqual(s.tabs.map(t => t.id), ['automation', 'task:b', 'result:b'], 'another conversation keeps its results');
   assert.equal(s.activeId, 'task:b');
 });
 
