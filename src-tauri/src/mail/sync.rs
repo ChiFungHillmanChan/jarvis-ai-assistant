@@ -17,6 +17,20 @@ const GMAIL_API: &str = "https://gmail.googleapis.com/gmail/v1/users/me";
 // the background sync job and the commands exclude each other.
 static OPERATION: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
 
+/// The Mail lock, unless a sign-in, sync or removal holds it. For background
+/// work that should skip a tick rather than wait behind a sign-in.
+pub(crate) fn try_operation() -> Option<tokio::sync::MutexGuard<'static, ()>> {
+    OPERATION.try_lock().ok()
+}
+
+/// A mailbox's Google grant: its mail and, read-only, its calendar, so a second
+/// or third Google account brings both (mail::additional). JARVIS writes only
+/// to the main account, so neither scope can change anything.
+const MAILBOX_SCOPES: &[&str] = &[
+    "https://www.googleapis.com/auth/gmail.readonly",
+    super::additional::CALENDAR_SCOPE,
+];
+
 pub struct MailSyncState {
     operation: &'static tokio::sync::Mutex<()>,
 }
@@ -177,11 +191,15 @@ async fn gmail_get<T: DeserializeOwned>(path: &str, token: &str, params: &[(&str
 pub async fn connect(db: &Database, state: &MailSyncState) -> Result<MailAccount, String> {
     let _operation = state.operation.lock().await;
     let auth = auth_instance()?;
-    auth.start_auth_flow_with_account_selection(vec![
-        "https://www.googleapis.com/auth/gmail.readonly".to_string(),
-    ])
+    auth.start_auth_flow_with_account_selection(MAILBOX_SCOPES.iter().map(|s| s.to_string()).collect())
     .await
     .map_err(|_| "Google 登入未完成或已取消，請重試。".to_string())?;
+    // Google's consent screen lets the user untick Calendar and keep mail.
+    let calendar = auth
+        .granted_scopes
+        .lock()
+        .map(|granted| granted.iter().any(|scope| scope == super::additional::CALENDAR_SCOPE))
+        .unwrap_or(false);
     let token = auth
         .ensure_access_token()
         .await
@@ -199,7 +217,10 @@ pub async fn connect(db: &Database, state: &MailSyncState) -> Result<MailAccount
         .map(|account| account.id.clone())
         .unwrap_or_else(|| uuid::Uuid::new_v4().to_string());
     persist_refresh(&auth, &id)?;
-    match store::upsert_account(db, &id, &email, true) {
+    match store::upsert_account(db, &id, &email, true)
+        .and_then(|_| store::set_calendar(db, &id, calendar))
+        .and_then(|_| store::get_account(db, &id))
+    {
         Ok(account) => Ok(account),
         Err(error) => {
             // A failed new DB insert must not strand a credential. Existing
@@ -225,12 +246,15 @@ async fn revoke_unless_shared(db: &Database, main: &GoogleAuth, account_id: &str
         _ => return,
     };
     if main.is_linked() {
-        let main_email = match main.ensure_access_token().await {
-            Ok(token) => gmail_get::<Profile>("profile", &token, &[])
-                .await
-                .ok()
-                .map(|p| p.email_address),
-            Err(_) => None,
+        let main_email = match super::additional::main_email(db) {
+            Some(email) => Some(email),
+            None => match main.ensure_access_token().await {
+                Ok(token) => gmail_get::<Profile>("profile", &token, &[])
+                    .await
+                    .ok()
+                    .map(|p| p.email_address),
+                Err(_) => None,
+            },
         };
         match main_email {
             Some(email) if !email.eq_ignore_ascii_case(&account.email) => {}
@@ -341,6 +365,29 @@ pub async fn sync_connected(db: &Database) -> Result<Option<(usize, Vec<String>)
     Ok(Some((saved, problems)))
 }
 
+/// A mailbox's Google session from its Keychain credential: the auth, kept
+/// for refreshing after a 401, and a fresh access token.
+pub(crate) async fn mailbox_session(db: &Database, account_id: &str) -> Result<(GoogleAuth, String), String> {
+    let secret = KeychainStore::get(KEYCHAIN_SERVICE, account_id).map_err(|error| {
+        if KeychainStore::is_not_found(&error) {
+            // Only reconnecting brings a missing credential back. Show the
+            // mailbox as disconnected, or the background sync fails on it
+            // every tick.
+            let _ = store::set_connected(db, account_id, false);
+            "找不到此信箱的憑證，請按「連接 Gmail 帳戶」重新連接；本機郵件會保留。".to_string()
+        } else {
+            "未能讀取信箱憑證，請解鎖 macOS 鑰匙圈或重新連接。".to_string()
+        }
+    })?;
+    let auth = auth_instance()?;
+    *auth
+        .refresh_token
+        .lock()
+        .map_err(|_| "暫時未能讀取登入狀態，請重試。".to_string())? = Some(secret);
+    let token = refresh(db, &auth, account_id).await?;
+    Ok((auth, token))
+}
+
 async fn sync_locked(
     db: &Database,
     account_id: &str,
@@ -358,23 +405,7 @@ async fn sync_locked(
             warning: None,
         });
     }
-    let secret = KeychainStore::get(KEYCHAIN_SERVICE, account_id).map_err(|error| {
-        if KeychainStore::is_not_found(&error) {
-            // Only reconnecting brings a missing credential back. Show the
-            // mailbox as disconnected, or the background sync fails on it
-            // every tick.
-            let _ = store::set_connected(db, account_id, false);
-            "找不到此信箱的憑證，請按「連接 Gmail 帳戶」重新連接；本機郵件會保留。".to_string()
-        } else {
-            "未能讀取信箱憑證，請解鎖 macOS 鑰匙圈或重新連接。".to_string()
-        }
-    })?;
-    let auth = auth_instance()?;
-    *auth
-        .refresh_token
-        .lock()
-        .map_err(|_| "暫時未能讀取登入狀態，請重試。".to_string())? = Some(secret);
-    let mut token = refresh(db, &auth, account_id).await?;
+    let (auth, mut token) = mailbox_session(db, account_id).await?;
     if !older && !restart && account.last_synced.is_some() {
         if let Some(start) = store::history_id(db, account_id)? {
             if let Some(result) = history_sync(db, &auth, account_id, &mut token, &start).await? {
@@ -651,6 +682,8 @@ struct HistoryPage {
 struct HistoryRecord {
     #[serde(rename = "messagesAdded", default)]
     messages_added: Vec<HistoryChange>,
+    #[serde(rename = "messagesDeleted", default)]
+    messages_deleted: Vec<HistoryChange>,
     #[serde(rename = "labelsAdded", default)]
     labels_added: Vec<HistoryChange>,
     #[serde(rename = "labelsRemoved", default)]
@@ -676,12 +709,19 @@ struct HistoryMessage {
 type LabelChange = (String, Option<bool>, Option<bool>);
 
 /// What a run of history records means here: messages to download, oldest
-/// first, and each message's final read and inbox change. Spam, trash and
-/// drafts are skipped, as the date-window listing skips them; a draft being
-/// edited would otherwise add a message on every autosave.
-fn collect_history(records: Vec<HistoryRecord>) -> (Vec<String>, Vec<LabelChange>) {
-    let mut added = Vec::new();
-    let mut seen = std::collections::HashSet::new();
+/// first, each message's final read and inbox change, and messages to remove.
+/// Spam, trash and drafts are skipped, as the date-window listing skips them;
+/// a draft being edited would otherwise add a message on every autosave. Mail
+/// deleted, trashed or marked spam is removed, and mail taken back out of the
+/// trash or spam is downloaded again; a message's last event decides.
+fn collect_history(records: Vec<HistoryRecord>) -> (Vec<String>, Vec<LabelChange>, Vec<String>) {
+    let mut order = Vec::new();
+    let mut present = std::collections::HashMap::new();
+    let mut mark = |id: String, keep: bool| {
+        if present.insert(id.clone(), keep).is_none() {
+            order.push(id);
+        }
+    };
     let mut changes: Vec<LabelChange> = Vec::new();
     let mut index = std::collections::HashMap::new();
     let mut note = |id: String, labels: &[String], present: bool, changes: &mut Vec<LabelChange>| {
@@ -698,21 +738,32 @@ fn collect_history(records: Vec<HistoryRecord>) -> (Vec<String>, Vec<LabelChange
         entry.1 = read.or(entry.1);
         entry.2 = inbox.or(entry.2);
     };
+    let binned = |labels: &[String]| labels.iter().any(|l| l == "SPAM" || l == "TRASH");
     for record in records {
         for change in record.messages_added {
             let skip = change.message.label_ids.iter().any(|l| l == "SPAM" || l == "TRASH" || l == "DRAFT");
-            if !skip && seen.insert(change.message.id.clone()) {
-                added.push(change.message.id);
+            if !skip {
+                mark(change.message.id, true);
             }
         }
+        for change in record.messages_deleted {
+            mark(change.message.id, false);
+        }
         for change in record.labels_added {
+            if binned(&change.label_ids) {
+                mark(change.message.id.clone(), false);
+            }
             note(change.message.id, &change.label_ids, true, &mut changes);
         }
         for change in record.labels_removed {
+            if binned(&change.label_ids) {
+                mark(change.message.id.clone(), true);
+            }
             note(change.message.id, &change.label_ids, false, &mut changes);
         }
     }
-    (added, changes)
+    let (added, removed): (Vec<String>, Vec<String>) = order.into_iter().partition(|id| present[id]);
+    (added, changes, removed)
 }
 
 async fn history_page(
@@ -727,6 +778,7 @@ async fn history_page(
         ("startHistoryId", start),
         ("maxResults", "500"),
         ("historyTypes", "messageAdded"),
+        ("historyTypes", "messageDeleted"),
         ("historyTypes", "labelAdded"),
         ("historyTypes", "labelRemoved"),
     ];
@@ -780,8 +832,9 @@ async fn history_sync(
             break;
         }
     }
-    let (added, labels) = collect_history(records);
-    log::info!("[mail] history sync: {} added, {} label changes", added.len(), labels.len());
+    let (added, labels, removed) = collect_history(records);
+    log::info!("[mail] history sync: {} added, {} label changes, {} removed", added.len(), labels.len(), removed.len());
+    store::delete_messages(db, account_id, &removed)?;
     let known = store::known_provider_ids(db, account_id, &added)?;
     let mut new_ids: Vec<String> = added.into_iter().filter(|id| !known.contains(id)).collect();
     if new_ids.len() > CATCH_UP_LIMIT {
@@ -938,7 +991,7 @@ mod tests {
 
     #[test]
     fn history_lists_new_mail_once_and_skips_spam_trash_and_drafts() {
-        let (added, _) = collect_history(history(r#"{"history":[
+        let (added, _, _) = collect_history(history(r#"{"history":[
             {"messagesAdded":[{"message":{"id":"a","labelIds":["INBOX","UNREAD"]}}]},
             {"messagesAdded":[{"message":{"id":"s","labelIds":["SPAM"]}},{"message":{"id":"t","labelIds":["TRASH"]}}]},
             {"messagesAdded":[{"message":{"id":"d","labelIds":["DRAFT"]}},{"message":{"id":"b","labelIds":["SENT"]}}]},
@@ -947,9 +1000,26 @@ mod tests {
         assert_eq!(added, vec!["a", "b"]);
     }
 
+    /// Mail deleted, trashed or marked spam in Gmail used to stay on this Mac
+    /// for good; mail taken back out of the trash comes back.
+    #[test]
+    fn history_removes_deleted_trashed_and_spam_mail_and_restores_untrashed_mail() {
+        let (added, _, removed) = collect_history(history(r#"{"history":[
+            {"messagesDeleted":[{"message":{"id":"deleted"}}]},
+            {"labelsAdded":[{"message":{"id":"trashed"},"labelIds":["TRASH"]}]},
+            {"labelsAdded":[{"message":{"id":"spam"},"labelIds":["SPAM","UNREAD"]}]},
+            {"labelsAdded":[{"message":{"id":"back"},"labelIds":["TRASH"]}]},
+            {"labelsRemoved":[{"message":{"id":"back"},"labelIds":["TRASH"]}]},
+            {"messagesAdded":[{"message":{"id":"brief","labelIds":["INBOX"]}}]},
+            {"messagesDeleted":[{"message":{"id":"brief"}}]}
+        ]}"#));
+        assert_eq!(removed, vec!["deleted", "trashed", "spam", "brief"]);
+        assert_eq!(added, vec!["back"]);
+    }
+
     #[test]
     fn history_label_changes_keep_the_last_state_of_each_flag() {
-        let (_, changes) = collect_history(history(r#"{"history":[
+        let (_, changes, _) = collect_history(history(r#"{"history":[
             {"labelsRemoved":[{"message":{"id":"m"},"labelIds":["UNREAD"]}]},
             {"labelsRemoved":[{"message":{"id":"m"},"labelIds":["INBOX"]}]},
             {"labelsAdded":[{"message":{"id":"m"},"labelIds":["UNREAD"]}]},

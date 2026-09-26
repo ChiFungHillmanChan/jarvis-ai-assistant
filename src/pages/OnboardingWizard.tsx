@@ -64,6 +64,7 @@ export default function OnboardingWizard({ onComplete }: { onComplete: () => voi
     catch (reason) { if (mounted.current) setError(setupError(reason instanceof Error ? reason.message : String(reason), text)); }
     finally { operation.current = false; if (mounted.current) setBusy(''); }
   }
+  const connectingGmail = text('Connecting Gmail', '連接 Gmail');
   function changeSettings(next: mail.MailSettings) { setSettings(next); setAnalysis(null); setConsent(false); }
   const sameSettings = !!settings && JSON.stringify(settings) === JSON.stringify(workspace?.settings);
   const readiness = sameSettings && !credentialDirty ? status?.mail.state || 'not_configured' : 'saved_unverified';
@@ -134,6 +135,7 @@ export default function OnboardingWizard({ onComplete }: { onComplete: () => voi
       {error && <p className="setup-error" role="alert">{error}</p>}
       {notice && <p className="setup-notice" role="status">{notice}</p>}
       {busy && <p role="status">{busy}…</p>}
+      {busy === connectingGmail && <button type="button" onClick={() => void mail.mailCancelConnect().catch(() => {})}>{text('Cancel Gmail sign-in', '取消 Gmail 登入')}</button>}
       {loading ? <p role="status">{text('Reading existing settings…', '正在讀取現有設定…')}</p> : !workspace || !settings ? <button onClick={() => void run(text('Reloading', '重新載入'), reload)}>{text('Retry', '重試')}</button> : <fieldset className="setup-fields" disabled={!!busy}>
         {step === 1 && <>
           <ChooseAi onChosen={() => void verifyMail()} onBusyChange={setLocalBusy} />
@@ -150,9 +152,9 @@ export default function OnboardingWizard({ onComplete }: { onComplete: () => voi
           </details>
         </>}
         {step === 2 && <>
-          <div className="setup-current"><h2>{text('Gmail access for mail only', '只為電郵工作區授權 Gmail')}</h2><p>{text('JARVIS requests read-only mail access and stores readable copies on this Mac. This connection does not grant sending or calendar permissions. Disconnecting keeps local copies; deleting a local account removes them.', 'JARVIS 會要求唯讀郵件權限，並將可讀副本儲存於此 Mac。本次連接不會要求寄信或日曆權限。斷開連接會保留副本；刪除本機帳戶才會清除副本。')}</p></div>
+          <div className="setup-current"><h2>{text('Read-only Gmail and Calendar access', '唯讀授權 Gmail 及日曆')}</h2><p>{text('JARVIS requests read-only mail and calendar access and stores readable copies of the mail on this Mac. This connection cannot send mail or change events. Disconnecting keeps local copies; deleting a local account removes them.', 'JARVIS 會要求唯讀郵件及日曆權限，並將可讀郵件副本儲存於此 Mac。本次連接不能寄信，亦不能修改日曆活動。斷開連接會保留副本；刪除本機帳戶才會清除副本。')}</p></div>
           {workspace.accounts.length > 0 && <label>{text('Mailbox', '信箱')}<select value={accountId} onChange={event => setAccountId(event.target.value)}>{workspace.accounts.map(account => <option key={account.id} value={account.id}>{account.email} · {account.connected ? text('Connected', '已連接') : text('Disconnected', '已斷開')} · {account.message_count}</option>)}</select></label>}
-          <div className="setup-actions"><button type="button" onClick={() => void run(text('Connecting Gmail', '連接 Gmail'), async () => { const account = await mail.mailConnectAccount(); setAccountId(account.id); await syncAccount(account.id); })}>{text('Connect Gmail and sync first batch', '連接 Gmail 並同步首批郵件')}</button><button type="button" disabled={!workspace.accounts.find(account => account.id === accountId)?.connected} onClick={() => void run(text('Syncing mail', '同步郵件'), () => syncAccount(accountId))}>{text('Sync selected mailbox', '同步所選信箱')}</button></div>
+          <div className="setup-actions"><button type="button" onClick={() => void run(connectingGmail, async () => { const account = await mail.mailConnectAccount(); setAccountId(account.id); await syncAccount(account.id); })}>{text('Connect Gmail and sync first batch', '連接 Gmail 並同步首批郵件')}</button><button type="button" disabled={!workspace.accounts.find(account => account.id === accountId)?.connected} onClick={() => void run(text('Syncing mail', '同步郵件'), () => syncAccount(accountId))}>{text('Sync selected mailbox', '同步所選信箱')}</button></div>
           <p className="setup-hint">{text('Up to 50 messages per sync, not a full backup. Company accounts may need administrator approval. If sign-in expires or is blocked, check the account policy before retrying.', '每次最多同步 50 封，並非完整備份。公司帳戶可能需要管理員批准；登入逾時或被封鎖時，請先核對帳戶政策。')}</p>
         </>}
         {step === 3 && <>

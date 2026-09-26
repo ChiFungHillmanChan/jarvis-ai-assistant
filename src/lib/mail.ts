@@ -1,6 +1,7 @@
 import { invoke } from "@tauri-apps/api/core";
 
-export interface MailAccount { id: string; email: string; connected: boolean; last_synced: string | null; next_page_token: string | null; message_count: number }
+/** `calendar`: JARVIS may read this account's calendar (it is then an additional Google account in Settings). */
+export interface MailAccount { id: string; email: string; connected: boolean; last_synced: string | null; next_page_token: string | null; message_count: number; calendar: boolean }
 export interface MailMessage { id: number; account_id: string; account_email: string; provider_id: string; thread_id: string | null; subject: string; sender: string; snippet: string; body: string | null; is_read: boolean; is_inbox: boolean; received_at: string; attachments: MailAttachment[] | null; triage: MailTriage | null; next_due: string | null }
 /** null: synced before attachments were recorded, so unknown until a rescan. */
 export interface MailAttachment { filename: string; mime_type: string; size: number }
@@ -21,6 +22,7 @@ export interface MailSyncResult { saved: number; has_more: boolean; warning: str
 export interface MailAnalysis { text: string; mode: string; model: string; source_ids: number[]; omitted_messages: number; input_tokens: number; output_tokens: number; cached_tokens: number }
 export const mailWorkspace = (accountId?: string) => invoke<MailWorkspace>("mail_workspace", { accountId: accountId || undefined });
 export const mailConnectAccount = () => invoke<MailAccount>("mail_connect_account");
+export const mailCancelConnect = () => invoke<void>("mail_cancel_connect");
 export const mailDisconnectAccount = (accountId: string) => invoke<void>("mail_disconnect_account", { accountId });
 export const mailRemoveAccount = (accountId: string) => invoke<void>("mail_remove_account", { accountId });
 export const mailSyncAccount = (accountId: string, older: boolean) => invoke<MailSyncResult>("mail_sync_account", { accountId, older });

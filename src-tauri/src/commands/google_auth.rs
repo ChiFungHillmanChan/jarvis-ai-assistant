@@ -1,5 +1,7 @@
 use crate::auth::google::GoogleAuth;
 use crate::db::Database;
+use crate::mail::{additional, models::MailAccount, store};
+use serde::Serialize;
 use std::sync::Arc;
 use tauri::State;
 
@@ -85,6 +87,11 @@ pub async fn google_connect(
         if let Err(e) = store_profile_name(&token, &db).await {
             log::warn!("Could not read Google profile name: {}", e);
         }
+        // This may be a different account from the last one; learn it afresh.
+        if let Ok(conn) = db.conn.lock() {
+            let _ = conn.execute("DELETE FROM user_preferences WHERE key = ?1", [additional::MAIN_EMAIL_KEY]);
+        }
+        additional::remember_main_email(&db, &token).await;
     }
     // Nothing used to sync on connect: the first mail and events arrived with
     // the scheduler's five-minute tick, and until then the injected [CONTEXT]
@@ -102,6 +109,13 @@ pub async fn google_connect(
         }
     });
     Ok("Connected to Google".to_string())
+}
+
+/// Stop waiting for a browser sign-in the user abandoned, such as a closed
+/// tab. `google_connect` then returns `SIGN_IN_CANCELLED`.
+#[tauri::command]
+pub fn google_cancel_connect() {
+    crate::auth::google::cancel_sign_in(crate::auth::google::SignIn::Assistant);
 }
 
 /// Fetch the signed-in user's given name and persist it as `user_name`.
@@ -142,19 +156,54 @@ async fn store_profile_name(access_token: &str, db: &Arc<Database>) -> Result<()
 /// `google_connect`, so switching cannot leave the previous account's mail on
 /// disk.
 async fn unlink(auth: &GoogleAuth, db: &Database) -> Result<(), String> {
-    auth.disconnect(db).await?;
+    let revoke = !mailbox_shares_grant(auth, db).await;
+    auth.disconnect(db, revoke).await?;
 
     // The mail, events and briefings on disk are all derived from the account
     // we just unlinked. Leaving them would show a disconnected user their old
-    // inbox, which is the opposite of what disconnect promises.
+    // inbox, which is the opposite of what disconnect promises. Additional
+    // accounts' events are theirs and stay.
     {
         let conn = db.conn.lock().map_err(|e| e.to_string())?;
         conn.execute("DELETE FROM emails", []).map_err(|e| e.to_string())?;
-        conn.execute("DELETE FROM calendar_events", []).map_err(|e| e.to_string())?;
+        conn.execute(
+            "DELETE FROM calendar_events WHERE account_id = ?1",
+            [crate::integrations::calendar::MAIN_ACCOUNT],
+        )
+        .map_err(|e| e.to_string())?;
         conn.execute("DELETE FROM daily_briefings", []).map_err(|e| e.to_string())?;
     }
     crate::commands::storage::reclaim_db(db);
     Ok(())
+}
+
+/// Whether a connected Mail mailbox is on the main Google account. Google
+/// revokes per app and account, so revoking the main grant would sign that
+/// mailbox out too (mail::sync::revoke_unless_shared is the other direction).
+async fn mailbox_shares_grant(auth: &GoogleAuth, db: &Database) -> bool {
+    let mailboxes: Vec<String> = store::list_accounts(db)
+        .unwrap_or_default()
+        .into_iter()
+        .filter(|a| a.connected)
+        .map(|a| a.email)
+        .collect();
+    if mailboxes.is_empty() {
+        return false;
+    }
+    let main = match additional::main_email(db) {
+        Some(email) => Some(email),
+        None => match auth.ensure_access_token().await {
+            Ok(token) => crate::integrations::gmail::profile_email(&token).await.ok(),
+            Err(_) => None,
+        },
+    };
+    shares_grant(&mailboxes, main.as_deref())
+}
+
+/// Unconfirmed (offline, say) counts as shared: keeping a grant JARVIS no
+/// longer holds is harmless; revoking a mailbox's by mistake is not.
+fn shares_grant(mailboxes: &[String], main: Option<&str>) -> bool {
+    main.is_none_or(|main| mailboxes.iter().any(|m| m.eq_ignore_ascii_case(main)))
 }
 
 /// Unlink the Google account. Until this existed there was no way to
@@ -169,26 +218,87 @@ pub async fn google_disconnect(
     Ok("Disconnected from Google".to_string())
 }
 
-#[tauri::command]
-pub async fn google_status(auth: State<'_, Arc<GoogleAuth>>) -> Result<bool, String> {
-    if auth.is_authenticated() {
-        return Ok(true);
+/// "connected", "reconnect" (Google refused the grant; only signing in again
+/// fixes it) or "not_connected". A cached access token used to count as
+/// connected even after it expired, so a revoked grant still showed as
+/// connected until the app restarted.
+async fn main_state(auth: &GoogleAuth) -> &'static str {
+    if !auth.is_linked() {
+        return "not_connected";
     }
-    if auth.has_refresh_token() {
-        match auth.refresh_access_token().await {
-            Ok(()) => return Ok(true),
-            Err(e) => {
-                log::warn!("Google token refresh failed during status check: {}", e);
-                return Ok(false);
-            }
+    match auth.ensure_access_token().await {
+        Ok(_) => "connected",
+        Err(_) if auth.needs_reconnect() => "reconnect",
+        // Offline or Google unavailable: still linked.
+        Err(e) => {
+            log::warn!("Google token refresh failed during status check: {}", e);
+            "connected"
         }
     }
-    Ok(false)
+}
+
+#[tauri::command]
+pub async fn google_status(auth: State<'_, Arc<GoogleAuth>>) -> Result<bool, String> {
+    Ok(main_state(&auth).await == "connected")
+}
+
+#[derive(Serialize)]
+pub struct MainGoogleAccount {
+    state: &'static str,
+    name: Option<String>,
+    email: Option<String>,
+}
+
+/// The main account and the additional ones, for Settings > Google.
+#[derive(Serialize)]
+pub struct GoogleAccounts {
+    main: MainGoogleAccount,
+    /// Every Mail mailbox except the main account's, disconnected ones too
+    /// so they can be reconnected.
+    others: Vec<MailAccount>,
+}
+
+#[tauri::command]
+pub async fn google_accounts(
+    auth: State<'_, Arc<GoogleAuth>>,
+    db: State<'_, Arc<Database>>,
+) -> Result<GoogleAccounts, String> {
+    let state = main_state(&auth).await;
+    if state == "connected" {
+        if let Ok(token) = auth.ensure_access_token().await {
+            additional::remember_main_email(&db, &token).await;
+        }
+    }
+    let email = if state == "not_connected" { None } else { additional::main_email(&db) };
+    let name = {
+        let conn = db.conn.lock().map_err(|e| e.to_string())?;
+        conn.query_row("SELECT value FROM user_preferences WHERE key = 'user_name'", [], |r| r.get::<_, String>(0))
+            .ok()
+            .filter(|name| !name.trim().is_empty())
+    };
+    let others = store::list_accounts(&db)?
+        .into_iter()
+        .filter(|a| email.as_deref().is_none_or(|main| !main.eq_ignore_ascii_case(&a.email)))
+        .collect();
+    Ok(GoogleAccounts {
+        main: MainGoogleAccount { state, name: name.filter(|_| state != "not_connected"), email },
+        others,
+    })
 }
 
 #[cfg(test)]
 mod tests {
-    use super::{connect_plan, ConnectPlan, REQUESTED_SCOPES};
+    use super::{connect_plan, shares_grant, ConnectPlan, REQUESTED_SCOPES};
+
+    /// Disconnecting the Assistant's Google used to revoke the grant a Mail
+    /// mailbox on the same account also depends on.
+    #[test]
+    fn the_main_grant_is_kept_while_a_mailbox_on_that_account_uses_it() {
+        let mailboxes = vec!["Me@Example.com".to_string(), "work@example.com".to_string()];
+        assert!(shares_grant(&mailboxes, Some("me@example.com")));
+        assert!(!shares_grant(&mailboxes, Some("other@example.com")));
+        assert!(shares_grant(&mailboxes, None), "unconfirmed: keep it");
+    }
 
     #[test]
     fn profile_scope_is_requested() {

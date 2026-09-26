@@ -424,6 +424,7 @@ pub fn run() {
         .invoke_handler(tauri::generate_handler![
             commands::mail::mail_workspace,
             commands::mail::mail_connect_account,
+            commands::mail::mail_cancel_connect,
             commands::mail::mail_disconnect_account,
             commands::mail::mail_remove_account,
             commands::mail::mail_sync_account,
@@ -482,7 +483,9 @@ pub fn run() {
             commands::cron::toggle_cron_job,
             commands::cron::get_upcoming_runs,
             commands::google_auth::google_connect,
+            commands::google_auth::google_cancel_connect,
             commands::google_auth::google_status,
+            commands::google_auth::google_accounts,
             commands::google_auth::google_disconnect,
             commands::notion::get_notion_pages,
             commands::notion::sync_notion,

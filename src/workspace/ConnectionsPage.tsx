@@ -72,7 +72,7 @@ export default function ConnectionsPage() {
         <div className="connections-section-head">
           <div>
             <h2 id="connections-mail-title">{text('Gmail workspaces', 'Gmail 工作區')}</h2>
-            <p>{text('Bring several Gmail accounts into Mail for local copies, groups and source memories. Each account uses read-only Gmail access.', '將多個 Gmail 帳戶加入郵件工作區，建立本機副本、群組及來源記憶。每個帳戶僅授予 Gmail 唯讀權限。')}</p>
+            <p>{text('Bring several Gmail accounts into Mail for local copies, groups and source memories. Each account uses read-only Gmail and Calendar access, and its events appear on the Calendar page.', '將多個 Gmail 帳戶加入郵件工作區，建立本機副本、群組及來源記憶。每個帳戶僅授予 Gmail 及日曆唯讀權限，其日曆活動會顯示在日曆頁。')}</p>
           </div>
           <button className="connections-primary" onClick={() => open("email")}>{text('Manage in Mail', '在郵件頁管理')}</button>
         </div>

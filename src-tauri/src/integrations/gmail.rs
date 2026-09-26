@@ -45,6 +45,8 @@ pub struct GmailMessage {
 #[derive(Deserialize)]
 struct ListResponse {
     messages: Option<Vec<MessageRef>>,
+    #[serde(rename = "nextPageToken")]
+    next_page_token: Option<String>,
 }
 
 #[derive(Deserialize)]
@@ -462,6 +464,76 @@ pub fn save_to_db(db: &crate::db::Database, fetched: &InboxFetch) -> Result<(), 
     }
 
     tx.commit().map_err(|e| e.to_string())
+}
+
+/// Ids of every unread message in the inbox, or None when there are more than
+/// one page of them: a partial list says nothing about the rest.
+pub async fn unread_inbox_ids(access_token: &str) -> Result<Option<HashSet<String>>, String> {
+    let url = format!("{}/messages?maxResults=500&labelIds=INBOX&labelIds=UNREAD", GMAIL_API);
+    let resp = HTTP
+        .get(&url)
+        .bearer_auth(access_token)
+        .send()
+        .await
+        .map_err(|e| format!("Gmail list error: {}", e))?;
+    if resp.status() == 401 {
+        return Err("UNAUTHORIZED".to_string());
+    }
+    if !resp.status().is_success() {
+        return Err(format!("Gmail API error: {}", resp.status()));
+    }
+    let list: ListResponse = resp.json().await.map_err(|e| e.to_string())?;
+    if list.next_page_token.is_some() {
+        return Ok(None);
+    }
+    Ok(Some(list.messages.unwrap_or_default().into_iter().map(|m| m.id).collect()))
+}
+
+/// Mark read every inbox row Gmail no longer lists as unread. The sync reads
+/// only the newest messages, so without this a message read elsewhere stayed
+/// unread here and the assistant's unread count only grew.
+pub fn mark_read_except(db: &crate::db::Database, unread: &HashSet<String>) -> Result<usize, String> {
+    let mut conn = db.conn.lock().map_err(|e| e.to_string())?;
+    let tx = conn.transaction().map_err(|e| e.to_string())?;
+    let stale: Vec<String> = {
+        let mut stmt = tx
+            .prepare("SELECT gmail_id FROM emails WHERE is_read = 0 AND is_archived = 0")
+            .map_err(|e| e.to_string())?;
+        let rows = stmt
+            .query_map([], |r| r.get::<_, String>(0))
+            .map_err(|e| e.to_string())?
+            .collect::<Result<Vec<String>, _>>()
+            .map_err(|e| e.to_string())?;
+        rows.into_iter().filter(|id| !unread.contains(id)).collect()
+    };
+    for id in &stale {
+        tx.execute("UPDATE emails SET is_read = 1 WHERE gmail_id = ?1", rusqlite::params![id])
+            .map_err(|e| e.to_string())?;
+    }
+    tx.commit().map_err(|e| e.to_string())?;
+    Ok(stale.len())
+}
+
+/// The signed-in account's address.
+pub async fn profile_email(access_token: &str) -> Result<String, String> {
+    let resp = HTTP
+        .get(format!("{}/profile", GMAIL_API))
+        .bearer_auth(access_token)
+        .send()
+        .await
+        .map_err(|e| format!("Gmail profile error: {}", e))?;
+    if resp.status() == 401 {
+        return Err("UNAUTHORIZED".to_string());
+    }
+    if !resp.status().is_success() {
+        return Err(format!("Gmail API error: {}", resp.status()));
+    }
+    let body: serde_json::Value = resp.json().await.map_err(|e| e.to_string())?;
+    body["emailAddress"]
+        .as_str()
+        .map(|email| email.trim().to_lowercase())
+        .filter(|email| !email.is_empty())
+        .ok_or_else(|| "Gmail returned no address".to_string())
 }
 
 pub async fn search_messages(access_token: &str, query: &str) -> Result<Vec<GmailMessage>, String> {
@@ -1344,5 +1416,24 @@ mod sync_tests {
         };
         save_to_db(&db, &fetched).unwrap();
         assert_eq!(archived(&db, "unlucky"), 0);
+    }
+
+    fn read_flag(db: &crate::db::Database, gmail_id: &str) -> i32 {
+        db.conn.lock().unwrap()
+            .query_row("SELECT is_read FROM emails WHERE gmail_id = ?1", rusqlite::params![gmail_id], |r| r.get(0))
+            .unwrap()
+    }
+
+    /// The sync reads only the newest 20, so an older message read on the
+    /// phone stayed unread here and the assistant's unread count only grew.
+    #[test]
+    fn mail_no_longer_unread_in_gmail_is_marked_read() {
+        let db = emails_db();
+        seed(&db, "read-on-phone", "2026-08-01T09:00:00Z", 0);
+        seed(&db, "still-unread", "2026-08-02T09:00:00Z", 0);
+        let unread: HashSet<String> = ["still-unread".to_string()].into_iter().collect();
+        assert_eq!(mark_read_except(&db, &unread).unwrap(), 1);
+        assert_eq!(read_flag(&db, "read-on-phone"), 1);
+        assert_eq!(read_flag(&db, "still-unread"), 0);
     }
 }

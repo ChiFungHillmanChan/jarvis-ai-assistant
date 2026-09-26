@@ -47,6 +47,7 @@ export default function EmailPage({ onSetup }: { onSetup?: () => void }) {
   const [notice, setNotice] = useState("");
   const [revision, setRevision] = useState(0);
   const operation = useRef(false);
+  const connectCancelled = useRef(false);
   const stored = useRef("");
   const dialog = useRef<HTMLDialogElement>(null);
   const reader = useRef<HTMLElement>(null);
@@ -149,6 +150,26 @@ export default function EmailPage({ onSetup }: { onSetup?: () => void }) {
     try { await action(); if (refresh) { setRevision(n => n + 1); setAnalysis(null); } }
     catch (e) { setError(text(`${label} failed: ${String(e)}`, `${label}失敗：${String(e)}`)); }
     finally { operation.current = false; setBusy(""); }
+  }
+  const connectLabel = text("Connect Gmail", "連接 Gmail");
+  function connectAccount() {
+    connectCancelled.current = false;
+    return run(connectLabel, async () => {
+      try {
+        const connected = await mail.mailConnectAccount();
+        setAccountId(connected.id); setOffset(0);
+        setNotice(text("Connected. Choose Sync to download your mail.", "已連接。請按「同步」下載郵件。"));
+      } catch (e) {
+        // Cancelling a sign-in the user abandoned is not a failure.
+        if (connectCancelled.current) { setNotice(text("Gmail sign-in cancelled.", "已取消 Gmail 登入。")); return; }
+        throw e;
+      }
+    });
+  }
+  // Closing the browser tab tells JARVIS nothing; this stops the wait.
+  function cancelConnect() {
+    connectCancelled.current = true;
+    void mail.mailCancelConnect().catch(() => {});
   }
   function choose(next: { view?: MailView; groupId?: number }) {
     setView(next.view); setGroupId(next.groupId); setOffset(0); setSelected([]); setMessageId(null);
@@ -260,8 +281,12 @@ export default function EmailPage({ onSetup }: { onSetup?: () => void }) {
           </button>
           <button className="mail-quiet mail-icon-button" aria-label={text(`Manage ${item.email}`, `管理 ${item.email}`)} onClick={() => setEditor({ type: "account", account: item })}>{text("Manage", "管理")}</button>
         </div>)}
-        <button className="mail-wide" disabled={!!busy} onClick={() => run(text("Connect Gmail", "連接 Gmail"), async () => { const connected = await mail.mailConnectAccount(); setAccountId(connected.id); setOffset(0); setNotice(text("Connected. Choose Sync to download your mail.", "已連接。請按「同步」下載郵件。")); })}>{text("Connect Gmail account", "連接 Gmail 帳戶")}</button>
-        <p className="mail-hint">{text("Google shows a warning that the app is not verified yet. Choose Advanced, then Go to JARVIS, to continue.", "Google 會提示此應用程式尚未經驗證。請按「進階」，再按「前往 JARVIS」繼續。")}</p>
+        {busy === connectLabel
+          ? <button className="mail-wide" onClick={cancelConnect}>{text("Cancel Gmail sign-in", "取消 Gmail 登入")}</button>
+          : <button className="mail-wide" disabled={!!busy} onClick={() => { void connectAccount(); }}>{text("Connect Gmail account", "連接 Gmail 帳戶")}</button>}
+        <p className="mail-hint">{busy === connectLabel
+          ? text("Finish signing in in your browser. If you closed the Google tab, choose Cancel.", "請在瀏覽器完成登入。如已關閉 Google 登入分頁，請按「取消 Gmail 登入」。")
+          : text("Google shows a warning that the app is not verified yet. Choose Advanced, then Go to JARVIS, to continue.", "Google 會提示此應用程式尚未經驗證。請按「進階」，再按「前往 JARVIS」繼續。")}</p>
       </nav>
 
       <section className="mail-list-panel" aria-label={heading}>

@@ -8,6 +8,8 @@ pub struct MailAccount {
     pub last_synced: Option<String>,
     pub next_page_token: Option<String>,
     pub message_count: i64,
+    /// Whether JARVIS may read this account's calendar (mail::additional).
+    pub calendar: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
