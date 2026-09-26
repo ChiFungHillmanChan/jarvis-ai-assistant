@@ -7,6 +7,7 @@ pub mod cost;
 pub mod gemini;
 pub mod local;
 pub mod openai;
+pub mod persona;
 pub mod routing;
 pub mod tools;
 pub use routing::{classify_workload, Workload};

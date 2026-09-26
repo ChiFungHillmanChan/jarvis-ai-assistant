@@ -55,8 +55,10 @@ export function installWorkspacePreview() {
         const user: ChatMessage = { id: null, role: 'user', content: args.message, created_at: now.toISOString() };
         conversations[sessionId] = [...(conversations[sessionId] || []), user];
         await emit('chat-state', { ...scope, state: 'thinking' });
-        await emit('chat-status', { ...scope, phase: 'acting', status: 'Reading the sample calendar…' });
-        await new Promise(resolve => setTimeout(resolve, 2500));
+        await emit('chat-status', { ...scope, phase: 'acting', status: 'Running: Checking calendar...', detail: day });
+        await new Promise(resolve => setTimeout(resolve, 1500));
+        await emit('chat-status', { ...scope, phase: 'acting', status: 'Running: Checking follow-ups...', detail: null });
+        await new Promise(resolve => setTimeout(resolve, 1000));
         await emit('chat-tool-result', { ...scope, tool_call_id: crypto.randomUUID(), tool_name: 'list_events', target: { view: 'calendar', accountId: 'legacy-google', dateRange: { from: day, to: day } }, result: { events } });
         const content = 'You have a customer onboarding review at 14:00 UTC. I opened the calendar result so you can review the details.';
         await emit('chat-token', { ...scope, token: content, done: false });

@@ -210,6 +210,10 @@
 .assistant-message.user { background:var(--surface-solid); border:1px solid var(--border-primary); border-radius:8px; padding:15px 18px; margin:8px 0 22px; }
 .message-author { font-size:11px; color:var(--text-muted); margin-bottom:8px; }
 .assistant-progress { display:flex; align-items:center; gap:8px; color:var(--text-muted); font-size:12px; padding:10px 0; }
+.assistant-steps { margin-top:10px; font-size:12px; color:var(--text-muted); }
+.assistant-steps summary { cursor:pointer; width:max-content; }
+.assistant-steps summary:hover { color:var(--text-secondary); }
+.assistant-steps ol { margin:6px 0 0 18px; line-height:1.7; }
 .assistant-composer { margin:12px 16px 20px; padding:10px 12px; border:1px solid var(--border-strong); border-radius:9px; background:var(--surface); flex-shrink:0; }
 .assistant-full .assistant-composer { width:calc(100% - 80px); max-width:790px; margin:10px auto 30px; }
 .assistant-composer:focus-within { border-color:var(--cyan); }

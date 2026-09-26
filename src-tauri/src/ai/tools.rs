@@ -501,7 +501,79 @@ pub fn tool_status_label(name: &str) -> &'static str {
 }
 
 /// Conversational narration for TTS during tool execution.
-pub fn tool_voice_narration(name: &str) -> &'static str {
+const STEP_DETAIL_MAX_CHARS: usize = 60;
+
+/// What a step is looking for, shown next to its status line: the search
+/// words, the dates, or the title being created. `None` when the arguments say
+/// nothing useful or would repeat private content back (mail ids, memories).
+pub fn tool_status_detail(name: &str, arguments: &str) -> Option<String> {
+    let args: serde_json::Value = serde_json::from_str(arguments).ok()?;
+    let field = |key: &str| args.get(key).and_then(serde_json::Value::as_str).map(str::trim).filter(|v| !v.is_empty());
+    let detail = match name {
+        "search_emails" | "search_notion" | "search_notes" | "find_files" | "list_inbox_triage" => {
+            field("query")?.to_string()
+        }
+        "list_events" => match (field("date_from"), field("date_to")) {
+            (Some(from), Some(to)) if from != to => format!("{from} – {to}"),
+            (Some(day), _) | (None, Some(day)) => day.to_string(),
+            (None, None) => return None,
+        },
+        "create_event" | "update_event" | "create_task" | "create_notion_page" | "create_github_issue" => {
+            field("title")?.to_string()
+        }
+        "draft_email" => field("subject")?.to_string(),
+        "open_app" => field("name")?.to_string(),
+        "list_github_items" => field("repo")?.to_string(),
+        "read_note" => field("path")?.rsplit('/').next()?.to_string(),
+        _ => return None,
+    };
+    let line = detail.split_whitespace().collect::<Vec<_>>().join(" ");
+    if line.chars().count() <= STEP_DETAIL_MAX_CHARS {
+        return Some(line);
+    }
+    Some(line.chars().take(STEP_DETAIL_MAX_CHARS - 1).chain(std::iter::once('…')).collect())
+}
+
+/// Short spoken line played at the first tool call of a turn. `language` is
+/// the saved response language: `yue` hears Chinese, everything else English
+/// (a `bilingual` request's language is not known until the reply is written).
+pub fn tool_voice_narration(name: &str, language: &str) -> &'static str {
+    if language == "yue" {
+        return match name {
+            "search_emails" => "我找找你的郵件。",
+            "read_email" => "我打開那封郵件。",
+            "draft_email" => "我幫你起草。",
+            "archive_email" => "我把它封存。",
+            "list_events" => "我看看你的日曆。",
+            "create_event" => "我放進你的日曆。",
+            "update_event" => "我更新這個活動。",
+            "delete_event" => "我移除這個活動。",
+            "search_notion" => "我在 Notion 找找。",
+            "read_notion_page" => "我看看那個 Notion 頁面。",
+            "create_notion_page" => "我在 Notion 建立新頁面。",
+            "list_github_items" => "我看看你的 GitHub。",
+            "create_github_issue" => "我開一個 GitHub issue。",
+            "search_notes" => "我翻翻你的筆記。",
+            "read_note" => "我看看那份筆記。",
+            "open_app" => "我幫你打開。",
+            "run_command" => "我執行一下。",
+            "find_files" => "我找找那些檔案。",
+            "open_file" => "我打開那個檔案。",
+            "create_task" => "我記下這項待辦。",
+            "list_tasks" => "我看看你的待辦。",
+            "list_follow_ups" => "我看看要跟進的事項。",
+            "update_follow_up" => "我更新這項跟進。",
+            "list_inbox_triage" => "我看看有甚麼要你留意。",
+            "system_info" => "我看看系統狀態。",
+            "send_notification" => "我發個通知。",
+            "render_chart" => "我整理成圖表。",
+            "render_status" => "結果在這裏。",
+            "remember" => "我記住了。",
+            "forget" => "我會忘記這件事。",
+            "list_memories" => "我看看我記得甚麼。",
+            _ => "我來處理。",
+        };
+    }
     match name {
         "search_emails" => "Searching through your emails now.",
         "read_email" => "Pulling up that email.",
@@ -1571,7 +1643,7 @@ pub fn build_cacheable_system_prompt() -> String {
 /// Returns the per-request dynamic suffix appended (as a separate SystemContentBlock
 /// AFTER the cachePoint) so it doesn't break the cached prefix.
 /// Includes user_name, the current local time and offset, language preference,
-/// and any persisted memory.
+/// the personal style settings (`persona::block`), and any persisted memory.
 pub fn build_dynamic_suffix(
     user_name: &str,
     now: chrono::DateTime<chrono::Local>,
@@ -1579,8 +1651,9 @@ pub fn build_dynamic_suffix(
     db: &crate::db::Database,
 ) -> String {
     let header = format!(
-        "Current user: {user_name}\n{time_line}\nResponse language: {language}\n",
+        "Current user: {user_name}\n{time_line}\nResponse language: {language}\n{persona}",
         time_line = current_time_line(now),
+        persona = super::persona::block(db, user_name),
     );
     let memory_block = load_memory_block(db);
     if memory_block.is_empty() {
@@ -1902,6 +1975,25 @@ mod prompt_tests {
         assert!(prompt.lines().any(|line| line == "Response language: en"));
         assert!(!prompt.contains(invalid));
         assert_eq!(read_language_pref(&db), "en");
+    }
+
+    #[test]
+    fn every_request_carries_the_personal_style_lines() {
+        let prompt = build_system_prompt(&prompt_db());
+        for line in ["Address the user as: Ada", "Tone: jarvis", "Reply length: balanced", "Chinese style: written", "Search depth: thorough"] {
+            assert!(prompt.lines().any(|l| l == line), "missing {line:?}");
+        }
+    }
+
+    #[test]
+    fn the_static_prompt_explains_each_personal_setting_and_drops_the_robotic_rules() {
+        let prompt = build_cacheable_system_prompt();
+        for field in ["Address the user as", "Tone", "Reply length", "Chinese style", "Search depth", "User's own instructions", "`cantonese`"] {
+            assert!(prompt.contains(field), "the static prompt must explain {field:?}");
+        }
+        assert!(!prompt.contains("followed by their name"), "a line before a tool call must not always name the user");
+        assert!(!prompt.contains("never as \"sir\""), "the user may choose Sir as their address");
+        assert!(!prompt.contains("Never call the same tool more than once"), "a thorough search refines its query");
     }
 
     #[test]
@@ -2673,5 +2765,44 @@ mod local_data_tests {
         let ledger = crate::ai::SideEffectLedger::new();
         ledger.note("update_follow_up");
         assert_eq!(ledger.count(), 1);
+    }
+}
+
+#[cfg(test)]
+mod step_tests {
+    use super::*;
+
+    #[test]
+    fn a_step_names_what_it_is_looking_for() {
+        assert_eq!(tool_status_detail("search_emails", r#"{"query":"Gold Badge deadline"}"#).as_deref(), Some("Gold Badge deadline"));
+        assert_eq!(tool_status_detail("list_events", r#"{"date_from":"2026-09-27","date_to":"2026-09-28"}"#).as_deref(), Some("2026-09-27 – 2026-09-28"));
+        assert_eq!(tool_status_detail("list_events", r#"{"date_from":"2026-09-27"}"#).as_deref(), Some("2026-09-27"));
+        assert_eq!(tool_status_detail("create_event", r#"{"title":"Lunch with Sam","start":"2026-09-28T12:00:00"}"#).as_deref(), Some("Lunch with Sam"));
+        assert_eq!(tool_status_detail("draft_email", r#"{"to":"sam@example.com","subject":"Friday review"}"#).as_deref(), Some("Friday review"));
+        assert_eq!(tool_status_detail("open_app", r#"{"name":"Safari"}"#).as_deref(), Some("Safari"));
+        assert_eq!(tool_status_detail("read_note", r#"{"path":"Projects/Evoke pilot.md"}"#).as_deref(), Some("Evoke pilot.md"));
+        assert_eq!(tool_status_detail("read_email", r#"{"message_id":"18c"}"#), None);
+        assert_eq!(tool_status_detail("remember", r#"{"content":"Prefers mornings"}"#), None);
+    }
+
+    #[test]
+    fn a_step_detail_is_one_short_line_and_bad_arguments_give_none() {
+        let long = format!(r#"{{"query":"{}\nsecond line"}}"#, "q".repeat(200));
+        let detail = tool_status_detail("search_emails", &long).unwrap();
+        assert!(!detail.contains('\n'));
+        assert_eq!(detail.chars().count(), 60);
+        assert!(detail.ends_with('…'));
+        assert_eq!(tool_status_detail("search_emails", "not json"), None);
+        assert_eq!(tool_status_detail("search_emails", r#"{"query":"   "}"#), None);
+    }
+
+    #[test]
+    fn spoken_step_lines_follow_the_response_language() {
+        assert_eq!(tool_voice_narration("list_events", "en"), "Let me check your calendar.");
+        assert_eq!(tool_voice_narration("list_events", "bilingual"), "Let me check your calendar.");
+        assert_eq!(tool_voice_narration("list_events", "yue"), "我看看你的日曆。");
+        for tool in get_tool_definitions() {
+            assert!(!tool_voice_narration(&tool.name, "yue").is_ascii(), "{} has no Chinese line", tool.name);
+        }
     }
 }

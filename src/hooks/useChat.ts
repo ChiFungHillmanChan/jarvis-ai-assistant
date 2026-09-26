@@ -1,12 +1,12 @@
 import { useState, useEffect, useCallback, useRef } from 'react';
 import { listen } from '@tauri-apps/api/event';
-import type { ChatMessage, ChatTokenPayload, ChatStatusPayload, ChatStatePayload } from '../lib/types';
+import type { ChatMessage, ChatStep, ChatTokenPayload, ChatStatusPayload, ChatStatePayload } from '../lib/types';
 import { sendMessage, getConversations } from '../lib/commands';
-import { matchesRun, mergeHistory } from '../workspace/chatState';
-interface SessionState { historyLoading: boolean; messages: ChatMessage[]; loading: boolean; error: string | null; currentStatus: string | null; streamingText: string }
+import { addStep, matchesRun, mergeHistory } from '../workspace/chatState';
+interface SessionState { historyLoading: boolean; messages: ChatMessage[]; loading: boolean; error: string | null; currentStatus: string | null; currentDetail: string | null; streamingText: string }
 interface Scoped { session_id?: string; run_id?: string }
-const empty = (): SessionState => ({ historyLoading: true, messages: [], loading: false, error: null, currentStatus: null, streamingText: '' });
-interface Stream { sessionId: string; runId: string; text: string; held: string; buffer: string }
+const empty = (): SessionState => ({ historyLoading: true, messages: [], loading: false, error: null, currentStatus: null, currentDetail: null, streamingText: '' });
+interface Stream { sessionId: string; runId: string; text: string; held: string; buffer: string; steps: ChatStep[] }
 
 // The selected conversation is a view; an in-flight run always belongs to its origin.
 export function useChat() {
@@ -59,10 +59,12 @@ export function useChat() {
       if (frame.current === null) frame.current = requestAnimationFrame(flush);
     });
     const statusListener = listen<ChatStatusPayload & Scoped>('chat-status', ({ payload }) => {
-      if (matches(payload)) update(payload.session_id!, s => ({ ...s, currentStatus: payload.status }));
+      if (!matches(payload)) return;
+      stream.current!.steps = addStep(stream.current!.steps, payload);
+      update(payload.session_id!, s => ({ ...s, currentStatus: payload.status, currentDetail: payload.detail ?? null }));
     });
     const stateListener = listen<ChatStatePayload & Scoped>('chat-state', ({ payload }) => {
-      if (matches(payload) && payload.state === 'idle') update(payload.session_id!, s => ({ ...s, currentStatus: null }));
+      if (matches(payload) && payload.state === 'idle') update(payload.session_id!, s => ({ ...s, currentStatus: null, currentDetail: null }));
     });
     const voiceListener = listen<{ role: string; content: string } & Scoped>('chat-new-message', ({ payload }) => {
       if (payload.session_id && payload.session_id !== 'legacy') return;
@@ -74,14 +76,14 @@ export function useChat() {
     const id = selected.current;
     if (!text.trim()) return;
     if (stream.current) { update(id, s => ({ ...s, error: 'Another assistant task is running. You can keep working here and send this request when it finishes.' })); return; }
-    const run: Stream = { sessionId: id, runId: crypto.randomUUID(), text: '', held: '', buffer: '' };
+    const run: Stream = { sessionId: id, runId: crypto.randomUUID(), text: '', held: '', buffer: '', steps: [] };
     stream.current = run; setRunningSessionId(id);
     update(id, s => ({ ...s, loading: true }));
     try {
       await hydrate(id);
       update(id, s => ({ ...s, error: null, streamingText: '', currentStatus: 'Understanding your request…', messages: [...s.messages, { id: null, role: 'user', content: text, created_at: new Date().toISOString() }] }));
       const response = await sendMessage(text, workload, id, run.runId);
-      update(id, s => ({ ...s, messages: [...s.messages, response], streamingText: '' }));
+      update(id, s => ({ ...s, messages: [...s.messages, run.steps.length ? { ...response, steps: run.steps } : response], streamingText: '' }));
     } catch (error) {
       const partial = run.text + run.buffer || run.held;
       update(id, s => ({ ...s, error: String(error), streamingText: partial ? `${partial}\n\n[Incomplete response]` : '' }));
@@ -89,7 +91,7 @@ export function useChat() {
       if (frame.current !== null) cancelAnimationFrame(frame.current);
       frame.current = null;
       stream.current = null; setRunningSessionId(null);
-      update(id, s => ({ ...s, loading: false, currentStatus: null }));
+      update(id, s => ({ ...s, loading: false, currentStatus: null, currentDetail: null }));
     }
   }, [update, hydrate]);
   const acceptsRun = useCallback((payload: Scoped) => matchesRun(payload, stream.current), []);
