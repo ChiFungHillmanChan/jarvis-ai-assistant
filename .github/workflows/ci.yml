@@ -1,7 +1,10 @@
 name: CI
 
+# Pushes to main, and pull requests. A push to a branch with an open pull
+# request used to run twice (push + pull_request) without cancelling either.
 on:
   push:
+    branches: [main]
   pull_request:
 
 concurrency:
@@ -13,7 +16,10 @@ jobs:
     name: Verify (type-check, build, cargo test)
     # macOS only, and not a preference: this crate depends on cocoa,
     # security-framework and whisper-rs, none of which build on ubuntu.
-    runs-on: macos-latest
+    # Runs on the founder's Mac (self-hosted, label jarvis-mac): GitHub-hosted
+    # macOS minutes count ten-fold against the plan and ran out in September.
+    # To go back, set runs-on to macos-latest.
+    runs-on: [self-hosted, jarvis-mac]
     steps:
       - uses: actions/checkout@v5
 
@@ -25,7 +31,10 @@ jobs:
       # Cargo registry, git checkouts and build artifacts. Keyed on the lockfile
       # so a dependency change invalidates it; the restore-key still gives a
       # warm target/ dir when only source changed.
+      # The self-hosted workspace keeps target/ between runs, and restoring into
+      # ~/.cargo would overwrite the Mac's own registry.
       - name: Cache cargo
+        if: runner.environment == 'github-hosted'
         uses: actions/cache@v4
         with:
           path: |
