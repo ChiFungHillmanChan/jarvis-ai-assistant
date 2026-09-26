@@ -20,7 +20,7 @@ pub fn mail_workspace(db: State<Arc<Database>>, account_id: Option<String>) -> R
         accounts: store::list_accounts(&db)?,
         groups: store::list_groups(&db)?,
         settings: store::settings(&db)?,
-        triage: store::triage_status(&db, account_id.as_deref().filter(|id| !id.is_empty()), typesafe_key().is_some(), openai_key().is_ok())?,
+        triage: store::triage_status(&db, account_id.as_deref().filter(|id| !id.is_empty()), typesafe_key().is_some(), openai_key().is_ok(), chosen_ai(&db).map(|ai| ai.label))?,
     })
 }
 
@@ -51,28 +51,44 @@ pub async fn mail_triage_run(
 /// same untriaged messages and pay for them twice.
 static TRIAGE_RUN: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
 
-/// Whether the background sync should sort new mail: the user opted in and a
-/// TypeSafe key exists.
+/// The AI the user chose in setup, if any; a default chain nobody chose does
+/// not count.
+fn chosen_ai(db: &Database) -> Option<crate::commands::ai_choice::CurrentAi> {
+    crate::commands::ai_choice::describe(&crate::commands::ai_choice::saved_chain(db).ok()?)
+}
+
+/// Whether the background sync should sort new mail: the user opted in, and
+/// either a TypeSafe key or a chosen AI can classify it.
 pub(crate) fn triage_ready(db: &Database) -> bool {
-    store::auto_triage_enabled(db).unwrap_or(false) && typesafe_key().is_some()
+    store::auto_triage_enabled(db).unwrap_or(false) && (typesafe_key().is_some() || chosen_ai(db).is_some())
 }
 
 pub(crate) async fn triage_untriaged(db: &Database, language: Option<&str>) -> Result<MailTriageRun, String> {
     if !store::auto_triage_enabled(db)? {
         return Err("請先在「分析設定」開啟自動整理。".into());
     }
-    let typesafe = typesafe_key().ok_or("尚未設定 TypeSafe API 密鑰，請在分析設定中加入。")?;
+    let typesafe = typesafe_key();
+    let chosen = chosen_ai(db);
+    if typesafe.is_none() && chosen.is_none() {
+        return Err(crate::ai::NO_AI_CHOSEN.into());
+    }
     let settings = store::settings(db)?;
+    // Only the AI the user chose reads the mail: OpenAI keeps its strict-schema
+    // path when it is the choice, any other choice goes through its router.
+    let (openai, assistant) = match chosen {
+        Some(ai) if ai.provider == "openai" => (openai_key().ok(), None),
+        Some(_) => (None, Some(crate::commands::ai_choice::rebuilt_router(db))),
+        None => (None, None),
+    };
     let keys = triage::TriageKeys {
         typesafe,
-        // Without an OpenAI key, messages are still classified; they just get
-        // no summary or extracted dates.
-        openai: openai_key().ok(),
+        openai,
         openai_model: if settings.openai_model.trim().is_empty() {
             crate::ai::openai::OPENAI_MODEL.to_string()
         } else {
             settings.openai_model.trim().to_string()
         },
+        assistant,
     };
     let language = if language == Some("en") { "en" } else { "zh-HK" };
     let _run = TRIAGE_RUN.lock().await;

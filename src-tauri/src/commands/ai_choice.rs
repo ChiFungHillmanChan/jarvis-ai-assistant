@@ -66,7 +66,7 @@ fn keychain_account(choice: &AiChoice, entry: &ProviderChainEntry) -> Option<Str
 }
 
 /// Describe a chain as the one AI in use, for setup and Settings.
-fn describe(chain: &[ProviderChainEntry]) -> Option<CurrentAi> {
+pub(crate) fn describe(chain: &[ProviderChainEntry]) -> Option<CurrentAi> {
     let entry = chain.iter().find(|e| e.enabled)?;
     let (provider, label) = match (entry.provider_type.as_str(), entry.base_url.as_deref()) {
         ("openai", Some(base)) => ("compatible", compat::label(base)),
@@ -80,7 +80,7 @@ fn describe(chain: &[ProviderChainEntry]) -> Option<CurrentAi> {
     Some(CurrentAi { provider: provider.into(), label, model: entry.model_id.clone(), base_url: entry.base_url.clone() })
 }
 
-fn saved_chain(db: &Database) -> Result<Vec<ProviderChainEntry>, String> {
+pub(crate) fn saved_chain(db: &Database) -> Result<Vec<ProviderChainEntry>, String> {
     let conn = db.conn.lock().map_err(|e| e.to_string())?;
     let mut stmt = conn
         .prepare("SELECT position, provider_type, endpoint_id, model_id, enabled, base_url FROM provider_chain ORDER BY position")
@@ -124,7 +124,7 @@ fn save(db: &Database, choice: &AiChoice, entry: &ProviderChainEntry) -> Result<
     tx.commit().map_err(|e| e.to_string())
 }
 
-fn rebuilt_router(db: &Database) -> AiRouter {
+pub(crate) fn rebuilt_router(db: &Database) -> AiRouter {
     let provider = db
         .conn
         .lock()

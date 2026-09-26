@@ -58,7 +58,15 @@ export default function EmailPage({ onSetup }: { onSetup?: () => void }) {
   const from = message ? parseSender(message.sender) : null;
   const files = message?.attachments ?? null;
   const count = (category: string) => triage?.categories.find(([name]) => name === category)?.[1] ?? 0;
-  const triageReady = !!triage?.enabled && !!triage.typesafe_key;
+  // Sorting needs the user's opt-in and something to classify with: a
+  // TypeSafe key, or the AI chosen in setup.
+  const triageReady = !!triage?.enabled && (!!triage.typesafe_key || !!triage.chosen_ai);
+  const chosenAi = triage?.chosen_ai ?? null;
+  const sortedBy = triage?.typesafe_key
+    ? text(`TypeSafe Jev decides the category and whether it needs you; ${chosenAi ?? "no AI yet"} writes a summary and finds dates only for the emails that need one.`, `TypeSafe Jev 判斷分類及是否需要你處理；只有需要摘要或含日期的郵件，才交由${chosenAi ? ` ${chosenAi} ` : "（尚未選擇 AI）"}撰寫摘要及找出日期。`)
+    : chosenAi
+    ? text(`${chosenAi}, the AI you chose, decides the category, writes a summary and finds dates.`, `由你選擇的 ${chosenAi} 判斷分類、撰寫摘要及找出日期。`)
+    : text("Choose your AI in Settings → Your AI first.", "請先到「設定 → 你的 AI」選擇 AI。");
 
   useEffect(() => {
     let current = true;
@@ -127,6 +135,14 @@ export default function EmailPage({ onSetup }: { onSetup?: () => void }) {
   }, [page, messageId, editor, view]);
 
   function refreshWorkspace() { mail.mailWorkspace(accountId).then(data => { stored.current = storedState(data); setWorkspace(data); }).catch(() => undefined); }
+  // A sorting run can take minutes with a slow model; refresh the counts so
+  // progress shows instead of a page that looks frozen.
+  const sorting = busy === text("AI sorting", "AI 整理");
+  useEffect(() => {
+    if (!sorting) return;
+    const timer = window.setInterval(refreshWorkspace, 3_000);
+    return () => window.clearInterval(timer);
+  }, [sorting, accountId]);
   async function run(label: string, action: () => Promise<void>, refresh = true) {
     if (operation.current) return;
     operation.current = true; setBusy(label); setError(""); setNotice("");
@@ -332,7 +348,7 @@ export default function EmailPage({ onSetup }: { onSetup?: () => void }) {
               <button onClick={() => choose({ view: "due" })}><strong>{triage?.open_items ?? 0}</strong><span>{text("open follow-ups", "項未完成待辦")}</span></button>
               <button onClick={() => choose({ view: "untriaged" })}><strong>{triage?.untriaged ?? 0}</strong><span>{text("not sorted yet", "封尚未整理")}</span></button>
             </div>
-            {!triageReady && <p className="mail-hint">{text("AI sorting reads each new email once: TypeSafe Jev decides the category and whether it needs you; gpt-6-luna writes a summary and finds dates only for the emails that need one.", "AI 整理會讀取每封新郵件一次：TypeSafe Jev 判斷分類及是否需要你處理；只有需要摘要或含日期的郵件，才交由 gpt-6-luna 撰寫摘要及找出日期。")}</p>}
+            {!triageReady && <p className="mail-hint">{text("AI sorting reads each new email once. ", "AI 整理會讀取每封新郵件一次。")}{sortedBy}</p>}
             <p className="mail-hint">{text("Select an email to read it here. Use j and k to move through the list.", "選取郵件即可在此閱讀；可按 j、k 上下移動。")}</p>
           </section>}
       </section>
@@ -355,11 +371,16 @@ export default function EmailPage({ onSetup }: { onSetup?: () => void }) {
         <h2>{text("Analysis settings", "分析設定")}</h2>
         <section className="mail-settings-block">
           <h3>{text("AI sorting", "AI 自動整理")}</h3>
-          <p className="mail-hint">{text("Each new email is read once. TypeSafe Jev gets the sender, recipients, subject, the first 1,500 characters and your mailbox addresses to decide its category and whether it needs you. Only emails that need a summary or mention a date go to OpenAI (up to 6,000 characters). Nothing is sent from your Gmail or added to your calendar without your click.", "每封新郵件只讀取一次：TypeSafe Jev 會收到寄件人、收件人、主旨、正文開頭 1,500 字及你的信箱地址，用來判斷分類及是否需要你處理；只有需要摘要或含日期的郵件，才會把最多 6,000 字傳送至 OpenAI。未經你按下按鈕，不會寄出郵件或加入日曆。")}</p>
-          <label>{text("TypeSafe API key", "TypeSafe API 密鑰")}<input type="password" autoComplete="off" value={editor.typesafeKey} placeholder={workspace?.triage.typesafe_key ? text("Saved. Enter a new key to replace it.", "已儲存；輸入新密鑰即可取代。") : text("Paste your key", "貼上密鑰")} onChange={e => setEditor({ ...editor, typesafeKey: e.target.value })} /></label>
-          <p className="mail-hint">{workspace?.triage.openai_key ? text(`Summaries use ${editor.input.openai_model || "gpt-6-luna"} with the OpenAI key saved in Settings.`, `摘要使用設定頁已儲存的 OpenAI 密鑰及 ${editor.input.openai_model || "gpt-6-luna"}。`) : text("No OpenAI key saved: emails are sorted, but get no summary or dates.", "未儲存 OpenAI 密鑰：郵件仍會分類，但不會有摘要及日期。")}</p>
+          <p className="mail-hint">{workspace?.triage.typesafe_key
+            ? text(`Each new email is read once. TypeSafe Jev gets the sender, recipients, subject, the first 1,500 characters and your mailbox addresses to decide its category and whether it needs you. Only emails that need a summary or mention a date go to ${chosenAi ?? "your AI"} (up to 6,000 characters). Nothing is sent from your Gmail or added to your calendar without your click.`, `每封新郵件只讀取一次：TypeSafe Jev 會收到寄件人、收件人、主旨、正文開頭 1,500 字及你的信箱地址，用來判斷分類及是否需要你處理；只有需要摘要或含日期的郵件，才會把最多 6,000 字傳送至${chosenAi ? ` ${chosenAi}` : "你選擇的 AI"}。未經你按下按鈕，不會寄出郵件或加入日曆。`)
+            : text(`Each new email is read once. The sender, recipients, subject and up to 6,000 characters go to ${chosenAi ?? "the AI you choose"}, which decides the category, writes a summary and finds dates. Nothing is sent from your Gmail or added to your calendar without your click.`, `每封新郵件只讀取一次：寄件人、收件人、主旨及最多 6,000 字正文會傳送至${chosenAi ? ` ${chosenAi}` : "你選擇的 AI"}，用來判斷分類、撰寫摘要及找出日期。未經你按下按鈕，不會寄出郵件或加入日曆。`)}</p>
+          {!chosenAi && <p className="mail-hint">{text("No AI chosen yet: choose one in Settings → Your AI.", "尚未選擇 AI：請到「設定 → 你的 AI」選擇。")}</p>}
+          <label>{text("TypeSafe API key (optional, cheaper sorting)", "TypeSafe API 密鑰（選用，分類較便宜）")}<input type="password" autoComplete="off" value={editor.typesafeKey} placeholder={workspace?.triage.typesafe_key ? text("Saved. Enter a new key to replace it.", "已儲存；輸入新密鑰即可取代。") : text("Optional", "選用")} onChange={e => setEditor({ ...editor, typesafeKey: e.target.value })} /></label>
+          <p className="mail-hint">{text(`With a TypeSafe key, Jev sorts every email first and only the ones that need a summary go to ${chosenAi ?? "your AI"}.`, `加入 TypeSafe 密鑰後，由 Jev 先分類每封郵件，只有需要摘要的郵件才交給${chosenAi ? ` ${chosenAi}` : "你選擇的 AI"}。`)}</p>
           <label className="mail-consent"><input type="checkbox" checked={editor.triage} onChange={e => setEditor({ ...editor, triage: e.target.checked, triageConsent: e.target.checked && editor.triageConsent })} />{text("Sort new mail with AI", "以 AI 整理新郵件")}</label>
-          {editor.triage && <label className="mail-consent"><input type="checkbox" required checked={editor.triageConsent} onChange={e => setEditor({ ...editor, triageConsent: e.target.checked })} />{text("I understand that email text is sent to TypeSafe and, for some emails, OpenAI, as described above.", "我明白郵件內容會按上述方式傳送至 TypeSafe，部分郵件亦會傳送至 OpenAI。")}</label>}
+          {editor.triage && <label className="mail-consent"><input type="checkbox" required checked={editor.triageConsent} onChange={e => setEditor({ ...editor, triageConsent: e.target.checked })} />{(editor.typesafeKey.trim() || workspace?.triage.typesafe_key)
+            ? text(`I understand that email text is sent to TypeSafe and, for some emails, ${chosenAi ?? "my AI"}, as described above.`, `我明白郵件內容會按上述方式傳送至 TypeSafe，部分郵件亦會傳送至${chosenAi ? ` ${chosenAi}` : "我選擇的 AI"}。`)
+            : text(`I understand that email text is sent to ${chosenAi ?? "my AI"}, as described above.`, `我明白郵件內容會按上述方式傳送至${chosenAi ? ` ${chosenAi}` : "我選擇的 AI"}。`)}</label>}
         </section>
         <section className="mail-settings-block">
           <h3>{text("Group analysis", "群組分析")}</h3>
