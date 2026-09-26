@@ -40,6 +40,9 @@ export function MailItemRow({ item, text, locale, onChanged, onError, onOpenSour
         <span>{text(`“${item.evidence}”`, `「${item.evidence}」`)}</span>
         {!item.evidence_verified && <small>{text("This quote was not found in the email. Check the original.", "未能在原文找到這句，請核對原信。")}</small>}
       </blockquote>}
+      {item.superseded_by !== null && <p className="mail-item-when">{item.status === "open"
+        ? text("A later email from the same sender changed this date. Check your calendar or reminder.", "寄件人其後來信更改了這個日期，請檢查日曆或提醒。")
+        : text("Replaced by a later email from the same sender with a new date.", "寄件人其後來信更正日期，此項已被取代。")}</p>}
       {onOpenSource && <button type="button" className="mail-link" onClick={() => onOpenSource(item.message_id)}>{parseSender(item.sender).name || text("Source email", "來源郵件")}<span>{item.subject || text("(No subject)", "（無主旨）")}</span></button>}
     </div>
     {!closed && <div className="mail-item-actions">
