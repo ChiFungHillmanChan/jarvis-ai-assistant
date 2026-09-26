@@ -91,9 +91,22 @@ fn open_root(path: &str) -> Result<File, String> {
         .read(true)
         .custom_flags(libc::O_DIRECTORY | libc::O_NOFOLLOW | libc::O_CLOEXEC)
         .open(path)
-        .map_err(|_| {
-            "未能開啟已授權的 Obsidian 資料庫，請重新選取資料夾或檢查 macOS 權限。".to_string()
-        })
+        .map_err(|error| open_error(&error))
+}
+
+/// The folder picker's access lasts only until JARVIS quits; after that a
+/// vault under Desktop or Documents needs the Files and Folders permission,
+/// and macOS answers EPERM until it is given. Re-selecting the folder cannot
+/// fix that for longer than one launch, so only a vault that is really gone
+/// is sent back to the picker.
+fn open_error(error: &std::io::Error) -> String {
+    match error.raw_os_error() {
+        Some(libc::EPERM) | Some(libc::EACCES) => "macOS 未允許 JARVIS 讀取此資料夾。請到「系統設定 > 私隱與安全性 > 檔案與資料夾」允許 JARVIS 存取桌面或文件資料夾；連接設定會保留。".to_string(),
+        Some(libc::ENOENT) | Some(libc::ENOTDIR) => {
+            "找不到 Obsidian 資料庫；資料夾可能已移動或重新命名，請重新選取。".to_string()
+        }
+        _ => "未能開啟已授權的 Obsidian 資料庫，請重新選取資料夾或檢查 macOS 權限。".to_string(),
+    }
 }
 
 fn open_child(parent: &File, name: &str, directory: bool) -> Result<File, String> {
@@ -346,6 +359,19 @@ pub fn search_notes(grant: &VaultGrant, query: &str) -> Result<Vec<ObsidianNote>
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A macOS privacy denial is fixed in System Settings, not by picking the
+    /// folder again: re-selecting only lasts until the next launch, which is
+    /// the reconnect loop. Only a vault that is really gone asks to re-select.
+    #[test]
+    fn a_privacy_denial_points_at_system_settings_not_at_reconnecting() {
+        for code in [libc::EPERM, libc::EACCES] {
+            let message = open_error(&std::io::Error::from_raw_os_error(code));
+            assert!(message.contains("檔案與資料夾"), "{code}: {message}");
+            assert!(!message.contains("重新選取"), "{code}: {message}");
+        }
+        assert!(open_error(&std::io::Error::from_raw_os_error(libc::ENOENT)).contains("重新選取"));
+    }
     struct Fixture(std::path::PathBuf);
     impl Fixture {
         fn new() -> Self {

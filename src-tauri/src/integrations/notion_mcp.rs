@@ -54,7 +54,7 @@ fn client() -> Result<Client, String> {
 async fn body(mut response: reqwest::Response) -> Result<String, String> {
     if !response.status().is_success() {
         return Err(match response.status().as_u16() {
-            401 | 403 => "Notion 拒絕存取。請重新授權，或確認工作區權限。".into(),
+            401 | 403 => ACCESS_DENIED.into(),
             429 => "Notion 請求過於頻繁，請稍後再試。".into(),
             _ => format!(
                 "Notion 服務暫時無法完成請求（HTTP {}）。",
@@ -195,7 +195,10 @@ async fn rpc_response(mut response: reqwest::Response, id: u64) -> Result<Value,
 }
 
 fn allowed_tool(name: &str) -> bool {
-    matches!(name, "notion-search" | "notion-ai-search" | "notion-fetch")
+    matches!(
+        name,
+        "notion-search" | "notion-ai-search" | "notion-fetch" | "notion-list-recent-pages"
+    )
 }
 
 struct McpClient {
@@ -438,13 +441,25 @@ fn apply_tokens(bundle: &mut TokenBundle, value: &Value) -> Result<(), String> {
     Ok(())
 }
 
-async fn access_token(db: &Database) -> Result<String, String> {
+/// Only a refresh token Notion rejected means the grant is gone. A rate limit
+/// or an outage leaves the stored bundle valid, and the next call retries.
+fn refresh_failure(status: u16) -> String {
+    match status {
+        400 | 401 | 403 => "Notion 授權已失效，請重新連接。".into(),
+        429 => "Notion 請求過於頻繁，請稍後再試。".into(),
+        _ => format!("Notion 暫時無法更新授權（HTTP {status}），請稍後再試。"),
+    }
+}
+
+/// `force` refreshes even before the stored expiry: Notion can reject an
+/// access token early, and one refresh is cheaper than a reconnect.
+async fn access_token(db: &Database, force: bool) -> Result<String, String> {
     let _guard = TOKEN_LOCK.lock().await;
     if method(db)?.as_deref() != Some("mcp") {
         return Err("Notion OAuth 連接已解除。".into());
     }
     let mut bundle = load_bundle()?.ok_or("尚未連接 Notion，請先完成授權。")?;
-    if bundle.expires_at <= chrono::Utc::now().timestamp() + 60 {
+    if force || bundle.expires_at <= chrono::Utc::now().timestamp() + 60 {
         let response = client()?
             .post(format!("{ORIGIN}/token"))
             .form(&[
@@ -457,12 +472,26 @@ async fn access_token(db: &Database) -> Result<String, String> {
             .await
             .map_err(|_| "無法更新 Notion 授權，請檢查網絡後重試。")?;
         if !response.status().is_success() {
-            return Err("Notion 授權未能更新，請重新連接。".into());
+            return Err(refresh_failure(response.status().as_u16()));
         }
         apply_tokens(&mut bundle, &response_json(response).await?)?;
         store_bundle(&bundle)?;
     }
     Ok(bundle.access_token)
+}
+
+/// What `body` returns for a 401/403 from the MCP endpoint.
+const ACCESS_DENIED: &str = "Notion 拒絕存取。請重新授權，或確認工作區權限。";
+
+/// Connect with the stored token. If Notion rejects it before its stated
+/// expiry, refresh once and retry before the user is told to reconnect.
+async fn open(db: &Database) -> Result<McpClient, String> {
+    match McpClient::connect(&access_token(db, false).await?).await {
+        Err(error) if error == ACCESS_DENIED => {
+            McpClient::connect(&access_token(db, true).await?).await
+        }
+        connected => connected,
+    }
 }
 
 fn self_identity(value: &Value) -> Result<(String, String), String> {
@@ -512,8 +541,7 @@ pub async fn connection_status(db: &Database) -> Result<NotionConnectionStatus, 
     }
     status.status = "configured".into();
     let checked = async {
-        let token = access_token(db).await?;
-        let mut connection = McpClient::connect(&token).await?;
+        let mut connection = open(db).await?;
         self_identity(
             &connection
                 .call("notion-fetch", json!({"id":"self"}))
@@ -785,6 +813,15 @@ fn notion_url(value: &str) -> bool {
         .unwrap_or(false)
 }
 
+/// Recent-page rows name a page only by URL, ending in the 32 hex digits of
+/// its id: `.../p/<id>` or `.../Some-Title-<id>`.
+fn id_from_url(url: &str) -> Option<String> {
+    let parsed = Url::parse(url).ok()?;
+    let segment = parsed.path_segments()?.next_back()?;
+    let hex = segment.get(segment.len().checked_sub(32)?..)?;
+    hex.bytes().all(|b| b.is_ascii_hexdigit()).then(|| hex.to_string())
+}
+
 fn search_results(value: &Value) -> Result<Vec<super::notion::NotionPage>, String> {
     let rows = value["results"]
         .as_array()
@@ -796,10 +833,14 @@ fn search_results(value: &Value) -> Result<Vec<super::notion::NotionPage>, Strin
                 continue;
             }
         }
-        let Some(raw_id) = row["id"].as_str() else {
+        let Some(raw_id) = row["id"]
+            .as_str()
+            .map(str::to_string)
+            .or_else(|| row["url"].as_str().and_then(id_from_url))
+        else {
             continue;
         };
-        let Ok(id) = page_id(raw_id) else {
+        let Ok(id) = page_id(&raw_id) else {
             continue;
         };
         let url = row["url"].as_str().filter(|url| notion_url(url));
@@ -840,9 +881,18 @@ pub async fn search_pages(
     if query.chars().count() > 1000 {
         return Err("Notion 搜尋文字過長，請縮短後重試。".into());
     }
-    let token = access_token(db).await?;
-    let mut connection = McpClient::connect(&token).await?;
-    let results = search_connected(&mut connection, query).await?;
+    let mut connection = open(db).await?;
+    // The hosted search refuses an empty query below the Business plan, so
+    // "everything" means the pages the user has been working in.
+    let results = if query.is_empty() {
+        search_results(
+            &connection
+                .call("notion-list-recent-pages", json!({"limit": 50}))
+                .await?,
+        )?
+    } else {
+        search_connected(&mut connection, query).await?
+    };
     ensure_generation(db, &generation)?;
     Ok(results)
 }
@@ -878,8 +928,7 @@ async fn search_connected(
 pub async fn get_page_content(db: &Database, id: &str) -> Result<String, String> {
     let generation = generation(db)?;
     let id = page_id(id)?;
-    let token = access_token(db).await?;
-    let mut connection = McpClient::connect(&token).await?;
+    let mut connection = open(db).await?;
     let value = connection.call("notion-fetch", json!({"id":id})).await?;
     ensure_generation(db, &generation)?;
     if let Some(text) = value
@@ -942,10 +991,42 @@ mod tests {
         assert!(!err.contains("sensitive-remote-body"));
     }
 
+    /// notion-list-recent-pages rows carry a URL but no id. Sync used to send
+    /// an empty search instead, which Notion refuses below the Business plan,
+    /// so every scheduled sync failed and notion_pages stayed empty.
+    #[test]
+    fn recent_page_rows_take_their_id_from_the_url() {
+        let pages = search_results(&json!({"results":[
+            {"type":"page","url":"https://app.notion.com/p/3c4e2f1a78bf814f8132c68d1ade8945?pvs=204","title":"Edwin 個案檔案"},
+            {"type":"page","url":"https://www.notion.so/Weekly-Report-30de2f1a78bf80f38975dfb1423f77f7","title":"Weekly Report"},
+            {"type":"database","url":"https://app.notion.com/p/28fe2f1a78bf80cfb9fdca62e8ca5892","title":"會議記錄"},
+            {"type":"page","url":"https://app.notion.com/p/not-an-id","title":"壞連結"},
+            {"type":"page","url":"https://slack.com/p/3c4e2f1a78bf814f8132c68d1ade8945","title":"Slack"}
+        ],"nextCursor":"offset:5"}))
+        .unwrap();
+        let ids: Vec<&str> = pages.iter().map(|p| p.notion_id.as_str()).collect();
+        assert_eq!(ids, ["3c4e2f1a-78bf-814f-8132-c68d1ade8945", "30de2f1a-78bf-80f3-8975-dfb1423f77f7"]);
+        assert_eq!(pages[0].title, "Edwin 個案檔案");
+    }
+
+    /// Only a refresh token Notion actually rejected means reconnecting. A rate
+    /// limit or outage used to say "reconnect" too, and reconnecting wipes the
+    /// synced pages for nothing.
+    #[test]
+    fn only_a_rejected_refresh_token_asks_for_a_reconnect() {
+        for status in [400, 401, 403] {
+            assert!(refresh_failure(status).contains("重新連接"), "{status}");
+        }
+        for status in [429, 500, 502, 503] {
+            assert!(!refresh_failure(status).contains("重新連接"), "{status}");
+        }
+    }
+
     #[test]
     fn mcp_exposes_only_the_existing_notion_operations() {
         assert!(allowed_tool("notion-search"));
         assert!(allowed_tool("notion-fetch"));
+        assert!(allowed_tool("notion-list-recent-pages"));
         assert!(!allowed_tool("notion-create-pages"));
         assert!(!allowed_tool("notion-create-comment"));
         assert!(!allowed_tool("notion-update-page"));
@@ -1047,7 +1128,7 @@ mod tests {
         disconnect(&db).await.unwrap();
         assert!(load_bundle().unwrap().is_none());
         assert!(ensure_generation(&db, &old_generation).is_err());
-        assert!(access_token(&db).await.unwrap_err().contains("已解除"));
+        assert!(access_token(&db, false).await.unwrap_err().contains("已解除"));
         let status = connection_status(&db).await.unwrap();
         assert_eq!(status.status, "not_connected");
         assert!(status.identity.is_none());

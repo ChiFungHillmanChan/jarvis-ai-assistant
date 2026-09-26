@@ -85,7 +85,7 @@ pub async fn sync_connected(db: &crate::db::Database) -> Result<String, String> 
     save_to_db_checked(db, &pages, Some(&generation))?;
     if super::notion_mcp::method(db)?.as_deref() == Some("mcp") {
         Ok(format!(
-            "已同步 {} 個 Notion 搜尋結果；每次最多讀取 50 個結果，並非完整工作區備份。",
+            "已同步 {} 個最近使用的 Notion 頁面；每次最多 50 個，並非完整工作區備份。",
             count
         ))
     } else {

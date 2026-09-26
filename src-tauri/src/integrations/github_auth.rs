@@ -15,6 +15,11 @@ const ACCOUNT: &str = "device_token_bundle";
 const DEVICE_URL: &str = "https://github.com/login/device/code";
 const TOKEN_URL: &str = "https://github.com/login/oauth/access_token";
 const VERIFY_URL: &str = "https://github.com/login/device";
+/// JARVIS's own OAuth App (owner ChiFungHillmanChan, Device Flow on, token
+/// expiry off). A Client ID is public by design -- the device flow sends no
+/// secret -- so it ships in the binary and every build can connect without
+/// the user registering an app of their own.
+const DEFAULT_CLIENT_ID: &str = "Ov23liZ7BoeqHE3fpKrn";
 static HTTP: LazyLock<Client> = LazyLock::new(|| {
     Client::builder()
         .no_proxy()
@@ -172,12 +177,19 @@ fn validate_device_reply(value: &Value) -> Result<(), String> {
     }
     Ok(())
 }
+/// Only a 401 means the grant is gone. Rate limits and outages clear on
+/// their own, and a 403 is as often a secondary rate limit as a missing scope.
+fn http_failure(status: u16) -> String {
+    match status {
+        401 => "GitHub 授權已失效，請重新連接。".into(),
+        403 => "GitHub 拒絕此要求（HTTP 403），可能是請求過於頻繁或權限不足，請稍後再試。".into(),
+        429 | 500..=599 => format!("GitHub 暫時無法使用（HTTP {status}），請稍後再試。"),
+        _ => format!("GitHub 服務回應 HTTP {status}，請檢查連接。"),
+    }
+}
 async fn json_response(mut response: Response) -> Result<Value, String> {
     if !response.status().is_success() {
-        return Err(format!(
-            "GitHub 服務回應 HTTP {}，請檢查連接或重新授權。",
-            response.status().as_u16()
-        ));
+        return Err(http_failure(response.status().as_u16()));
     }
     let mut bytes = Vec::new();
     while let Some(chunk) = response
@@ -310,6 +322,7 @@ fn client_id(db: &Database) -> Option<String> {
                 )
                 .ok()
         })
+        .or_else(|| Some(DEFAULT_CLIENT_ID.to_string()))
         .filter(|v| valid_client_id(v))
 }
 fn valid_client_id(id: &str) -> bool {
@@ -848,6 +861,26 @@ mod tests {
     }
     fn response(value: Value) -> (u16, String, String) {
         (200, value.to_string(), String::new())
+    }
+
+    /// With no Client ID anywhere the Connect button stayed disabled and the
+    /// only way in was registering your own GitHub app.
+    #[test]
+    fn jarvis_ships_with_its_own_client_id() {
+        assert!(valid_client_id(DEFAULT_CLIENT_ID));
+        assert!(client_id(&temp_db()).is_some());
+    }
+
+    /// A GitHub outage or rate limit is not a revoked grant; telling the user
+    /// to re-authorise sends them round a reconnect that fixes nothing.
+    #[test]
+    fn only_an_unauthorised_response_asks_for_a_reconnect() {
+        assert!(http_failure(401).contains("重新連接"));
+        for status in [429, 500, 502, 503] {
+            let message = http_failure(status);
+            assert!(!message.contains("重新"), "{status}: {message}");
+            assert!(message.contains("稍後"), "{status}: {message}");
+        }
     }
 
     #[test]

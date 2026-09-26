@@ -6,5 +6,9 @@
   <string>JARVIS needs microphone access for push-to-talk and always-on wake word listening</string>
   <key>NSAppleEventsUsageDescription</key>
   <string>JARVIS uses System Events to show notifications and toggle dark mode.</string>
+  <key>NSDesktopFolderUsageDescription</key>
+  <string>JARVIS reads the Obsidian vault you connect, if it is in your Desktop folder. It only reads notes and never changes them.</string>
+  <key>NSDocumentsFolderUsageDescription</key>
+  <string>JARVIS reads the Obsidian vault you connect, if it is in your Documents folder. It only reads notes and never changes them.</string>
 </dict>
 </plist>

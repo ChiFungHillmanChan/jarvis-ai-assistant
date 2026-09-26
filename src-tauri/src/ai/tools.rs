@@ -251,7 +251,7 @@ pub fn get_tool_definitions() -> Vec<Tool> {
         },
         Tool {
             name: "search_notion".into(),
-            description: "Search Notion pages by keyword. Returns matching pages with IDs, titles, and URLs. A keyword is required; Notion cannot list the whole workspace.".into(),
+            description: "Search Notion pages by keyword. Returns matching pages with IDs, titles, and URLs. An empty query lists the pages the user used most recently.".into(),
             parameters: json!({
                 "type": "object",
                 "properties": {
@@ -1093,12 +1093,6 @@ async fn execute_github_tool(
     }
 }
 
-/// The Notion MCP refuses an empty query unless the search is sorted or
-/// filtered, and both of those need a Business plan. The model sent one for
-/// "what's in my Notion?", got a generic failure, and told the user Notion
-/// needed reconnecting.
-const EMPTY_NOTION_QUERY: &str = "Notion search needs at least one keyword; it cannot list the whole workspace. Search a likely topic, or ask the user what to look for.";
-
 async fn execute_notion_tool(
     name: &str,
     args: &serde_json::Value,
@@ -1108,11 +1102,6 @@ async fn execute_notion_tool(
     match name {
         "search_notion" => {
             let query = args["query"].as_str().unwrap_or("");
-            if query.trim().is_empty()
-                && crate::integrations::notion_mcp::method(db)?.as_deref() == Some("mcp")
-            {
-                return Ok(EMPTY_NOTION_QUERY.to_string());
-            }
             // Inside a chat turn the user waits through every round-trip, and the
             // result is truncated to a few thousand bytes anyway, so take one page.
             let pages = notion::search_pages_connected(
@@ -2537,21 +2526,6 @@ mod local_data_tests {
         let mut expected = vec!["attention", "due", "untriaged"];
         expected.extend(crate::mail::models::MAIL_CATEGORIES);
         assert_eq!(listed, expected);
-    }
-
-    /// The Notion MCP refuses an empty query below the Business plan, and the
-    /// model then told the user Notion needed reconnecting. The guard answers
-    /// before any network call, so this runs offline.
-    #[tokio::test]
-    async fn an_empty_notion_query_asks_for_a_keyword_instead_of_failing() {
-        let db = crate::db::test_database();
-        db.conn.lock().unwrap().execute(
-            "INSERT INTO user_preferences(key,value) VALUES ('notion_connection_method','mcp')", [],
-        ).unwrap();
-        for query in ["", "   "] {
-            let out = run("search_notion", serde_json::json!({"query": query}), &db).await;
-            assert_eq!(out, EMPTY_NOTION_QUERY);
-        }
     }
 
     /// create_task wrote into a table the assistant could not read back.
