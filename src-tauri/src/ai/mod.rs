@@ -154,6 +154,8 @@ const SIDE_EFFECTING_TOOLS: &[&str] = &[
     "create_github_issue",
     "create_notion_page",
     "create_task",
+    // Local only, but a fallback replay would still flip it twice.
+    "update_follow_up",
     "remember",
     "forget",
 ];
@@ -175,6 +177,10 @@ const UNTRUSTED_READ_TOOLS: &[&str] = &[
     "list_events",
     // Issue and PR titles are written by whoever opened them.
     "list_github_items",
+    // JARVIS's synced mail data: titles, summaries and evidence are derived
+    // from email a stranger wrote.
+    "list_follow_ups",
+    "list_inbox_triage",
 ];
 
 /// Per-turn tally of side-effecting tool calls, shared between the router and
@@ -1232,6 +1238,8 @@ mod tests {
             "search_notion",
             "list_events",
             "list_github_items",
+            "list_follow_ups",
+            "list_inbox_triage",
         ] {
             let ledger = SideEffectLedger::new();
             ledger.note(reader);

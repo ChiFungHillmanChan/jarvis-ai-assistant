@@ -23,7 +23,7 @@ const TOOL_CATEGORIES: &[(&str, &[&str])] = &[
     ),
     (
         "email",
-        &["search_emails", "read_email", "draft_email", "archive_email"],
+        &["search_emails", "read_email", "draft_email", "archive_email", "list_inbox_triage"],
     ),
     (
         "calendar",
@@ -43,7 +43,7 @@ const TOOL_CATEGORIES: &[(&str, &[&str])] = &[
     ),
     (
         "tasks",
-        &["create_task"],
+        &["create_task", "list_tasks", "list_follow_ups", "update_follow_up"],
     ),
     (
         "render",
@@ -62,7 +62,7 @@ const CATEGORY_KEYWORDS: &[(&str, &[&str])] = &[
     ("github", &["github", "pr", "pull request", "issue", "repo", "commit", "branch"]),
     ("notion", &["notion", "page", "database", "wiki", "doc"]),
     ("obsidian", &["obsidian", "notes", "vault", "note"]),
-    ("tasks", &["task", "todo", "remind", "deadline", "priority"]),
+    ("tasks", &["task", "todo", "remind", "deadline", "priority", "follow", "due"]),
     ("render", &["chart", "graph", "status", "visualize", "data", "stats"]),
     ("system", &["open", "launch", "run", "file", "find", "clipboard", "screenshot", "window", "volume", "notification", "process", "kill"]),
     ("memory", &["remember", "forget", "memory", "記住", "唔記得"]),

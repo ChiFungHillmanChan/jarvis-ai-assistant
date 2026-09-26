@@ -76,6 +76,16 @@ pub fn get_tool_definitions() -> Vec<Tool> {
             }),
         },
         Tool {
+            name: "list_tasks".into(),
+            description: "List tasks in the JARVIS task list (the ones create_task adds), open ones first by deadline.".into(),
+            parameters: json!({
+                "type": "object",
+                "properties": {
+                    "include_completed": { "type": "boolean", "description": "Also list completed tasks (default false)" }
+                }
+            }),
+        },
+        Tool {
             name: "system_info".into(),
             description: "Get system information: hostname, uptime, disk usage, memory".into(),
             parameters: json!({ "type": "object", "properties": {} }),
@@ -140,6 +150,47 @@ pub fn get_tool_definitions() -> Vec<Tool> {
                 "required": ["email_id"]
             }),
         },
+        // The next three read JARVIS's own synced copy of the mailbox -- the
+        // data the Mail, Calendar and Home pages show -- instead of Gmail.
+        Tool {
+            name: "list_follow_ups".into(),
+            description: "List the follow-ups JARVIS extracted from the user's email: deadlines, events, replies owed and tasks. These show on the JARVIS Calendar and Home pages but are NOT Google Calendar events unless the line names one. Check here whenever the user mentions a deadline, due date or item that list_events does not have. Open items only unless include_closed is true.".into(),
+            parameters: json!({
+                "type": "object",
+                "properties": {
+                    "date_from": { "type": "string", "description": "Only items due on or after this date, YYYY-MM-DD. Undated items are left out when a date is given." },
+                    "date_to": { "type": "string", "description": "Only items due on or before this date, YYYY-MM-DD" },
+                    "include_closed": { "type": "boolean", "description": "Also list items already done or dismissed (default false)" }
+                }
+            }),
+        },
+        Tool {
+            name: "update_follow_up".into(),
+            description: "Mark one follow-up from list_follow_ups as done or dismissed, or reopen it. Dismiss is how to remove an outdated or duplicate follow-up, for example a deadline a later email replaced. It does not touch Google Calendar.".into(),
+            parameters: json!({
+                "type": "object",
+                "properties": {
+                    "item_id": { "type": "integer", "description": "The ID from list_follow_ups" },
+                    "status": { "type": "string", "enum": ["done", "dismissed", "open"] }
+                },
+                "required": ["item_id", "status"]
+            }),
+        },
+        Tool {
+            name: "list_inbox_triage".into(),
+            description: "List messages from the JARVIS Mail page with JARVIS's triage: category, whether it needs attention, next due date and a one-line summary. Use view 'attention' for 'what needs my attention' or 'anything important'. The Gmail ID works with read_email. Use search_emails for mail JARVIS has not synced.".into(),
+            parameters: json!({
+                "type": "object",
+                "properties": {
+                    "view": {
+                        "type": "string",
+                        "enum": ["attention", "due", "untriaged", "work", "jobs", "finance", "schedule", "account", "personal", "promotions"],
+                        "description": "attention = flagged as needing the user; due = has an open follow-up; untriaged = not classified yet; otherwise a category"
+                    },
+                    "query": { "type": "string", "description": "Words to match in sender, subject, body or summary" }
+                }
+            }),
+        },
         Tool {
             name: "list_events".into(),
             description: "List upcoming Google Calendar events. Defaults to next 7 days if no dates specified.".into(),
@@ -200,7 +251,7 @@ pub fn get_tool_definitions() -> Vec<Tool> {
         },
         Tool {
             name: "search_notion".into(),
-            description: "Search Notion pages by query. Returns matching pages with IDs, titles, and URLs.".into(),
+            description: "Search Notion pages by keyword. Returns matching pages with IDs, titles, and URLs. A keyword is required; Notion cannot list the whole workspace.".into(),
             parameters: json!({
                 "type": "object",
                 "properties": {
@@ -433,6 +484,10 @@ pub fn tool_status_label(name: &str) -> &'static str {
         "find_files" => "Finding files...",
         "open_file" => "Opening file...",
         "create_task" => "Creating task...",
+        "list_tasks" => "Checking tasks...",
+        "list_follow_ups" => "Checking follow-ups...",
+        "update_follow_up" => "Updating follow-up...",
+        "list_inbox_triage" => "Checking your inbox...",
         "system_info" => "Checking system...",
         "send_notification" => "Sending notification...",
         "render_chart" => "Rendering chart...",
@@ -467,6 +522,10 @@ pub fn tool_voice_narration(name: &str) -> &'static str {
         "find_files" => "Looking for those files.",
         "open_file" => "Opening that file.",
         "create_task" => "Creating that task for you.",
+        "list_tasks" => "Checking your task list.",
+        "list_follow_ups" => "Checking your follow-ups.",
+        "update_follow_up" => "Updating that follow-up.",
+        "list_inbox_triage" => "Checking what needs your attention.",
         "system_info" => "Checking your system.",
         "send_notification" => "Sending a notification.",
         "render_chart" => "Putting together a chart for you.",
@@ -592,10 +651,187 @@ fn execute_memory_tool(
 
 /// Truncate tool results to avoid blowing up context windows.
 fn truncate_result(s: String) -> String {
-    if s.len() > 4000 {
-        format!("{}... [truncated, {} total chars]", crate::util::truncate_bytes(&s, 4000), s.len())
+    truncate_to(s, 4000)
+}
+
+fn truncate_to(s: String, limit: usize) -> String {
+    if s.len() > limit {
+        format!("{}... [truncated, {} total chars]", crate::util::truncate_bytes(&s, limit), s.len())
     } else {
         s
+    }
+}
+
+/// The local lists are already bounded by their queries, and a page of
+/// Chinese titles and summaries runs past the 4000-byte cap long before its
+/// last line -- undated follow-ups sort last and were the ones cut.
+const LOCAL_LIST_LIMIT: usize = 12_000;
+
+/// Lines shown from `list_inbox_triage`; the store pages 50 at a time.
+const TRIAGE_LINES: usize = 25;
+
+/// An optional `YYYY-MM-DD` argument. Anything else is refused rather than
+/// compared as a string, where "28 Sept" would sort after every real date.
+fn date_arg(args: &serde_json::Value, key: &str) -> Result<Option<String>, String> {
+    match args[key].as_str().map(str::trim).filter(|s| !s.is_empty()) {
+        None => Ok(None),
+        Some(s) => chrono::NaiveDate::parse_from_str(s, "%Y-%m-%d")
+            .map(|_| Some(s.to_string()))
+            .map_err(|_| format!("{key} must be a date in YYYY-MM-DD format.")),
+    }
+}
+
+/// JARVIS's own synced data: the follow-ups, triage and tasks the Mail,
+/// Calendar and Home pages show. Reads go through the same store functions
+/// those pages call, so the assistant and the UI cannot disagree.
+fn execute_local_data_tool(
+    name: &str,
+    args: &serde_json::Value,
+    db: &crate::db::Database,
+) -> Result<String, String> {
+    use crate::mail::store;
+    match name {
+        "list_follow_ups" => {
+            let from = date_arg(args, "date_from")?;
+            let to = date_arg(args, "date_to")?;
+            let in_range = |due: Option<&str>| {
+                if from.is_none() && to.is_none() {
+                    return true;
+                }
+                due.is_some_and(|d| {
+                    from.as_deref().map_or(true, |f| d >= f) && to.as_deref().map_or(true, |t| d <= t)
+                })
+            };
+            let items: Vec<_> = store::list_items(db, None, args["include_closed"].as_bool().unwrap_or(false))?
+                .into_iter()
+                .filter(|i| in_range(i.due_date.as_deref()))
+                .collect();
+            if items.is_empty() {
+                return Ok("No follow-ups found.".to_string());
+            }
+            let lines: Vec<String> = items
+                .iter()
+                .map(|i| {
+                    let due = match (i.due_date.as_deref(), i.due_time.as_deref()) {
+                        (Some(d), Some(t)) => format!("{d} {t}"),
+                        (Some(d), None) => d.to_string(),
+                        _ => "no date".to_string(),
+                    };
+                    let calendar = match i.calendar_event_id.as_deref() {
+                        None => "not added".to_string(),
+                        Some("created") => "added".to_string(),
+                        Some(id) => format!("event {id}"),
+                    };
+                    let place = i.location.as_deref().map(|l| format!(" | At: {l}")).unwrap_or_default();
+                    format!(
+                        "ID: {} | {} | {} | Due: {}{} | Status: {} | Google Calendar: {} | From email \"{}\" by {}",
+                        i.id, i.kind, i.title, due, place, i.status, calendar, i.subject, i.sender,
+                    )
+                })
+                .collect();
+            Ok(lines.join("\n"))
+        }
+        "update_follow_up" => {
+            let id = args["item_id"]
+                .as_i64()
+                .or_else(|| args["item_id"].as_str().and_then(|s| s.trim().parse().ok()))
+                .ok_or("item_id must be the numeric ID from list_follow_ups.")?;
+            let status = args["status"].as_str().unwrap_or("");
+            if !["open", "done", "dismissed"].contains(&status) {
+                return Err("status must be open, done or dismissed.".to_string());
+            }
+            let item = store::get_item(db, id).map_err(|_| format!("No follow-up with ID {id}."))?;
+            // update_item writes remind_at as given, so pass the current one
+            // through; a status change must not silently cancel a reminder.
+            let item = store::update_item(db, id, status, item.remind_at.as_deref())?;
+            let mut out = format!(
+                "Follow-up {} ({}, due {}) is now {}.",
+                item.id,
+                item.title,
+                item.due_date.as_deref().unwrap_or("no date"),
+                item.status
+            );
+            match item.calendar_event_id.as_deref() {
+                None => {}
+                Some("created") => out.push_str(" It was also added to Google Calendar, and that event is unchanged."),
+                Some(event) => out.push_str(&format!(
+                    " It is also on Google Calendar as event {event}, and that event is unchanged. Call delete_event with that ID only if the user wants it removed there too."
+                )),
+            }
+            Ok(out)
+        }
+        "list_inbox_triage" => {
+            let view = args["view"].as_str().map(str::trim).filter(|v| !v.is_empty());
+            if let Some(v) = view {
+                if !["attention", "due", "untriaged"].contains(&v) && !crate::mail::models::MAIL_CATEGORIES.contains(&v) {
+                    return Err(format!(
+                        "Unknown view {v}. Use attention, due, untriaged, or one of: {}.",
+                        crate::mail::models::MAIL_CATEGORIES.join(", ")
+                    ));
+                }
+            }
+            let page = store::list_messages(db, None, None, args["query"].as_str().unwrap_or(""), 0, view)?;
+            if page.messages.is_empty() {
+                return Ok("No synced messages match. If the Mail page has no account connected, search_emails searches Gmail directly.".to_string());
+            }
+            let mut lines: Vec<String> = page
+                .messages
+                .iter()
+                .take(TRIAGE_LINES)
+                .map(|m| {
+                    let triage = match &m.triage {
+                        None => " | Not triaged".to_string(),
+                        Some(t) => format!(
+                            " | {}{}{}{}",
+                            t.category,
+                            if t.attention { " | Needs attention" } else { "" },
+                            m.next_due.as_deref().map(|d| format!(" | Next due: {d}")).unwrap_or_default(),
+                            t.summary.as_deref().map(|s| format!(" | Summary: {s}")).unwrap_or_default(),
+                        ),
+                    };
+                    format!(
+                        "Gmail ID: {} | {} | From: {} | Subject: {}{}",
+                        m.provider_id,
+                        m.received_at.get(..10).unwrap_or(&m.received_at),
+                        m.sender,
+                        m.subject,
+                        triage
+                    )
+                })
+                .collect();
+            if page.total as usize > lines.len() {
+                lines.insert(0, format!("Showing the newest {} of {} messages.", lines.len(), page.total));
+            }
+            Ok(lines.join("\n"))
+        }
+        "list_tasks" => {
+            let conn = db.conn.lock().map_err(|e| e.to_string())?;
+            let mut stmt = conn
+                .prepare(
+                    "SELECT id, title, deadline, priority, status FROM tasks WHERE (?1 OR status != 'completed') \
+                     ORDER BY status = 'completed', deadline IS NULL, deadline, priority DESC, id LIMIT 50",
+                )
+                .map_err(|e| e.to_string())?;
+            let lines: Vec<String> = stmt
+                .query_map([args["include_completed"].as_bool().unwrap_or(false)], |r| {
+                    Ok(format!(
+                        "ID: {} | {} | Deadline: {} | Priority: {} | Status: {}",
+                        r.get::<_, i64>(0)?,
+                        r.get::<_, String>(1)?,
+                        r.get::<_, Option<String>>(2)?.unwrap_or_else(|| "none".into()),
+                        r.get::<_, i64>(3)?,
+                        r.get::<_, String>(4)?,
+                    ))
+                })
+                .map_err(|e| e.to_string())?
+                .collect::<Result<_, _>>()
+                .map_err(|e| e.to_string())?;
+            if lines.is_empty() {
+                return Ok("No tasks in the JARVIS task list. Tasks JARVIS found in email are follow-ups: check list_follow_ups.".to_string());
+            }
+            Ok(lines.join("\n"))
+        }
+        _ => Err(format!("Unknown local data tool: {}", name)),
     }
 }
 
@@ -857,6 +1093,12 @@ async fn execute_github_tool(
     }
 }
 
+/// The Notion MCP refuses an empty query unless the search is sorted or
+/// filtered, and both of those need a Business plan. The model sent one for
+/// "what's in my Notion?", got a generic failure, and told the user Notion
+/// needed reconnecting.
+const EMPTY_NOTION_QUERY: &str = "Notion search needs at least one keyword; it cannot list the whole workspace. Search a likely topic, or ask the user what to look for.";
+
 async fn execute_notion_tool(
     name: &str,
     args: &serde_json::Value,
@@ -866,6 +1108,11 @@ async fn execute_notion_tool(
     match name {
         "search_notion" => {
             let query = args["query"].as_str().unwrap_or("");
+            if query.trim().is_empty()
+                && crate::integrations::notion_mcp::method(db)?.as_deref() == Some("mcp")
+            {
+                return Ok(EMPTY_NOTION_QUERY.to_string());
+            }
             // Inside a chat turn the user waits through every round-trip, and the
             // result is truncated to a few thousand bytes anyway, so take one page.
             let pages = notion::search_pages_connected(
@@ -1084,6 +1331,10 @@ async fn execute_tool_inner(
                 Err(e) => format!("Failed to lock database: {}", e),
             }
         }
+        "list_tasks" | "list_follow_ups" | "update_follow_up" | "list_inbox_triage" => {
+            let out = execute_local_data_tool(name, &args, db).unwrap_or_else(|e| e);
+            return truncate_to(out, LOCAL_LIST_LIMIT);
+        }
         "system_info" => {
             crate::system::control::system_info().await.unwrap_or_else(|e| format!("Error: {}", e))
         }
@@ -1292,6 +1543,8 @@ mod injection_tests {
             // anything that is not a local path (see `is_local_file_path`).
             "open_file" => (false, false),
             "create_task" => (false, false),
+            // Flips a local status only; Google Calendar is never touched.
+            "update_follow_up" => (false, false),
             "send_notification" => (false, false),
             "render_chart" => (false, false),
             "render_status" => (false, false),
@@ -1315,6 +1568,9 @@ mod injection_tests {
             "search_notes" => (true, false),
             "read_note" => (true, false),
             "list_memories" => (true, false),
+            "list_follow_ups" => (true, false),
+            "list_inbox_triage" => (true, false),
+            "list_tasks" => (true, false),
 
             // Emits outbound. Every one of these must be justified in
             // ALLOWED_OUTBOUND below.
@@ -2168,5 +2424,158 @@ mod local_time_tests {
             "got: {suffix}"
         );
         assert!(!suffix.contains("Today:"), "the bare date line is replaced, got: {suffix}");
+    }
+}
+
+#[cfg(test)]
+mod local_data_tests {
+    use super::*;
+    use std::sync::Arc;
+
+    /// Two AWS emails with different Gold Badge dates (the older one
+    /// superseded), a newsletter, their triage rows and their follow-ups --
+    /// the shape the Calendar overlay and Home follow-up list read.
+    fn mail_db() -> crate::db::Database {
+        let db = crate::db::test_database();
+        db.conn.lock().unwrap().execute_batch(
+            "INSERT INTO mail_accounts(id,email) VALUES ('a','me@example.com');
+             INSERT INTO mail_messages(id,account_id,provider_id,subject,sender,received_at) VALUES
+               (1,'a','g1','Submission (Due 28 Sept 2026)','AWS <aws@example.com>','2026-09-18T07:38:28Z'),
+               (2,'a','g2','Submission (Due 16 Oct 2026)','AWS <aws@example.com>','2026-09-18T08:21:57Z'),
+               (3,'a','g3','Weekly newsletter','News <news@example.com>','2026-09-19T08:00:00Z');
+             INSERT INTO mail_items(id,message_id,kind,title,due_date,status,remind_at,calendar_event_id) VALUES
+               (19,1,'deadline','Submit Gold Badge','2026-09-28','open','2026-09-27T09:00',NULL),
+               (18,2,'deadline','Submit Gold Badge','2026-10-16','open',NULL,'evt16'),
+               (7,2,'task','Share training proof',NULL,'open',NULL,NULL),
+               (5,3,'reply','Reply to newsletter',NULL,'done',NULL,NULL);
+             INSERT INTO mail_triage(message_id,category,category_confidence,needs_reply,action_required,has_date,importance,attention,summary,jev_model) VALUES
+               (2,'work',0.9,0.0,0.9,0.9,2.5,1,'Gold Badge due 16 Oct','jev'),
+               (3,'promotions',0.9,0.0,0.0,0.0,0.1,0,'Newsletter','jev');",
+        ).unwrap();
+        db
+    }
+
+    async fn run(name: &str, args: serde_json::Value, db: &crate::db::Database) -> String {
+        let auth = Arc::new(crate::auth::google::GoogleAuth::new_empty());
+        execute_tool(name, &args.to_string(), db, &auth, &crate::ai::SideEffectLedger::new()).await
+    }
+
+    fn status_of(db: &crate::db::Database, id: i64) -> (String, Option<String>) {
+        db.conn.lock().unwrap()
+            .query_row("SELECT status, remind_at FROM mail_items WHERE id=?1", [id], |r| Ok((r.get(0)?, r.get(1)?)))
+            .unwrap()
+    }
+
+    /// The follow-ups the Calendar page overlays are not Google events, so
+    /// before this tool the assistant searched Google Calendar, found nothing
+    /// and told the user the 28 Sep deadline did not exist.
+    #[tokio::test]
+    async fn list_follow_ups_shows_what_the_calendar_page_overlays() {
+        let db = mail_db();
+        let out = run("list_follow_ups", serde_json::json!({}), &db).await;
+        for want in ["ID: 19", "2026-09-28", "ID: 18", "2026-10-16", "Due 28 Sept 2026", "ID: 7", "evt16"] {
+            assert!(out.contains(want), "missing {want} in:\n{out}");
+        }
+        assert!(!out.contains("ID: 5 "), "a done item is not open work:\n{out}");
+
+        let closed = run("list_follow_ups", serde_json::json!({"include_closed": true}), &db).await;
+        assert!(closed.contains("ID: 5 "), "include_closed shows finished items:\n{closed}");
+
+        let ranged = run("list_follow_ups", serde_json::json!({"date_from": "2026-09-26", "date_to": "2026-09-30"}), &db).await;
+        assert!(ranged.contains("ID: 19"), "{ranged}");
+        assert!(!ranged.contains("ID: 18") && !ranged.contains("ID: 7"), "outside the range or undated:\n{ranged}");
+
+        let bad = run("list_follow_ups", serde_json::json!({"date_from": "28 Sept"}), &db).await;
+        assert!(bad.contains("YYYY-MM-DD"), "{bad}");
+    }
+
+    #[tokio::test]
+    async fn update_follow_up_dismisses_one_item_and_keeps_its_reminder() {
+        let db = mail_db();
+        let out = run("update_follow_up", serde_json::json!({"item_id": 19, "status": "dismissed"}), &db).await;
+        assert!(out.contains("dismissed"), "{out}");
+        assert_eq!(status_of(&db, 19), ("dismissed".into(), Some("2026-09-27T09:00".into())));
+        assert_eq!(status_of(&db, 18).0, "open", "only the named item changes");
+
+        // Reopening is the undo.
+        run("update_follow_up", serde_json::json!({"item_id": 19, "status": "open"}), &db).await;
+        assert_eq!(status_of(&db, 19).0, "open");
+
+        // Dismissing a follow-up does not touch Google, so the reply has to
+        // say the calendar copy is still there.
+        let on_calendar = run("update_follow_up", serde_json::json!({"item_id": 18, "status": "done"}), &db).await;
+        assert!(on_calendar.contains("evt16"), "{on_calendar}");
+
+        let bad = run("update_follow_up", serde_json::json!({"item_id": 19, "status": "deleted"}), &db).await;
+        assert_eq!(status_of(&db, 19).0, "open", "{bad}");
+        let missing = run("update_follow_up", serde_json::json!({"item_id": 999, "status": "done"}), &db).await;
+        assert!(missing.contains("999"), "{missing}");
+    }
+
+    /// Same list the Mail page's "Needs attention" view shows.
+    #[tokio::test]
+    async fn list_inbox_triage_matches_the_mail_page_views() {
+        let db = mail_db();
+        let attention = run("list_inbox_triage", serde_json::json!({"view": "attention"}), &db).await;
+        assert!(attention.contains("g2") && attention.contains("Gold Badge due 16 Oct"), "{attention}");
+        assert!(!attention.contains("g3") && !attention.contains("g1"), "{attention}");
+
+        let searched = run("list_inbox_triage", serde_json::json!({"query": "newsletter"}), &db).await;
+        assert!(searched.contains("g3") && searched.contains("promotions"), "{searched}");
+
+        let bad = run("list_inbox_triage", serde_json::json!({"view": "everything"}), &db).await;
+        assert!(bad.contains("attention"), "an unknown view names the valid ones:\n{bad}");
+    }
+
+    /// The schema enum is what the model can pick from; a category added to
+    /// the Mail page must be reachable here too.
+    #[test]
+    fn triage_view_enum_matches_the_mail_page() {
+        let tool = get_tool_definitions().into_iter().find(|t| t.name == "list_inbox_triage").unwrap();
+        let listed: Vec<&str> = tool.parameters["properties"]["view"]["enum"]
+            .as_array().unwrap().iter().map(|v| v.as_str().unwrap()).collect();
+        let mut expected = vec!["attention", "due", "untriaged"];
+        expected.extend(crate::mail::models::MAIL_CATEGORIES);
+        assert_eq!(listed, expected);
+    }
+
+    /// The Notion MCP refuses an empty query below the Business plan, and the
+    /// model then told the user Notion needed reconnecting. The guard answers
+    /// before any network call, so this runs offline.
+    #[tokio::test]
+    async fn an_empty_notion_query_asks_for_a_keyword_instead_of_failing() {
+        let db = crate::db::test_database();
+        db.conn.lock().unwrap().execute(
+            "INSERT INTO user_preferences(key,value) VALUES ('notion_connection_method','mcp')", [],
+        ).unwrap();
+        for query in ["", "   "] {
+            let out = run("search_notion", serde_json::json!({"query": query}), &db).await;
+            assert_eq!(out, EMPTY_NOTION_QUERY);
+        }
+    }
+
+    /// create_task wrote into a table the assistant could not read back.
+    #[tokio::test]
+    async fn list_tasks_reads_back_what_create_task_wrote() {
+        let db = crate::db::test_database();
+        run("create_task", serde_json::json!({"title": "Book SELT", "deadline": "2026-10-05", "priority": 2}), &db).await;
+        let out = run("list_tasks", serde_json::json!({}), &db).await;
+        assert!(out.contains("Book SELT") && out.contains("2026-10-05"), "{out}");
+    }
+
+    /// Follow-up titles and triage summaries derive from email a stranger
+    /// wrote, so reading them taints the turn exactly like read_email does.
+    /// Tasks stay the user's own data (see remember_still_works_after_a_local_only_turn).
+    #[test]
+    fn local_data_reads_taint_the_turn_and_the_status_change_is_a_side_effect() {
+        for name in ["list_follow_ups", "list_inbox_triage"] {
+            let ledger = crate::ai::SideEffectLedger::new();
+            ledger.note(name);
+            assert!(ledger.saw_untrusted_read(), "{name} must taint the turn");
+            assert_eq!(ledger.count(), 0, "{name} changes nothing");
+        }
+        let ledger = crate::ai::SideEffectLedger::new();
+        ledger.note("update_follow_up");
+        assert_eq!(ledger.count(), 1);
     }
 }
