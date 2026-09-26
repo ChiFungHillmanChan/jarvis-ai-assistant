@@ -1,8 +1,22 @@
 use oauth2::{
-    basic::BasicClient, AuthUrl, ClientId, ClientSecret, CsrfToken,
-    PkceCodeChallenge, RedirectUrl, Scope, TokenUrl,
-    AuthorizationCode, TokenResponse, RefreshToken, reqwest::async_http_client,
+    basic::BasicClient, AuthUrl, ClientId, ClientSecret, CsrfToken, EndpointNotSet,
+    EndpointSet, PkceCodeChallenge, RedirectUrl, Scope, TokenUrl,
+    AuthorizationCode, TokenResponse, RefreshToken,
 };
+
+/// Authorization and token endpoints set; device, introspection and
+/// revocation endpoints unused (revocation is a plain POST in `disconnect`).
+type GoogleClient =
+    BasicClient<EndpointSet, EndpointNotSet, EndpointNotSet, EndpointNotSet, EndpointSet>;
+
+/// HTTP client for the token endpoint. Redirects are refused so an
+/// authorization code or refresh token is never re-sent to another host.
+fn token_http_client() -> Result<reqwest::Client, String> {
+    reqwest::Client::builder()
+        .redirect(reqwest::redirect::Policy::none())
+        .build()
+        .map_err(|e| format!("Could not create the Google sign-in client: {}", e))
+}
 use std::sync::Mutex;
 use tokio::sync::oneshot;
 
@@ -98,28 +112,23 @@ impl GoogleAuth {
         !self.client_id.is_empty()
     }
 
-    fn build_client(&self, redirect_port: u16) -> Result<BasicClient, String> {
+    fn build_client(&self, redirect_port: u16) -> Result<GoogleClient, String> {
         if self.client_id.is_empty() {
             return Err(
                 "Google sign-in is not configured for this build. Please contact support."
                     .to_string(),
             );
         }
-        let secret = if self.client_secret.is_empty() {
-            None
-        } else {
-            Some(ClientSecret::new(self.client_secret.clone()))
-        };
-        let client = BasicClient::new(
-            ClientId::new(self.client_id.clone()),
-            secret,
-            AuthUrl::new(AUTH_URL.to_string()).map_err(|e| e.to_string())?,
-            Some(TokenUrl::new(TOKEN_URL.to_string()).map_err(|e| e.to_string())?),
-        )
-        .set_redirect_uri(
-            RedirectUrl::new(format!("http://127.0.0.1:{}", redirect_port))
-                .map_err(|e| e.to_string())?,
-        );
+        let mut client = BasicClient::new(ClientId::new(self.client_id.clone()))
+            .set_auth_uri(AuthUrl::new(AUTH_URL.to_string()).map_err(|e| e.to_string())?)
+            .set_token_uri(TokenUrl::new(TOKEN_URL.to_string()).map_err(|e| e.to_string())?)
+            .set_redirect_uri(
+                RedirectUrl::new(format!("http://127.0.0.1:{}", redirect_port))
+                    .map_err(|e| e.to_string())?,
+            );
+        if !self.client_secret.is_empty() {
+            client = client.set_client_secret(ClientSecret::new(self.client_secret.clone()));
+        }
         Ok(client)
     }
 
@@ -233,10 +242,11 @@ impl GoogleAuth {
             .map_err(|_| "OAuth cancelled".to_string())?
             .map_err(|e| format!("Google OAuth denied: {}", e))?;
 
+        let http = token_http_client()?;
         let exchange_future = client
             .exchange_code(AuthorizationCode::new(code))
             .set_pkce_verifier(pkce_verifier)
-            .request_async(async_http_client);
+            .request_async(&http);
         let token_result = tokio::time::timeout(
             std::time::Duration::from_secs(30),
             exchange_future,
@@ -284,9 +294,10 @@ impl GoogleAuth {
             .ok_or("No refresh token available")?;
         let client = self.build_client(0)?;
         let refresh_token = RefreshToken::new(refresh);
+        let http = token_http_client()?;
         let refresh_future = client
             .exchange_refresh_token(&refresh_token)
-            .request_async(async_http_client);
+            .request_async(&http);
         let token_result = tokio::time::timeout(
             std::time::Duration::from_secs(30),
             refresh_future,
@@ -558,5 +569,19 @@ mod tests {
         assert!(!constant_time_eq(&state, "abc-124"), "a forged state must be rejected");
         assert!(!constant_time_eq(&state, "abc-1234"), "length differences must be rejected");
         assert!(!constant_time_eq(&state, ""), "an absent state must be rejected");
+    }
+
+    /// Live: Google must answer a made-up refresh token with `invalid_grant`.
+    /// That proves the token request works end to end (TLS, client
+    /// authentication, form encoding, error parsing); a wrong client or a
+    /// broken request would come back as `invalid_client` or a transport error.
+    /// Needs GOOGLE_CLIENT_ID and GOOGLE_CLIENT_SECRET in the environment.
+    #[tokio::test]
+    #[ignore]
+    async fn live_token_endpoint_rejects_a_made_up_refresh_token() {
+        let auth = GoogleAuth::new().expect("GOOGLE_CLIENT_ID must be set");
+        *auth.refresh_token.lock().unwrap() = Some("1//made-up-refresh-token".to_string());
+        let err = auth.refresh_access_token().await.unwrap_err();
+        assert_eq!(err, "Token refresh failed: invalid_grant");
     }
 }

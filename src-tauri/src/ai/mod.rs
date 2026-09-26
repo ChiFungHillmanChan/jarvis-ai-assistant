@@ -2083,7 +2083,7 @@ mod tests {
         };
         KeychainStore::put(
             KEY_SERVICE,
-            "local_endpoint_api_key:r2-01-keychain",
+            "local_endpoint_api_key:r2-01-keychain", // gitleaks:allow (test account name)
             "sk-from-keychain",
         )
         .unwrap();
@@ -2105,6 +2105,6 @@ mod tests {
         // Nothing is still holding the connection once the call returns.
         assert!(db.conn.try_lock().is_ok());
 
-        KeychainStore::delete(KEY_SERVICE, "local_endpoint_api_key:r2-01-keychain").ok();
+        KeychainStore::delete(KEY_SERVICE, "local_endpoint_api_key:r2-01-keychain").ok(); // gitleaks:allow (test account name)
     }
 }

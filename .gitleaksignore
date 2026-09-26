@@ -1,0 +1,8 @@
+# Test fixtures, not secrets: fake keys in ai/mod.rs tests ("sk-from-keychain")
+# and a fake Calendar nextPageToken in integrations/calendar.rs tests.
+214481bddbacb44c49b9adda7db121217e7a2b1a:src-tauri/src/ai/mod.rs:generic-api-key:1152
+214481bddbacb44c49b9adda7db121217e7a2b1a:src-tauri/src/ai/mod.rs:generic-api-key:1174
+214481bddbacb44c49b9adda7db121217e7a2b1a:src-tauri/src/integrations/calendar.rs:generic-api-key:212
+5e41b376e06ac5cdca4a34cf2450ff14108a5bb2:src-tauri/src/ai/mod.rs:generic-api-key:1152
+5e41b376e06ac5cdca4a34cf2450ff14108a5bb2:src-tauri/src/ai/mod.rs:generic-api-key:1174
+5e41b376e06ac5cdca4a34cf2450ff14108a5bb2:src-tauri/src/integrations/calendar.rs:generic-api-key:212
