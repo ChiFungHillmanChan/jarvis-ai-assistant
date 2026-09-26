@@ -42,9 +42,10 @@ const ZH: Record<string, string> = {
   'Processing...': '處理中…',
 };
 
-export function chatStatusText(status: string, text: Text): string {
-  const translate = (value: string) => text(value.replace(/\.\.\.$/, '…'), ZH[value] ?? value);
-  const step = /^(Planning|Running): (.+)$/.exec(status);
-  if (step) return text(`${step[1]}: ${step[2].replace(/\.\.\.$/, '…')}`, `${step[1] === 'Planning' ? '準備' : '執行'}：${ZH[step[2]] ?? step[2]}`);
-  return translate(status);
+/** A progress line as a plain action ("Searching emails: Gold Badge"), never a log prefix. */
+export function chatStatusText(status: string, text: Text, detail?: string | null): string {
+  const action = /^(?:Planning|Running): (.+)$/.exec(status)?.[1] ?? status;
+  const english = action.replace(/\.\.\.$/, '…');
+  const label = text(english, ZH[action] ?? english);
+  return detail ? `${label.replace(/…$/, '')}${text(': ', '：')}${detail}` : label;
 }

@@ -9,6 +9,7 @@ interface WorkspaceContextValue {
   saveError: string | null;
   open: (view: WorkspaceView) => void;
   newTask: () => string;
+  forgetSession: (sessionId: string) => void;
   readValue: <T>(tab: string, key: string, initial: T) => T;
   writeValue: (tab: string, key: string, value: unknown) => void;
   subscribe: (callback: () => void) => () => void;
@@ -81,11 +82,17 @@ export function WorkspaceProvider({ children }: { children: ReactNode }) {
     dispatch({ type: 'open', view: 'chat', id: `task:${sessionId}`, sessionId, title: 'New task' });
     return sessionId;
   }, []);
+  const forgetSession = useCallback((sessionId: string) => {
+    // An unsent draft is kept past pruning on purpose, so remove it explicitly.
+    delete pages.current[`task:${sessionId}`];
+    subscribers.current.forEach(fn => fn());
+    dispatch({ type: 'forget', sessionId });
+  }, []);
   const setAppearance = useCallback((value: string) => {
     setAppearanceValue(value);
     updateSetting('workspace_appearance', value).catch(() => setSaveError('Could not save appearance.'));
   }, []);
-  return <WorkspaceContext.Provider value={{ state, dispatch, ready, saveError, open, newTask, readValue, writeValue, subscribe, appearance, setAppearance }}>{children}</WorkspaceContext.Provider>;
+  return <WorkspaceContext.Provider value={{ state, dispatch, ready, saveError, open, newTask, forgetSession, readValue, writeValue, subscribe, appearance, setAppearance }}>{children}</WorkspaceContext.Provider>;
 }
 export function useWorkspace() { const value = useContext(WorkspaceContext); if (!value) throw new Error('WorkspaceProvider is required'); return value; }
 export function WorkspaceTabScope({ id, children }: { id: string; children: ReactNode }) { return <TabContext.Provider value={id}>{children}</TabContext.Provider>; }

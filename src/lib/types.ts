@@ -14,7 +14,11 @@ export interface ChatMessage {
   role: "user" | "assistant";
   content: string;
   created_at: string | null;
+  /** What JARVIS did for this reply. Kept for this app session only, never saved. */
+  steps?: ChatStep[];
 }
+
+export interface ChatStep { status: string; detail: string | null }
 
 export interface DashboardData {
   greeting: string;
@@ -177,7 +181,7 @@ export interface ChatTokenPayload {
 export interface ChatStatusPayload {
   status: string;
   phase?: AssistantPhase;
-  detail?: string;
+  detail?: string | null;
 }
 
 export interface ChatStatePayload {

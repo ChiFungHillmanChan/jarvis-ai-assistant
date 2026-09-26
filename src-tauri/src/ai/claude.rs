@@ -370,13 +370,14 @@ pub async fn send(
                     "chat-status",
                     json!({
                         "status": format!("Running: {}", label),
+                        "detail": tools::tool_status_detail(name, &args_str),
                         "phase": "acting"
                     }),
                 );
                 if !narrated {
                     if let Some(ref tx) = tts_tx {
                         // Always narrate -- this also flushes any buffered AI text
-                        let narration = tools::tool_voice_narration(name);
+                        let narration = tools::tool_voice_narration(name, &tools::read_language_pref(db));
                         let _ = tx.try_send(TtsCommand::Narrate(narration.to_string()));
                         narrated = true;
                     }

@@ -76,7 +76,9 @@ function AppShell() {
   const stateRef = useRef(state); stateRef.current = state;
   const seenResults = useRef(new Set<string>());
   const focusedRuns = useRef(new Set<string>());
-  const listening = voice.state === 'Listening' || voice.state === 'WakeWordListening';
+  // Push-to-talk only. Waiting for "Hey Jarvis" is not a recording the user has to finish.
+  const listening = voice.state === 'Listening';
+  const awaitingWakeWord = voice.state === 'WakeWordListening';
   useEffect(() => { if ((activeTab.view === 'chat' || activeTab.view === 'result') && activeTab.sessionId) chat.selectSession(activeTab.sessionId); }, [activeTab.id, activeTab.view, activeTab.sessionId, chat.selectSession]);
   useEffect(() => { if (voice.error) showToast(voice.error, 'error'); }, [voice.error]);
   const toggleVoice = useCallback(() => {
@@ -134,7 +136,7 @@ function AppShell() {
   }, [state, dispatch, toggleVoice, activity.state, assistant, wallpaper, raised]);
   function render(tab: WorkspaceTab) {
     switch (tab.view) {
-      case 'home': return <AutomationOverview activity={activity} onVoice={toggleVoice} listening={listening} />;
+      case 'home': return <AutomationOverview activity={activity} onVoice={toggleVoice} listening={listening} voiceState={voice.state} />;
       case 'chat': return chat.sessionId === tab.sessionId ? <AssistantPanel full onVoice={toggleVoice} /> : <div className="workspace-loading">{text("Opening task…", "正在開啟工作…")}</div>;
       case 'email': return <EmailPage onSetup={() => setSetupOpen(true)} />;
       case 'calendar': return <CalendarPage />;
@@ -149,13 +151,13 @@ function AppShell() {
   if (setupOpen) return <OnboardingWizard onComplete={() => { setSetupOpen(false); dispatch({ type: 'open', view: 'email' }); }} />;
   if (!ready) return <div className="workspace-loading" role="status">{text("Restoring your workspace…", "正在還原工作區…")}</div>;
   return <div className="workspace-app">
-    <header className="workspace-titlebar" data-tauri-drag-region><WindowControls /><span data-tauri-drag-region>{text("JARVIS Workspace", "JARVIS 工作區")}</span><div><button className="workspace-button" onClick={() => setSetupOpen(true)}>{text('Set up', '設定導引')}</button>{wallpaper && raised && <button className="icon-button" aria-label={text("Return to desktop", "返回桌面")} onClick={() => void invoke('lower_wallpaper')}><Minimize2 size={15} /></button>}<button className="icon-button" aria-label={text("Search workspaces", "搜尋工作區")} onClick={() => setSearch(true)}><Search size={16} /></button><button className="workspace-button assistant-toggle" aria-pressed={assistant || activeTab.view === 'chat'} disabled={activeTab.view === 'chat'} onClick={() => setAssistant(v => !v)}><MessageSquare size={15} />{text('Assistant', 'AI 助理')}</button></div></header>
+    <header className="workspace-titlebar" data-tauri-drag-region><WindowControls /><span data-tauri-drag-region>{text("JARVIS Workspace", "JARVIS 工作區")}</span><div><button className="workspace-button" onClick={() => setSetupOpen(true)}>{text('Set up', '設定導引')}</button>{wallpaper && raised && <button className="icon-button" aria-label={text("Return to desktop", "返回桌面")} onClick={() => void invoke('lower_wallpaper')}><Minimize2 size={15} /></button>}<button className="icon-button" aria-label={text("Search workspaces", "搜尋工作區")} onClick={() => setSearch(true)}><Search size={16} /></button><button className="workspace-button assistant-toggle" aria-pressed={assistant || activeTab.view === 'chat'} disabled={activeTab.view === 'chat'} onClick={() => { if (!assistant && chat.sessionId === 'legacy') chat.selectSession(crypto.randomUUID()); setAssistant(v => !v); }}><MessageSquare size={15} />{text('Assistant', 'AI 助理')}</button></div></header>
     <div className="workspace-body">{sidebar && <Sidebar onSearch={() => setSearch(true)} onCollapse={() => setSidebar(false)} />}<main className="workspace-main"><WorkspaceTabs sidebarVisible={sidebar} onShowSidebar={() => setSidebar(true)} />{saveError && <p className="workspace-error" role="alert">{saveError}</p>}<div className="workspace-content"><div className="workspace-pages">{state.tabs.map(tab => {
       const active = tab.id === state.activeId;
       // The sphere and task composer exist only in their active view. Tool work stays mounted.
       if ((tab.view === 'home' || tab.view === 'chat') && !active) return null;
       return <section className={`workspace-page view-${tab.view}`} key={tab.id} id={`page-${tab.id}`} role="tabpanel" aria-labelledby={`tab-${tab.id}`} hidden={!active}><WorkspaceTabScope id={tab.id}><ErrorBoundary><Suspense fallback={<div className="workspace-loading">{text("Opening workspace…", "正在開啟工作區…")}</div>}>{render(tab)}</Suspense></ErrorBoundary></WorkspaceTabScope></section>;
-    })}</div>{assistant && activeTab.view !== 'chat' && <div className="workspace-assistant-dock"><WorkspaceTabScope key={chat.sessionId} id={`task:${chat.sessionId}`}><AssistantPanel onClose={() => setAssistant(false)} onVoice={toggleVoice} /></WorkspaceTabScope></div>}</div><footer className="workspace-statusbar"><span className={`status-dot ${chat.busy || listening ? 'is-working' : ''}`} /><span>{listening ? text('Listening · Press ⌘⇧J to finish', '聆聽中 · 按 ⌘⇧J 完成') : chat.busy ? text('Assistant working · You can keep using your tools', 'AI 助理處理中 · 可繼續使用其他工具') : text('Ready', '就緒')}</span>{chat.busy && <button className="text-button" onClick={() => dispatch({ type: 'open', view: 'chat', id: `task:${chat.runningSessionId}`, sessionId: chat.runningSessionId!, title: 'Assistant' })}>{text("View task", "查看工作")}</button>}<span className="grow" /><button className="text-button" onClick={() => setSearch(true)}><Command size={12} />{text("K Search", "K 搜尋")}</button></footer></main></div>
+    })}</div>{assistant && activeTab.view !== 'chat' && <div className="workspace-assistant-dock"><WorkspaceTabScope key={chat.sessionId} id={`task:${chat.sessionId}`}><AssistantPanel onClose={() => setAssistant(false)} onVoice={toggleVoice} /></WorkspaceTabScope></div>}</div><footer className="workspace-statusbar"><span className={`status-dot ${chat.busy || listening ? 'is-working' : ''}`} /><span>{listening ? text('Listening · Press ⌘⇧J to finish', '聆聽中 · 按 ⌘⇧J 完成') : chat.busy ? text('Assistant working · You can keep using your tools', 'AI 助理處理中 · 可繼續使用其他工具') : awaitingWakeWord ? text('Listening for "Hey Jarvis"', '正在等候「Hey Jarvis」') : text('Ready', '就緒')}</span>{chat.busy && <button className="text-button" onClick={() => dispatch({ type: 'open', view: 'chat', id: `task:${chat.runningSessionId}`, sessionId: chat.runningSessionId!, title: 'Assistant' })}>{text("View task", "查看工作")}</button>}<span className="grow" /><button className="text-button" onClick={() => setSearch(true)}><Command size={12} />{text("K Search", "K 搜尋")}</button></footer></main></div>
     {search && <CommandPicker onClose={() => setSearch(false)} />}<ToastContainer /><ModelPullToast progress={progress} visible={progress !== null} /><UpdateToast /><ToolApproval />
   </div>;
 }

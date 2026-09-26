@@ -2,6 +2,7 @@ use crate::voice::{JarvisAppHandle, VoiceEngine, VoiceState};
 use futures_util::StreamExt;
 use sha2::{Digest, Sha256};
 use std::path::PathBuf;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use tauri::Manager;
 use tokio::io::AsyncWriteExt;
@@ -49,7 +50,27 @@ fn should_skip_download(force: bool, downloaded: bool) -> bool {
     !force && downloaded
 }
 
+/// One download at a time. Two would write the same `.part` file: the second
+/// truncates it under the first, which then renames a file with a hole in it
+/// (its checksum is taken over the stream, not the file).
+static DOWNLOADING: AtomicBool = AtomicBool::new(false);
+
+struct DownloadGuard;
+
+impl DownloadGuard {
+    fn acquire() -> Option<Self> {
+        DOWNLOADING.compare_exchange(false, true, Ordering::SeqCst, Ordering::SeqCst).ok().map(|_| DownloadGuard)
+    }
+}
+
+impl Drop for DownloadGuard {
+    fn drop(&mut self) {
+        DOWNLOADING.store(false, Ordering::SeqCst);
+    }
+}
+
 async fn download_model(app_handle: JarvisAppHandle, force: bool) -> Result<PathBuf, String> {
+    let _only_download = DownloadGuard::acquire().ok_or("The speech model is already downloading.")?;
     let path = model_path();
     if should_skip_download(force, is_downloaded()) {
         return Ok(path);
@@ -165,6 +186,19 @@ fn verify_checksum(actual: &str) -> Result<(), String> {
     Err(format!(
         "Model checksum mismatch: expected {MODEL_SHA256}, got {actual}. The download was discarded."
     ))
+}
+
+#[cfg(test)]
+mod download_guard_tests {
+    use super::DownloadGuard;
+
+    #[test]
+    fn a_second_download_is_refused_while_one_runs() {
+        let first = DownloadGuard::acquire().expect("the first download starts");
+        assert!(DownloadGuard::acquire().is_none(), "two downloads would write the same .part file");
+        drop(first);
+        assert!(DownloadGuard::acquire().is_some(), "a finished or failed download frees the slot");
+    }
 }
 
 #[cfg(test)]

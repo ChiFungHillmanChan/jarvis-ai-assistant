@@ -58,6 +58,8 @@ import AccountPanel from "../components/AccountPanel";
 import { UserRound } from "lucide-react";
 import { useWorkspace, useWorkspaceValue } from "../workspace/WorkspaceContext";
 import "./settings-workspace.css";
+import { MAX_ADDRESS_CHARS, MAX_INSTRUCTIONS_CHARS, PERSONA_CHOICES, personaLabel, personaValue, type PersonaKey } from "../lib/persona";
+import { canSwitchListening, voiceStateKind } from "../lib/always-listening";
 import { Cpu, Key, Globe, Gem, Mic, Bot, Palette, HardDrive, GithubMark, NotionMark } from "../components/icons";
 
 const API_KEY_PROVIDERS = [
@@ -87,6 +89,10 @@ export default function Settings() {
   const [aiProvider, setAiProvider] = useState("gemini_primary");
   const [autoBriefing, setAutoBriefing] = useState(false);
   const [displayName, setDisplayName] = useState("");
+  const [persona, setPersona] = useState<Record<string, string>>({});
+  const [personaText, setPersonaText] = useState({ assistant_address: "", assistant_instructions: "" });
+  const [personaSaved, setPersonaSaved] = useState(false);
+  const [personaError, setPersonaError] = useState<string | null>(null);
   const [displayNameSaved, setDisplayNameSaved] = useState(false);
   const [apiKeyDrafts, setApiKeyDrafts] = useState<Record<string, string>>({});
   const [apiKeyStatus, setApiKeyStatus] = useState<Record<string, boolean>>({});
@@ -225,6 +231,8 @@ export default function Settings() {
       // Same rule as the startup reader in lib.rs: an absent row means off.
       setAutoBriefing(s.values["auto_briefing"] === "true");
       setDisplayName(s.values[DISPLAY_NAME_KEY] ?? "");
+      setPersona(Object.fromEntries(Object.keys(PERSONA_CHOICES).map(key => [key, personaValue(key as PersonaKey, s.values[key] ?? null)])));
+      setPersonaText({ assistant_address: s.values.assistant_address ?? "", assistant_instructions: s.values.assistant_instructions ?? "" });
       setLoaded(true);
     } catch {
       setLoadError(true);
@@ -252,8 +260,12 @@ export default function Settings() {
   useEffect(() => {
     getVoiceSettings().then(setVoiceSettingsState).catch(() => setWakeError("Could not load voice settings."));
     listTtsVoices().then(setTtsVoices).catch(() => setWakeError("Could not load the available voices."));
-    void refreshWakeStatus();
   }, []);
+
+  // This tab stays mounted while hidden, and the home switch or a download can
+  // change listening meanwhile: re-read whenever the voice state changes kind.
+  const voiceKind = voiceStateKind(voiceState);
+  useEffect(() => { void refreshWakeStatus(); }, [voiceKind]);
 
   useEffect(() => {
     listLocalEndpoints().then(setEndpoints).catch(() => {});
@@ -1114,7 +1126,7 @@ export default function Settings() {
             <h2 className="settings-heading">{text('Wake word', '喚醒詞')}</h2>
             <div style={styles.hint}>{text('Experimental. Listen locally for "Hey Jarvis" to start voice input.', '實驗功能：在本機偵測「Hey Jarvis」以啟動語音輸入。')}</div>
             <label style={styles.option}>
-              <input type="checkbox" checked={wakeStatus?.enabled ?? false} disabled={!wakeCanEnable || wakeBusy || modelDownloading !== null} onChange={(e) => { void handleWakeToggle(e.target.checked); }} style={styles.radio} />
+              <input type="checkbox" checked={wakeStatus?.running ?? false} disabled={!wakeCanEnable || !canSwitchListening(wakeStatus, wakeBusy, voiceState)} onChange={(e) => { void handleWakeToggle(e.target.checked); }} style={styles.radio} />
               <span style={styles.optionLabel}>{text('Enable wake word', '啟用喚醒詞')}</span>
             </label>
             <div style={styles.statusText}>{getWakeStatusLine(voiceState)}</div>
@@ -1145,7 +1157,44 @@ export default function Settings() {
           </div>
         </>)}
 
-        {section === "assistant" && (
+        {section === "assistant" && (<>
+          <div className="settings-panel">
+            <h2 className="settings-heading">{text('Personalisation', '個人化')}</h2>
+            <div style={styles.hint}>{text('How JARVIS talks to you, in typed and spoken replies.', '設定 JARVIS 在文字及語音回覆中與你對話的方式。')}</div>
+            <div style={{ marginTop: 12 }}>
+              <div style={{ color: "var(--text-secondary)", fontSize: 12, marginBottom: 4 }}>{text('What JARVIS calls you', 'JARVIS 對你的稱呼')}</div>
+              <input aria-label={text('What JARVIS calls you', 'JARVIS 對你的稱呼')} value={personaText.assistant_address} maxLength={MAX_ADDRESS_CHARS} placeholder={displayName || text('Your name', '你的名稱')} style={styles.tokenInput} onChange={(e) => { setPersonaText(p => ({ ...p, assistant_address: e.target.value })); setPersonaSaved(false); }} />
+              <div style={{ ...styles.hint, marginTop: 6 }}>{text('Leave blank to use your name. JARVIS uses it now and then, not in every reply.', '留空則使用你的名稱。JARVIS 只會在適當時候稱呼你，不會每句都用。')}</div>
+            </div>
+            {([["assistant_tone", text('Tone', '語氣')], ["assistant_length", text('Reply length', '回覆長度')], ["assistant_chinese", text('Chinese replies', '中文回覆')], ["assistant_search", text('Search depth', '搜尋深度')]] as [PersonaKey, string][]).map(([key, label]) => (
+              <div key={key} style={{ marginTop: 12 }}>
+                <div style={{ color: "var(--text-secondary)", fontSize: 12, marginBottom: 4 }}>{label}</div>
+                <select aria-label={label} value={personaValue(key, persona[key] ?? null)} style={styles.select} onChange={async (e) => {
+                  const v = e.target.value;
+                  setPersona(p => ({ ...p, [key]: v }));
+                  await setPreference(key, v);
+                }}>
+                  {PERSONA_CHOICES[key].map(value => <option key={value} value={value}>{personaLabel(value, text)}</option>)}
+                </select>
+                {key === "assistant_chinese" && <div style={{ ...styles.hint, marginTop: 6 }}>{text('Emails, events and notes written for other people always use written Chinese.', '寫給其他人的郵件、活動及筆記一律使用書面語。')}</div>}
+                {key === "assistant_search" && <div style={{ ...styles.hint, marginTop: 6 }}>{text('Thorough uses a little more of your AI allowance.', '徹底模式會略為增加 AI 用量。')}</div>}
+              </div>
+            ))}
+            <div style={{ marginTop: 12 }}>
+              <div style={{ color: "var(--text-secondary)", fontSize: 12, marginBottom: 4 }}>{text('Anything else about how you like replies', '其他回覆偏好')}</div>
+              <textarea aria-label={text('Anything else about how you like replies', '其他回覆偏好')} value={personaText.assistant_instructions} maxLength={MAX_INSTRUCTIONS_CHARS} rows={4} placeholder={text('For example: lead with the most urgent item.', '例如：先說最緊急的事項。')} style={{ ...styles.tokenInput, resize: "vertical" }} onChange={(e) => { setPersonaText(p => ({ ...p, assistant_instructions: e.target.value })); setPersonaSaved(false); }} />
+              <div style={{ ...styles.hint, marginTop: 6 }}>{`${personaText.assistant_instructions.length}/${MAX_INSTRUCTIONS_CHARS} · `}{text('Tone and format only. It cannot change what JARVIS is allowed to do.', '只影響語氣及格式，不會改變 JARVIS 可以做的事。')}</div>
+            </div>
+            <button style={styles.saveBtn} onClick={async () => {
+              setPersonaError(null);
+              try {
+                await setPreference("assistant_address", personaText.assistant_address.trim());
+                await setPreference("assistant_instructions", personaText.assistant_instructions.trim());
+                setPersonaSaved(true);
+              } catch (e) { setPersonaError(String(e)); }
+            }}>{personaSaved ? t("saved") : t("save")}</button>
+            {personaError && <div style={styles.errorText}>{personaError}</div>}
+          </div>
           <div className="settings-panel">
             <h2 className="settings-heading">{text('Briefing', '簡報')}</h2>
             <label style={styles.option}>
@@ -1153,7 +1202,7 @@ export default function Settings() {
               <span style={styles.optionLabel}>{text('Speak morning briefing on startup (once per day)', '啟動時朗讀晨早簡報（每日一次）')}</span>
             </label>
           </div>
-        )}
+        </>)}
 
         {section === "appearance" && (<>
           <div className="settings-panel">

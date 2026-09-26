@@ -325,12 +325,13 @@ pub async fn send(
                     "chat-status",
                     json!({
                         "status": format!("Running: {}", label),
+                        "detail": tools::tool_status_detail(&fc.name, &args_str),
                         "phase": "acting"
                     }),
                 );
                 if !narrated {
                     if let Some(ref tx) = tts_tx {
-                        let narration = tools::tool_voice_narration(&fc.name);
+                        let narration = tools::tool_voice_narration(&fc.name, &tools::read_language_pref(db));
                         let _ = tx.try_send(TtsCommand::Narrate(narration.to_string()));
                         narrated = true;
                     }

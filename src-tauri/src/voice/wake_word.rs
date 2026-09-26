@@ -2,7 +2,7 @@ use crate::ai::{AiRouter, Workload};
 use crate::auth::google::GoogleAuth;
 use crate::db::Database;
 use crate::voice::model_manager;
-use crate::voice::transcribe::LocalTranscriber;
+use crate::voice::transcribe::{DecodeProfile, LocalTranscriber};
 use crate::voice::tts::StreamingTts;
 use crate::voice::{JarvisAppHandle, VoiceEngine, VoiceState};
 use serde_json::json;
@@ -82,7 +82,11 @@ impl WakeWordService {
                 router.start()?;
             }
             router.set_wake_word_resting(true);
-            router.unmute();
+            // A push-to-talk recording keeps capturing; stop_ptt hands the
+            // microphone to the wake word when that recording ends.
+            if !push_to_talk_active(&self.voice_engine.get_state()) {
+                router.unmute();
+            }
         }
 
         let token = {
@@ -91,8 +95,9 @@ impl WakeWordService {
             guard.clone()
         };
 
-        self.voice_engine
-            .set_state_and_emit(VoiceState::WakeWordListening);
+        if !push_to_talk_active(&self.voice_engine.get_state()) {
+            self.voice_engine.set_state_and_emit(VoiceState::WakeWordListening);
+        }
 
         let voice_engine = Arc::clone(&self.voice_engine);
         let db = Arc::clone(&self.db);
@@ -125,7 +130,7 @@ impl WakeWordService {
             let _ = handle.await;
         }
 
-        let ptt_active = matches!(self.voice_engine.get_state(), VoiceState::Listening);
+        let ptt_active = push_to_talk_active(&self.voice_engine.get_state());
         {
             let mut router = self
                 .voice_engine
@@ -141,10 +146,11 @@ impl WakeWordService {
             }
         }
 
-        if *self.voice_engine.muted.lock().map_err(|e| e.to_string())? {
-            self.voice_engine.set_state_and_emit(VoiceState::Disabled);
-        } else {
-            self.voice_engine.set_state_and_emit(VoiceState::Idle);
+        // stop_listening only finishes a recording whose state is still
+        // Listening, so leave a push-to-talk session's state alone.
+        if !ptt_active {
+            let muted = *self.voice_engine.muted.lock().map_err(|e| e.to_string())?;
+            self.voice_engine.set_state_and_emit(if muted { VoiceState::Disabled } else { VoiceState::Idle });
         }
 
         Ok(())
@@ -240,7 +246,9 @@ async fn detection_loop(
     token: CancellationToken,
     local_transcriber: LocalTranscriber,
 ) -> Result<(), String> {
-    voice_engine.set_state_and_emit(VoiceState::WakeWordListening);
+    if !push_to_talk_active(&voice_engine.get_state()) {
+        voice_engine.set_state_and_emit(VoiceState::WakeWordListening);
+    }
     let mut gate = SpeechGate::new();
 
     loop {
@@ -252,6 +260,9 @@ async fn detection_loop(
                 }
 
                 if !matches!(voice_engine.get_state(), VoiceState::WakeWordListening | VoiceState::Idle) {
+                    continue;
+                }
+                if wake_check_paused() {
                     continue;
                 }
 
@@ -289,7 +300,7 @@ async fn detection_loop(
                     continue;
                 }
 
-                let transcript = transcribe_local_window(local_transcriber.clone(), audio_window, Arc::clone(&db)).await?;
+                let transcript = transcribe_local_window(local_transcriber.clone(), audio_window).await?;
 
                 // Whisper ran for a few hundred milliseconds; a push-to-talk
                 // session may have started in that window. Acting now would
@@ -313,6 +324,7 @@ async fn detection_loop(
                     app_handle.clone(),
                     token.clone(),
                     local_transcriber.clone(),
+                    command_speech_threshold(gate.noise_floor()),
                 ).await?;
 
                 // Capture was muted for the whole exchange, so the ring still
@@ -325,6 +337,20 @@ async fn detection_loop(
     }
 }
 
+/// Push-to-talk owns the microphone and the voice state from start_listening
+/// until stop_listening finishes; switching listening on or off must not
+/// overwrite either, or the recording can no longer be finished.
+fn push_to_talk_active(state: &VoiceState) -> bool {
+    matches!(state, VoiceState::Listening | VoiceState::Processing | VoiceState::Speaking)
+}
+
+/// JARVIS speaking (the microphone would only hear JARVIS), or another
+/// assistant turn holding the FOREGROUND guard (a detection would be dropped
+/// there anyway): skip the tick rather than spend a Whisper pass on it.
+fn wake_check_paused() -> bool {
+    crate::voice::tts::is_playing() || crate::chat_session::FOREGROUND.try_lock().is_err()
+}
+
 async fn handle_wake_word_detection(
     voice_engine: Arc<VoiceEngine>,
     db: Arc<Database>,
@@ -332,6 +358,7 @@ async fn handle_wake_word_detection(
     app_handle: JarvisAppHandle,
     token: CancellationToken,
     local_transcriber: LocalTranscriber,
+    speech_threshold: f32,
 ) -> Result<(), String> {
     let _assistant_guard = match crate::chat_session::FOREGROUND.try_lock() {
         Ok(guard) => guard,
@@ -359,7 +386,7 @@ async fn handle_wake_word_detection(
         .unmute();
 
     voice_engine.set_state_and_emit(VoiceState::WakeWordProcessing);
-    let command_audio = record_command_audio(Arc::clone(&voice_engine), token.clone()).await?;
+    let command_audio = record_command_audio(Arc::clone(&voice_engine), token.clone(), speech_threshold).await?;
     if command_audio.is_empty() {
         voice_engine
             .audio_router
@@ -466,12 +493,15 @@ async fn handle_wake_word_detection(
     Ok(())
 }
 
+/// "Hey Jarvis" is an English phrase, so the wake window is transcribed as
+/// English whatever the user dictates in; see the test of the same name.
+const WAKE_PHRASE_LANGUAGE: Option<&str> = Some("en");
+
 async fn transcribe_local_window(
     local_transcriber: LocalTranscriber,
     audio_window: Vec<f32>,
-    db: Arc<crate::db::Database>,
 ) -> Result<String, String> {
-    tauri::async_runtime::spawn_blocking(move || local_transcriber.transcribe(&audio_window, &db))
+    tauri::async_runtime::spawn_blocking(move || local_transcriber.transcribe_as(&audio_window, WAKE_PHRASE_LANGUAGE, DecodeProfile::WAKE))
         .await
         .map_err(|e| format!("Wake-word transcription task failed: {}", e))?
 }
@@ -495,9 +525,36 @@ async fn transcribe_with_fallback(
         .map_err(|e| format!("Wake-word local STT task failed: {}", e))?
 }
 
+/// Longest request after "Yes?". Just inside the push-to-talk buffer, which
+/// keeps only its newest 30 s at 48 kHz (`AudioRouter::new`).
+const COMMAND_MAX_DURATION: Duration = Duration::from_secs(28);
+/// Give up when nothing is said after "Yes?".
+const COMMAND_NO_SPEECH_TIMEOUT: Duration = Duration::from_secs(8);
+/// Quiet 250 ms polls in a row that end a request: 1.5 s, so a pause to think
+/// mid-sentence does not send half of it.
+const COMMAND_END_QUIET_POLLS: u32 = 6;
+
+/// The quietest a stretch after "Yes?" can be and still count as speech.
+const COMMAND_MIN_SPEECH_RMS: f32 = 0.02;
+
+/// Speech after "Yes?" has to stand clear of the room the wake gate measured,
+/// as the wake phrase did. A fixed bar let music or a crowd above it count as
+/// speech, so every request in a loud room ran to COMMAND_MAX_DURATION.
+fn command_speech_threshold(noise_floor: f32) -> f32 {
+    (noise_floor * SPEECH_OVER_NOISE).max(COMMAND_MIN_SPEECH_RMS)
+}
+
+fn command_finished(elapsed: Duration, heard_speech: bool, quiet_polls: u32) -> bool {
+    if !heard_speech {
+        return elapsed >= COMMAND_NO_SPEECH_TIMEOUT;
+    }
+    quiet_polls >= COMMAND_END_QUIET_POLLS || elapsed >= COMMAND_MAX_DURATION
+}
+
 async fn record_command_audio(
     voice_engine: Arc<VoiceEngine>,
     token: CancellationToken,
+    speech_threshold: f32,
 ) -> Result<Vec<f32>, String> {
     voice_engine
         .audio_router
@@ -527,14 +584,14 @@ async fn record_command_audio(
                 }
 
                 let trailing_rms = trailing_rms(&samples, 0.35);
-                if trailing_rms > 0.02 {
+                if trailing_rms > speech_threshold {
                     heard_speech = true;
                     silent_windows = 0;
                 } else if heard_speech && duration_secs > 0.8 {
                     silent_windows += 1;
                 }
 
-                if start.elapsed() >= Duration::from_secs(8) || (heard_speech && silent_windows >= 3) {
+                if command_finished(start.elapsed(), heard_speech, silent_windows) {
                     break;
                 }
             }
@@ -650,6 +707,11 @@ impl SpeechGate {
             noise_floor: None,
             suppressed_until: None,
         }
+    }
+
+    /// The room's level as measured so far.
+    fn noise_floor(&self) -> f32 {
+        self.noise_floor.unwrap_or(INITIAL_NOISE_FLOOR)
     }
 
     /// Forget the adapted floor. Used when capture is interrupted: the room the
@@ -1012,6 +1074,84 @@ mod tests {
     /// the wiring is checked as a property of the source text. The search is
     /// bounded to this one function's body, so the assertions below cannot
     /// satisfy themselves.
+    /// "Hey Jarvis" is English whatever language the user dictates in. Whisper
+    /// told to expect Cantonese writes the phrase in Chinese characters, which
+    /// `is_wake_phrase` (Latin letters only) never matches, so the wake check
+    /// must not follow `stt_language`. Checked on the source like the guard
+    /// test below: the model is not available to a unit test.
+    #[test]
+    fn the_wake_phrase_is_transcribed_as_english_whatever_the_speech_language() {
+        assert_eq!(WAKE_PHRASE_LANGUAGE, Some("en"));
+        let source = include_str!("wake_word.rs");
+        let start = source
+            .find("async fn transcribe_local_window(")
+            .expect("transcribe_local_window must exist");
+        let len = source[start..]
+            .find("\nasync fn transcribe_with_fallback(")
+            .expect("transcribe_with_fallback must follow transcribe_local_window");
+        let body = &source[start..start + len];
+        assert!(
+            body.contains("transcribe_as(") && body.contains("WAKE_PHRASE_LANGUAGE") && body.contains("DecodeProfile::WAKE"),
+            "the wake window must be transcribed in WAKE_PHRASE_LANGUAGE, not the dictation language"
+        );
+    }
+
+    /// While JARVIS is speaking, the microphone hears JARVIS; while another
+    /// assistant turn runs, a detection is dropped at the FOREGROUND guard in
+    /// handle_wake_word_detection. Neither is worth a Whisper pass.
+    #[test]
+    fn the_wake_check_pauses_before_whisper_runs() {
+        let source = include_str!("wake_word.rs");
+        let start = source.find("async fn detection_loop(").expect("detection_loop must exist");
+        let body = &source[start..start + source[start..].find("\nasync fn handle_wake_word_detection(").unwrap()];
+        let pause = body.find("wake_check_paused()").expect("detection_loop must check wake_check_paused()");
+        assert!(pause < body.find("transcribe_local_window(").unwrap(), "the pause must come before the Whisper pass");
+    }
+
+    #[test]
+    fn push_to_talk_keeps_the_microphone_while_listening_is_switched() {
+        for state in [VoiceState::Listening, VoiceState::Processing, VoiceState::Speaking] {
+            assert!(push_to_talk_active(&state), "{state:?}");
+        }
+        for state in [VoiceState::Idle, VoiceState::WakeWordListening, VoiceState::Error("x".into())] {
+            assert!(!push_to_talk_active(&state), "{state:?}");
+        }
+        let source = include_str!("wake_word.rs");
+        for function in ["pub async fn enable(", "pub async fn disable(", "async fn detection_loop("] {
+            let start = source.find(function).unwrap();
+            let body = &source[start..start + 4000.min(source.len() - start)];
+            assert!(body.contains("push_to_talk_active("), "{function} must leave a push-to-talk session alone");
+        }
+    }
+
+    #[test]
+    fn a_loud_room_does_not_count_as_speech_after_the_wake_word() {
+        assert_eq!(command_speech_threshold(0.003), 0.02, "a quiet room keeps the old bar");
+        let loud_room = 0.03;
+        let threshold = command_speech_threshold(loud_room);
+        assert!(loud_room < threshold, "music or a crowd at the measured floor must not keep a request open");
+        assert!(0.1 > threshold, "a voice well above the room still counts");
+    }
+
+    #[test]
+    fn a_pause_shorter_than_one_and_a_half_seconds_does_not_end_the_request() {
+        let elapsed = Duration::from_secs(4);
+        assert!(!command_finished(elapsed, true, 5));
+        assert!(command_finished(elapsed, true, 6));
+    }
+
+    #[test]
+    fn a_request_longer_than_eight_seconds_is_not_cut_off() {
+        assert!(!command_finished(Duration::from_secs(20), true, 0));
+        assert!(command_finished(COMMAND_MAX_DURATION, true, 0));
+    }
+
+    #[test]
+    fn saying_nothing_after_the_prompt_still_gives_up_after_eight_seconds() {
+        assert!(!command_finished(Duration::from_secs(7), false, 0));
+        assert!(command_finished(Duration::from_secs(8), false, 0));
+    }
+
     #[test]
     fn the_wake_word_assistant_turn_goes_through_the_shared_guard() {
         let source = include_str!("wake_word.rs");

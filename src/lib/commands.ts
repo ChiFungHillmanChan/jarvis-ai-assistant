@@ -42,6 +42,9 @@ export async function getConversations(sessionId?: string): Promise<ChatMessage[
 export async function listChatSessions(): Promise<{ id: string; title: string; updated_at: string }[]> {
   return invoke("list_chat_sessions");
 }
+export async function clearConversations(sessionId: string): Promise<void> {
+  return invoke("clear_conversations", { sessionId });
+}
 export async function getDashboardData(): Promise<DashboardData> {
   return invoke("get_dashboard_data");
 }
