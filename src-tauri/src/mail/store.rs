@@ -119,6 +119,45 @@ pub fn update_labels(db: &Database, account_id: &str, provider_id: &str, is_read
     Ok(())
 }
 
+/// Gmail's history cursor for this account, if a complete sync has set one.
+pub fn history_id(db: &Database, account_id: &str) -> Result<Option<String>, String> {
+    db.conn.lock().map_err(err)?
+        .query_row("SELECT history_id FROM mail_accounts WHERE id=?1", [account_id], |r| r.get(0))
+        .map_err(err)
+}
+/// Set only once everything up to `history_id` is stored; None drops an
+/// expired cursor so the next sync falls back to the date window.
+pub fn set_history_id(db: &Database, account_id: &str, history_id: Option<&str>) -> Result<(), String> {
+    required(db.conn.lock().map_err(err)?
+        .execute("UPDATE mail_accounts SET history_id=?2 WHERE id=?1", params![account_id, history_id])
+        .map_err(err)?)
+}
+/// Seconds since a complete window first failed to download a message,
+/// starting the clock now if this is the first such sync.
+pub fn retrying_for(db: &Database, account_id: &str) -> Result<i64, String> {
+    let conn = db.conn.lock().map_err(err)?;
+    conn.execute("UPDATE mail_accounts SET retry_since=COALESCE(retry_since,datetime('now')) WHERE id=?1", [account_id]).map_err(err)?;
+    conn.query_row("SELECT CAST(strftime('%s','now') AS INTEGER)-CAST(strftime('%s',retry_since) AS INTEGER) FROM mail_accounts WHERE id=?1", [account_id], |r| r.get(0))
+        .map_err(err)
+}
+pub fn clear_retry(db: &Database, account_id: &str) -> Result<(), String> {
+    db.conn.lock().map_err(err)?
+        .execute("UPDATE mail_accounts SET retry_since=NULL WHERE id=?1", [account_id])
+        .map_err(err)?;
+    Ok(())
+}
+/// Apply read and inbox changes reported by Gmail history. None leaves that
+/// flag as stored.
+pub fn apply_label_changes(db: &Database, account_id: &str, changes: &[(String, Option<bool>, Option<bool>)]) -> Result<(), String> {
+    let mut conn = db.conn.lock().map_err(err)?;
+    let tx = conn.transaction().map_err(err)?;
+    for (provider_id, is_read, is_inbox) in changes {
+        tx.execute("UPDATE mail_messages SET is_read=COALESCE(?3,is_read),is_inbox=COALESCE(?4,is_inbox) WHERE account_id=?1 AND provider_id=?2",
+            params![account_id, provider_id, is_read, is_inbox]).map_err(err)?;
+    }
+    tx.commit().map_err(err)
+}
+
 /// The user's "handled" / "needs attention" override for one message.
 pub fn set_attention(db: &Database, message_id: i64, attention: bool) -> Result<(), String> {
     required(db.conn.lock().map_err(err)?

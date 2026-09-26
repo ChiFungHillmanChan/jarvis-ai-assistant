@@ -45,10 +45,18 @@ if [ -z "${GOOGLE_CLIENT_ID:-}" ]; then
   read -r -p "Continue anyway? [y/N] " GO_ANYWAY
   if [[ "${GO_ANYWAY}" != "y" && "${GO_ANYWAY}" != "Y" ]]; then exit 1; fi
 fi
-# A payment endpoint alone leaves Account hidden in downloaded builds. Stop
-# before version changes or uploads if the complete public configuration is absent.
-export JARVIS_PAYMENT_API JARVIS_COGNITO_DOMAIN JARVIS_COGNITO_CLIENT_ID
-node scripts/release-billing-config.mjs
+# JARVIS_RELEASE_FREE=1 ships a free build: no account sign-in and no checkout.
+# The dev .env sets a sandbox JARVIS_PAYMENT_API, so clear all three rather than
+# trust what the file left behind; option_env! then bakes none of them in.
+if [ "${JARVIS_RELEASE_FREE:-}" = "1" ]; then
+  unset JARVIS_PAYMENT_API JARVIS_COGNITO_DOMAIN JARVIS_COGNITO_CLIENT_ID
+  echo "==> Free build: account sign-in and checkout are left out"
+else
+  # A payment endpoint alone leaves Account hidden in downloaded builds. Stop
+  # before version changes or uploads if the complete public configuration is absent.
+  export JARVIS_PAYMENT_API JARVIS_COGNITO_DOMAIN JARVIS_COGNITO_CLIENT_ID
+  node scripts/release-billing-config.mjs
+fi
 
 echo "==> 0/10 Running the test suite (same command CI runs)"
 # release.sh builds from the local working tree, so CI green on the last push

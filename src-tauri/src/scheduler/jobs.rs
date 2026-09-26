@@ -66,6 +66,7 @@ pub async fn run_job(db: &Arc<Database>, auth: &Arc<GoogleAuth>, action_type: &s
 
     let result = match action_type {
         "email_sync" => run_email_sync(db, auth).await,
+        "mail_workspace_sync" => run_mail_workspace_sync(db).await,
         "calendar_sync" => run_calendar_sync(db, auth).await,
         "deadline_monitor" => run_deadline_monitor(db).await,
         "notion_sync" => run_notion_sync(db).await,
@@ -110,6 +111,48 @@ pub(crate) async fn run_email_sync(db: &Arc<Database>, auth: &Arc<GoogleAuth>) -
             Ok(format!("Synced {} emails (refreshed)", c))
         }
         Err(e) => Err(e),
+    }
+}
+
+/// Triage runs per background tick, 100 messages each: the same bound as a
+/// manual sync in the mail page.
+const BACKGROUND_TRIAGE_RUNS: usize = 3;
+
+/// Download new mail for every connected workspace mailbox, then sort it if
+/// the user turned AI sorting on. Separate from `email_sync`, which fills the
+/// assistant's inbox cache through the main Google connection.
+pub(crate) async fn run_mail_workspace_sync(db: &Arc<Database>) -> Result<String, String> {
+    let Some((saved, problems)) = crate::mail::sync::sync_connected(db).await? else {
+        return Ok("Skipped: a mail operation is in progress".to_string());
+    };
+    let mut summary = format!("Saved {} new emails", saved);
+    if saved > 0 && crate::commands::mail::triage_ready(db) {
+        let language = if crate::ai::tools::read_language_pref(db) == "en" { "en" } else { "zh-HK" };
+        let mut sorted = 0;
+        for _ in 0..BACKGROUND_TRIAGE_RUNS {
+            match crate::commands::mail::triage_untriaged(db, Some(language)).await {
+                Ok(run) => {
+                    sorted += run.triaged;
+                    // A failing message stays untriaged and would be sent
+                    // and billed again by the next run; stop here instead.
+                    if run.remaining == 0 || run.triaged == 0 || run.failed > 0 {
+                        break;
+                    }
+                }
+                Err(error) => {
+                    summary.push_str(&format!("; sorting failed: {}", error));
+                    break;
+                }
+            }
+        }
+        summary.push_str(&format!("; sorted {}", sorted));
+    }
+    if problems.is_empty() {
+        Ok(summary)
+    } else if saved == 0 {
+        Err(problems.join(" "))
+    } else {
+        Ok(format!("{}; {}", summary, problems.join(" ")))
     }
 }
 

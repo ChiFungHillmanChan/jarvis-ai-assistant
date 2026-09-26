@@ -224,7 +224,7 @@ const RATE_LIMIT_REASONS: [&str; 2] = ["ratelimitexceeded", "userratelimitexceed
 /// carries reason `rateLimitExceeded` or `userRateLimitExceeded`. Rate limiting
 /// is how Gmail throttles a fan-out of `messages.get` in practice, so the body
 /// decides, and a permission 403 still fails fast. A 400 or 401 is permanent.
-fn is_retryable_status(status: u16, body: &str) -> bool {
+pub(crate) fn is_retryable_status(status: u16, body: &str) -> bool {
     if status == 429 || (500..600).contains(&status) {
         return true;
     }
@@ -276,7 +276,7 @@ fn jitter_ms(bound_ms: u64) -> u64 {
 
 /// Backoff before retry `attempt` (1-based): 250ms, 500ms, 1s, 2s, capped there,
 /// plus up to 250ms of jitter.
-fn retry_delay(attempt: u32) -> std::time::Duration {
+pub(crate) fn retry_delay(attempt: u32) -> std::time::Duration {
     let base_ms = 250u64 << (attempt.clamp(1, 4) - 1);
     std::time::Duration::from_millis(base_ms + jitter_ms(250))
 }
@@ -507,18 +507,31 @@ pub async fn get_message_full(
 ) -> Result<(GmailMessage, String), String> {
     let client = &*HTTP;
     let url = format!("{}/messages/{}?format=full", GMAIL_API, message_id);
-    let resp = client
-        .get(&url)
-        .bearer_auth(access_token)
-        .send()
-        .await
-        .map_err(|e| format!("Gmail read error: {}", e))?;
-    if resp.status() == 401 {
-        return Err("UNAUTHORIZED".to_string());
-    }
-    if !resp.status().is_success() {
-        return Err(format!("Gmail API error: {}", resp.status()));
-    }
+    let mut attempt = 0;
+    let resp = loop {
+        attempt += 1;
+        let resp = client
+            .get(&url)
+            .bearer_auth(access_token)
+            .send()
+            .await
+            .map_err(|e| format!("Gmail read error: {}", e))?;
+        if resp.status() == 401 {
+            return Err("UNAUTHORIZED".to_string());
+        }
+        if resp.status().is_success() {
+            break resp;
+        }
+        // Same backoff as the metadata fetch: a mail-sync fan-out is what
+        // Gmail rate-limits, and a dropped message holds the sync window open.
+        let status = resp.status();
+        let body_text = resp.text().await.unwrap_or_default();
+        if is_retryable_status(status.as_u16(), &body_text) && attempt < DETAIL_MAX_ATTEMPTS {
+            tokio::time::sleep(retry_delay(attempt)).await;
+            continue;
+        }
+        return Err(format!("Gmail API error: {}", status));
+    };
     let detail: MessageDetail = resp.json().await.map_err(|e| e.to_string())?;
 
     let payload = detail.payload.as_ref();
