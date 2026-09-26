@@ -143,6 +143,16 @@ DMG_PUBLIC_URL="https://${BUCKET}.s3.${REGION}.amazonaws.com/${DMG_NAME}"
 UPDATER_URL="https://${BUCKET}.s3.${REGION}.amazonaws.com/${TARBALL_NAME}"
 NOTES_FILE="${REPO_ROOT}/RELEASE_NOTES.md"
 NOTES="$([ -f "${NOTES_FILE}" ] && cat "${NOTES_FILE}" || echo "Routine update.")"
+# English notes for the English download page. Used only when the first line
+# names this version, so last release's text is never published as this one's;
+# without them the English page falls back to the Chinese notes.
+NOTES_EN_FILE="${REPO_ROOT}/RELEASE_NOTES.en.md"
+NOTES_EN=""
+if [ -f "${NOTES_EN_FILE}" ] && head -n 1 "${NOTES_EN_FILE}" | grep -qF "v${VERSION}"; then
+  NOTES_EN="$(cat "${NOTES_EN_FILE}")"
+else
+  echo "NOTE: RELEASE_NOTES.en.md is missing or not for v${VERSION}; the English download page will show the Chinese notes."
+fi
 # $(cat ...) already strips trailing newlines. Emit the JSON string with
 # `jq -n --arg` — a here-string (`jq -Rs . <<< "$SIG_CONTENT"`) would put the
 # newline back, and tauri-plugin-updater base64-decodes the signature without
@@ -152,6 +162,7 @@ cat > /tmp/latest.json <<MANIFEST
 {
   "version": "${VERSION}",
   "notes": $(jq -Rs . <<< "${NOTES}"),
+  "notes_en": $(jq -n --arg notes "${NOTES_EN}" '$notes'),
   "pub_date": "${PUB_DATE}",
   "dmg_url": "${DMG_PUBLIC_URL}",
   "platforms": {
