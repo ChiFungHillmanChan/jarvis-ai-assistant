@@ -83,7 +83,7 @@ impl VoiceEngine {
     pub fn get_state(&self) -> VoiceState { self.state.lock().unwrap().clone() }
 
     pub fn is_available(&self) -> bool {
-        cloud_transcriber().is_some() || model_manager::is_downloaded()
+        cloud_transcriber(&self.db).is_some() || model_manager::is_downloaded()
     }
 
     /// Drop the cached local Whisper context so the next transcription reloads
@@ -114,7 +114,7 @@ impl VoiceEngine {
     }
 
     pub async fn transcribe_command(&self, audio_data: &[f32]) -> Result<String, String> {
-        if let Some(transcriber) = cloud_transcriber() {
+        if let Some(transcriber) = cloud_transcriber(&self.db) {
             match transcriber.transcribe(audio_data, &self.db).await {
                 Ok(text) if !text.is_empty() => return Ok(text),
                 Ok(_) => log::info!("Cloud transcription returned empty text, trying local fallback"),
@@ -135,7 +135,7 @@ impl VoiceEngine {
             return local_result;
         }
 
-        Err("Speech-to-text not available. Add a Gemini API key in Settings or download the local Whisper model.".to_string())
+        Err("語音輸入需要本機語音模型：請到「設定 → 語音」下載（約 148 MB，語音只在此 Mac 處理）。".to_string())
     }
 
     pub fn toggle_mute(&self) -> bool {
@@ -181,12 +181,23 @@ impl VoiceEngine {
     }
 }
 
+/// Gemini hears the user only when Gemini is the AI they chose, or when they
+/// have not chosen one (installs from before setup asked). Anyone else gets
+/// the local Whisper model, so no other AI receives their voice.
+fn speech_allowed_for(chosen: Option<&crate::commands::ai_choice::CurrentAi>) -> bool {
+    chosen.is_none_or(|ai| ai.provider == "gemini")
+}
+
 /// Build the cloud speech-to-text transcriber from the currently configured
-/// Gemini key, or return None when there is none.
+/// Gemini key, or return None when there is none or Gemini is not the chosen AI.
 ///
 /// Resolved on every use rather than once at startup: users paste the key into
 /// Settings after first launch, which writes it to the Keychain only.
-pub fn cloud_transcriber() -> Option<Transcriber> {
+pub fn cloud_transcriber(db: &crate::db::Database) -> Option<Transcriber> {
+    let chain = crate::commands::ai_choice::saved_chain(db).ok()?;
+    if !speech_allowed_for(crate::commands::ai_choice::describe(&chain).as_ref()) {
+        return None;
+    }
     let key = resolve_gemini_key()?;
     match Transcriber::new(key) {
         Ok(t) => Some(t),
@@ -218,6 +229,18 @@ fn pick_key(env_value: Option<String>, keychain_value: Option<String>) -> Option
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn only_a_gemini_choice_or_no_choice_sends_speech_to_gemini() {
+        use super::speech_allowed_for;
+        use crate::commands::ai_choice::CurrentAi;
+        let ai = |provider: &str| CurrentAi { provider: provider.into(), label: provider.into(), model: None, base_url: None };
+        assert!(speech_allowed_for(None), "installs from before setup asked keep Gemini speech");
+        assert!(speech_allowed_for(Some(&ai("gemini"))));
+        for other in ["ollama", "openai", "claude", "compatible"] {
+            assert!(!speech_allowed_for(Some(&ai(other))), "{other} users get local Whisper");
+        }
+    }
+
     use super::pick_key;
 
     #[test]

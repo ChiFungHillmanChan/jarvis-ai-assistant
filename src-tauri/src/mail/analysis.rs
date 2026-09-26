@@ -89,15 +89,23 @@ struct OllamaModelDetails {
     format: Option<String>,
 }
 
+/// The AI the user chose in setup, for `processing_mode = 'assistant'`.
+pub struct AssistantRoute {
+    pub router: crate::ai::AiRouter,
+    pub db: std::sync::Arc<crate::db::Database>,
+}
+
 pub async fn analyze(
     context: MailContext,
     creds: Option<AwsCredentials>,
     openai_key: Option<String>,
+    assistant: Option<AssistantRoute>,
 ) -> Result<MailAnalysis, String> {
     analyze_with_endpoints(
         context,
         creds,
         openai_key,
+        assistant,
         OLLAMA_PORT,
         OpenAiEndpoint::Production,
     )
@@ -110,11 +118,25 @@ async fn analyze_with_endpoints(
     context: MailContext,
     creds: Option<AwsCredentials>,
     openai_key: Option<String>,
+    assistant: Option<AssistantRoute>,
     ollama_port: u16,
     openai_endpoint: OpenAiEndpoint,
 ) -> Result<MailAnalysis, String> {
-    let prepared = prepare_request(context, Utc::now())?;
+    let mut prepared = prepare_request(context, Utc::now())?;
     let (text, usage) = match prepared.mode.as_str() {
+        "assistant" => {
+            let route = assistant.ok_or_else(|| crate::ai::NO_AI_CHOSEN.to_string())?;
+            let done = crate::ai::complete::complete(
+                &route.router,
+                &route.db,
+                crate::ai::complete::Request { system: "", user: &prepared.prompt, json: false, max_tokens: 4_096 },
+            )
+            .await?;
+            prepared.model = format!("{} · {}", done.provider, done.model);
+            // complete() already wrote the cost row; usage stays zero so the
+            // caller does not record it twice.
+            (done.text, openai::Usage::default())
+        }
         "local" => (
             send_to_ollama(&prepared.model, &prepared.prompt, ollama_port).await?,
             openai::Usage::default(),
@@ -136,7 +158,7 @@ async fn analyze_with_endpoints(
                 .ok_or_else(|| "尚未設定 OpenAI API 密鑰，請在設定中加入後重試。".to_string())?;
             openai::send(key, &prepared.model, &prepared.prompt, openai_endpoint).await?
         }
-        _ => return Err("分析模式無效，只支援本機、Bedrock 或 OpenAI。".into()),
+        _ => return Err("分析模式無效，只支援本機、Bedrock、OpenAI 或所選 AI。".into()),
     };
     if text.trim().is_empty() {
         return Err("AI 沒有回覆，請檢查模型設定後重試。".into());
@@ -199,15 +221,19 @@ fn validate_output_citations(text: &str, source_ids: &[i64]) -> Result<(), Strin
 
 fn prepare_request(context: MailContext, now: DateTime<Utc>) -> Result<PreparedRequest, String> {
     let mode = context.settings.processing_mode.trim().to_ascii_lowercase();
-    if !matches!(mode.as_str(), "local" | "bedrock" | "openai") {
-        return Err("分析模式無效，只支援本機、Bedrock 或 OpenAI。".into());
+    if !matches!(mode.as_str(), "local" | "bedrock" | "openai" | "assistant") {
+        return Err("分析模式無效，只支援本機、Bedrock、OpenAI 或所選 AI。".into());
     }
+    // 'assistant' uses the model of the AI chosen in setup.
     let model = match mode.as_str() {
         "local" => context.settings.local_model.trim(),
         "openai" => context.settings.openai_model.trim(),
+        "assistant" => "",
         _ => context.settings.bedrock_model.trim(),
     };
-    validate_model(model)?;
+    if mode != "assistant" {
+        validate_model(model)?;
+    }
 
     let available_count = usize::try_from(context.group.message_count.max(0))
         .unwrap_or(usize::MAX)
@@ -775,7 +801,7 @@ mod tests {
     ) -> Result<MailAnalysis, String> {
         tokio::time::timeout(
             Duration::from_secs(5),
-            analyze_with_endpoints(input, None, None, server.port, OpenAiEndpoint::Production),
+            analyze_with_endpoints(input, None, None, None, server.port, OpenAiEndpoint::Production),
         )
         .await
         .expect("local analysis must complete without a cloud fallback")
@@ -808,6 +834,7 @@ mod tests {
                 input,
                 None,
                 key,
+                None,
                 server.port,
                 OpenAiEndpoint::Loopback(server.port),
             ),
@@ -1605,7 +1632,7 @@ mod tests {
 
         let analysis = tokio::time::timeout(
             Duration::from_secs(180),
-            analyze(synthetic_mail_context("openai", &model), None, Some(key)),
+            analyze(synthetic_mail_context("openai", &model), None, Some(key), None),
         )
         .await
         .expect("real OpenAI analysis exceeded three minutes")
@@ -1633,7 +1660,7 @@ mod tests {
 
         // Use the shipped entry point and fixed 127.0.0.1:11434 endpoint, not
         // the fixture port seam. No AWS credentials are provided or loaded.
-        let analysis = tokio::time::timeout(Duration::from_secs(180), analyze(input, None, None))
+        let analysis = tokio::time::timeout(Duration::from_secs(180), analyze(input, None, None, None))
             .await
             .expect("real local analysis exceeded three minutes")
             .expect("production local analysis must accept the installed model metadata and reply");

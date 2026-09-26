@@ -1,10 +1,10 @@
 import { useEffect, useRef, useState } from 'react';
 import { useUiLocale } from '../i18n';
-import { getAwsCredentialsStatus, markOnboardingComplete, openUrl, setApiKey, setAwsCredentials } from '../lib/commands';
+import { getAwsCredentialsStatus, markOnboardingComplete, setApiKey, setAwsCredentials } from '../lib/commands';
 import * as mail from '../lib/mail';
 import { canStartFirstAnalysis } from '../lib/setup-flow';
 import { applyTestedMailSettings, getSetupStatus, setupError, testMailAiConnection, type SetupStatus } from '../lib/setup';
-import LocalMailSetup from '../components/LocalMailSetup';
+import ChooseAi from '../components/ChooseAi';
 import WindowControls from '../components/WindowControls';
 import ReadableContent from '../components/content/ReadableContent';
 import '../styles/setup.css';
@@ -67,7 +67,6 @@ export default function OnboardingWizard({ onComplete }: { onComplete: () => voi
   function changeSettings(next: mail.MailSettings) { setSettings(next); setAnalysis(null); setConsent(false); }
   const sameSettings = !!settings && JSON.stringify(settings) === JSON.stringify(workspace?.settings);
   const readiness = sameSettings && !credentialDirty ? status?.mail.state || 'not_configured' : 'saved_unverified';
-  const savedModel = workspace?.settings.processing_mode === 'local' ? workspace.settings.local_model : workspace?.settings.processing_mode === 'openai' ? workspace.settings.openai_model : workspace?.settings.bedrock_model;
   function goStep(next: number) { setError(''); setNotice(''); setStep(next); }
   const canAnalyze = canStartFirstAnalysis(readiness, selected.length);
 
@@ -89,6 +88,16 @@ export default function OnboardingWizard({ onComplete }: { onComplete: () => voi
       setCredentialDirty(false);
       try { await reload(); } catch { setError(text('Mail settings were saved, but this page could not refresh. Reopen setup to check.', '電郵設定已儲存，但畫面未能更新。請重新開啟導引以核對。')); }
       setNotice(text('The synthetic test passed. The selected model is saved for mail.', '合成測試通過，所選模型已儲存供電郵工作區使用。'));
+    });
+  }
+  // The choice already pointed mail at the same AI; confirm the mail
+  // pipeline (citations included) works with it before step 3.
+  async function verifyMail() {
+    await run(text('Checking mail analysis', '檢查電郵分析'), async () => {
+      await reload();
+      const tested = await testMailAiConnection();
+      if (mounted.current) setStatus(current => current ? { ...current, mail: tested } : current);
+      if (tested.state !== 'ready') throw Error(tested.errorCode || 'probe_failed');
     });
   }
   async function syncAccount(id: string) {
@@ -119,32 +128,26 @@ export default function OnboardingWizard({ onComplete }: { onComplete: () => voi
     <header className="setup-titlebar" data-tauri-drag-region><WindowControls /><span data-tauri-drag-region>JARVIS</span></header>
     <main className="setup-content">
       <div className="setup-topline"><span>{text(`Step ${step} of 3`, `第 ${step}／3 步`)}</span><label>{text('Interface language', '介面語言')}<select disabled={!!busy || localBusy} value={locale} onChange={event => setLocale(event.target.value as 'en' | 'zh-HK')}><option value="zh-HK">繁體中文（香港）</option><option value="en">English</option></select></label></div>
-      <h1>{step === 1 ? text('Set up AI for your mail', '設定電郵 AI') : step === 2 ? text('Connect your mail workspace', '連接電郵工作區') : text('Get your first useful result', '取得第一份實用結果')}</h1>
-      <p>{text('Existing credentials and connected mailboxes are reused. Assistant, calendar and voice have separate optional setup.', '系統會沿用已儲存的憑證及已連接的信箱。AI 助理、日曆及語音可按需要另行設定。')}</p>
+      <h1>{step === 1 ? text('Choose your AI', '選擇你的 AI') : step === 2 ? text('Connect your mail workspace', '連接電郵工作區') : text('Get your first useful result', '取得第一份實用結果')}</h1>
+      <p>{text('Existing credentials and connected mailboxes are reused. Calendar and voice have separate optional setup.', '系統會沿用已儲存的憑證及已連接的信箱。日曆及語音可按需要另行設定。')}</p>
       {saveError && <p className="setup-error" role="alert">{text(saveError, '未能儲存介面語言。關閉 JARVIS 前請重試。')} <button onClick={retrySave}>{text('Retry saving language', '重試儲存語言')}</button></p>}
       {error && <p className="setup-error" role="alert">{error}</p>}
       {notice && <p className="setup-notice" role="status">{notice}</p>}
       {busy && <p role="status">{busy}…</p>}
       {loading ? <p role="status">{text('Reading existing settings…', '正在讀取現有設定…')}</p> : !workspace || !settings ? <button onClick={() => void run(text('Reloading', '重新載入'), reload)}>{text('Retry', '重試')}</button> : <fieldset className="setup-fields" disabled={!!busy}>
         {step === 1 && <>
-          <div className="setup-current"><strong>{text('Current mail AI', '目前電郵 AI')}: </strong>{savedModel ? workspace?.settings.processing_mode : text('Not configured', '未設定')} / {savedModel || '—'}<p>{readiness === 'ready' ? text('Test passed in this session. Availability can change; normal requests still report errors.', '本次開啟 App 後的測試已通過。服務狀態可能改變，實際使用時仍可能出現錯誤。') : text('Saved settings are not proof of a working connection. Test before continuing.', '已儲存設定不代表連接可用，請先進行測試。')}</p></div>
-          <label>{text('Processing method', '處理方式')}<select disabled={localBusy} value={settings.processing_mode} onChange={event => changeSettings({ ...settings, processing_mode: event.target.value })}><option value="local">{text('Local AI — no API key', '本機 AI — 無須 API 密鑰')}</option><option value="openai">{text('OpenAI — own account, eligible regions', 'OpenAI — 自備帳戶，限合資格地區')}</option><option value="bedrock">{text('AWS Bedrock — own company account', 'AWS Bedrock — 自備公司帳戶')}</option></select></label>
-          {settings.processing_mode === 'local' ? <><LocalMailSetup onReady={reload} onBusyChange={setLocalBusy} /><details><summary>{text('Use another installed local model', '使用其他已安裝本機模型')}</summary><label>{text('Exact model name', '完整模型名稱')}<input disabled={localBusy} value={settings.local_model} onChange={event => changeSettings({ ...settings, local_model: event.target.value })} /></label><button type="button" disabled={localBusy} onClick={() => void testAndSave()}>{text('Test and use this model', '測試並使用此模型')}</button></details></> : <>
-            {settings.processing_mode === 'openai' ? <>
-              <p className="setup-hint">{text('Hong Kong is not listed for the OpenAI API. Use an eligible account and region, or choose local AI. You only need one provider for mail.', 'OpenAI API 支援地區清單未列出香港。請使用合資格帳戶及地區，或選擇本機 AI。電郵僅需設定一個供應商。')}</p>
-              <label>OpenAI API key<input type="password" autoComplete="off" spellCheck={false} value={apiKey} onChange={event => { setKey(event.target.value); setCredentialDirty(true); }} placeholder={text('Leave blank to keep the saved key', '留空會沿用已儲存密鑰')} /></label>
-              <button type="button" onClick={() => void openUrl('https://platform.openai.com/api-keys').catch(() => setError(text('Could not open the provider page.', '未能開啟供應商頁面。')))}>{text('Open official API key page', '開啟官方 API key 頁')}</button>
-              <label>{text('Model', '模型')}<input required value={settings.openai_model} onChange={event => changeSettings({ ...settings, openai_model: event.target.value })} placeholder="gpt-6-luna" /></label>
-            </> : <>
-              <p>{text('Your company administrator provides these credentials. Model availability depends on the region and account. Start with a text model approved by your company.', '憑證由公司管理員提供；可用模型取決於地區及帳戶。請先使用公司批准的文字模型。')}</p>
-              <label>Access Key ID<input autoComplete="off" value={accessKey} onChange={event => { setAccessKey(event.target.value); setCredentialDirty(true); }} placeholder={text('Leave both keys blank to reuse saved credentials', '兩個欄位都留空會沿用已儲存憑證')} /></label>
-              <label>Secret Access Key<input type="password" autoComplete="off" value={secretKey} onChange={event => { setSecretKey(event.target.value); setCredentialDirty(true); }} /></label>
-              <label>{text('Region for new credentials', '新憑證使用的地區')}<select value={region} onChange={event => setRegion(event.target.value)}><option value="us-east-1">us-east-1 — US</option><option value="ap-southeast-1">ap-southeast-1 — Singapore</option><option value="ap-northeast-1">ap-northeast-1 — Tokyo</option><option value="eu-west-2">eu-west-2 — London</option></select></label>
-              <label>{text('Bedrock model ID', 'Bedrock 模型 ID')}<input required value={settings.bedrock_model} onChange={event => changeSettings({ ...settings, bedrock_model: event.target.value })} placeholder="amazon.nova-micro-v1:0" /></label>
-            </>}
+          <ChooseAi onChosen={() => void verifyMail()} onBusyChange={setLocalBusy} />
+          {readiness === 'ready' && <p className="setup-notice">{text('Mail analysis passed its test with this AI. Press Continue to connect Gmail.', '電郵分析已用這個 AI 通過測試。按「繼續」連接 Gmail。')}</p>}
+          <details onToggle={event => { if ((event.target as HTMLDetailsElement).open && settings.processing_mode !== 'bedrock') changeSettings({ ...settings, processing_mode: 'bedrock' }); }}>
+            <summary>{text('Advanced: use a company AWS Bedrock account for mail', '進階：電郵改用公司 AWS Bedrock 帳戶')}</summary>
+            <p>{text('Your company administrator provides these credentials. Model availability depends on the region and account. Start with a text model approved by your company.', '憑證由公司管理員提供；可用模型取決於地區及帳戶。請先使用公司批准的文字模型。')}</p>
+            <label>Access Key ID<input autoComplete="off" value={accessKey} onChange={event => { setAccessKey(event.target.value); setCredentialDirty(true); }} placeholder={text('Leave both keys blank to reuse saved credentials', '兩個欄位都留空會沿用已儲存憑證')} /></label>
+            <label>Secret Access Key<input type="password" autoComplete="off" value={secretKey} onChange={event => { setSecretKey(event.target.value); setCredentialDirty(true); }} /></label>
+            <label>{text('Region for new credentials', '新憑證使用的地區')}<select value={region} onChange={event => setRegion(event.target.value)}><option value="us-east-1">us-east-1 — US</option><option value="ap-southeast-1">ap-southeast-1 — Singapore</option><option value="ap-northeast-1">ap-northeast-1 — Tokyo</option><option value="eu-west-2">eu-west-2 — London</option></select></label>
+            <label>{text('Bedrock model ID', 'Bedrock 模型 ID')}<input required value={settings.bedrock_model} onChange={event => changeSettings({ ...settings, processing_mode: 'bedrock', bedrock_model: event.target.value })} placeholder="amazon.nova-micro-v1:0" /></label>
             <label className="setup-checkbox"><input type="checkbox" checked={consent} onChange={event => setConsent(event.target.checked)} />{text('The test sends synthetic text and may incur a small charge. Later mail analysis sends selected mail content, instructions and valid memories to this provider.', '測試會傳送合成文字，可能產生少量費用。之後分析郵件時，所選郵件內容、指示及有效記憶會傳送至此供應商。')}</label>
-            <button type="button" className="setup-primary" disabled={!consent} onClick={() => void testAndSave()}>{text('Test and save', '測試並儲存')}</button>
-          </>}
+            <button type="button" className="setup-primary" disabled={!consent || settings.processing_mode !== 'bedrock'} onClick={() => void testAndSave()}>{text('Test and use Bedrock for mail', '測試並以 Bedrock 處理電郵')}</button>
+          </details>
         </>}
         {step === 2 && <>
           <div className="setup-current"><h2>{text('Gmail access for mail only', '只為電郵工作區授權 Gmail')}</h2><p>{text('JARVIS requests read-only mail access and stores readable copies on this Mac. This connection does not grant sending or calendar permissions. Disconnecting keeps local copies; deleting a local account removes them.', 'JARVIS 會要求唯讀郵件權限，並將可讀副本儲存於此 Mac。本次連接不會要求寄信或日曆權限。斷開連接會保留副本；刪除本機帳戶才會清除副本。')}</p></div>
@@ -157,12 +160,12 @@ export default function OnboardingWizard({ onComplete }: { onComplete: () => voi
           <div className="setup-mail-list">{messages.map(message => <label key={message.id} className="setup-checkbox"><input type="checkbox" checked={selected.includes(message.id)} disabled={firstGroup.current !== null || (!selected.includes(message.id) && selected.length >= 5)} onChange={event => setSelected(ids => event.target.checked ? [...ids, message.id] : ids.filter(id => id !== message.id))} /><span>{message.subject || text('(No subject)', '（無主旨）')}<small>{message.sender}</small></span></label>)}{!messages.length && <p>{text('No local mail yet. Return to the previous step to sync, or open the workspace and connect later.', '尚無本機郵件。可返回上一步同步，或先開啟工作區，稍後再連接。')}</p>}</div>
           <label>{text('Group name', '群組名稱')}<input maxLength={100} value={groupName} disabled={firstGroup.current !== null} onChange={event => setGroupName(event.target.value)} placeholder={text('For example: Customer follow-up', '例如：客戶跟進')} /></label>
           <label>{text('Instructions for this group', '此群組的整理指示')}<textarea maxLength={8000} rows={3} value={instructions} disabled={firstGroup.current !== null} onChange={event => setInstructions(event.target.value)} placeholder={text('List confirmed dates, unanswered questions and next steps.', '列出已確認的日期、待回覆問題及下一步。')} /></label>
-          <p className="setup-hint">{workspace.settings.processing_mode === 'local' ? text('Analysis uses the local model. If the group is too long, reduce its size in the mail workspace.', '分析使用本機模型。群組內容過長時，可在電郵工作區縮小範圍。') : text(`Analysis sends this group to ${workspace.settings.processing_mode === 'openai' ? 'OpenAI' : 'AWS Bedrock'} using your account.`, `分析會使用你的帳戶，將此群組內容傳送至 ${workspace.settings.processing_mode === 'openai' ? 'OpenAI' : 'AWS Bedrock'}。`)}</p>
+          <p className="setup-hint">{workspace.settings.processing_mode === 'local' ? text('Analysis uses the local model. If the group is too long, reduce its size in the mail workspace.', '分析使用本機模型。群組內容過長時，可在電郵工作區縮小範圍。') : workspace.settings.processing_mode === 'assistant' ? text('Analysis sends this group to the AI you chose, using your key.', '分析會使用你的密鑰，將此群組內容傳送至你選擇的 AI。') : text(`Analysis sends this group to ${workspace.settings.processing_mode === 'openai' ? 'OpenAI' : 'AWS Bedrock'} using your account.`, `分析會使用你的帳戶，將此群組內容傳送至 ${workspace.settings.processing_mode === 'openai' ? 'OpenAI' : 'AWS Bedrock'}。`)}</p>
           {readiness !== 'ready' && <p>{text('Return to step 1 to test the selected AI before analyzing.', '分析前，請返回第 1 步測試所選 AI。')}</p>}
           <button type="button" className="setup-primary" disabled={!canAnalyze || !groupName.trim()} onClick={() => void firstAnalysis()}>{text('Create group and analyze', '建立群組並分析')}</button>
           {analysis && <article className="setup-result"><h2>{text('Open a source to check the result', '開啟原信以核對結果')}</h2><ReadableContent text={analysis.text} sourceIds={analysis.source_ids} onSource={id => void run(text('Opening source', '開啟原信'), async () => { setSource(await mail.mailGetMessage(id)); })} /><p>{text('Messages omitted', '未納入郵件')}: {analysis.omitted_messages}</p><div className="setup-actions">{analysis.source_ids.map(id => <button type="button" key={id} onClick={() => void run(text('Opening source', '開啟原信'), async () => { setSource(await mail.mailGetMessage(id)); })}>{text('Source', '原信')} #{id}</button>)}</div>{source && <section><h3>{source.subject}</h3><ReadableContent text={source.body || source.snippet} format="plain" /></section>}</article>}
         </>}
-        <footer className="setup-footer"><button type="button" disabled={step === 1 || localBusy} onClick={() => goStep(step - 1)}>{text('Back', '上一步')}</button>{step < 3 && <button type="button" disabled={localBusy} onClick={() => goStep(step + 1)}>{text('Continue', '繼續')}</button>}<button type="button" disabled={localBusy} onClick={finish}>{step === 3 ? text('Open mail workspace', '開啟電郵工作區') : text('Set up later', '稍後繼續設定')}</button></footer>
+        <footer className="setup-footer"><button type="button" disabled={step === 1 || localBusy} onClick={() => goStep(step - 1)}>{text('Back', '上一步')}</button>{step < 3 && <button type="button" className={step === 1 && readiness === 'ready' ? 'setup-primary' : undefined} disabled={localBusy} onClick={() => goStep(step + 1)}>{text('Continue', '繼續')}</button>}<button type="button" disabled={localBusy} onClick={finish}>{step === 3 ? text('Open mail workspace', '開啟電郵工作區') : text('Set up later', '稍後繼續設定')}</button></footer>
       </fieldset>}
     </main>
   </div>;

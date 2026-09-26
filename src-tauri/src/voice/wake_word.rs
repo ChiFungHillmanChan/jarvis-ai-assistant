@@ -481,7 +481,7 @@ async fn transcribe_with_fallback(
     audio_data: &[f32],
     db: Arc<crate::db::Database>,
 ) -> Result<String, String> {
-    if let Some(transcriber) = crate::voice::cloud_transcriber() {
+    if let Some(transcriber) = crate::voice::cloud_transcriber(&db) {
         match transcriber.transcribe(audio_data, &db).await {
             Ok(text) if !text.is_empty() => return Ok(text),
             Ok(_) => log::info!("Wake-word cloud STT returned empty text, using local fallback"),
