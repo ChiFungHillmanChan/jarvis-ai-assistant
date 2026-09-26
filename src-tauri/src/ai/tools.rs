@@ -1994,6 +1994,10 @@ mod prompt_tests {
         assert!(!prompt.contains("followed by their name"), "a line before a tool call must not always name the user");
         assert!(!prompt.contains("never as \"sir\""), "the user may choose Sir as their address");
         assert!(!prompt.contains("Never call the same tool more than once"), "a thorough search refines its query");
+        // Live check, 2026-09-26: with a Cantonese example in the prompt, gpt-6-luna
+        // answered a Cantonese question in colloquial Cantonese under the written default.
+        assert!(prompt.contains("even when the user writes in Cantonese"), "the written default must hold for Cantonese questions");
+        assert!(!prompt.contains("搞掂，"), "no colloquial example may sit in the prompt to be imitated");
     }
 
     #[test]
