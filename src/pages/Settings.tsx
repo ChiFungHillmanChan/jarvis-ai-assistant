@@ -50,7 +50,7 @@ import { connectionsChanged } from "../lib/connections";
 import { DISPLAY_NAME_KEY, accountSectionVisible, displayNameChanged } from "../lib/account";
 import LocalAiSetup from "../components/LocalAiSetup";
 import ChooseAi from "../components/ChooseAi";
-import { aiServiceLabel } from "../lib/ai-choice";
+import { aiServiceLabel, currentAi, type CurrentAi } from "../lib/ai-choice";
 import AccountPanel from "../components/AccountPanel";
 import { UserRound } from "lucide-react";
 import { useWorkspace, useWorkspaceValue } from "../workspace/WorkspaceContext";
@@ -111,6 +111,9 @@ export default function Settings() {
   const [voiceSettings, setVoiceSettingsState] = useState<VoiceSettings | null>(null);
   const [ttsVoices, setTtsVoices] = useState<string[]>([]);
   const [wakeStatus, setWakeStatus] = useState<WakeWordStatus | null>(null);
+  // Gemini hears speech only when it is the chosen AI (voice/mod.rs).
+  const [chosenAi, setChosenAi] = useState<CurrentAi | null>(null);
+  useEffect(() => { void currentAi().then(setChosenAi).catch(() => {}); }, []);
   const [wakeBusy, setWakeBusy] = useState(false);
   const [wakeError, setWakeError] = useState<string | null>(null);
   const { state: voiceState } = useVoiceState();
@@ -613,12 +616,14 @@ export default function Settings() {
   // key (env or Keychain, which is what get_api_key_status reports) or the
   // downloaded local Whisper model. Without one of them push-to-talk errors out.
   function getVoiceAvailabilityLine(): string {
-    const cloud = Boolean(apiKeyStatus["gemini"]);
+    const cloud = geminiSpeech;
     const local = Boolean(wakeStatus?.model_downloaded);
     if (cloud && local) return text("Speech-to-text ready -- cloud Gemini, with the local Whisper model as fallback.", "語音辨識可用：雲端 Gemini，並以本機 Whisper 作後備。");
     if (cloud) return text("Speech-to-text ready -- cloud Gemini.", "語音辨識可用：雲端 Gemini。");
     if (local) return text("Speech-to-text ready -- local Whisper model.", "語音辨識可用：本機 Whisper 模型。");
-    return text("Speech-to-text needs one of two things: a Gemini API key saved under API Keys, or the local Whisper model downloaded under Wake Word.", "語音辨識需要在「API 密鑰」儲存 Gemini 密鑰，或在「喚醒詞」下載本機 Whisper 模型。");
+    return chosenAi && chosenAi.provider !== "gemini"
+      ? text(`Voice input uses a speech model on this Mac, so your voice does not go to ${chosenAi.label}. Download it once (about 148 MB).`, `語音輸入使用此 Mac 上的語音模型，聲音不會傳送至 ${chosenAi.label}。請先下載一次（約 148 MB）。`)
+      : text("Voice input needs a Gemini key (Settings → Your AI) or the speech model on this Mac (about 148 MB).", "語音輸入需要 Gemini 密鑰（設定 → 你的 AI），或此 Mac 上的語音模型（約 148 MB）。");
   }
 
   function getWakeStatusLine(state: VoiceState): string {
@@ -659,7 +664,8 @@ export default function Settings() {
       ? voiceState.ModelDownloading
       : null;
   const wakeCanEnable = Boolean(wakeStatus?.model_downloaded || wakeStatus?.enabled);
-  const voiceInputReady = Boolean(apiKeyStatus["gemini"] || wakeStatus?.model_downloaded);
+  const geminiSpeech = Boolean(apiKeyStatus["gemini"]) && (!chosenAi || chosenAi.provider === "gemini");
+  const voiceInputReady = geminiSpeech || Boolean(wakeStatus?.model_downloaded);
 
   const SECTIONS = [
     { id: "account", label: t("accountSection"), Icon: () => <UserRound size={17} /> },
@@ -1056,6 +1062,7 @@ export default function Settings() {
             <h2 className="settings-heading">{text('Speech', '語音')}</h2>
             <div style={styles.hint}>{text('Cmd+Shift+J to start/stop voice input', '按 Cmd+Shift+J 開始或結束語音輸入')}</div>
             <div style={voiceInputReady ? styles.hint : styles.statusText}>{getVoiceAvailabilityLine()}</div>
+            {!voiceInputReady && <button onClick={() => { void handleDownloadModel(false); }} disabled={wakeBusy || modelDownloading !== null} style={{ ...styles.actionBtn, margin: "8px 0 12px" }}>{modelDownloading !== null ? `${text("Downloading", "正在下載")} ${modelDownloading}%` : text("Download the speech model (about 148 MB)", "下載語音模型（約 148 MB）")}</button>}
             <label style={styles.option}>
               <input type="checkbox" checked={voiceSettings?.tts_enabled ?? true} onChange={(e) => { void setVoiceSetting("tts_enabled", String(e.target.checked)); setVoiceSettingsState((prev) => prev ? { ...prev, tts_enabled: e.target.checked } : prev); }} style={styles.radio} />
               <span style={styles.optionLabel}>{text('Enable text-to-speech', '啟用文字朗讀')}</span>
@@ -1107,7 +1114,7 @@ export default function Settings() {
               </div>
             )}
             <div style={styles.privacyText}>
-              {text("Wake-word audio is processed locally for detection. After activation, full commands use cloud speech-to-text first when a Gemini API key is saved under API Keys, then fall back to local Whisper.", "喚醒詞偵測會在本機處理音訊。啟動後，如已儲存 Gemini API 密鑰，完整指示會優先使用雲端語音辨識，並以本機 Whisper 作為備援。")}
+              {text("Wake-word detection runs on this Mac. After it wakes, the full request uses cloud speech-to-text only when Gemini is the AI you chose; otherwise it stays on this Mac.", "喚醒詞偵測會在本機處理音訊。喚醒後，只有當你選擇的 AI 是 Gemini 時，完整指示才會使用雲端語音辨識；否則只在此 Mac 處理。")}
             </div>
             {wakeError && <div style={styles.errorText}>{wakeError}</div>}
           </div>
