@@ -519,6 +519,9 @@ pub struct NewItem {
     pub location: Option<String>,
     pub evidence: String,
     pub evidence_verified: bool,
+    /// Known follow-ups from the same sender that the extractor says are the
+    /// same obligation or event, possibly with a different date.
+    pub same_as: Vec<i64>,
 }
 
 /// Newest untriaged messages first, so a capped run covers what the user is
@@ -586,6 +589,95 @@ fn sender_domain(sender: &str) -> String {
     address.rsplit_once('@').map(|(_, domain)| domain.trim().trim_matches('"').to_lowercase()).unwrap_or_default()
 }
 
+/// An open follow-up from another email by the same sender, shown to the
+/// extractor so it can tell a repeat or a correction from something new.
+#[derive(Debug, Clone, PartialEq)]
+pub struct KnownItem {
+    pub id: i64,
+    pub kind: String,
+    pub title: String,
+    pub due_date: Option<String>,
+    pub due_time: Option<String>,
+    pub subject: String,
+    /// The other email arrived after this one.
+    pub later: bool,
+    /// From this same email: an item the user acted on in an earlier triage.
+    pub this_email: bool,
+}
+
+/// How far either side of a message its sender's other follow-ups are shown.
+const KNOWN_WINDOW_DAYS: i64 = 120;
+
+/// Open follow-ups from other emails sent by exactly `address`, nearest in
+/// time first, plus the items of this email that a re-triage keeps because
+/// the user acted on them. Only the same address: a correction must never
+/// let one sender close another sender's items.
+pub fn known_items_from_sender(db: &Database, message_id: i64, address: &str, received_at: &str) -> Result<Vec<KnownItem>, String> {
+    let conn = db.conn.lock().map_err(err)?;
+    let mut stmt = conn.prepare("SELECT i.id,i.kind,i.title,i.due_date,i.due_time,COALESCE(m.subject,''),m.received_at>?3,i.message_id=?1 FROM mail_items i JOIN mail_messages m ON m.id=i.message_id
+        WHERE (i.message_id=?1 AND (i.status!='open' OR i.remind_at IS NOT NULL OR i.calendar_event_id IS NOT NULL))
+           OR (?2!='' AND i.message_id!=?1 AND i.status='open' AND i.superseded_by IS NULL
+               AND (instr(lower(m.sender),'<'||?2||'>')>0 OR lower(trim(m.sender))=?2)
+               AND abs(julianday(m.received_at)-julianday(?3))<=?4)
+        ORDER BY i.message_id=?1 DESC,abs(julianday(m.received_at)-julianday(?3)),i.id LIMIT 20").map_err(err)?;
+    let rows = stmt
+        .query_map(params![message_id, address, received_at, KNOWN_WINDOW_DAYS], |r| {
+            Ok(KnownItem { id: r.get(0)?, kind: r.get(1)?, title: r.get(2)?, due_date: r.get(3)?, due_time: r.get(4)?, subject: r.get(5)?, later: r.get(6)?, this_email: r.get(7)? })
+        })
+        .map_err(err)?
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(err)?;
+    Ok(rows)
+}
+
+/// A known follow-up the extractor linked a new item to.
+struct Linked {
+    id: i64,
+    due_date: Option<String>,
+    due_time: Option<String>,
+    /// Its email arrived after the one being saved.
+    later: bool,
+    /// Its email says it corrects an earlier one.
+    corrects_earlier: bool,
+}
+
+impl Linked {
+    /// Same date, and the same time where both give one.
+    fn same_moment(&self, item: &NewItem) -> bool {
+        self.due_date == item.due_date && (self.due_time.is_none() || item.due_time.is_none() || self.due_time == item.due_time)
+    }
+}
+
+/// Close `old` in favour of `new`, which comes from an email that says it
+/// corrects the earlier one. An item the user acted on (calendar, reminder)
+/// stays open but carries the link, so the reader can say its date changed;
+/// JARVIS never edits the user's calendar on its own.
+fn replace_item(conn: &Connection, old: i64, new: i64) -> Result<(), String> {
+    conn.execute(
+        "UPDATE mail_items SET superseded_by=?2, status=CASE WHEN remind_at IS NULL AND calendar_event_id IS NULL THEN 'dismissed' ELSE status END WHERE id=?1 AND status='open' AND superseded_by IS NULL",
+        params![old, new],
+    ).map_err(err)?;
+    clear_attention_when_done(conn, old)
+}
+
+/// As when the user finishes the last follow-up: the email stops asking.
+fn clear_attention_when_done(conn: &Connection, item: i64) -> Result<(), String> {
+    conn.execute(
+        "UPDATE mail_triage SET attention=0 WHERE message_id=(SELECT message_id FROM mail_items WHERE id=?1) AND NOT EXISTS(SELECT 1 FROM mail_items o WHERE o.message_id=mail_triage.message_id AND o.status='open')",
+        [item],
+    ).map_err(err)?;
+    Ok(())
+}
+
+/// Saves one message's triage and follow-ups. Each new item is reconciled
+/// with the known follow-ups the extractor linked it to:
+/// - same date: a reminder or resend, so the existing item stands;
+/// - different date, and this email says it corrects the earlier one: the
+///   earlier item is replaced;
+/// - different date, and a later email already said it corrects this one:
+///   saved as replaced, so it shows on this email but not on the agenda;
+/// - different date with no stated correction: both stay. Closing a real
+///   deadline is worse than showing one twice.
 pub fn save_triage(
     db: &Database,
     message_id: i64,
@@ -593,45 +685,101 @@ pub fn save_triage(
     triage: &MailTriage,
     jev_model: &str,
     luna_model: Option<&str>,
+    corrects_earlier: bool,
     items: &[NewItem],
 ) -> Result<(), String> {
     let mut conn = db.conn.lock().map_err(err)?;
     let tx = conn.transaction().map_err(err)?;
-    tx.execute("INSERT INTO mail_triage(message_id,category,category_confidence,needs_reply,action_required,has_date,importance,sent_by_owner,attention,summary,decided_by,jev_model,luna_model) VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13)
-      ON CONFLICT(message_id) DO UPDATE SET category=excluded.category,category_confidence=excluded.category_confidence,needs_reply=excluded.needs_reply,action_required=excluded.action_required,has_date=excluded.has_date,importance=excluded.importance,sent_by_owner=excluded.sent_by_owner,attention=excluded.attention,summary=excluded.summary,decided_by=excluded.decided_by,jev_model=excluded.jev_model,luna_model=excluded.luna_model,triaged_at=datetime('now')",
-      params![message_id,triage.category,triage.category_confidence,triage.needs_reply,triage.action_required,triage.has_date,triage.importance,triage.sent_by_owner,triage.attention,triage.summary,triage.decided_by,jev_model,luna_model]).map_err(err)?;
+    tx.execute("INSERT INTO mail_triage(message_id,category,category_confidence,needs_reply,action_required,has_date,importance,sent_by_owner,attention,summary,decided_by,jev_model,luna_model,corrects_earlier) VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14)
+      ON CONFLICT(message_id) DO UPDATE SET category=excluded.category,category_confidence=excluded.category_confidence,needs_reply=excluded.needs_reply,action_required=excluded.action_required,has_date=excluded.has_date,importance=excluded.importance,sent_by_owner=excluded.sent_by_owner,attention=excluded.attention,summary=excluded.summary,decided_by=excluded.decided_by,jev_model=excluded.jev_model,luna_model=excluded.luna_model,corrects_earlier=excluded.corrects_earlier,triaged_at=datetime('now')",
+      params![message_id,triage.category,triage.category_confidence,triage.needs_reply,triage.action_required,triage.has_date,triage.importance,triage.sent_by_owner,triage.attention,triage.summary,triage.decided_by,jev_model,luna_model,corrects_earlier]).map_err(err)?;
     // A re-triage replaces untouched suggestions but keeps anything the user
     // has acted on (done, dismissed, reminded or added to the calendar).
     tx.execute("DELETE FROM mail_items WHERE message_id=?1 AND status='open' AND remind_at IS NULL AND calendar_event_id IS NULL", [message_id]).map_err(err)?;
+    let received: String = tx.query_row("SELECT received_at FROM mail_messages WHERE id=?1", [message_id], |r| r.get(0)).map_err(err)?;
+    // What survived the delete is what the user acted on: (id, due_date, is_event).
+    let kept_items: Vec<(i64, Option<String>, bool)> = {
+        let mut stmt = tx.prepare("SELECT id,due_date,kind='event' FROM mail_items WHERE message_id=?1").map_err(err)?;
+        let rows = stmt.query_map([message_id], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?))).map_err(err)?.collect::<Result<Vec<_>, _>>().map_err(err)?;
+        rows
+    };
+    let same_slot = |a: &NewItem, date: &Option<String>, event: bool| a.due_date.is_some() && &a.due_date == date && (a.kind == "event") == event;
     let domain = sender_domain(sender);
     for item in items {
-        // A booking and its confirmation arrive as two emails from the same
-        // sender for the same moment; keep one follow-up. Untimed items only
-        // merge when kind and title also match, so two different things due
-        // the same day from one organisation both survive.
-        if let (Some(due_date), false) = (item.due_date.as_deref(), domain.is_empty()) {
-            let mut stmt = tx.prepare("SELECT i.kind,i.title,i.due_time,m.sender FROM mail_items i JOIN mail_messages m ON m.id=i.message_id WHERE i.message_id!=?1 AND i.due_date=?2 AND i.status!='dismissed'").map_err(err)?;
-            let candidates = stmt
-                .query_map(params![message_id, due_date], |r| Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?, r.get::<_, Option<String>>(2)?, r.get::<_, String>(3)?)))
-                .map_err(err)?
-                .collect::<Result<Vec<_>, _>>()
-                .map_err(err)?;
-            let duplicate = candidates.iter().any(|(kind, title, due_time, other)| {
-                sender_domain(other) == domain
-                    && match (&item.due_time, due_time) {
-                        (Some(a), Some(b)) => a == b,
-                        (None, None) => kind == &item.kind && title.trim() == item.title.trim(),
-                        _ => false,
-                    }
-            });
-            if duplicate {
-                continue;
-            }
+        let mut links = Vec::new();
+        for id in &item.same_as {
+            let linked = tx.query_row(
+                "SELECT i.id,i.due_date,i.due_time,m.received_at>?3,COALESCE(t.corrects_earlier,0) FROM mail_items i JOIN mail_messages m ON m.id=i.message_id LEFT JOIN mail_triage t ON t.message_id=m.id WHERE i.id=?1 AND i.message_id!=?2 AND i.status='open' AND i.superseded_by IS NULL",
+                params![id, message_id, received],
+                |r| Ok(Linked { id: r.get(0)?, due_date: r.get(1)?, due_time: r.get(2)?, later: r.get(3)?, corrects_earlier: r.get(4)? }),
+            ).optional().map_err(err)?;
+            links.extend(linked);
         }
-        tx.execute("INSERT INTO mail_items(message_id,kind,title,due_date,due_time,end_time,location,evidence,evidence_verified) VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9)",
-          params![message_id,item.kind,item.title,item.due_date,item.due_time,item.end_time,item.location,item.evidence,item.evidence_verified]).map_err(err)?;
+        // A re-triage finds an item the user kept again; that item stands in.
+        // The extractor links it; without a link, only a match that cannot be
+        // wrong counts (one kept and one new item on that date).
+        let kept: Option<i64> = item.same_as.iter().copied().find(|id| kept_items.iter().any(|(k, _, _)| k == id)).or_else(|| {
+            let event = item.kind == "event";
+            let candidates: Vec<i64> = kept_items.iter().filter(|(_, date, e)| same_slot(item, date, *e)).map(|(id, _, _)| *id).collect();
+            let rivals = items.iter().filter(|other| same_slot(other, &item.due_date, event)).count();
+            match (candidates.as_slice(), rivals) {
+                ([only], 1) => Some(*only),
+                _ => None,
+            }
+        });
+        if let Some(newer) = links.iter().find(|l| l.later && l.corrects_earlier && !l.same_moment(item)) {
+            if let Some(kept) = kept {
+                replace_item(&tx, kept, newer.id)?;
+            } else {
+                tx.execute("INSERT INTO mail_items(message_id,kind,title,due_date,due_time,end_time,location,evidence,evidence_verified,status,superseded_by) VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,'dismissed',?10)",
+                  params![message_id,item.kind,item.title,item.due_date,item.due_time,item.end_time,item.location,item.evidence,item.evidence_verified,newer.id]).map_err(err)?;
+                clear_attention_when_done(&tx, tx.last_insert_rowid())?;
+            }
+            continue;
+        }
+        let replaced: Vec<i64> = if corrects_earlier { links.iter().filter(|l| !l.later && !l.same_moment(item)).map(|l| l.id).collect() } else { Vec::new() };
+        let repeat = links.iter().find(|l| l.same_moment(item)).map(|l| l.id);
+        if links.is_empty() && kept.is_none() && is_same_day_duplicate(&tx, message_id, &domain, item)? {
+            continue;
+        }
+        let id = match kept.or(repeat) {
+            Some(id) => id,
+            None => {
+                tx.execute("INSERT INTO mail_items(message_id,kind,title,due_date,due_time,end_time,location,evidence,evidence_verified) VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9)",
+                  params![message_id,item.kind,item.title,item.due_date,item.due_time,item.end_time,item.location,item.evidence,item.evidence_verified]).map_err(err)?;
+                tx.last_insert_rowid()
+            }
+        };
+        for old in replaced {
+            replace_item(&tx, old, id)?;
+        }
     }
     tx.commit().map_err(err)
+}
+
+/// A booking and its confirmation arrive as two emails from the same sender
+/// for the same moment; keep one follow-up. Untimed items only merge when
+/// kind and title also match, so two different things due the same day from
+/// one organisation both survive.
+fn is_same_day_duplicate(conn: &Connection, message_id: i64, domain: &str, item: &NewItem) -> Result<bool, String> {
+    let Some(due_date) = item.due_date.as_deref() else { return Ok(false) };
+    if domain.is_empty() {
+        return Ok(false);
+    }
+    let mut stmt = conn.prepare("SELECT i.kind,i.title,i.due_time,m.sender FROM mail_items i JOIN mail_messages m ON m.id=i.message_id WHERE i.message_id!=?1 AND i.due_date=?2 AND i.status!='dismissed'").map_err(err)?;
+    let candidates = stmt
+        .query_map(params![message_id, due_date], |r| Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?, r.get::<_, Option<String>>(2)?, r.get::<_, String>(3)?)))
+        .map_err(err)?
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(err)?;
+    Ok(candidates.iter().any(|(kind, title, due_time, other)| {
+        sender_domain(other) == domain
+            && match (&item.due_time, due_time) {
+                (Some(a), Some(b)) => a == b,
+                (None, None) => kind == &item.kind && title.trim() == item.title.trim(),
+                _ => false,
+            }
+    }))
 }
 
 pub fn auto_triage_enabled(db: &Database) -> Result<bool, String> {
@@ -663,7 +811,7 @@ pub fn triage_status(db: &Database, account_id: Option<&str>, typesafe_key: bool
     Ok(MailTriageStatus { enabled, typesafe_key, openai_key, untriaged, attention, open_items, categories })
 }
 
-const ITEM_SELECT: &str = "SELECT i.id,i.message_id,i.kind,i.title,i.due_date,i.due_time,i.end_time,i.location,i.evidence,i.evidence_verified,i.status,i.remind_at,i.reminded_at,i.calendar_event_id,m.subject,m.sender FROM mail_items i JOIN mail_messages m ON m.id=i.message_id";
+const ITEM_SELECT: &str = "SELECT i.id,i.message_id,i.kind,i.title,i.due_date,i.due_time,i.end_time,i.location,i.evidence,i.evidence_verified,i.status,i.remind_at,i.reminded_at,i.calendar_event_id,m.subject,m.sender,i.superseded_by FROM mail_items i JOIN mail_messages m ON m.id=i.message_id";
 fn item_row(r: &Row<'_>) -> rusqlite::Result<MailItem> {
     Ok(MailItem {
         id: r.get(0)?,
@@ -682,6 +830,7 @@ fn item_row(r: &Row<'_>) -> rusqlite::Result<MailItem> {
         calendar_event_id: r.get(13)?,
         subject: r.get(14)?,
         sender: r.get(15)?,
+        superseded_by: r.get(16)?,
     })
 }
 
@@ -785,10 +934,10 @@ mod tests {
             (2,'a','p2','Airbnb <automated@airbnb.com>','2026-09-20T10:05:00Z'),
             (3,'a','p3','Other <x@other.com>','2026-09-20T10:05:00Z');").unwrap();
         let triage = MailTriage { category: "schedule".into(), category_confidence: 0.9, needs_reply: 0.0, action_required: 0.2, has_date: 0.9, importance: 1.6, sent_by_owner: false, attention: true, summary: None, decided_by: "jev".into() };
-        let check_in = NewItem { kind: "event".into(), title: "Check in".into(), due_date: Some("2026-10-02".into()), due_time: Some("15:00".into()), end_time: None, location: None, evidence: String::new(), evidence_verified: true };
-        save_triage(&db, 1, "Airbnb <express@airbnb.com>", &triage, "jev", None, &[check_in.clone()]).unwrap();
-        save_triage(&db, 2, "Airbnb <automated@airbnb.com>", &triage, "jev", None, &[check_in.clone()]).unwrap();
-        save_triage(&db, 3, "Other <x@other.com>", &triage, "jev", None, &[check_in]).unwrap();
+        let check_in = NewItem { kind: "event".into(), title: "Check in".into(), due_date: Some("2026-10-02".into()), due_time: Some("15:00".into()), end_time: None, location: None, evidence: String::new(), evidence_verified: true, same_as: vec![] };
+        save_triage(&db, 1, "Airbnb <express@airbnb.com>", &triage, "jev", None, false, &[check_in.clone()]).unwrap();
+        save_triage(&db, 2, "Airbnb <automated@airbnb.com>", &triage, "jev", None, false, &[check_in.clone()]).unwrap();
+        save_triage(&db, 3, "Other <x@other.com>", &triage, "jev", None, false, &[check_in]).unwrap();
         assert_eq!(list_items(&db, None, false).unwrap().len(), 2);
         // Re-triaging the first message replaces its own item, not a duplicate.
         assert_eq!(list_items(&db, Some(1), true).unwrap().len(), 1);
@@ -796,12 +945,155 @@ mod tests {
         db.conn.lock().unwrap().execute_batch("INSERT INTO mail_messages(id,account_id,provider_id,sender,received_at) VALUES
             (4,'a','p4','\"a@hkstp.org\" <a@hkstp.org>','2026-09-20T10:00:00Z'),
             (5,'a','p5','Ideation <b@hkstp.org>','2026-09-20T11:00:00Z');").unwrap();
-        let session = NewItem { kind: "event".into(), title: "Mentor session".into(), due_date: Some("2026-10-02".into()), due_time: None, end_time: None, location: None, evidence: String::new(), evidence_verified: true };
+        let session = NewItem { kind: "event".into(), title: "Mentor session".into(), due_date: Some("2026-10-02".into()), due_time: None, end_time: None, location: None, evidence: String::new(), evidence_verified: true, same_as: vec![] };
         let report = NewItem { kind: "deadline".into(), title: "Submit report".into(), ..session.clone() };
-        save_triage(&db, 4, "\"a@hkstp.org\" <a@hkstp.org>", &triage, "jev", None, &[session.clone()]).unwrap();
-        save_triage(&db, 5, "Ideation <b@hkstp.org>", &triage, "jev", None, &[report, session]).unwrap();
+        save_triage(&db, 4, "\"a@hkstp.org\" <a@hkstp.org>", &triage, "jev", None, false, &[session.clone()]).unwrap();
+        save_triage(&db, 5, "Ideation <b@hkstp.org>", &triage, "jev", None, false, &[report, session]).unwrap();
         assert_eq!(list_items(&db, Some(5), true).unwrap().len(), 1, "the repeated session merges, the report stays");
         assert_eq!(sender_domain("\"alice@corp.com\" <alice@corp.com>"), "corp.com");
+    }
+
+    const AWS: &str = "AWS Startups Hong Kong <aws-startups-hk@amazon.com>";
+
+    /// Message 1 is the original, 2 the correction 43 minutes later, 3 a
+    /// reply three days later restating the corrected date.
+    fn correction_db() -> Database {
+        let db = crate::db::test_database();
+        upsert_account(&db, "a", "me@example.com", true).unwrap();
+        db.conn.lock().unwrap().execute(
+            "INSERT INTO mail_messages(id,account_id,provider_id,thread_id,sender,subject,received_at) VALUES
+            (1,'a','p1','t1',?1,'Submission of 2nd Milestone (Due 28 Sept 2026)','2026-09-18T07:38:28Z'),
+            (2,'a','p2','t2',?1,'Submission of 2nd Milestone (Due 16 Oct 2026)','2026-09-18T08:21:57Z'),
+            (3,'a','p3','t3',?1,'Re: Gold Badge Milestone: deadlines and format','2026-09-21T04:01:55Z')",
+            [AWS],
+        ).unwrap();
+        db
+    }
+
+    fn deadline(title: &str, due: &str, same_as: &[i64]) -> NewItem {
+        NewItem { kind: "deadline".into(), title: title.into(), due_date: Some(due.into()), due_time: None, end_time: None, location: None, evidence: String::new(), evidence_verified: true, same_as: same_as.to_vec() }
+    }
+
+    fn work_triage() -> MailTriage {
+        MailTriage { category: "work".into(), category_confidence: 0.9, needs_reply: 0.0, action_required: 0.9, has_date: 0.9, importance: 2.5, sent_by_owner: false, attention: true, summary: None, decided_by: "jev".into() }
+    }
+
+    fn only_item(db: &Database, message_id: i64) -> MailItem {
+        let items = list_items(db, Some(message_id), true).unwrap();
+        assert_eq!(items.len(), 1, "message {message_id}: {items:?}");
+        items.into_iter().next().unwrap()
+    }
+
+    fn known_ids(db: &Database, message_id: i64) -> Vec<i64> {
+        let received: String = db.conn.lock().unwrap().query_row("SELECT received_at FROM mail_messages WHERE id=?1", [message_id], |r| r.get(0)).unwrap();
+        known_items_from_sender(db, message_id, "aws-startups-hk@amazon.com", &received).unwrap().into_iter().map(|k| k.id).collect()
+    }
+
+    #[test]
+    fn a_correction_replaces_the_date_it_changes() {
+        let db = correction_db();
+        save_triage(&db, 1, AWS, &work_triage(), "jev", None, false, &[deadline("提交 Ideation 第二里程碑所需文件", "2026-09-28", &[])]).unwrap();
+        let original = only_item(&db, 1).id;
+        assert_eq!(known_ids(&db, 2), [original]);
+        save_triage(&db, 2, AWS, &work_triage(), "jev", None, true, &[deadline("提交第二階段金章評核材料", "2026-10-16", &[original])]).unwrap();
+        let corrected = only_item(&db, 2);
+        let replaced = only_item(&db, 1);
+        assert_eq!((replaced.status.as_str(), replaced.superseded_by), ("dismissed", Some(corrected.id)));
+        assert_eq!(list_items(&db, None, false).unwrap().iter().map(|i| i.id).collect::<Vec<_>>(), [corrected.id]);
+        assert_eq!(triage_status(&db, None, true, true).unwrap().attention, 1, "the corrected email stops asking");
+        // The later reply restates the new date: still one follow-up.
+        assert_eq!(known_ids(&db, 3), [corrected.id], "a replaced item is not offered again");
+        save_triage(&db, 3, AWS, &work_triage(), "jev", None, false, &[deadline("提交第二階段里程碑材料", "2026-10-16", &[corrected.id])]).unwrap();
+        assert!(list_items(&db, Some(3), true).unwrap().is_empty());
+        assert_eq!(list_items(&db, None, false).unwrap().len(), 1);
+        // Restoring the replaced item is final: it is not offered or replaced again.
+        update_item(&db, replaced.id, "open", None).unwrap();
+        assert!(!known_ids(&db, 2).contains(&replaced.id));
+    }
+
+    #[test]
+    fn a_correction_triaged_before_its_original_still_wins() {
+        let db = correction_db();
+        save_triage(&db, 2, AWS, &work_triage(), "jev", None, true, &[deadline("Submit", "2026-10-16", &[])]).unwrap();
+        let corrected = only_item(&db, 2).id;
+        let known = known_items_from_sender(&db, 1, "aws-startups-hk@amazon.com", "2026-09-18T07:38:28Z").unwrap();
+        assert!(known[0].later);
+        save_triage(&db, 1, AWS, &work_triage(), "jev", None, false, &[deadline("Submit", "2026-09-28", &[corrected])]).unwrap();
+        let original = only_item(&db, 1);
+        assert_eq!((original.status.as_str(), original.superseded_by), ("dismissed", Some(corrected)));
+        assert_eq!(list_items(&db, None, false).unwrap().len(), 1);
+        // An original the user already put in the calendar keeps its place
+        // but is marked as changed when it is checked again.
+        update_item(&db, original.id, "open", None).unwrap();
+        db.conn.lock().unwrap().execute("UPDATE mail_items SET superseded_by=NULL WHERE id=?1", [original.id]).unwrap();
+        set_item_calendar_event(&db, original.id, "evt").unwrap();
+        save_triage(&db, 1, AWS, &work_triage(), "jev", None, false, &[deadline("Submit", "2026-09-28", &[original.id, corrected])]).unwrap();
+        let kept = only_item(&db, 1);
+        assert_eq!((kept.id, kept.status.as_str(), kept.superseded_by), (original.id, "open", Some(corrected)));
+    }
+
+    #[test]
+    fn a_new_date_without_a_stated_correction_keeps_both() {
+        let db = correction_db();
+        save_triage(&db, 1, AWS, &work_triage(), "jev", None, false, &[deadline("Submit", "2026-09-28", &[])]).unwrap();
+        let original = only_item(&db, 1).id;
+        save_triage(&db, 2, AWS, &work_triage(), "jev", None, false, &[deadline("Submit", "2026-10-16", &[original])]).unwrap();
+        assert_eq!(list_items(&db, None, false).unwrap().len(), 2);
+        // An id from another sender, or from this message, is not a link.
+        db.conn.lock().unwrap().execute("INSERT INTO mail_messages(id,account_id,provider_id,sender,received_at) VALUES (4,'a','p4','Someone <x@example.org>','2026-09-19T00:00:00Z')", []).unwrap();
+        assert!(!known_items_from_sender(&db, 4, "x@example.org", "2026-09-19T00:00:00Z").unwrap().iter().any(|k| k.id == original));
+        assert!(!known_ids(&db, 1).contains(&original));
+    }
+
+    #[test]
+    fn an_item_the_user_acted_on_stays_open_but_is_marked_changed() {
+        let db = correction_db();
+        save_triage(&db, 1, AWS, &work_triage(), "jev", None, false, &[deadline("Submit", "2026-09-28", &[])]).unwrap();
+        let original = only_item(&db, 1).id;
+        set_item_calendar_event(&db, original, "evt").unwrap();
+        save_triage(&db, 2, AWS, &work_triage(), "jev", None, true, &[deadline("Submit", "2026-10-16", &[original])]).unwrap();
+        let corrected = only_item(&db, 2).id;
+        let kept = only_item(&db, 1);
+        assert_eq!((kept.status.as_str(), kept.superseded_by), ("open", Some(corrected)));
+    }
+
+    #[test]
+    fn re_triage_reuses_what_the_user_kept_and_still_applies_the_correction() {
+        let db = correction_db();
+        save_triage(&db, 2, AWS, &work_triage(), "jev", None, true, &[deadline("Submit", "2026-10-16", &[]), deadline("Quiz", "2026-10-16", &[])]).unwrap();
+        assert_eq!(list_items(&db, Some(2), true).unwrap().len(), 2, "two things due the same day both save");
+        let in_calendar = list_items(&db, Some(2), true).unwrap()[0].id;
+        set_item_calendar_event(&db, in_calendar, "evt").unwrap();
+        // The original is processed later, before the correction's re-check.
+        save_triage(&db, 1, AWS, &work_triage(), "jev", None, false, &[deadline("Submit", "2026-09-28", &[])]).unwrap();
+        let original = only_item(&db, 1).id;
+        save_triage(&db, 2, AWS, &work_triage(), "jev", None, true, &[deadline("Submit again", "2026-10-16", &[original])]).unwrap();
+        assert_eq!(list_items(&db, Some(2), true).unwrap().iter().map(|i| i.id).collect::<Vec<_>>(), [in_calendar], "no second copy of the kept item");
+        assert_eq!(only_item(&db, 1).superseded_by, Some(in_calendar));
+    }
+
+    #[test]
+    fn a_kept_item_stands_in_only_for_the_item_it_matches() {
+        // The correction lists three things due 16 Oct; the user put the
+        // submission in the calendar before the re-check.
+        let db = correction_db();
+        let items = |submit: &[i64], watch: &[i64], quiz: &[i64]| vec![deadline("Submit", "2026-10-16", submit), deadline("Watch curriculum 2", "2026-10-16", watch), deadline("Quiz", "2026-10-16", quiz)];
+        save_triage(&db, 1, AWS, &work_triage(), "jev", None, false, &[deadline("Submit", "2026-09-28", &[]), deadline("Watch curriculum 2", "2026-09-28", &[]), deadline("Quiz", "2026-09-28", &[])]).unwrap();
+        let old: Vec<i64> = list_items(&db, Some(1), true).unwrap().iter().map(|i| i.id).collect();
+        save_triage(&db, 2, AWS, &work_triage(), "jev", None, true, &items(&[old[0]], &[old[1]], &[old[2]])).unwrap();
+        let submit = list_items(&db, Some(2), true).unwrap().into_iter().find(|i| i.title == "Submit").unwrap().id;
+        set_item_calendar_event(&db, submit, "evt").unwrap();
+        let received = "2026-09-18T08:21:57Z";
+        let own: Vec<KnownItem> = known_items_from_sender(&db, 2, "aws-startups-hk@amazon.com", received).unwrap().into_iter().filter(|k| k.this_email).collect();
+        assert_eq!(own.iter().map(|k| k.id).collect::<Vec<_>>(), [submit], "only what the user acted on is offered from this email");
+        // Re-check: the model links the submission to the kept item.
+        save_triage(&db, 2, AWS, &work_triage(), "jev", None, true, &items(&[submit], &[], &[])).unwrap();
+        let titles: Vec<String> = list_items(&db, Some(2), false).unwrap().into_iter().map(|i| i.title).collect();
+        assert_eq!(titles.len(), 3, "{titles:?}");
+        assert_eq!(list_items(&db, None, false).unwrap().len(), 3, "the 28 Sept versions stay replaced");
+        // Without a link and with three candidates, nothing is folded into the kept item.
+        save_triage(&db, 2, AWS, &work_triage(), "jev", None, true, &items(&[], &[], &[])).unwrap();
+        assert_eq!(list_items(&db, Some(2), false).unwrap().len(), 4, "a duplicate is better than a lost task");
     }
 
     #[test]
@@ -810,8 +1102,8 @@ mod tests {
         upsert_account(&db, "a", "me@example.com", true).unwrap();
         db.conn.lock().unwrap().execute("INSERT INTO mail_messages(id,account_id,provider_id,sender,received_at) VALUES (1,'a','p1','x@y.com','2026-09-20T10:00:00Z')", []).unwrap();
         let triage = MailTriage { category: "work".into(), category_confidence: 0.9, needs_reply: 0.9, action_required: 0.9, has_date: 0.0, importance: 2.5, sent_by_owner: false, attention: true, summary: None, decided_by: "jev".into() };
-        let task = NewItem { kind: "task".into(), title: "A".into(), due_date: None, due_time: None, end_time: None, location: None, evidence: String::new(), evidence_verified: true };
-        save_triage(&db, 1, "x@y.com", &triage, "jev", None, &[task.clone(), NewItem { title: "B".into(), ..task }]).unwrap();
+        let task = NewItem { kind: "task".into(), title: "A".into(), due_date: None, due_time: None, end_time: None, location: None, evidence: String::new(), evidence_verified: true, same_as: vec![] };
+        save_triage(&db, 1, "x@y.com", &triage, "jev", None, false, &[task.clone(), NewItem { title: "B".into(), ..task }]).unwrap();
         let items = list_items(&db, Some(1), true).unwrap();
         update_item(&db, items[0].id, "done", None).unwrap();
         assert_eq!(triage_status(&db, None, true, true).unwrap().attention, 1);

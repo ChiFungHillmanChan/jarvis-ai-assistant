@@ -75,6 +75,8 @@ pub struct MailItem {
     pub calendar_event_id: Option<String>,
     pub subject: String,
     pub sender: String,
+    /// The newer item that replaced this one when a later email corrected it.
+    pub superseded_by: Option<i64>,
 }
 
 #[derive(Debug, Clone, Serialize)]
