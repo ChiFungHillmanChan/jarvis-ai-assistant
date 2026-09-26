@@ -40,6 +40,7 @@ export function installWorkspacePreview() {
   const notes = [{ id: 1, notion_id: '12345678901234567890123456789012ab', title: 'Customer onboarding playbook', url: 'https://www.notion.so/12345678901234567890123456789012ab', parent_type: 'workspace', last_edited: now.toISOString() }];
   const jobs = [{ id: 1, name: 'Morning briefing', schedule: '0 0 9 * * MON-FRI', action_type: 'briefing', status: 'active', last_run: day + ' 09:00:00', next_run: null, description: 'Review my calendar every weekday at 9 am.' }, { id: 2, name: 'Weekly project review', schedule: '0 0 16 * * FRI', action_type: 'summary', status: 'paused', last_run: null, next_run: null, description: 'Summarize project progress on Friday.' }];
   const runs = [{ id: 1, job_id: 1, started_at: day + ' 09:00:00', finished_at: day + ' 09:00:12', status: 'success', result: 'Your calendar has one customer review today.\n\nPrepare the rollout plan before the meeting.', error: null }];
+  let wakeOn = false;
   mockIPC(async (command, raw) => {
     const args = (raw || {}) as Record<string, any>;
     if (command.startsWith('plugin:')) return null;
@@ -64,7 +65,7 @@ export function installWorkspacePreview() {
         const answer: ChatMessage = { id: null, role: 'assistant', content, created_at: now.toISOString() };
         conversations[sessionId].push(answer); localStorage.setItem('jarvis-preview-conversations', JSON.stringify(conversations)); return answer;
       }
-      case 'get_voice_state': return 'Idle';
+      case 'get_voice_state': return wakeOn ? 'WakeWordListening' : 'Idle';
       case 'clear_conversations': delete conversations[args.sessionId]; localStorage.setItem('jarvis-preview-conversations', JSON.stringify(conversations)); return null;
       case 'get_wallpaper_status': case 'is_wallpaper_raised': return false;
       case 'get_tasks': return tasks;
@@ -94,7 +95,8 @@ export function installWorkspacePreview() {
       case 'get_google_account': return 'alex@example.com';
       case 'get_aws_credentials_status': return { configured: false, region: null };
       case 'list_local_endpoints': case 'get_provider_chain': case 'list_tts_voices': return [];
-      case 'get_wake_word_status': return { enabled: false, model_downloaded: true };
+      case 'get_wake_word_status': return { enabled: wakeOn, running: wakeOn, model_downloaded: true, voice_state: wakeOn ? 'WakeWordListening' : 'Idle' };
+      case 'enable_wake_word': case 'disable_wake_word': wakeOn = command === 'enable_wake_word'; void emit('voice-state', wakeOn ? 'WakeWordListening' : 'Idle'); return null;
       case 'get_voice_settings': return null;
       case 'get_preference': return '';
       case 'is_model_downloaded': return false;

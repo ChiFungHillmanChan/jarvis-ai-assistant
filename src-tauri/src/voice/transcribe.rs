@@ -18,6 +18,16 @@ fn read_stt_language(db: &crate::db::Database) -> String {
     }).unwrap_or_else(|| "auto".into())
 }
 
+/// Whisper's language for the dictation setting. Anything but a fixed
+/// language ("auto", "bilingual") lets Whisper detect it.
+pub(crate) fn whisper_language(setting: &str) -> Option<&'static str> {
+    match setting {
+        "yue" => Some("yue"),
+        "en" => Some("en"),
+        _ => None,
+    }
+}
+
 #[derive(Clone)]
 pub struct Transcriber {
     api_key: String,
@@ -158,6 +168,11 @@ impl LocalTranscriber {
     }
 
     pub fn transcribe(&self, audio_data: &[f32], db: &crate::db::Database) -> Result<String, String> {
+        self.transcribe_as(audio_data, whisper_language(&read_stt_language(db)))
+    }
+
+    /// Transcribe in a fixed language, or let Whisper detect it when `None`.
+    pub fn transcribe_as(&self, audio_data: &[f32], language: Option<&str>) -> Result<String, String> {
         if audio_data.len() < 1600 {
             return Ok(String::new());
         }
@@ -168,13 +183,7 @@ impl LocalTranscriber {
             .map_err(|e| format!("Failed to create Whisper state: {}", e))?;
 
         let mut params = FullParams::new(SamplingStrategy::Greedy { best_of: 1 });
-        let lang = read_stt_language(db);
-        let whisper_lang = match lang.as_str() {
-            "yue" => Some("yue"),
-            "en"  => Some("en"),
-            _     => None, // auto-detect
-        };
-        params.set_language(whisper_lang);
+        params.set_language(language);
         params.set_translate(false);
         params.set_print_special(false);
         params.set_print_progress(false);
@@ -204,5 +213,18 @@ impl LocalTranscriber {
         let text = text.trim().to_string();
         log::info!("Locally transcribed {} characters", text.chars().count());
         Ok(text)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn whisper_language_follows_the_dictation_setting() {
+        assert_eq!(whisper_language("yue"), Some("yue"));
+        assert_eq!(whisper_language("en"), Some("en"));
+        assert_eq!(whisper_language("bilingual"), None);
+        assert_eq!(whisper_language("auto"), None);
     }
 }

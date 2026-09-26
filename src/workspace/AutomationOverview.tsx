@@ -1,9 +1,11 @@
 import { useEffect, useState, useCallback } from 'react';
-import { ArrowUpRight, Check, Clock3, Mic, Pause, Play, RefreshCw, MessageSquare } from 'lucide-react';
+import { ArrowUpRight, Check, Clock3, Ear, Mic, Pause, Play, RefreshCw, MessageSquare } from 'lucide-react';
 import JarvisScene from '../components/3d/JarvisScene';
-import { getCronJobs, getCronRuns, getTasks, setCronJobStatus, updateTask } from '../lib/commands';
+import { disableWakeWord, downloadModel, enableWakeWord, getCronJobs, getCronRuns, getTasks, getWakeWordStatus, setCronJobStatus, updateTask } from '../lib/commands';
+import { setAlwaysListening } from '../lib/always-listening';
+import { showToast } from '../components/Toast';
 import { followUps, localDate } from '../lib/follow-ups';
-import type { CronJobView, CronRunView, Task } from '../lib/types';
+import type { CronJobView, CronRunView, Task, VoiceState, WakeWordStatus } from '../lib/types';
 import type { AssistantActivity } from './useAssistantActivity';
 import { useWorkspace } from './WorkspaceContext';
 import { useChatContext } from '../hooks/ChatContext';
@@ -11,7 +13,8 @@ import MessageRenderer from '../components/chat/MessageRenderer';
 import { useUiLocale } from '../i18n';
 import { chatStatusText } from '../lib/chat-status';
 function timeLabel(value: string | null, empty: string, locale: string) { if (!value) return empty; const d = new Date(value.includes('T') || /Z$/.test(value) ? value : value.replace(' ', 'T') + 'Z'); return isNaN(d.getTime()) ? value : d.toLocaleString(locale, { month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit' }); }
-export default function AutomationOverview({ activity, onVoice, listening }: { activity: AssistantActivity; onVoice: () => void; listening: boolean }) {
+const listeningApi = { status: getWakeWordStatus, download: () => downloadModel(false), enable: enableWakeWord, disable: disableWakeWord };
+export default function AutomationOverview({ activity, onVoice, listening, voiceState }: { activity: AssistantActivity; onVoice: () => void; listening: boolean; voiceState: VoiceState }) {
   const { text, locale } = useUiLocale();
   const when = (value: string | null) => timeLabel(value, text('No run yet', '從未執行'), locale);
   const [jobs, setJobs] = useState<CronJobView[]>([]);
@@ -22,6 +25,8 @@ export default function AutomationOverview({ activity, onVoice, listening }: { a
   const [selected, setSelected] = useState<number | null>(null);
   const [tasks, setTasks] = useState<Task[]>([]);
   const [completing, setCompleting] = useState<number | null>(null);
+  const [wake, setWake] = useState<WakeWordStatus | null>(null);
+  const [wakeBusy, setWakeBusy] = useState(false);
   const { open, newTask, writeValue } = useWorkspace();
   const chat = useChatContext();
   const refresh = useCallback(async () => {
@@ -43,6 +48,14 @@ export default function AutomationOverview({ activity, onVoice, listening }: { a
     const update = () => void load(); window.addEventListener('jarvis-automations-changed', update);
     return () => { mounted = false; clearInterval(timer); window.removeEventListener('jarvis-automations-changed', update); };
   }, [refresh]);
+  useEffect(() => { void getWakeWordStatus().then(setWake).catch(() => {}); }, []);
+  async function toggleAlwaysListening() {
+    if (!wake || wakeBusy) return; setWakeBusy(true);
+    try { setWake(await setAlwaysListening(!wake.running, listeningApi)); }
+    catch (e) { showToast(String(e), 'error'); void getWakeWordStatus().then(setWake).catch(() => {}); }
+    finally { setWakeBusy(false); }
+  }
+  const downloading = typeof voiceState === 'object' && 'ModelDownloading' in voiceState ? voiceState.ModelDownloading : null;
   async function toggle(job: CronJobView) {
     if (busy !== null) return; setBusy(job.id);
     try { await setCronJobStatus(job.id, job.status === 'active' ? 'paused' : 'active'); const { next, latest } = await refresh(); setJobs(next); setRuns(latest); setError(''); window.dispatchEvent(new Event('jarvis-automations-changed')); }
@@ -67,7 +80,7 @@ export default function AutomationOverview({ activity, onVoice, listening }: { a
     <div className="automation-layout"><section className="automation-brain" aria-label={text('JARVIS automation overview', 'JARVIS 自動化概覽')}>
       <div className="automation-presence"><span className={`status-dot ${activityLevel !== 'idle' ? 'is-working' : ''}`} /><span>{loading ? text('Loading automations…', '正在載入自動排程…') : text(`${enabled.length} enabled`, `已啟用 ${enabled.length} 項`)}</span><span className="presence-separator" /><span>{currentStatus}</span></div>
       <div className="automation-scene"><JarvisScene contained minimalLabels activityLevel={activityLevel} assistantPhase={listening ? 'listening' : activity.phase} ttsAmplitudeRef={activity.tts} micAmplitudeRef={activity.mic} pendingToolCall={activity.tool} onToolCallConsumed={activity.clearTool} /></div>
-      <div className="automation-command"><p>{activityLevel === 'idle' ? text('Ready for your next instruction.', '已準備好接收下一項工作指示。') : currentStatus}</p><div><button className="workspace-button primary" onClick={() => { const id = newTask(); chat.selectSession(id); }}><MessageSquare size={17} />{text('Give JARVIS a task', '向 JARVIS 提供工作指示')}</button><button className="workspace-button" onClick={onVoice} disabled={chat.busy}><Mic size={17} />{listening ? text('Finish listening', '結束語音輸入') : text('Speak', '語音輸入')}</button></div><small>{text('Only enabled routines run. Opening this view starts no new actions.', '系統只會執行已啟用的排程。開啟此頁面不會啟動新工作。')}</small></div>
+      <div className="automation-command"><p>{activityLevel === 'idle' ? text('Ready for your next instruction.', '已準備好接收下一項工作指示。') : currentStatus}</p><div><button className="workspace-button primary" onClick={() => { const id = newTask(); chat.selectSession(id); }}><MessageSquare size={17} />{text('Give JARVIS a task', '向 JARVIS 提供工作指示')}</button><button className="workspace-button" onClick={onVoice} disabled={chat.busy}><Mic size={17} />{listening ? text('Finish listening', '結束語音輸入') : text('Speak', '語音輸入')}</button><button className={`workspace-button ${wake?.running ? 'is-on' : ''}`} aria-pressed={!!wake?.running} disabled={!wake || wakeBusy} onClick={() => void toggleAlwaysListening()}><Ear size={17} />{downloading !== null ? text(`Downloading speech model ${downloading}%`, `正在下載語音模型 ${downloading}%`) : wake?.running ? text('Always listening: on', '一直聆聽：開') : text('Always listening: off', '一直聆聽：關')}</button></div>{wake?.running ? <small>{text('Say "Hey Jarvis", then your request. Nothing leaves this Mac until you say it.', '先說「Hey Jarvis」，再說出指示。說出喚醒詞之前，聲音不會離開此 Mac。')}</small> : wake && !wake.model_downloaded && <small>{text('Turning it on downloads a speech model (about 148 MB) once.', '首次開啟會下載語音模型（約 148 MB）。')}</small>}<small>{text('Only enabled routines run. Opening this view starts no new actions.', '系統只會執行已啟用的排程。開啟此頁面不會啟動新工作。')}</small></div>
     </section><aside className="automation-work">{due.length > 0 && <section className="automation-followups" aria-label={text('Follow-ups', '待跟進')}><div className="section-heading"><h2>{text('Follow-ups', '待跟進')}</h2><span>{due.length}</span></div>
       {due.map(task => <div className="automation-job" key={task.id}><div className="automation-job-main"><span className="automation-job-name">{task.title}</span><span className={`run-state ${task.deadline! < today ? 'failed' : ''}`}>{dueLabel(task.deadline!)}</span></div><button className="icon-button" aria-label={text(`Mark ${task.title} as done`, `將「${task.title}」標為完成`)} disabled={completing !== null} onClick={() => void complete(task)}><Check size={15} /></button></div>)}</section>}
       <div className="section-heading"><h2>{text('Enabled routines', '已啟用的排程')}</h2><span>{enabled.length}</span></div>

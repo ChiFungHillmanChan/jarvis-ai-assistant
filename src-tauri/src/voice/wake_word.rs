@@ -289,7 +289,7 @@ async fn detection_loop(
                     continue;
                 }
 
-                let transcript = transcribe_local_window(local_transcriber.clone(), audio_window, Arc::clone(&db)).await?;
+                let transcript = transcribe_local_window(local_transcriber.clone(), audio_window).await?;
 
                 // Whisper ran for a few hundred milliseconds; a push-to-talk
                 // session may have started in that window. Acting now would
@@ -466,12 +466,15 @@ async fn handle_wake_word_detection(
     Ok(())
 }
 
+/// "Hey Jarvis" is an English phrase, so the wake window is transcribed as
+/// English whatever the user dictates in; see the test of the same name.
+const WAKE_PHRASE_LANGUAGE: Option<&str> = Some("en");
+
 async fn transcribe_local_window(
     local_transcriber: LocalTranscriber,
     audio_window: Vec<f32>,
-    db: Arc<crate::db::Database>,
 ) -> Result<String, String> {
-    tauri::async_runtime::spawn_blocking(move || local_transcriber.transcribe(&audio_window, &db))
+    tauri::async_runtime::spawn_blocking(move || local_transcriber.transcribe_as(&audio_window, WAKE_PHRASE_LANGUAGE))
         .await
         .map_err(|e| format!("Wake-word transcription task failed: {}", e))?
 }
@@ -493,6 +496,22 @@ async fn transcribe_with_fallback(
     tauri::async_runtime::spawn_blocking(move || local_transcriber.transcribe(&samples, &db))
         .await
         .map_err(|e| format!("Wake-word local STT task failed: {}", e))?
+}
+
+/// Longest request after "Yes?". Just inside the push-to-talk buffer, which
+/// keeps only its newest 30 s at 48 kHz (`AudioRouter::new`).
+const COMMAND_MAX_DURATION: Duration = Duration::from_secs(28);
+/// Give up when nothing is said after "Yes?".
+const COMMAND_NO_SPEECH_TIMEOUT: Duration = Duration::from_secs(8);
+/// Quiet 250 ms polls in a row that end a request: 1.5 s, so a pause to think
+/// mid-sentence does not send half of it.
+const COMMAND_END_QUIET_POLLS: u32 = 6;
+
+fn command_finished(elapsed: Duration, heard_speech: bool, quiet_polls: u32) -> bool {
+    if !heard_speech {
+        return elapsed >= COMMAND_NO_SPEECH_TIMEOUT;
+    }
+    quiet_polls >= COMMAND_END_QUIET_POLLS || elapsed >= COMMAND_MAX_DURATION
 }
 
 async fn record_command_audio(
@@ -534,7 +553,7 @@ async fn record_command_audio(
                     silent_windows += 1;
                 }
 
-                if start.elapsed() >= Duration::from_secs(8) || (heard_speech && silent_windows >= 3) {
+                if command_finished(start.elapsed(), heard_speech, silent_windows) {
                     break;
                 }
             }
@@ -1012,6 +1031,47 @@ mod tests {
     /// the wiring is checked as a property of the source text. The search is
     /// bounded to this one function's body, so the assertions below cannot
     /// satisfy themselves.
+    /// "Hey Jarvis" is English whatever language the user dictates in. Whisper
+    /// told to expect Cantonese writes the phrase in Chinese characters, which
+    /// `is_wake_phrase` (Latin letters only) never matches, so the wake check
+    /// must not follow `stt_language`. Checked on the source like the guard
+    /// test below: the model is not available to a unit test.
+    #[test]
+    fn the_wake_phrase_is_transcribed_as_english_whatever_the_speech_language() {
+        assert_eq!(WAKE_PHRASE_LANGUAGE, Some("en"));
+        let source = include_str!("wake_word.rs");
+        let start = source
+            .find("async fn transcribe_local_window(")
+            .expect("transcribe_local_window must exist");
+        let len = source[start..]
+            .find("\nasync fn transcribe_with_fallback(")
+            .expect("transcribe_with_fallback must follow transcribe_local_window");
+        let body = &source[start..start + len];
+        assert!(
+            body.contains("transcribe_as(") && body.contains("WAKE_PHRASE_LANGUAGE"),
+            "the wake window must be transcribed in WAKE_PHRASE_LANGUAGE, not the dictation language"
+        );
+    }
+
+    #[test]
+    fn a_pause_shorter_than_one_and_a_half_seconds_does_not_end_the_request() {
+        let elapsed = Duration::from_secs(4);
+        assert!(!command_finished(elapsed, true, 5));
+        assert!(command_finished(elapsed, true, 6));
+    }
+
+    #[test]
+    fn a_request_longer_than_eight_seconds_is_not_cut_off() {
+        assert!(!command_finished(Duration::from_secs(20), true, 0));
+        assert!(command_finished(COMMAND_MAX_DURATION, true, 0));
+    }
+
+    #[test]
+    fn saying_nothing_after_the_prompt_still_gives_up_after_eight_seconds() {
+        assert!(!command_finished(Duration::from_secs(7), false, 0));
+        assert!(command_finished(Duration::from_secs(8), false, 0));
+    }
+
     #[test]
     fn the_wake_word_assistant_turn_goes_through_the_shared_guard() {
         let source = include_str!("wake_word.rs");

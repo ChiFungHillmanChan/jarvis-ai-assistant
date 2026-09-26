@@ -169,6 +169,8 @@
 .automation-command>div { display:flex; justify-content:center; gap:8px; }
 .automation-command .workspace-button { background:#202c38; border-color:#40505e; color:#dce7ee; }
 .automation-command .workspace-button.primary { background:#b7dcec; color:#15222c; border-color:#b7dcec; }
+.automation-command .workspace-button.is-on { border-color:#b7dcec; box-shadow:inset 0 0 0 1px #b7dcec; }
+.automation-command small + small { margin-top:6px; }
 .automation-command small { display:block; color:#a5b3c1; font-size:11px; margin-top:18px; }
 .automation-work { overflow:auto; }
 .section-heading { display:flex; align-items:center; justify-content:space-between; gap:12px; margin-bottom:15px; }
