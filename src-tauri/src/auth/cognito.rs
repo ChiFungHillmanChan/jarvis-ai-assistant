@@ -50,6 +50,31 @@ fn resolve(runtime: Option<String>, compile_time: Option<&'static str>) -> Optio
         .or_else(|| compile_time.map(str::to_string).filter(|v| !v.trim().is_empty()))
 }
 
+/// The account settings a billing build compiles in.
+const COMPILED_ACCOUNT_SETTINGS: [Option<&str>; 3] = [
+    option_env!("JARVIS_COGNITO_DOMAIN"),
+    option_env!("JARVIS_COGNITO_CLIENT_ID"),
+    option_env!("JARVIS_PAYMENT_API"),
+];
+
+/// Whether launch-time env vars may replace the compiled-in account settings.
+/// A release build compiled with all three ignores them: otherwise anyone
+/// could point a paid build at another server, or at an invalid one that hides
+/// accounts, and so skip the paywall. Debug builds, including the native QA
+/// app, keep the override for sandbox testing.
+fn overrides_allowed(debug_build: bool, compiled: [Option<&str>; 3]) -> bool {
+    debug_build || !compiled.iter().all(|value| value.is_some_and(|v| !v.trim().is_empty()))
+}
+
+/// A launch-time account setting, or `None` when this build must ignore it.
+pub(crate) fn runtime_env(name: &str) -> Option<String> {
+    if overrides_allowed(cfg!(debug_assertions), COMPILED_ACCOUNT_SETTINGS) {
+        std::env::var(name).ok()
+    } else {
+        None
+    }
+}
+
 impl CognitoConfig {
     pub fn from_parts(
         domain: Option<String>,
@@ -73,9 +98,9 @@ impl CognitoConfig {
     /// hides sign-in instead of offering a button that cannot work.
     pub fn from_env() -> Option<Self> {
         Self::from_parts(
-            resolve(std::env::var("JARVIS_COGNITO_DOMAIN").ok(), option_env!("JARVIS_COGNITO_DOMAIN")),
-            resolve(std::env::var("JARVIS_COGNITO_CLIENT_ID").ok(), option_env!("JARVIS_COGNITO_CLIENT_ID")),
-            resolve(std::env::var("JARVIS_PAYMENT_API").ok(), option_env!("JARVIS_PAYMENT_API")),
+            resolve(runtime_env("JARVIS_COGNITO_DOMAIN"), option_env!("JARVIS_COGNITO_DOMAIN")),
+            resolve(runtime_env("JARVIS_COGNITO_CLIENT_ID"), option_env!("JARVIS_COGNITO_CLIENT_ID")),
+            resolve(runtime_env("JARVIS_PAYMENT_API"), option_env!("JARVIS_PAYMENT_API")),
         )
     }
 }
@@ -773,6 +798,15 @@ mod tests {
         assert_eq!(c.domain, "https://jarvis.auth.ap-southeast-1.amazoncognito.com");
         assert_eq!(c.client_id, "client");
         assert_eq!(c.api_base, "https://api.example.com");
+    }
+
+    #[test]
+    fn a_release_billing_build_ignores_launch_time_overrides() {
+        let billing = [Some("jarvis.auth.example.com"), Some("client"), Some("https://api.example.com")];
+        assert!(!overrides_allowed(false, billing), "release + billing: only the compiled values count");
+        assert!(overrides_allowed(true, billing), "debug builds, including the native QA app, keep the override");
+        assert!(overrides_allowed(false, [None, None, None]), "a free build has no paywall to protect");
+        assert!(overrides_allowed(false, [Some("d"), Some("  "), Some("https://api.example.com")]), "a blank compiled value is not a billing build");
     }
 
     #[test]

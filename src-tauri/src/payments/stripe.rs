@@ -1,5 +1,4 @@
 use serde::{Deserialize, Serialize};
-use std::env;
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "lowercase")]
@@ -62,8 +61,9 @@ pub enum PaymentError {
 /// the Google credentials use in auth/google.rs.
 const DEFAULT_PAYMENT_API: Option<&str> = option_env!("JARVIS_PAYMENT_API");
 
-/// Resolve the endpoint by checking the runtime env var first, then falling back
-/// to the value baked in at compile time. Empty strings count as missing.
+/// Resolve the endpoint from the launch-time env var (when this build allows
+/// it, see `auth::cognito::runtime_env`), then the value baked in at compile
+/// time. Empty strings count as missing.
 fn resolve_payment_api(
     runtime: Option<String>,
     compile_time: Option<&'static str>,
@@ -74,7 +74,7 @@ fn resolve_payment_api(
 }
 
 fn payment_api_base() -> Result<String, PaymentError> {
-    resolve_payment_api(env::var("JARVIS_PAYMENT_API").ok(), DEFAULT_PAYMENT_API)
+    resolve_payment_api(crate::auth::cognito::runtime_env("JARVIS_PAYMENT_API"), DEFAULT_PAYMENT_API)
         .ok_or(PaymentError::NotConfigured)
 }
 
