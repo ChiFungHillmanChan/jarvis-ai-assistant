@@ -8,6 +8,7 @@ import WelcomeGuide from './pages/WelcomeGuide';
 import UpdateToast from './components/UpdateToast';
 import ToolApproval from './components/ToolApproval';
 import ErrorBoundary from './components/ErrorBoundary';
+import PaywallGate from './components/PaywallGate';
 import { checkOnboardingStatus, getOptionalPreference, stopSpeaking, listChatSessions } from './lib/commands';
 import { readStartupScreen, type StartupScreen } from './lib/onboarding-flow';
 import { useVoiceState } from './hooks/useVoiceState';
@@ -175,9 +176,13 @@ function AppGate() {
   }, [attempt]);
   if (loadError || localeError) return <div className="setup-screen"><header className="setup-titlebar" data-tauri-drag-region><WindowControls /><span>JARVIS</span></header><main className="setup-content"><p className="setup-error" role="alert">{text('Could not read your startup settings. Retry to continue.', '未能讀取啟動設定，請重試以繼續。')}</p><button onClick={() => { if (localeError) retryLoad(); setAttempt(value => value + 1); }}>{text('Retry', '重試')}</button></main></div>;
   if (!localeReady || screen === null) return <div className="workspace-loading" role="status">{text("Opening JARVIS…", "正在開啟 JARVIS…")}</div>;
-  if (screen === 'welcome') return <WelcomeGuide onComplete={setScreen} />;
-  if (screen === 'setup') return <OnboardingWizard onComplete={() => { setScreen('workspace'); open('email'); }} />;
-  return <AppShell />;
+  // In a billing build the gate comes before everything else, so no Google
+  // connection is made for an account without a plan.
+  return <PaywallGate>{
+    screen === 'welcome' ? <WelcomeGuide onComplete={setScreen} />
+      : screen === 'setup' ? <OnboardingWizard onComplete={() => { setScreen('workspace'); open('email'); }} />
+      : <AppShell />
+  }</PaywallGate>;
 }
 
 export default function App() { return <WorkspaceProvider><ChatProvider><AppGate /></ChatProvider></WorkspaceProvider>; }

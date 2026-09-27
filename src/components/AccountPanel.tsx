@@ -1,14 +1,15 @@
 import { useCallback, useEffect, useRef, useState } from "react";
-import { accountSignIn, accountSignOut, accountStatus, paymentsOpenPortal, paymentsReopenUrl, paymentsStartCheckout } from "../lib/commands";
+import { accountSignIn, accountSignOut, accountStatus, paymentsOpenPortal, paymentsReopenUrl } from "../lib/commands";
 import type { AccountStatus, PaymentPage } from "../lib/types";
 import { NOT_SIGNED_IN, SIGN_IN_CANCELLED, accountChanged, onAccountChanged, createAccountOperationGuard, isAccountSessionChanging, onAccountSessionChange, tierKey } from "../lib/account";
 import { createAccountMonitor, type PaymentState } from "../lib/account-monitor";
+import { formatPlanDate, planLine } from "../lib/paywall";
 import { useUiLocale } from "../i18n";
 import type { MessageKey } from "../i18n/catalog";
 
 type Busy = null | "signin" | "signout" | "checkout" | "portal" | "reopen" | "refresh";
 
-/** The account is optional; signing in is required for Stripe checkout. */
+/** Plan details, billing management and sign-out. Subscribing happens in the paywall gate. */
 export default function AccountPanel() {
   const { t, locale } = useUiLocale();
   const [status, setStatus] = useState<AccountStatus | null>(null);
@@ -117,14 +118,6 @@ export default function AccountPanel() {
     setPage({ ...next, kind });
     setMessage(next.browser_opened ? (kind === "checkout" ? "upgradeOpened" : "billingOpened") : "billingBrowserFailed");
   };
-  const upgrade = () => run("checkout", async current => {
-    monitor.current?.cancelPayment();
-    const next = await paymentsStartCheckout("pro", locale);
-    if (!current()) return;
-    showPage(next, next.already_subscribed ? "portal" : "checkout");
-    if (next.already_subscribed) await load(true);
-    else if (next.browser_opened) monitor.current?.waitForPayment();
-  });
   const manageBilling = () => run("portal", async current => {
     monitor.current?.cancelPayment();
     const next = await paymentsOpenPortal(locale);
@@ -153,6 +146,7 @@ export default function AccountPanel() {
   if (!status.available) {
     return <div className="settings-panel"><p style={styles.hint}>{t("accountUnavailable")}</p></div>;
   }
+  const line = planLine(status);
 
   return (
     <div className="settings-panel">
@@ -162,10 +156,8 @@ export default function AccountPanel() {
         <>
           <p style={styles.hint}>{t("signedInAs", { email: status.email ?? "-" })}</p>
           <p style={styles.hint}>{t("planLabel", { plan: t(tierKey(status.tier)) })}</p>
+          {line && <p style={styles.hint}>{t(line.key, { date: formatPlanDate(line.date, locale) })}</p>}
           <div style={styles.row}>
-            {status.tier === "free" && (
-              <button style={styles.button} disabled={sessionChanging || busy !== null || payment === "waiting"} onClick={() => void upgrade()}>{t("upgradePro")}</button>
-            )}
             {(status.tier === "pro" || status.tier === "team") && (
               <button style={styles.button} disabled={sessionChanging || busy !== null} onClick={() => void manageBilling()}>{t("manageBilling")}</button>
             )}
