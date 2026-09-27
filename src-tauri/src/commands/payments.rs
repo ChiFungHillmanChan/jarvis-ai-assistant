@@ -38,10 +38,12 @@ fn open_browser(url: &str) -> Result<(), String> {
 /// Requires a signed-in JARVIS account: the checkout endpoint binds the Stripe
 /// customer to the Cognito user in the access token. Returns `not_signed_in`
 /// when there is no session, which the UI answers by starting sign-in.
+/// `code` is an optional promotion code; a code Stripe does not recognise returns `invalid_code`.
 #[tauri::command]
 pub async fn payments_start_checkout(
     tier: String,
     locale: Option<PaymentLocale>,
+    code: Option<String>,
     session: State<'_, Arc<CognitoSession>>,
 ) -> Result<CheckoutPayload, String> {
     let parsed_tier = match tier.as_str() {
@@ -50,8 +52,10 @@ pub async fn payments_start_checkout(
         other => return Err(format!("invalid tier: {}", other)),
     };
 
+    // A blank code is a normal checkout; the server trims and limits it again.
+    let code = code.map(|c| c.trim().to_string()).filter(|c| !c.is_empty());
     let generation = session.generation();
-    let resp = create_checkout_session(parsed_tier, locale.unwrap_or_default(), session.inner(), generation)
+    let resp = create_checkout_session(parsed_tier, locale.unwrap_or_default(), code, session.inner(), generation)
         .await
         .map_err(|e| e.to_string())?;
 

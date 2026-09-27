@@ -22,6 +22,9 @@ pub enum PaymentLocale {
 pub struct CheckoutRequest {
     pub tier: Tier,
     pub locale: PaymentLocale,
+    /// A promotion code typed in the app; omitted for a normal checkout.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub code: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -51,6 +54,8 @@ pub enum PaymentError {
     Account(String),
     #[error("billing_busy")]
     Busy,
+    #[error("invalid_code")]
+    InvalidCode,
     #[error("The payment service returned an unsupported URL.")]
     InvalidUrl,
 }
@@ -92,6 +97,20 @@ pub fn validate_payment_url(value: &str) -> Result<(), PaymentError> {
     Ok(())
 }
 
+/// Maps a non-success reply to the error codes the frontend matches on.
+fn rejection(status: reqwest::StatusCode, body: &str) -> PaymentError {
+    if status == reqwest::StatusCode::CONFLICT {
+        return PaymentError::Busy;
+    }
+    let code = serde_json::from_str::<serde_json::Value>(body)
+        .ok()
+        .and_then(|v| v.get("error").and_then(|e| e.as_str()).map(str::to_string));
+    if status == reqwest::StatusCode::BAD_REQUEST && code.as_deref() == Some("invalid_code") {
+        return PaymentError::InvalidCode;
+    }
+    PaymentError::Checkout(status.to_string())
+}
+
 async fn post_session<T: serde::de::DeserializeOwned>(
     path: &str,
     body: Option<serde_json::Value>,
@@ -115,11 +134,10 @@ async fn post_session<T: serde::de::DeserializeOwned>(
             AccountError::NotSignedIn => PaymentError::NotSignedIn,
             other => PaymentError::Account(other.to_string()),
         })?;
-    if resp.status() == reqwest::StatusCode::CONFLICT {
-        return Err(PaymentError::Busy);
-    }
     if !resp.status().is_success() {
-        return Err(PaymentError::Checkout(resp.status().to_string()));
+        let status = resp.status();
+        let body = resp.text().await.unwrap_or_default();
+        return Err(rejection(status, &body));
     }
     let parsed = resp.json().await?;
     session.with_current_generation(generation, || ()).map_err(|_| PaymentError::NotSignedIn)?;
@@ -129,10 +147,11 @@ async fn post_session<T: serde::de::DeserializeOwned>(
 pub async fn create_checkout_session(
     tier: Tier,
     locale: PaymentLocale,
+    code: Option<String>,
     session: &crate::auth::cognito::CognitoSession,
     generation: u64,
 ) -> Result<CheckoutResponse, PaymentError> {
-    let parsed: CheckoutResponse = post_session("checkout", Some(serde_json::json!(CheckoutRequest { tier, locale })), session, generation).await?;
+    let parsed: CheckoutResponse = post_session("checkout", Some(serde_json::json!(CheckoutRequest { tier, locale, code })), session, generation).await?;
     validate_payment_url(&parsed.url)?;
     Ok(parsed)
 }
@@ -182,8 +201,24 @@ mod tests {
 
     #[test]
     fn checkout_body_carries_only_tier_and_the_selected_locale() {
-        let body = serde_json::to_value(CheckoutRequest { tier: Tier::Pro, locale: PaymentLocale::TraditionalChinese }).unwrap();
+        let body = serde_json::to_value(CheckoutRequest { tier: Tier::Pro, locale: PaymentLocale::TraditionalChinese, code: None }).unwrap();
         assert_eq!(body, serde_json::json!({ "tier": "pro", "locale": "zh-HK" }));
+    }
+
+    #[test]
+    fn a_code_is_sent_only_when_given() {
+        let body = serde_json::to_value(CheckoutRequest { tier: Tier::Pro, locale: PaymentLocale::English, code: Some("PILOT100".into()) }).unwrap();
+        assert_eq!(body, serde_json::json!({ "tier": "pro", "locale": "en", "code": "PILOT100" }));
+    }
+
+    #[test]
+    fn server_rejections_map_to_the_codes_the_app_matches() {
+        use reqwest::StatusCode;
+        assert!(matches!(rejection(StatusCode::CONFLICT, ""), PaymentError::Busy));
+        assert!(matches!(rejection(StatusCode::BAD_REQUEST, r#"{"error":"invalid_code"}"#), PaymentError::InvalidCode));
+        assert_eq!(PaymentError::InvalidCode.to_string(), "invalid_code");
+        assert!(matches!(rejection(StatusCode::BAD_REQUEST, r#"{"error":"invalid_tier"}"#), PaymentError::Checkout(_)));
+        assert!(matches!(rejection(StatusCode::SERVICE_UNAVAILABLE, "not json"), PaymentError::Checkout(_)));
     }
 
     #[test]
