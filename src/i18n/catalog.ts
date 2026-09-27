@@ -18,6 +18,13 @@ const messages = {
   billingBrowserFailed: ['The browser could not be opened. Use the button below to try again.', '未能開啟瀏覽器，請按下方按鈕重試。'], billingBusy: ['Your billing request is still being processed. Please try again shortly.', '訂閱要求仍在處理中，請稍後重試。'],
   paymentChecking: ['Checking your plan for up to two minutes…', '正在檢查方案，最多等候兩分鐘…'], paymentConfirmed: ['Your paid plan is confirmed and up to date.', '已確認付費方案，帳戶資料已更新。'], paymentUnconfirmed: ['Payment has not been confirmed. If you completed payment, choose Refresh shortly. You do not need to pay again.', '尚未確認付款。如已完成付款，請稍後按「重新整理」，無須再次付款。'],
   reopenCheckout: ['Reopen checkout', '重新開啟付款頁面'], reopenBilling: ['Reopen billing', '重新開啟訂閱管理'],
+  gateSignInTitle: ['Sign in to start using JARVIS', '登入以開始使用 JARVIS'], gateSignInBody: ['Your account holds your plan. Your mail, notes and settings stay on this Mac.', '帳戶只用作管理你的方案。你的郵件、筆記及設定仍然只儲存在此 Mac。'],
+  trialTitle: ['Start your {days}-day free trial', '開始 {days} 日免費試用'], trialTerms: ['Free for {days} days, then {price}. Cancel any time before day {days} and you pay nothing. Stripe asks for a card now so your plan continues without interruption.', '首 {days} 日免費，之後{price}。在第 {days} 日前隨時取消，不會收取任何費用。Stripe 會先登記信用卡，讓方案在試用期後繼續使用而不中斷。'], trialStart: ['Start free trial', '開始免費試用'],
+  subscribeTitle: ['Subscribe to JARVIS Pro', '訂閱 JARVIS Pro'], subscribeTerms: ['JARVIS Pro is {price}. Cancel any time from Manage billing.', '收費為{price}，可隨時在「管理訂閱」取消。'], subscribe: ['Subscribe', '訂閱'],
+  codeHave: ['I have a code', '我有優惠碼'], codeLabel: ['Code', '優惠碼'], codeApply: ['Apply code', '使用優惠碼'], codeInvalid: ['Code not recognised. Check the spelling, or ask the person who gave it to you.', '無法識別此優惠碼。請檢查拼寫，或向提供優惠碼的人查詢。'],
+  gateOfflineTitle: ['Cannot confirm your plan', '未能確認你的方案'], gateOfflineBody: ['JARVIS could not reach its server and has no recent confirmation of your plan. Check your connection and try again.', 'JARVIS 未能連接伺服器，亦沒有近期的方案確認紀錄。請檢查網絡連線後再試。'],
+  gateWaitingTitle: ['Finish checkout in your browser', '請在瀏覽器完成付款程序'],
+  planTrialEnds: ['Trial ends {date}', '試用期於 {date} 結束'], planRenews: ['Renews {date}', '將於 {date} 續期'], planEnds: ['Ends {date}', '將於 {date} 結束'],
   updateAvailable: ['New version {version}', '有新版本 {version}'], downloadLatest: ['Download latest version', '下載最新版本'], updating: ['Updating {percent}%', '更新中 {percent}%'], updateFailed: ['Update failed', '更新失敗'], dismissUpdate: ['Dismiss until the next check', '暫時關閉，下次檢查再提示'],
 } as const;
 export type MessageKey = keyof typeof messages;

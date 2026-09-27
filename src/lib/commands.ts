@@ -71,8 +71,8 @@ export async function accountSignOut(): Promise<void> {
 
 // Payments (backend set via JARVIS_PAYMENT_API).
 // Requires a signed-in account; rejects with "not_signed_in" otherwise.
-export async function paymentsStartCheckout(tier: "pro" | "team", locale: UiLocale = "en"): Promise<CheckoutPage> {
-  return invoke("payments_start_checkout", { tier, locale });
+export async function paymentsStartCheckout(tier: "pro" | "team", locale: UiLocale = "en", code?: string): Promise<CheckoutPage> {
+  return invoke("payments_start_checkout", code ? { tier, locale, code } : { tier, locale });
 }
 export async function paymentsOpenPortal(locale: UiLocale = "en"): Promise<PaymentPage> {
   return invoke("payments_open_portal", { locale });

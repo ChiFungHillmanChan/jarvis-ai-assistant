@@ -378,6 +378,14 @@ export interface AccountStatus {
   signed_in: boolean;
   email: string | null;
   tier: string | null;
+  subscription_status: string | null;
+  trial_ends_at: string | null;
+  period_ends_at: string | null;
+  cancel_at_period_end: boolean;
+  /** Free trial days a checkout would offer now; 0 once the account has subscribed. */
+  trial_days: number;
+  /** Where `tier` came from: the server now, a saved confirmation while offline, or nowhere. */
+  plan_checked: 'live' | 'saved' | 'none';
 }
 
 export interface PaymentPage {
