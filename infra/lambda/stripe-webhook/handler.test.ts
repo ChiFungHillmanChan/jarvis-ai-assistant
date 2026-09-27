@@ -88,3 +88,22 @@ test('past_due keeps the existing grace policy, while async failure does not gra
   assert.equal((await handler(h.webhookEvent('checkout.session.async_payment_failed',session))).statusCode,200);
   assert.equal(h.rows.get('user_fixture').tier,'free');
 });
+
+test('the webhook stores when a trial ends and when the plan renews, and clears the trial end afterwards', async () => {
+  const h=createHarness();const sub=h.seedSubscription('trialing');const handler=h.handler('stripe-webhook');
+  const trialEnd=1792800000;const renewal=trialEnd+30*24*60*60;
+  Object.assign(sub,{trial_end:trialEnd,current_period_end:trialEnd,cancel_at_period_end:false});
+  assert.equal((await handler(h.webhookEvent('customer.subscription.updated',sub))).statusCode,200);
+  let row=h.rows.get('user_fixture');
+  assert.equal(row.tier,'pro');
+  assert.equal(row.subscriptionStatus,'trialing');
+  assert.equal(row.trialEndsAt,new Date(trialEnd*1000).toISOString());
+  assert.equal(row.periodEndsAt,new Date(trialEnd*1000).toISOString());
+  assert.equal(row.cancelAtPeriodEnd,false);
+  Object.assign(sub,{status:'active',current_period_end:renewal,cancel_at_period_end:true});
+  assert.equal((await handler(h.webhookEvent('customer.subscription.updated',sub,'evt_second'))).statusCode,200);
+  row=h.rows.get('user_fixture');
+  assert.equal(row.trialEndsAt,undefined);
+  assert.equal(row.periodEndsAt,new Date(renewal*1000).toISOString());
+  assert.equal(row.cancelAtPeriodEnd,true);
+});

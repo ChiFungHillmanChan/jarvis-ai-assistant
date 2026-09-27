@@ -50,6 +50,31 @@ fn resolve(runtime: Option<String>, compile_time: Option<&'static str>) -> Optio
         .or_else(|| compile_time.map(str::to_string).filter(|v| !v.trim().is_empty()))
 }
 
+/// The account settings a billing build compiles in.
+const COMPILED_ACCOUNT_SETTINGS: [Option<&str>; 3] = [
+    option_env!("JARVIS_COGNITO_DOMAIN"),
+    option_env!("JARVIS_COGNITO_CLIENT_ID"),
+    option_env!("JARVIS_PAYMENT_API"),
+];
+
+/// Whether launch-time env vars may replace the compiled-in account settings.
+/// A release build compiled with all three ignores them: otherwise anyone
+/// could point a paid build at another server, or at an invalid one that hides
+/// accounts, and so skip the paywall. Debug builds, including the native QA
+/// app, keep the override for sandbox testing.
+fn overrides_allowed(debug_build: bool, compiled: [Option<&str>; 3]) -> bool {
+    debug_build || !compiled.iter().all(|value| value.is_some_and(|v| !v.trim().is_empty()))
+}
+
+/// A launch-time account setting, or `None` when this build must ignore it.
+pub(crate) fn runtime_env(name: &str) -> Option<String> {
+    if overrides_allowed(cfg!(debug_assertions), COMPILED_ACCOUNT_SETTINGS) {
+        std::env::var(name).ok()
+    } else {
+        None
+    }
+}
+
 impl CognitoConfig {
     pub fn from_parts(
         domain: Option<String>,
@@ -73,9 +98,9 @@ impl CognitoConfig {
     /// hides sign-in instead of offering a button that cannot work.
     pub fn from_env() -> Option<Self> {
         Self::from_parts(
-            resolve(std::env::var("JARVIS_COGNITO_DOMAIN").ok(), option_env!("JARVIS_COGNITO_DOMAIN")),
-            resolve(std::env::var("JARVIS_COGNITO_CLIENT_ID").ok(), option_env!("JARVIS_COGNITO_CLIENT_ID")),
-            resolve(std::env::var("JARVIS_PAYMENT_API").ok(), option_env!("JARVIS_PAYMENT_API")),
+            resolve(runtime_env("JARVIS_COGNITO_DOMAIN"), option_env!("JARVIS_COGNITO_DOMAIN")),
+            resolve(runtime_env("JARVIS_COGNITO_CLIENT_ID"), option_env!("JARVIS_COGNITO_CLIENT_ID")),
+            resolve(runtime_env("JARVIS_PAYMENT_API"), option_env!("JARVIS_PAYMENT_API")),
         )
     }
 }
@@ -249,7 +274,7 @@ const CALLBACK_DEADLINE: std::time::Duration = std::time::Duration::from_secs(30
 /// A peer that connects and says nothing must not hold up the listener.
 const CALLBACK_READ_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(5);
 
-#[derive(Clone, Debug, Deserialize, Serialize, PartialEq)]
+#[derive(Clone, Debug, Default, Deserialize, Serialize, PartialEq)]
 pub struct Me {
     pub sub: String,
     #[serde(default)]
@@ -257,6 +282,29 @@ pub struct Me {
     pub tier: String,
     #[serde(rename = "subscriptionStatus", default)]
     pub subscription_status: Option<String>,
+    #[serde(rename = "trialEndsAt", default)]
+    pub trial_ends_at: Option<String>,
+    #[serde(rename = "periodEndsAt", default)]
+    pub period_ends_at: Option<String>,
+    #[serde(rename = "cancelAtPeriodEnd", default)]
+    pub cancel_at_period_end: bool,
+    #[serde(rename = "trialDays", default)]
+    pub trial_days: u32,
+}
+
+/// Where `AccountStatus::tier` came from.
+#[derive(Clone, Copy, Debug, Default, Serialize, PartialEq)]
+pub enum PlanChecked {
+    /// From `/me`, now or within the 60-second cache.
+    #[serde(rename = "live")]
+    Live,
+    /// `/me` was unreachable; a paid plan confirmed in the last seven days.
+    #[serde(rename = "saved")]
+    Saved,
+    /// No tier is known.
+    #[default]
+    #[serde(rename = "none")]
+    NotChecked,
 }
 
 #[derive(Clone, Debug, Default, Serialize, PartialEq)]
@@ -264,9 +312,75 @@ pub struct AccountStatus {
     pub available: bool,
     pub signed_in: bool,
     pub email: Option<String>,
-    /// `None` while signed in means the API could not be reached. The UI shows
-    /// it as unknown; it is never guessed as a paid tier.
+    /// `None` while signed in means the API could not be reached and no recent
+    /// paid plan was saved. It is never guessed as a paid tier.
     pub tier: Option<String>,
+    pub subscription_status: Option<String>,
+    pub trial_ends_at: Option<String>,
+    pub period_ends_at: Option<String>,
+    pub cancel_at_period_end: bool,
+    /// Free trial days a checkout would offer now; 0 once the account has subscribed.
+    pub trial_days: u32,
+    pub plan_checked: PlanChecked,
+}
+
+impl AccountStatus {
+    fn from_me(me: &Me, fallback_email: Option<String>) -> Self {
+        Self {
+            available: true,
+            signed_in: true,
+            email: me.email.clone().or(fallback_email),
+            tier: Some(me.tier.clone()),
+            subscription_status: me.subscription_status.clone(),
+            trial_ends_at: me.trial_ends_at.clone(),
+            period_ends_at: me.period_ends_at.clone(),
+            cancel_at_period_end: me.cancel_at_period_end,
+            trial_days: me.trial_days,
+            plan_checked: PlanChecked::Live,
+        }
+    }
+}
+
+/// How long a paid plan confirmed by the server keeps the app open while the
+/// server cannot be reached.
+pub const OFFLINE_GRACE_SECS: i64 = 7 * 24 * 60 * 60;
+/// Kept next to the refresh token so one sign-out removes both.
+const PLAN_KEYCHAIN_ACCOUNT: &str = "plan_confirmation";
+
+#[derive(Debug, Deserialize, Serialize, PartialEq)]
+pub struct PlanConfirmation {
+    pub tier: String,
+    pub confirmed_at: i64,
+}
+
+/// The paid tier a saved confirmation still vouches for at `now`. A
+/// confirmation dated in the future (the clock moved back) vouches for nothing.
+pub fn saved_plan(saved: Option<&PlanConfirmation>, now: i64) -> Option<String> {
+    let saved = saved?;
+    let age = now - saved.confirmed_at;
+    (matches!(saved.tier.as_str(), "pro" | "team") && (0..=OFFLINE_GRACE_SECS).contains(&age)).then(|| saved.tier.clone())
+}
+
+fn load_plan_confirmation() -> Option<PlanConfirmation> {
+    KeychainStore::get(KEYCHAIN_SERVICE, PLAN_KEYCHAIN_ACCOUNT).ok().and_then(|raw| serde_json::from_str(&raw).ok())
+}
+
+/// A paid answer from the server is saved for the offline rule; any other
+/// answer removes the saved one, so the server always wins.
+fn remember_plan(tier: &str) {
+    if !matches!(tier, "pro" | "team") {
+        forget_plan();
+        return;
+    }
+    if let Ok(raw) = serde_json::to_string(&PlanConfirmation { tier: tier.to_string(), confirmed_at: now() }) {
+        if let Err(e) = KeychainStore::put(KEYCHAIN_SERVICE, PLAN_KEYCHAIN_ACCOUNT, &raw) {
+            log::warn!("plan confirmation not saved: {e}");
+        }
+    }
+}
+
+fn forget_plan() {
+    let _ = KeychainStore::delete(KEYCHAIN_SERVICE, PLAN_KEYCHAIN_ACCOUNT);
 }
 
 #[derive(Debug, PartialEq)]
@@ -461,6 +575,8 @@ impl CognitoSession {
         // The same guard covers persistent and in-memory credentials. A late
         // browser flow cannot resurrect an account after sign-out.
         KeychainStore::put(KEYCHAIN_SERVICE, KEYCHAIN_ACCOUNT, refresh).map_err(AccountError::Failed)?;
+        // A different account may be signing in; it must not inherit a saved plan.
+        forget_plan();
         tokens.email = None;
         Self::apply_token_set(&mut tokens, set);
         tokens.me = None;
@@ -490,6 +606,7 @@ impl CognitoSession {
         *tokens = Tokens::default();
         tokens.generation = next_generation;
         let _ = KeychainStore::delete(KEYCHAIN_SERVICE, KEYCHAIN_ACCOUNT);
+        forget_plan();
         Ok((refresh, next_generation))
     }
 
@@ -620,12 +737,7 @@ impl CognitoSession {
             return None;
         }
         let me = tokens.me.as_ref()?;
-        Some(AccountStatus {
-            available: true,
-            signed_in: true,
-            email: me.email.clone().or_else(|| tokens.email.clone()),
-            tier: Some(me.tier.clone()),
-        })
+        Some(AccountStatus::from_me(me, tokens.email.clone()))
     }
 
     pub async fn status(&self, force: bool) -> AccountStatus {
@@ -647,23 +759,26 @@ impl CognitoSession {
             return AccountStatus { available: true, ..AccountStatus::default() };
         }
         match result {
-            Ok(me) => AccountStatus {
-                available: true,
-                signed_in: true,
-                email: me.email.or_else(|| tokens.email.clone()),
-                tier: Some(me.tier),
-            },
+            Ok(me) => {
+                remember_plan(&me.tier);
+                AccountStatus::from_me(&me, tokens.email.clone())
+            }
             Err(AccountError::Failed(e)) => {
                 log::warn!("account status: {e}");
                 // Never let a follow-up cached read disguise an unsuccessful
                 // refresh as a verified paid plan. Keep the login token.
                 tokens.me = None;
                 tokens.me_fetched_at = None;
+                // The server could not answer. Only a paid plan it confirmed in
+                // the last OFFLINE_GRACE_SECS keeps the app open.
+                let saved = saved_plan(load_plan_confirmation().as_ref(), now());
                 AccountStatus {
                     available: true,
                     signed_in: true,
                     email: tokens.email.clone(),
-                    tier: None,
+                    plan_checked: if saved.is_some() { PlanChecked::Saved } else { PlanChecked::NotChecked },
+                    tier: saved,
+                    ..AccountStatus::default()
                 }
             }
             Err(_) => {
@@ -773,6 +888,15 @@ mod tests {
         assert_eq!(c.domain, "https://jarvis.auth.ap-southeast-1.amazoncognito.com");
         assert_eq!(c.client_id, "client");
         assert_eq!(c.api_base, "https://api.example.com");
+    }
+
+    #[test]
+    fn a_release_billing_build_ignores_launch_time_overrides() {
+        let billing = [Some("jarvis.auth.example.com"), Some("client"), Some("https://api.example.com")];
+        assert!(!overrides_allowed(false, billing), "release + billing: only the compiled values count");
+        assert!(overrides_allowed(true, billing), "debug builds, including the native QA app, keep the override");
+        assert!(overrides_allowed(false, [None, None, None]), "a free build has no paywall to protect");
+        assert!(overrides_allowed(false, [Some("d"), Some("  "), Some("https://api.example.com")]), "a blank compiled value is not a billing build");
     }
 
     #[test]
@@ -913,6 +1037,93 @@ mod tests {
     /// The cfg(test) keychain is one process-global map; every test that
     /// writes this module's (service, account) entry holds this guard.
     static KEYCHAIN_GUARD: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+    /// Status tests read and write the saved plan in the process-global test
+    /// keychain: hold the guard and start with no saved plan.
+    fn plan_guard() -> std::sync::MutexGuard<'static, ()> {
+        let guard = KEYCHAIN_GUARD.lock().unwrap_or_else(|e| e.into_inner());
+        forget_plan();
+        guard
+    }
+
+    #[test]
+    fn a_saved_plan_vouches_only_for_a_paid_tier_confirmed_in_the_last_seven_days() {
+        let at = |tier: &str, confirmed_at: i64| PlanConfirmation { tier: tier.into(), confirmed_at };
+        let now = 1_800_000_000;
+        assert_eq!(saved_plan(Some(&at("pro", now)), now).as_deref(), Some("pro"));
+        assert_eq!(saved_plan(Some(&at("team", now - OFFLINE_GRACE_SECS)), now).as_deref(), Some("team"));
+        assert_eq!(saved_plan(Some(&at("pro", now - OFFLINE_GRACE_SECS - 1)), now), None, "older than seven days");
+        assert_eq!(saved_plan(Some(&at("pro", now + 60)), now), None, "dated in the future: the clock moved back");
+        assert_eq!(saved_plan(Some(&at("free", now)), now), None);
+        assert_eq!(saved_plan(None, now), None);
+    }
+
+    #[tokio::test]
+    async fn an_unreachable_server_opens_on_a_recent_saved_plan_only() {
+        let _guard = plan_guard();
+        let closed_port = {
+            let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+            listener.local_addr().unwrap().port()
+        };
+        let session = CognitoSession::new(Some(CognitoConfig { domain: "https://auth.example.com".into(), client_id: "test".into(), api_base: format!("http://127.0.0.1:{closed_port}") }));
+        session.store(&TokenSet { access_token: "live".into(), id_token: None, refresh_token: None, expires_in: 3600 });
+
+        let status = session.status(true).await;
+        assert_eq!((status.tier.clone(), status.plan_checked), (None, PlanChecked::NotChecked));
+
+        remember_plan("pro");
+        let status = session.status(true).await;
+        assert_eq!(status.tier.as_deref(), Some("pro"));
+        assert_eq!(status.plan_checked, PlanChecked::Saved);
+
+        let stale = PlanConfirmation { tier: "pro".into(), confirmed_at: now() - OFFLINE_GRACE_SECS - 1 };
+        KeychainStore::put(KEYCHAIN_SERVICE, PLAN_KEYCHAIN_ACCOUNT, &serde_json::to_string(&stale).unwrap()).unwrap();
+        assert_eq!(session.status(true).await.tier, None);
+    }
+
+    #[tokio::test]
+    async fn the_servers_answer_carries_plan_details_and_replaces_the_saved_plan() {
+        let _guard = plan_guard();
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let server = tokio::spawn(fake_server(listener, vec![
+            (200, "OK", r#"{"sub":"test","tier":"pro","subscriptionStatus":"trialing","trialEndsAt":"2026-10-25T00:00:00.000Z","periodEndsAt":"2026-10-25T00:00:00.000Z","cancelAtPeriodEnd":false,"trialDays":0}"#.into()),
+            (200, "OK", r#"{"sub":"test","tier":"free","trialDays":0}"#.into()),
+        ]));
+        let session = CognitoSession::new(Some(CognitoConfig { domain: "https://auth.example.com".into(), client_id: "test".into(), api_base: format!("http://127.0.0.1:{port}") }));
+        session.store(&TokenSet { access_token: "live".into(), id_token: None, refresh_token: None, expires_in: 3600 });
+
+        let paid = session.status(true).await;
+        assert_eq!(paid.plan_checked, PlanChecked::Live);
+        assert_eq!(paid.subscription_status.as_deref(), Some("trialing"));
+        assert_eq!(paid.trial_ends_at.as_deref(), Some("2026-10-25T00:00:00.000Z"));
+        assert_eq!(paid.trial_days, 0);
+        assert_eq!(load_plan_confirmation().map(|p| p.tier).as_deref(), Some("pro"));
+
+        assert_eq!(session.status(true).await.tier.as_deref(), Some("free"));
+        assert!(load_plan_confirmation().is_none(), "the server's free answer wins over the saved plan");
+        server.await.unwrap();
+    }
+
+    #[test]
+    fn signing_in_or_out_drops_the_saved_plan() {
+        let _guard = plan_guard();
+        let session = CognitoSession::new(Some(cfg()));
+        remember_plan("pro");
+        let generation = session.begin_auth_transition();
+        session.complete_sign_in(generation, &TokenSet { access_token: "a".into(), id_token: None, refresh_token: Some("r".into()), expires_in: 3600 }).unwrap();
+        assert!(load_plan_confirmation().is_none(), "a new sign-in must not inherit another account's plan");
+        remember_plan("pro");
+        session.forget_local();
+        assert!(load_plan_confirmation().is_none(), "sign-out removes the saved plan");
+    }
+
+    #[test]
+    fn plan_checked_serialises_to_the_names_the_app_matches() {
+        assert_eq!(serde_json::to_value(PlanChecked::Live).unwrap(), "live");
+        assert_eq!(serde_json::to_value(PlanChecked::Saved).unwrap(), "saved");
+        assert_eq!(serde_json::to_value(PlanChecked::default()).unwrap(), "none");
+    }
 
     #[tokio::test]
     async fn the_first_free_port_is_used() {
@@ -1127,6 +1338,7 @@ mod tests {
 
     #[tokio::test]
     async fn a_500_from_me_keeps_signed_in_true_with_an_unknown_tier() {
+        let _guard = plan_guard();
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let port = listener.local_addr().unwrap().port();
         let server = tokio::spawn(fake_server(
@@ -1155,6 +1367,7 @@ mod tests {
 
     #[tokio::test]
     async fn an_expired_plan_cache_is_refreshed_without_a_forced_read() {
+        let _guard = plan_guard();
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let port = listener.local_addr().unwrap().port();
         let server = tokio::spawn(fake_server(listener, vec![(200, "OK", r#"{"sub":"test","tier":"free"}"#.into())]));
@@ -1162,7 +1375,7 @@ mod tests {
         session.store(&TokenSet { access_token: "live".into(), id_token: None, refresh_token: None, expires_in: 3600 });
         {
             let mut tokens = session.tokens();
-            tokens.me = Some(Me { sub: "test".into(), email: None, tier: "pro".into(), subscription_status: None });
+            tokens.me = Some(Me { sub: "test".into(), email: None, tier: "pro".into(), subscription_status: None, ..Me::default() });
             tokens.me_fetched_at = Some(std::time::Instant::now() - std::time::Duration::from_secs(61));
         }
         assert_eq!(session.status(false).await.tier.as_deref(), Some("free"));
@@ -1171,6 +1384,7 @@ mod tests {
 
     #[tokio::test]
     async fn a_failed_refresh_cannot_resurface_a_previously_cached_paid_plan() {
+        let _guard = plan_guard();
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let port = listener.local_addr().unwrap().port();
         let server = tokio::spawn(fake_server(listener, vec![(500, "Error", "{}".into()), (500, "Error", "{}".into())]));
@@ -1178,7 +1392,7 @@ mod tests {
         session.store(&TokenSet { access_token: "live".into(), id_token: None, refresh_token: None, expires_in: 3600 });
         {
             let mut tokens = session.tokens();
-            tokens.me = Some(Me { sub: "test".into(), email: None, tier: "pro".into(), subscription_status: None });
+            tokens.me = Some(Me { sub: "test".into(), email: None, tier: "pro".into(), subscription_status: None, ..Me::default() });
             tokens.me_fetched_at = Some(std::time::Instant::now());
         }
         assert_eq!(session.status(true).await.tier, None);
@@ -1188,7 +1402,7 @@ mod tests {
 
     #[tokio::test]
     async fn a_restarted_session_restores_the_server_plan_from_its_refresh_token() {
-        let _guard = KEYCHAIN_GUARD.lock().unwrap_or_else(|e| e.into_inner());
+        let _guard = plan_guard();
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let port = listener.local_addr().unwrap().port();
         let server = tokio::spawn(fake_server(listener, vec![(200, "OK", token_json()), (200, "OK", r#"{"sub":"test","tier":"pro","email":"test@example.com"}"#.into())]));

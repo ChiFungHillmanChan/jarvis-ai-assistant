@@ -13,6 +13,7 @@ exports.createHarness = function createHarness(overrides = {}) {
   const subscriptions = new Map();
   const sessions = new Map();
   const invoices = new Map();
+  const promotionCodes = new Map();
   const calls = [];
   const idempotent = new Map();
   const env = { ENV: 'sandbox', USER_META_TABLE: 'fixture-users', USER_POOL_ID: 'fixture-pool', STRIPE_SECRET_NAME: 'fixture-secret', APP_DOMAIN: 'example.test', ...overrides };
@@ -68,6 +69,7 @@ exports.createHarness = function createHarness(overrides = {}) {
       list: async input => ({data:copy([...subscriptions.values()].filter(sub=>sub.customer===input.customer && (input.status==='all' || sub.status!=='canceled'))),has_more:false}),
     },
     invoices: { retrieve: async id => { if(!invoices.has(id)) throw new Error('Unknown fixture invoice');return copy(invoices.get(id)); } },
+    promotionCodes: { list: async input => { calls.push({kind:'promotionCodes.list',input:copy(input)}); return {data:copy([...promotionCodes.values()].filter(p=>p.code.toLowerCase()===String(input.code).toLowerCase() && (!input.active || p.active)).slice(0,input.limit||10)),has_more:false}; } },
     checkout: { sessions: {
       create: (input, options) => once('checkout.create',input,options,()=>{const session={id:`cs_${++counter}`,url:`https://checkout.stripe.com/c/pay/${counter}`,status:'open',payment_status:'unpaid',...input};sessions.set(session.id,session);return session;}),
       list: async input => ({data:copy([...sessions.values()].filter(session=>session.customer===input.customer && (!input.status || session.status===input.status))),has_more:false}),
@@ -109,7 +111,7 @@ exports.createHarness = function createHarness(overrides = {}) {
     invoices.set('in_fixture',{id:'in_fixture',customer:'cus_fixture',subscription:id,paid:true,status:'paid'});
     return subscription;
   }
-  return { rows,customers,subscriptions,sessions,invoices,calls,env,stripe,request,webhookEvent,seedSubscription,
+  return { rows,customers,subscriptions,sessions,invoices,promotionCodes,calls,env,stripe,request,webhookEvent,seedSubscription,
     handler:name=>load(path.join(__dirname,'../lambda',name,'index.ts')).handler,
     failNextTierUpdate(){failUpdateOnce=true;},
     failNextUpdateContaining(expression){failUpdateMatching=expression;},

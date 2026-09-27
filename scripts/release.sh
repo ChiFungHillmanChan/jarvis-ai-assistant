@@ -45,17 +45,24 @@ if [ -z "${GOOGLE_CLIENT_ID:-}" ]; then
   read -r -p "Continue anyway? [y/N] " GO_ANYWAY
   if [[ "${GO_ANYWAY}" != "y" && "${GO_ANYWAY}" != "Y" ]]; then exit 1; fi
 fi
-# JARVIS_RELEASE_FREE=1 ships a free build: no account sign-in and no checkout.
-# The dev .env sets a sandbox JARVIS_PAYMENT_API, so clear all three rather than
-# trust what the file left behind; option_env! then bakes none of them in.
-if [ "${JARVIS_RELEASE_FREE:-}" = "1" ]; then
-  unset JARVIS_PAYMENT_API JARVIS_COGNITO_DOMAIN JARVIS_COGNITO_CLIENT_ID
-  echo "==> Free build: account sign-in and checkout are left out"
-else
+# Billing is opt-in. JARVIS_RELEASE_BILLING=1 builds with account sign-in, the
+# paywall gate and checkout, and checks the three public settings first. Without
+# it the build is free whatever the .env holds (the dev .env carries sandbox
+# values), so all three are cleared and option_env! bakes none of them in.
+# JARVIS_RELEASE_FREE=1 is still accepted and means the same as leaving billing off.
+if [ "${JARVIS_RELEASE_BILLING:-}" = "1" ] && [ "${JARVIS_RELEASE_FREE:-}" = "1" ]; then
+  echo "Set JARVIS_RELEASE_BILLING=1 or JARVIS_RELEASE_FREE=1, not both."
+  exit 1
+fi
+if [ "${JARVIS_RELEASE_BILLING:-}" = "1" ]; then
   # A payment endpoint alone leaves Account hidden in downloaded builds. Stop
   # before version changes or uploads if the complete public configuration is absent.
   export JARVIS_PAYMENT_API JARVIS_COGNITO_DOMAIN JARVIS_COGNITO_CLIENT_ID
   node scripts/release-billing-config.mjs
+  echo "==> Billing build: account sign-in, paywall and checkout are included"
+else
+  unset JARVIS_PAYMENT_API JARVIS_COGNITO_DOMAIN JARVIS_COGNITO_CLIENT_ID
+  echo "==> Free build: account sign-in and checkout are left out"
 fi
 
 echo "==> 0/10 Running the test suite (same command CI runs)"

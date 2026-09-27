@@ -27,6 +27,25 @@ async function paidTier(stripe: Stripe, subscription: Stripe.Subscription): Prom
   return invoice.paid || invoice.status === 'paid' ? tier : 'free';
 }
 
+function isoFromSeconds(value: number | null | undefined): string | null {
+  return typeof value === 'number' && value > 0 ? new Date(value * 1000).toISOString() : null;
+}
+
+/** The row update for the selected subscription, including the dates the app shows. */
+function billingState(subscription: Stripe.Subscription, tier: Tier, eventId: string): [string, Record<string, unknown>] {
+  const sets = ['tier = :tier', 'stripeSubscriptionId = :subscription', 'subscriptionStatus = :status', 'updatedAt = :updated', 'lastStripeEventId = :event', 'cancelAtPeriodEnd = :cancel'];
+  const values: Record<string, unknown> = {
+    ':tier': tier, ':subscription': subscription.id, ':status': subscription.status,
+    ':updated': new Date().toISOString(), ':event': eventId, ':cancel': subscription.cancel_at_period_end === true,
+  };
+  const removes: string[] = [];
+  const trialEnd = subscription.status === 'trialing' ? isoFromSeconds(subscription.trial_end) : null;
+  if (trialEnd) { sets.push('trialEndsAt = :trialEnd'); values[':trialEnd'] = trialEnd; } else removes.push('trialEndsAt');
+  const periodEnd = isoFromSeconds(subscription.current_period_end);
+  if (periodEnd) { sets.push('periodEndsAt = :periodEnd'); values[':periodEnd'] = periodEnd; } else removes.push('periodEndsAt');
+  return [`SET ${sets.join(', ')}${removes.length ? ` REMOVE ${removes.join(', ')}` : ''}`, values];
+}
+
 async function eventSubscription(stripe: Stripe, event: Stripe.Event): Promise<Stripe.Subscription | null> {
   let subscriptionId: string | null = null;
   let expectedCustomer: string | null = null;
@@ -107,9 +126,8 @@ async function reconcile(stripe: Stripe, event: Stripe.Event) {
     }
     // Replays perform this same current-state reconciliation. No event snapshot
     // can restore a canceled plan, and no outbound payment occurs in a webhook.
-    await updateUser(userId,
-      'SET tier = :tier, stripeSubscriptionId = :subscription, subscriptionStatus = :status, updatedAt = :updated, lastStripeEventId = :event',
-      { ':tier': selectedTier, ':subscription': selected.id, ':status': selected.status, ':updated': new Date().toISOString(), ':event': event.id }, owner);
+    const [expression, values] = billingState(selected, selectedTier, event.id);
+    await updateUser(userId, expression, values, owner);
   });
 }
 

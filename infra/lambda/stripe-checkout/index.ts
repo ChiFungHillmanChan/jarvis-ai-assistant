@@ -2,8 +2,9 @@ import type { APIGatewayProxyEventV2WithJWTAuthorizer, APIGatewayProxyResultV2 }
 import { randomUUID } from 'node:crypto';
 import { AdminGetUserCommand, CognitoIdentityProviderClient } from '@aws-sdk/client-cognito-identity-provider';
 import type Stripe from 'stripe';
-import { readLocale, readTier } from './body';
+import { readCode, readLocale, readTier } from './body';
 import { appDomain, BillingError, failure, isLiveSubscriptionStatus, json, loadBilling, objectId, portalSession, prices, subscriptionsFor, updateUser, userRow, verifyCustomer, withBillingLock } from './billing';
+import { readTrialDays } from './trial';
 export { isLiveSubscriptionStatus } from './billing';
 
 const cognito = new CognitoIdentityProviderClient({});
@@ -38,16 +39,52 @@ async function createAttempt(stripe: Stripe, userId: string, customer: string, r
   // Older durable attempts omitted Stripe's locale parameter. Preserve that
   // exact request on recovery; adding it would change an existing idempotency key.
   const stripeLocale = row.checkoutStripeLocale === 'zh-HK' ? 'zh-HK' : row.checkoutStripeLocale === 'en' ? 'en' : undefined;
+  // Attempts written before trials existed carry no trial length and replay without one.
+  const trialDays = attemptTrialDays(row);
+  const promotionCode = typeof row.checkoutPromotionCodeId === 'string' ? row.checkoutPromotionCodeId : undefined;
   return stripe.checkout.sessions.create({
     mode: 'subscription', customer,
     line_items: [{ price: row.checkoutPriceId, quantity: 1 }],
     client_reference_id: userId,
-    subscription_data: { metadata: { userId, tier: row.checkoutTier, project: 'jarvis' } },
+    subscription_data: { metadata: { userId, tier: row.checkoutTier, project: 'jarvis' }, ...(trialDays ? { trial_period_days: trialDays } : {}) },
     success_url: `https://${appDomain}/${row.checkoutLocale || 'en'}/payment/success?session_id={CHECKOUT_SESSION_ID}`,
     cancel_url: `https://${appDomain}/${row.checkoutLocale || 'en'}/payment/cancel`,
-    automatic_tax: { enabled: false }, allow_promotion_codes: true,
+    automatic_tax: { enabled: false },
+    // A code checkout applies the discount itself and asks for a card only if
+    // something is due; Stripe rejects allow_promotion_codes alongside discounts.
+    ...(promotionCode
+      ? { discounts: [{ promotion_code: promotionCode }], payment_method_collection: 'if_required' as const }
+      : { allow_promotion_codes: true }),
     ...(stripeLocale ? { locale: stripeLocale } : {}),
   }, { idempotencyKey: `checkout:${process.env.ENV}:${userId}:${row.checkoutAttemptId}` });
+}
+
+function attemptTrialDays(row: Record<string, any>): number {
+  return typeof row.checkoutTrialDays === 'number' && row.checkoutTrialDays > 0 ? row.checkoutTrialDays : 0;
+}
+
+const ATTEMPT_FIELDS = 'checkoutAttemptId, checkoutAttemptAt, checkoutTier, checkoutPriceId, checkoutLocale, checkoutStripeLocale, checkoutTrialDays, checkoutPromotionCodeId, checkoutSessionId';
+
+async function activePromotionCode(stripe: Stripe, code: string) {
+  const page = await stripe.promotionCodes.list({ code, active: true, limit: 1 });
+  return page.data[0] ?? null;
+}
+
+// Stripe refusing a discount (expired, redeemed out, restricted) is a definite
+// answer: no session exists under this attempt, so it is cleared and the app
+// shows "code not recognised". Any other failure keeps the attempt for recovery.
+async function createOrRejectCode(stripe: Stripe, userId: string, customer: string, row: Record<string, any>, owner: string) {
+  try {
+    return await createAttempt(stripe, userId, customer, row);
+  } catch (error) {
+    if (typeof row.checkoutPromotionCodeId === 'string' && (error as { type?: string })?.type === 'StripeInvalidRequestError') {
+      const stripeError = error as { code?: string; param?: string };
+      console.warn('Promotion code refused by Stripe', { code: stripeError.code, param: stripeError.param });
+      await updateUser(userId, `REMOVE ${ATTEMPT_FIELDS}`, {}, owner);
+      throw new BillingError('invalid_code', 400);
+    }
+    throw error;
+  }
 }
 
 // Include sessions created before durable attempt tracking was introduced. Do
@@ -75,22 +112,34 @@ export async function handler(event: APIGatewayProxyEventV2WithJWTAuthorizer): P
   if (!userId || !username) return json(401, { error: 'missing_identity' });
   const tier = readTier(event.body, event.isBase64Encoded);
   if (!tier) return json(400, { error: 'invalid_tier' });
+  const code = readCode(event.body, event.isBase64Encoded);
+  if (code === false) return json(400, { error: 'invalid_code' });
   try {
     const configuredPrices = prices();
+    const configuredTrialDays = readTrialDays(process.env.TRIAL_DAYS);
+    if (configuredTrialDays === null) throw new BillingError('billing_trial_not_configured', 503);
     const { stripe } = await loadBilling();
     return await withBillingLock(userId, async owner => {
       const customer = await customerFor(stripe, userId, username, owner);
-      const live = (await subscriptionsFor(stripe, customer)).find(s => isLiveSubscriptionStatus(s.status));
+      const history = await subscriptionsFor(stripe, customer);
+      const live = history.find(s => isLiveSubscriptionStatus(s.status));
       if (live) {
         await expireOtherSessions(stripe, customer, userId);
         const portal = await portalSession(stripe, customer, readLocale(event.body, event.isBase64Encoded));
         return json(200, { url: portal.url, session_id: portal.id, already_subscribed: true, subscription_status: live.status });
       }
+      // The trial is for first-time subscribers. A subscription that never
+      // started (incomplete_expired) does not use it up.
+      // Resolve the code before recovering a pending attempt, so an open
+      // session is reused only for exactly the same terms.
+      const promotionCode = code ? await activePromotionCode(stripe, code) : null;
+      if (code && !promotionCode) throw new BillingError('invalid_code', 400);
+      const trialDays = promotionCode || history.some(s => s.status !== 'incomplete_expired') ? 0 : configuredTrialDays;
       let row = await userRow(userId);
       if (row.checkoutAttemptId) {
         // Recover an ambiguous create before permitting a different tier. The
         // durable attempt keeps exactly the same Stripe parameters on retries.
-        const sessionId = row.checkoutSessionId || (await createAttempt(stripe, userId, customer, row)).id;
+        const sessionId = row.checkoutSessionId || (await createOrRejectCode(stripe, userId, customer, row, owner)).id;
         const pending = await stripe.checkout.sessions.retrieve(sessionId);
         if (pending.customer !== customer || pending.client_reference_id !== userId) throw new BillingError('billing_checkout_mismatch');
         if (!row.checkoutSessionId) await updateUser(userId, 'SET checkoutSessionId = :session', { ':session': pending.id }, owner);
@@ -103,7 +152,8 @@ export async function handler(event: APIGatewayProxyEventV2WithJWTAuthorizer): P
           if (isLiveSubscriptionStatus(completed.status)) throw new BillingError('billing_checkout_processing', 409);
         }
         if (pending.status === 'open') {
-          if (row.checkoutTier === tier && row.checkoutPriceId === configuredPrices[tier]) return json(200, { url: pending.url, session_id: pending.id });
+          if (row.checkoutTier === tier && row.checkoutPriceId === configuredPrices[tier] && attemptTrialDays(row) === trialDays
+            && (row.checkoutPromotionCodeId ?? null) === (promotionCode?.id ?? null)) return json(200, { url: pending.url, session_id: pending.id });
           // A concurrent browser completion makes expire fail, so no replacement
           // checkout is created until a subsequent request reconciles it.
           await stripe.checkout.sessions.expire(pending.id);
@@ -114,11 +164,14 @@ export async function handler(event: APIGatewayProxyEventV2WithJWTAuthorizer): P
       // but before it appears in the open-session list. Recheck after expiring
       // every remaining open session, when no pending tab can complete later.
       if ((await subscriptionsFor(stripe, customer)).some(s => isLiveSubscriptionStatus(s.status))) throw new BillingError('billing_checkout_processing', 409);
+      // DynamoDB rejects unused expression values, so the code is set or removed explicitly.
+      const codeSet = promotionCode ? ', checkoutPromotionCodeId = :promotionCode' : '';
+      const codeRemove = promotionCode ? '' : ', checkoutPromotionCodeId';
       await updateUser(userId,
-        'SET checkoutAttemptId = :attempt, checkoutAttemptAt = :at, checkoutTier = :tier, checkoutPriceId = :price, checkoutLocale = :locale, checkoutStripeLocale = :locale REMOVE checkoutSessionId',
-        { ':attempt': randomUUID(), ':at': Date.now(), ':tier': tier, ':price': configuredPrices[tier], ':locale': readLocale(event.body, event.isBase64Encoded) }, owner);
+        `SET checkoutAttemptId = :attempt, checkoutAttemptAt = :at, checkoutTier = :tier, checkoutPriceId = :price, checkoutLocale = :locale, checkoutStripeLocale = :locale, checkoutTrialDays = :trialDays${codeSet} REMOVE checkoutSessionId${codeRemove}`,
+        { ':attempt': randomUUID(), ':at': Date.now(), ':tier': tier, ':price': configuredPrices[tier], ':locale': readLocale(event.body, event.isBase64Encoded), ':trialDays': trialDays, ...(promotionCode ? { ':promotionCode': promotionCode.id } : {}) }, owner);
       row = await userRow(userId);
-      const session = await createAttempt(stripe, userId, customer, row);
+      const session = await createOrRejectCode(stripe, userId, customer, row, owner);
       await updateUser(userId, 'SET checkoutSessionId = :session', { ':session': session.id }, owner);
       return json(200, { url: session.url, session_id: session.id });
     });

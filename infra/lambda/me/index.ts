@@ -3,6 +3,7 @@ import { AdminGetUserCommand, CognitoIdentityProviderClient } from '@aws-sdk/cli
 import { DynamoDBClient } from '@aws-sdk/client-dynamodb';
 import { DynamoDBDocumentClient, GetCommand } from '@aws-sdk/lib-dynamodb';
 import { meBody } from './body';
+import { readTrialDays } from '../stripe-checkout/trial';
 
 const cognito = new CognitoIdentityProviderClient({});
 const ddb = DynamoDBDocumentClient.from(new DynamoDBClient({}));
@@ -28,6 +29,6 @@ export async function handler(event: APIGatewayProxyEventV2WithJWTAuthorizer): P
   return {
     statusCode: 200,
     headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify(meBody(sub, email, row.Item)),
+    body: JSON.stringify(meBody(sub, email, row.Item, readTrialDays(process.env.TRIAL_DAYS) ?? 0)),
   };
 }

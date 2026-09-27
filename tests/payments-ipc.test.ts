@@ -59,3 +59,12 @@ test('native sign-out invalidates pending billing before the deferred IPC finish
   assert.deepEqual(lifecycle, [true, false]);
   stop();
 });
+
+test('a promotion code is passed to the native command only when one is given', async () => {
+  mockIPC((command, args) => {
+    assert.equal(command, 'payments_start_checkout');
+    assert.deepEqual(args, { tier: 'pro', locale: 'en', code: 'PILOT100' });
+    return { url: 'https://checkout.stripe.com/c/pay/test', session_id: 'cs_test', already_subscribed: false, browser_opened: true, session_generation: 1 };
+  });
+  await paymentsStartCheckout('pro', 'en', 'PILOT100');
+});

@@ -7,7 +7,7 @@ const ts = require('typescript');
 const cdk = require('aws-cdk-lib');
 const { Template } = require('aws-cdk-lib/assertions');
 
-exports.paymentTemplate = function paymentTemplate() {
+exports.paymentTemplate = function paymentTemplate(extraContext = {}) {
   const file = path.resolve(__dirname, '../lib/payment-stack.ts');
   const source = ts.transpileModule(fs.readFileSync(file, 'utf8'), {
     compilerOptions: { module: ts.ModuleKind.CommonJS, target: ts.ScriptTarget.ES2022, esModuleInterop: true },
@@ -18,7 +18,7 @@ exports.paymentTemplate = function paymentTemplate() {
   loaded._compile(source, file);
   const app = new cdk.App({
     outdir: fs.mkdtempSync('/tmp/jarvis-payment-template-test-'),
-    context: { stripeProPriceId: 'price_fixture_pro', stripeTeamPriceId: 'price_fixture_team', stripePortalConfigurationId: 'bpc_fixture' },
+    context: { stripeProPriceId: 'price_fixture_pro', stripeTeamPriceId: 'price_fixture_team', stripePortalConfigurationId: 'bpc_fixture', ...extraContext },
   });
   const env = { account: '111111111111', region: 'ap-southeast-1' };
   const base = new cdk.Stack(app, 'FixtureBase', { env });

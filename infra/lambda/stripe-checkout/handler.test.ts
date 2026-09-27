@@ -153,3 +153,101 @@ test('a subscription completed between the initial list and session check preven
   assert.equal(response.statusCode,409);
   assert.equal(h.sessions.size,0);
 });
+
+test('a first checkout offers the configured trial and still collects a card', async () => {
+  for (const [configured, expected] of [[undefined, 28], ['61', 61]] as const) {
+    const h=createHarness(configured ? {TRIAL_DAYS:configured} : {});
+    assert.equal((await h.handler('stripe-checkout')(h.request())).statusCode,200);
+    const input=h.calls.find(c=>c.kind==='checkout.create').input;
+    assert.equal(input.subscription_data.trial_period_days,expected);
+    assert.equal(Object.hasOwn(input,'payment_method_collection'),false,'Stripe default: always collect a card');
+    assert.equal(input.allow_promotion_codes,true);
+  }
+});
+
+test('an account that has subscribed before gets no second trial', async () => {
+  const h=createHarness();h.seedSubscription('canceled');
+  assert.equal((await h.handler('stripe-checkout')(h.request())).statusCode,200);
+  assert.equal(Object.hasOwn(h.calls.find(c=>c.kind==='checkout.create').input.subscription_data,'trial_period_days'),false);
+});
+
+test('a subscription that never started does not use up the trial', async () => {
+  const h=createHarness();h.seedSubscription('incomplete_expired');
+  assert.equal((await h.handler('stripe-checkout')(h.request())).statusCode,200);
+  assert.equal(h.calls.find(c=>c.kind==='checkout.create').input.subscription_data.trial_period_days,28);
+});
+
+test('a misconfigured trial length refuses checkout before touching Stripe', async () => {
+  const h=createHarness({TRIAL_DAYS:'0'});
+  const response=await h.handler('stripe-checkout')(h.request());
+  assert.equal(response.statusCode,503);
+  assert.equal(JSON.parse(response.body).error,'billing_trial_not_configured');
+  assert.equal(h.customers.size,0);
+});
+
+const withBody=(h: any, body: object)=>{const request=h.request();request.body=JSON.stringify(body);return request;};
+const pilotCode=(h: any)=>h.promotionCodes.set('promo_pilot',{id:'promo_pilot',code:'PILOT100',active:true});
+
+test('an unknown or inactive code is rejected before any checkout exists', async () => {
+  const h=createHarness();h.promotionCodes.set('promo_old',{id:'promo_old',code:'OLD',active:false});const handler=h.handler('stripe-checkout');
+  for (const code of ['NOPE','OLD']) {
+    const response=await handler(withBody(h,{tier:'pro',code}));
+    assert.equal(response.statusCode,400);
+    assert.equal(JSON.parse(response.body).error,'invalid_code');
+  }
+  assert.equal(h.calls.some(c=>c.kind==='checkout.create'),false);
+});
+
+test('an oversized code is refused without calling Stripe at all', async () => {
+  const h=createHarness();
+  const response=await h.handler('stripe-checkout')(withBody(h,{tier:'pro',code:'x'.repeat(65)}));
+  assert.equal(response.statusCode,400);
+  assert.equal(JSON.parse(response.body).error,'invalid_code');
+  assert.equal(h.calls.some(c=>c.kind==='promotionCodes.list'||c.kind==='customer.create'),false);
+});
+
+test('a valid code, in any case and with spaces, applies the discount with no trial and no forced card', async () => {
+  const h=createHarness();pilotCode(h);
+  assert.equal((await h.handler('stripe-checkout')(withBody(h,{tier:'pro',code:' pilot100 '}))).statusCode,200);
+  const input=h.calls.find(c=>c.kind==='checkout.create').input;
+  assert.deepEqual(input.discounts,[{promotion_code:'promo_pilot'}]);
+  assert.equal(input.payment_method_collection,'if_required');
+  assert.equal(Object.hasOwn(input,'allow_promotion_codes'),false,'Stripe rejects it alongside discounts');
+  assert.equal(Object.hasOwn(input.subscription_data,'trial_period_days'),false);
+});
+
+test('switching between the trial and a code replaces the open session; the same code reuses it', async () => {
+  const h=createHarness();pilotCode(h);const handler=h.handler('stripe-checkout');
+  const trial=JSON.parse((await handler(h.request())).body);
+  const coded=JSON.parse((await handler(withBody(h,{tier:'pro',code:'PILOT100'}))).body);
+  assert.notEqual(coded.session_id,trial.session_id);
+  assert.equal(h.sessions.get(trial.session_id).status,'expired');
+  const again=JSON.parse((await handler(withBody(h,{tier:'pro',code:'PILOT100'}))).body);
+  assert.equal(again.session_id,coded.session_id);
+  assert.equal([...h.sessions.values()].filter(s=>s.status==='open').length,1);
+});
+
+test('an ambiguous code checkout replays the same discount under the same idempotency key', async () => {
+  const h=createHarness();pilotCode(h);const handler=h.handler('stripe-checkout');
+  h.failNextUpdateContaining('SET checkoutSessionId');
+  assert.equal((await handler(withBody(h,{tier:'pro',code:'PILOT100'}))).statusCode,500);
+  assert.equal((await handler(withBody(h,{tier:'pro',code:'PILOT100'}))).statusCode,200);
+  const creates=h.calls.filter(c=>c.kind==='checkout.create');
+  assert.equal(creates.length,2);
+  assert.deepEqual(creates[1].input,creates[0].input);
+  assert.equal(creates[1].options.idempotencyKey,creates[0].options.idempotencyKey);
+  assert.equal(h.sessions.size,1);
+});
+
+test('a code Stripe refuses at checkout clears the attempt so the next request starts clean', async () => {
+  const h=createHarness();pilotCode(h);const handler=h.handler('stripe-checkout');
+  const original=h.stripe.checkout.sessions.create;
+  h.stripe.checkout.sessions.create=async()=>{const error: any=new Error('This promotion code cannot be redeemed');error.type='StripeInvalidRequestError';throw error;};
+  const refused=await handler(withBody(h,{tier:'pro',code:'PILOT100'}));
+  assert.equal(refused.statusCode,400);
+  assert.equal(JSON.parse(refused.body).error,'invalid_code');
+  assert.equal(h.rows.get('user_fixture').checkoutAttemptId,undefined);
+  h.stripe.checkout.sessions.create=original;
+  assert.equal((await handler(h.request())).statusCode,200);
+  assert.equal(h.calls.filter(c=>c.kind==='checkout.create').at(-1).input.subscription_data.trial_period_days,28);
+});
