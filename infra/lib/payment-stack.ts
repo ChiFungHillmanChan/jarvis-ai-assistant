@@ -45,6 +45,13 @@ export class PaymentStack extends cdk.Stack {
 
     const portalConfiguration = this.node.tryGetContext('stripePortalConfigurationId') || process.env.STRIPE_PORTAL_CONFIGURATION_ID || '';
 
+    // Free trial length in days for first-time subscribers (Stripe allows 1-730).
+    // Changing it is a redeploy of this stack; no app release is needed.
+    const trialDays = String(this.node.tryGetContext('trialDays') ?? process.env.TRIAL_DAYS ?? '28').trim();
+    if (!/^\d+$/.test(trialDays) || Number(trialDays) < 1 || Number(trialDays) > 730) {
+      throw new Error(`trialDays must be a whole number from 1 to 730, got "${trialDays}"`);
+    }
+
     const webhookFn = new nodejs.NodejsFunction(this, 'StripeWebhookFn', {
       functionName: `jarvis-${props.envName}-stripe-webhook`,
       runtime: lambda.Runtime.NODEJS_24_X,
@@ -78,6 +85,7 @@ export class PaymentStack extends cdk.Stack {
         APP_DOMAIN: 'jarvis-automation.com',
         STRIPE_PORTAL_CONFIGURATION_ID: portalConfiguration,
         USER_POOL_ID: props.userPool.userPoolId,
+        TRIAL_DAYS: trialDays,
       },
       bundling: { minify: true, sourceMap: true },
     });
@@ -113,6 +121,7 @@ export class PaymentStack extends cdk.Stack {
       environment: {
         USER_META_TABLE: props.userMetaTable.tableName,
         USER_POOL_ID: props.userPool.userPoolId,
+        TRIAL_DAYS: trialDays,
       },
       bundling: { minify: true, sourceMap: true },
     });

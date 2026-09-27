@@ -121,6 +121,8 @@ Checkout、Webhook、Portal 及 `/me` Lambda 均為 `Active`／`Successful`，�
 
 - Checkout 與 webhook 共用 `STRIPE_PRO_PRICE_ID`、`STRIPE_TEAM_PRICE_ID`。CDK 接受 `stripeProPriceId`、`stripeTeamPriceId` context，亦接受同名環境變數。只有明確 `ENV=sandbox` 可回退至既有測試 ID；`dev`／`prod` 缺少有效設定會拒絕建立 Checkout。切換 Stripe 帳戶必須更新兩個價格 ID、Secrets Manager 的 API key／webhook secret，以及帳戶對應的 customer 資料；不能把舊帳戶 customer ID 原樣用於新帳戶。
 - `STRIPE_PORTAL_CONFIGURATION_ID`（CDK context：`stripePortalConfigurationId`）指定 JARVIS 專用 Portal 設定，避免共用帳戶的其他產品出現在方案管理中。只有 sandbox 可省略並使用帳戶預設；其他環境缺少此值會拒絕開啟 Portal。Portal 中可升降級的產品、取消方式及按比例收費規則須由擁有人在 Stripe 設定，本輪沒有替使用者決定。
+- `TRIAL_DAYS`（CDK context：`trialDays`，預設 28，只接受 1 至 730 的整數）是首次訂閱者的免費試用日數；更改只需重新部署 Payment stack，毋須發佈 App。`/me` 以同一設定顯示試用日數。
+- Stripe restricted key 另需 **Promotion Codes: Read**，App 內「我有優惠碼」才可查核優惠碼。
 - JWT 驗證後的 `POST /checkout` 接受 `{tier, locale?}`，`POST /portal` 接受 `{locale?}`，身份只取已驗證的 `sub`。`locale` 只使用 `en` 或 `zh-HK`，其餘預設 `en`。成功回傳 `{url, session_id}`；已有訂閱的 Checkout 會回 Portal 並包含 `already_subscribed: true`。
 - Webhook 必須訂閱 `checkout.session.completed`、`checkout.session.async_payment_succeeded`、`checkout.session.async_payment_failed`、`customer.subscription.created`、`customer.subscription.updated`、`customer.subscription.deleted`、`customer.subscription.paused`、`customer.subscription.resumed`、`invoice.paid`、`invoice.payment_failed`。請使用上述 API 版本的 endpoint，簽章 secret 必須與 endpoint 配對；事件的原始 body 不能先重新編碼。
 - API key 需能讀取 customer、subscription、invoice、Checkout Session，並建立 customer／Checkout／Portal Session 及 expire Checkout Session。Lambda 的 Portal IAM 只讀取 user-meta 與 Stripe secret；Checkout／webhook 可更新 user-meta 的 billing 欄位及 lease。
