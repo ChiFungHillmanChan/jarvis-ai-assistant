@@ -4,6 +4,7 @@ import { AdminGetUserCommand, CognitoIdentityProviderClient } from '@aws-sdk/cli
 import type Stripe from 'stripe';
 import { readLocale, readTier } from './body';
 import { appDomain, BillingError, failure, isLiveSubscriptionStatus, json, loadBilling, objectId, portalSession, prices, subscriptionsFor, updateUser, userRow, verifyCustomer, withBillingLock } from './billing';
+import { readTrialDays } from './trial';
 export { isLiveSubscriptionStatus } from './billing';
 
 const cognito = new CognitoIdentityProviderClient({});
@@ -38,16 +39,22 @@ async function createAttempt(stripe: Stripe, userId: string, customer: string, r
   // Older durable attempts omitted Stripe's locale parameter. Preserve that
   // exact request on recovery; adding it would change an existing idempotency key.
   const stripeLocale = row.checkoutStripeLocale === 'zh-HK' ? 'zh-HK' : row.checkoutStripeLocale === 'en' ? 'en' : undefined;
+  // Attempts written before trials existed carry no trial length and replay without one.
+  const trialDays = attemptTrialDays(row);
   return stripe.checkout.sessions.create({
     mode: 'subscription', customer,
     line_items: [{ price: row.checkoutPriceId, quantity: 1 }],
     client_reference_id: userId,
-    subscription_data: { metadata: { userId, tier: row.checkoutTier, project: 'jarvis' } },
+    subscription_data: { metadata: { userId, tier: row.checkoutTier, project: 'jarvis' }, ...(trialDays ? { trial_period_days: trialDays } : {}) },
     success_url: `https://${appDomain}/${row.checkoutLocale || 'en'}/payment/success?session_id={CHECKOUT_SESSION_ID}`,
     cancel_url: `https://${appDomain}/${row.checkoutLocale || 'en'}/payment/cancel`,
     automatic_tax: { enabled: false }, allow_promotion_codes: true,
     ...(stripeLocale ? { locale: stripeLocale } : {}),
   }, { idempotencyKey: `checkout:${process.env.ENV}:${userId}:${row.checkoutAttemptId}` });
+}
+
+function attemptTrialDays(row: Record<string, any>): number {
+  return typeof row.checkoutTrialDays === 'number' && row.checkoutTrialDays > 0 ? row.checkoutTrialDays : 0;
 }
 
 // Include sessions created before durable attempt tracking was introduced. Do
@@ -77,15 +84,21 @@ export async function handler(event: APIGatewayProxyEventV2WithJWTAuthorizer): P
   if (!tier) return json(400, { error: 'invalid_tier' });
   try {
     const configuredPrices = prices();
+    const configuredTrialDays = readTrialDays(process.env.TRIAL_DAYS);
+    if (configuredTrialDays === null) throw new BillingError('billing_trial_not_configured', 503);
     const { stripe } = await loadBilling();
     return await withBillingLock(userId, async owner => {
       const customer = await customerFor(stripe, userId, username, owner);
-      const live = (await subscriptionsFor(stripe, customer)).find(s => isLiveSubscriptionStatus(s.status));
+      const history = await subscriptionsFor(stripe, customer);
+      const live = history.find(s => isLiveSubscriptionStatus(s.status));
       if (live) {
         await expireOtherSessions(stripe, customer, userId);
         const portal = await portalSession(stripe, customer, readLocale(event.body, event.isBase64Encoded));
         return json(200, { url: portal.url, session_id: portal.id, already_subscribed: true, subscription_status: live.status });
       }
+      // The trial is for first-time subscribers. A subscription that never
+      // started (incomplete_expired) does not use it up.
+      const trialDays = history.some(s => s.status !== 'incomplete_expired') ? 0 : configuredTrialDays;
       let row = await userRow(userId);
       if (row.checkoutAttemptId) {
         // Recover an ambiguous create before permitting a different tier. The
@@ -103,7 +116,7 @@ export async function handler(event: APIGatewayProxyEventV2WithJWTAuthorizer): P
           if (isLiveSubscriptionStatus(completed.status)) throw new BillingError('billing_checkout_processing', 409);
         }
         if (pending.status === 'open') {
-          if (row.checkoutTier === tier && row.checkoutPriceId === configuredPrices[tier]) return json(200, { url: pending.url, session_id: pending.id });
+          if (row.checkoutTier === tier && row.checkoutPriceId === configuredPrices[tier] && attemptTrialDays(row) === trialDays) return json(200, { url: pending.url, session_id: pending.id });
           // A concurrent browser completion makes expire fail, so no replacement
           // checkout is created until a subsequent request reconciles it.
           await stripe.checkout.sessions.expire(pending.id);
@@ -115,8 +128,8 @@ export async function handler(event: APIGatewayProxyEventV2WithJWTAuthorizer): P
       // every remaining open session, when no pending tab can complete later.
       if ((await subscriptionsFor(stripe, customer)).some(s => isLiveSubscriptionStatus(s.status))) throw new BillingError('billing_checkout_processing', 409);
       await updateUser(userId,
-        'SET checkoutAttemptId = :attempt, checkoutAttemptAt = :at, checkoutTier = :tier, checkoutPriceId = :price, checkoutLocale = :locale, checkoutStripeLocale = :locale REMOVE checkoutSessionId',
-        { ':attempt': randomUUID(), ':at': Date.now(), ':tier': tier, ':price': configuredPrices[tier], ':locale': readLocale(event.body, event.isBase64Encoded) }, owner);
+        'SET checkoutAttemptId = :attempt, checkoutAttemptAt = :at, checkoutTier = :tier, checkoutPriceId = :price, checkoutLocale = :locale, checkoutStripeLocale = :locale, checkoutTrialDays = :trialDays REMOVE checkoutSessionId',
+        { ':attempt': randomUUID(), ':at': Date.now(), ':tier': tier, ':price': configuredPrices[tier], ':locale': readLocale(event.body, event.isBase64Encoded), ':trialDays': trialDays }, owner);
       row = await userRow(userId);
       const session = await createAttempt(stripe, userId, customer, row);
       await updateUser(userId, 'SET checkoutSessionId = :session', { ':session': session.id }, owner);

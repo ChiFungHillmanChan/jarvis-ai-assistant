@@ -153,3 +153,34 @@ test('a subscription completed between the initial list and session check preven
   assert.equal(response.statusCode,409);
   assert.equal(h.sessions.size,0);
 });
+
+test('a first checkout offers the configured trial and still collects a card', async () => {
+  for (const [configured, expected] of [[undefined, 28], ['61', 61]] as const) {
+    const h=createHarness(configured ? {TRIAL_DAYS:configured} : {});
+    assert.equal((await h.handler('stripe-checkout')(h.request())).statusCode,200);
+    const input=h.calls.find(c=>c.kind==='checkout.create').input;
+    assert.equal(input.subscription_data.trial_period_days,expected);
+    assert.equal(Object.hasOwn(input,'payment_method_collection'),false,'Stripe default: always collect a card');
+    assert.equal(input.allow_promotion_codes,true);
+  }
+});
+
+test('an account that has subscribed before gets no second trial', async () => {
+  const h=createHarness();h.seedSubscription('canceled');
+  assert.equal((await h.handler('stripe-checkout')(h.request())).statusCode,200);
+  assert.equal(Object.hasOwn(h.calls.find(c=>c.kind==='checkout.create').input.subscription_data,'trial_period_days'),false);
+});
+
+test('a subscription that never started does not use up the trial', async () => {
+  const h=createHarness();h.seedSubscription('incomplete_expired');
+  assert.equal((await h.handler('stripe-checkout')(h.request())).statusCode,200);
+  assert.equal(h.calls.find(c=>c.kind==='checkout.create').input.subscription_data.trial_period_days,28);
+});
+
+test('a misconfigured trial length refuses checkout before touching Stripe', async () => {
+  const h=createHarness({TRIAL_DAYS:'0'});
+  const response=await h.handler('stripe-checkout')(h.request());
+  assert.equal(response.statusCode,503);
+  assert.equal(JSON.parse(response.body).error,'billing_trial_not_configured');
+  assert.equal(h.customers.size,0);
+});
