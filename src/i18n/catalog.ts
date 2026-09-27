@@ -9,7 +9,7 @@ const messages = {
   save: ['Save', '儲存'], saved: ['Saved', '已儲存'], clear: ['Remove', '移除'], loading: ['Loading…', '載入中…'], retry: ['Retry', '重試'], refresh: ['Refresh', '重新整理'], refreshing: ['Refreshing…', '重新整理中…'], syncing: ['Syncing…', '同步中…'], noRun: ['Never', '從未執行'], localTime: ['Local time', '本機時間'], statusActive: ['Active', '運行中'], statusPaused: ['Paused', '已暫停'], statusFailed: ['Failed', '失敗'], statusRunning: ['Running', '執行中'], statusEnabled: ['Enabled', '已啟用'],
   countEvents: ['{count} events', '{count} 個活動'], countSynced: ['{count} synced', '已同步 {count} 項'], countTotal: ['{count} total', '共 {count} 項'],
   accountMenu: ['Account menu', '帳戶選單'], displayName: ['Display name', '顯示名稱'], displayNameHelp: ['Shown at the bottom of the sidebar. Stored on this Mac only.', '顯示於側邊欄底部。只儲存在此 Mac。'], displayNamePlaceholder: ['Your name', '你的名稱'],
-  accountSection: ['Account', '帳戶'], accountSignedOut: ['Sign in to view your plan and manage billing. You can continue using JARVIS without signing in.', '登入後可查看方案及管理訂閱。你亦可在未登入的情況下繼續使用 JARVIS。'], accountUnavailable: ['Accounts are not available in this build.', '此版本未提供帳戶功能。'],
+  accountSection: ['Account', '帳戶'], accountSignedOut: ['Sign in to view your plan and manage billing.', '登入後可查看方案及管理訂閱。'], accountUnavailable: ['Accounts are not available in this build.', '此版本未提供帳戶功能。'],
   signIn: ['Sign in', '登入'], signOut: ['Sign out', '登出'], signInGoogle: ['Continue with Google', '使用 Google 繼續'], signInEmail: ['Sign in with email', '使用電郵登入'], signingIn: ['Finish signing in in your browser, then return to JARVIS.', '請在瀏覽器完成登入，再返回 JARVIS。'], signedInAs: ['Signed in as {email}', '已登入：{email}'], sessionEnded: ['Your session has ended. Please sign in again.', '登入已失效，請重新登入。'],
   planLabel: ['Plan: {plan}', '方案：{plan}'], tierFree: ['Free', '免費版'], tierPro: ['Pro', 'Pro'], tierTeam: ['Team', 'Team'], tierUnknown: ['Unknown (JARVIS could not be reached)', '未知（無法連接 JARVIS）'],
   upgradeOpened: ['Checkout opened in your browser. JARVIS will check your plan after payment.', '已在瀏覽器開啟付款頁面。JARVIS 會在付款後檢查方案。'],
@@ -23,7 +23,7 @@ const messages = {
   subscribeTitle: ['Subscribe to JARVIS Pro', '訂閱 JARVIS Pro'], subscribeTerms: ['JARVIS Pro is {price}. Cancel any time from Manage billing.', '收費為{price}，可隨時在「管理訂閱」取消。'], subscribe: ['Subscribe', '訂閱'],
   codeHave: ['I have a code', '我有優惠碼'], codeLabel: ['Code', '優惠碼'], codeApply: ['Apply code', '使用優惠碼'], codeInvalid: ['Code not recognised. Check the spelling, or ask the person who gave it to you.', '無法識別此優惠碼。請檢查拼寫，或向提供優惠碼的人查詢。'],
   gateOfflineTitle: ['Cannot confirm your plan', '未能確認你的方案'], gateOfflineBody: ['JARVIS could not reach its server and has no recent confirmation of your plan. Check your connection and try again.', 'JARVIS 未能連接伺服器，亦沒有近期的方案確認紀錄。請檢查網絡連線後再試。'],
-  gateWaitingTitle: ['Finish checkout in your browser', '請在瀏覽器完成付款程序'],
+  gateWaitingTitle: ['Finish checkout in your browser', '請在瀏覽器完成付款程序'], gateBack: ['Back', '返回'],
   planTrialEnds: ['Trial ends {date}', '試用期於 {date} 結束'], planRenews: ['Renews {date}', '將於 {date} 續期'], planEnds: ['Ends {date}', '將於 {date} 結束'],
   updateAvailable: ['New version {version}', '有新版本 {version}'], downloadLatest: ['Download latest version', '下載最新版本'], updating: ['Updating {percent}%', '更新中 {percent}%'], updateFailed: ['Update failed', '更新失敗'], dismissUpdate: ['Dismiss until the next check', '暫時關閉，下次檢查再提示'],
 } as const;

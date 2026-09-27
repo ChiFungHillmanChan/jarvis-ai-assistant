@@ -7,14 +7,16 @@ import { gateScreen } from '../lib/paywall';
 import { PRO_MONTHLY_PRICE } from '../lib/offer';
 import { useUiLocale } from '../i18n';
 import WindowControls from './WindowControls';
+import UpdateToast from './UpdateToast';
 import '../styles/setup.css';
 
 type Busy = null | 'signin' | 'signout' | 'checkout' | 'code' | 'reopen' | 'refresh';
 
 /**
  * In a billing build nothing past this gate renders until the account has a
- * paid plan (a trial counts). Free and dev builds have no account settings and
- * pass straight through. Design: docs/superpowers/specs/2026-09-27-free-trial-paywall-design.md
+ * paid plan (a trial counts). Builds without account settings pass straight
+ * through (free builds, and dev builds whose `.env` has none).
+ * Design: docs/superpowers/specs/2026-09-27-free-trial-paywall-design.md
  */
 export default function PaywallGate({ children }: { children: ReactNode }) {
   const { t, locale } = useUiLocale();
@@ -145,6 +147,7 @@ export default function PaywallGate({ children }: { children: ReactNode }) {
       <div className="setup-actions">
         {page && <button disabled={disabled} onClick={() => void reopen()}>{t('reopenCheckout')}</button>}
         {screen === 'unconfirmed' && <button disabled={disabled} onClick={() => void checkAgain()}>{busy === 'refresh' ? t('refreshing') : t('refresh')}</button>}
+        <button disabled={disabled} onClick={() => monitor.current?.cancelPayment()}>{t('gateBack')}</button>
       </div>
     </>;
   } else {
@@ -171,8 +174,9 @@ export default function PaywallGate({ children }: { children: ReactNode }) {
       {body}
       {error && screen !== 'checking' && <p className="setup-error" role="alert">{error}</p>}
       {status?.signed_in && screen !== 'checking' && (
-        <p className="setup-footer">{t('signedInAs', { email: status.email ?? '-' })}<button className="text-button" disabled={disabled} onClick={() => void signOut()}>{t('signOut')}</button></p>
+        <p className="setup-footer">{status.email && t('signedInAs', { email: status.email })}<button className="text-button" disabled={disabled} onClick={() => void signOut()}>{t('signOut')}</button></p>
       )}
     </main>
+    <UpdateToast />
   </div>;
 }
