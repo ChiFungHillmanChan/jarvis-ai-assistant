@@ -78,6 +78,8 @@ async function createOrRejectCode(stripe: Stripe, userId: string, customer: stri
     return await createAttempt(stripe, userId, customer, row);
   } catch (error) {
     if (typeof row.checkoutPromotionCodeId === 'string' && (error as { type?: string })?.type === 'StripeInvalidRequestError') {
+      const stripeError = error as { code?: string; param?: string };
+      console.warn('Promotion code refused by Stripe', { code: stripeError.code, param: stripeError.param });
       await updateUser(userId, `REMOVE ${ATTEMPT_FIELDS}`, {}, owner);
       throw new BillingError('invalid_code', 400);
     }
