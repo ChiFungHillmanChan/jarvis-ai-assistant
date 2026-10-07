@@ -41,6 +41,28 @@ test('raw email keeps source symbols and line breaks unchanged', () => {
   assert.doesNotMatch(html, /<h2>|<strong>|<a |<svg/);
 });
 
+test('a reply shows its new text first and collapses the quoted history behind a toggle naming the sender', () => {
+  const reply = 'Best regards,\nHillman\n\nOn Tue, 6 Oct 2026 at 13:37, Yu from RAWR <rawrproject.hk@gmail.com> wrote:\n\n> Hi Hillman,\n>\n> On Mon, 5 Oct 2026 at 11:45 PM, Hillman Chan <hillmanchan709@gmail.com>\n> wrote:\n>\n>> Hi Yu,';
+  const html = render(reply, { format: 'plain' });
+  assert.match(html, /Best regards,\nHillman/);
+  assert.match(html, /<button[^>]*aria-expanded="false"[^>]*>.*顯示較早的 2 封郵件.*Yu from RAWR.*Tue, 6 Oct 2026 at 13:37.*<\/button>/s);
+  assert.doesNotMatch(html, /Hi Hillman|Hi Yu|&gt;|wrote:/);
+});
+
+test('quotes answered inline render as quote blocks without ">" markers and stay open', () => {
+  const html = render('> Can you send the SOW?\nYes, attached.\n\n> And the timeline?\nNext week.', { format: 'plain' });
+  assert.equal((html.match(/<blockquote/g) || []).length, 2);
+  assert.match(html, /Can you send the SOW\?[\s\S]*Yes, attached\.[\s\S]*And the timeline\?[\s\S]*Next week\./);
+  assert.doesNotMatch(html, /&gt;|<button/);
+});
+
+test('a message that is only quoted text stays visible under its sender header', () => {
+  const html = render('On Tue, 6 Oct 2026 at 13:37, Yu <yu@example.test> wrote:\n> Hi', { format: 'plain' });
+  assert.doesNotMatch(html, /<button|wrote:/);
+  assert.match(html, /<strong title="yu@example.test">Yu<\/strong>/);
+  assert.match(html, />Hi</);
+});
+
 test('untrusted Markdown cannot render HTML, unsafe links or tracking images', () => {
   const html = render('<script>alert(1)</script>\n\n[bad](javascript:alert%281%29) [file](file:///etc/passwd) [good](https://example.test/report)\n\n![Report scan](https://example.test/pixel?private=1)');
   assert.doesNotMatch(html, /<script|<img|href="javascript:|href="file:|src=/);

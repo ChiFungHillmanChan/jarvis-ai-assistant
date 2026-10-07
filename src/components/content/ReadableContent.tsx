@@ -8,7 +8,10 @@ export default function ReadableContent({ className = '', ...props }: ContentBod
   const { text } = useUiLocale();
   const [linkError, setLinkError] = useState(false);
   return <div className={`readable-content ${className}`}>
-    <ContentBody {...props} tableLabel={text('Table; scroll horizontally for more columns', '表格，可水平捲動查看更多欄位')} onOpenLink={url => {
+    <ContentBody {...props} tableLabel={text('Table; scroll horizontally for more columns', '表格，可水平捲動查看更多欄位')} quoteLabels={{
+      show: count => count ? text(`Show ${count} earlier message${count === 1 ? '' : 's'}`, `顯示較早的 ${count} 封郵件`) : text('Show quoted text', '顯示引用內容'),
+      hide: text('Hide quoted text', '隱藏引用內容'),
+    }} onOpenLink={url => {
       setLinkError(false);
       void openUrl(url).catch(() => setLinkError(true));
     }} />
