@@ -90,7 +90,11 @@ pub const CLOUD_MODELS: &[CloudModel] = &[
     // Anthropic model table (2026-10-06); cache writes at 1.25x input.
     model("claude", "claude-sonnet-5-5", "Claude Sonnet 5.5", price(2.0, 10.0, 0.20, 2.50)),
     model("claude", "claude-opus-5-5", "Claude Opus 5.5", price(4.0, 20.0, 0.20, 5.0)),
-    model("claude", "claude-haiku-5-5", "Claude Haiku 5.5", price(0.10, 0.50, 0.01, 0.125)),
+    // Haiku 5.5: base rate up to 100K input, $0.50 / $2.50 beyond.
+    CloudModel {
+        long_context: Some(LongContext { above: 100_000, price: price(0.50, 2.50, 0.05, 0.625) }),
+        ..model("claude", "claude-haiku-5-5", "Claude Haiku 5.5", price(0.10, 0.50, 0.01, 0.125))
+    },
     model("claude", "claude-sonnet-4-6", "Claude Sonnet 4.6", price(3.0, 15.0, 0.30, 3.75)),
     family("claude", "sonnet-4.6", price(3.0, 15.0, 0.30, 3.75)),
     model("claude", "claude-haiku-4-5", "Claude Haiku 4.5", price(1.0, 5.0, 0.10, 1.25)),
@@ -344,6 +348,15 @@ mod tests {
         let long = cost("gemini-3.1-pro-preview", 250_000, 1_000, 0);
         assert!(long > base * 2, "long-context input must use the $4 tier, got {long} vs {base}");
         assert_eq!(cost("gemini-3.5-flash", 250_000, 0, 0), 375_000);
+    }
+
+    #[test]
+    fn haiku_5_5_bills_above_100k_at_the_higher_tier() {
+        // 50K in + 10K out at $0.10 / $0.50: $0.005 + $0.005.
+        assert_eq!(cost("claude-haiku-5-5", 50_000, 10_000, 0), 10_000);
+        // 200K in at $0.50: $0.10.
+        assert_eq!(cost("claude-haiku-5-5", 200_000, 0, 0), 100_000);
+        assert_eq!(price_for("claude-haiku-5-5").input_per_million, 0.10, "not priced as haiku-4-5");
     }
 
     /// Every default must have its own price, or the fallback above fires on
