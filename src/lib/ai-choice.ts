@@ -7,7 +7,7 @@ export interface CurrentAi { provider: AiProvider | 'bedrock' | string; label: s
 
 export const chooseAi = (choice: AiChoice) => invoke<CurrentAi>('choose_ai', { choice });
 export const currentAi = () => invoke<CurrentAi | null>('current_ai');
-export const listAiModels = (provider: 'ollama' | 'compatible', baseUrl?: string, apiKey?: string) =>
+export const listAiModels = (provider: AiProvider, baseUrl?: string, apiKey?: string) =>
   invoke<string[]>('list_ai_models', { provider, baseUrl, apiKey });
 
 /** OpenAI-compatible services offered by name, with their regional endpoints. */

@@ -66,6 +66,9 @@ export default function ChooseAi({ onChosen, onBusyChange }: { onChosen?: (ai: C
   const service = option === 'kimi' || option === 'qwen' ? COMPATIBLE_SERVICES[option].regions.find(r => r.id === region)! : null;
   const baseUrl = service ? service.baseUrl : option === 'other' ? otherUrl.trim() : '';
   const needsModel = option === 'ollama' || option === 'kimi' || option === 'qwen' || option === 'other';
+  // OpenAI, Gemini and Claude may pin a model; left blank, JARVIS follows the
+  // latest model it ships with.
+  const optionalModel = option === 'openai' || option === 'gemini' || option === 'claude';
   const name = option === 'ollama' ? 'Ollama' : option === 'openai' ? 'OpenAI' : option === 'gemini' ? 'Gemini' : option === 'claude' ? 'Claude'
     : option === 'kimi' ? 'Kimi' : option === 'qwen' ? 'Qwen' : /^https?:\/\/[^/\s]+/.test(otherUrl.trim()) ? aiServiceLabel(otherUrl.trim()) : text('this service', '該服務');
   // Chinese text puts spaces around Latin names only ("向 Kimi 傳送", "向該服務傳送").
@@ -82,7 +85,7 @@ export default function ChooseAi({ onChosen, onBusyChange }: { onChosen?: (ai: C
     setBusy(label); setError(''); setNotice('');
     try { await action(); } catch (e) { if (mounted.current) setError(String(e)); } finally { if (mounted.current) setBusy(''); }
   }
-  function loadModels(kind: 'ollama' | 'compatible') {
+  function loadModels(kind: AiProvider) {
     return run(text('Loading models', '載入模型'), async () => {
       const list = await listAiModels(kind, kind === 'compatible' ? baseUrl : undefined, apiKey.trim() || undefined).catch(error => {
         // Ollama not running or not installed: show the installer below.
@@ -91,13 +94,13 @@ export default function ChooseAi({ onChosen, onBusyChange }: { onChosen?: (ai: C
       });
       if (!mounted.current) return;
       setModels(list);
-      setModel(previous => list.includes(previous) ? previous : list.length === 1 ? list[0] : '');
+      setModel(previous => list.includes(previous) ? previous : !optionalModel && list.length === 1 ? list[0] : '');
     });
   }
   function testAndUse() {
     if (!provider) return;
     void run(text('Testing', '測試中'), async () => {
-      const chosen = await chooseAi({ provider, apiKey: apiKey.trim() || undefined, baseUrl: provider === 'compatible' ? baseUrl : undefined, model: needsModel ? model : undefined });
+      const chosen = await chooseAi({ provider, apiKey: apiKey.trim() || undefined, baseUrl: provider === 'compatible' ? baseUrl : undefined, model: needsModel || optionalModel ? model || undefined : undefined });
       if (!mounted.current) return;
       setCurrent(chosen); setApiKey(''); setConsent(false);
       setNotice(text(`${chosen.label} answered. JARVIS now uses only ${chosen.label}.`, `${chosen.label} 已回覆。JARVIS 現在只會使用 ${chosen.label}。`)
@@ -129,7 +132,7 @@ export default function ChooseAi({ onChosen, onBusyChange }: { onChosen?: (ai: C
 
   return <div className="setup-local choose-ai">
     <p className="setup-hint">{current
-      ? text(`Now using: ${current.label}${current.model ? ` · ${current.model}` : ''}. Choose again to switch; only one AI is used at a time.`, `目前使用：${current.label}${current.model ? `・${current.model}` : ''}。重新選擇即可更換；每次只會使用一個 AI。`)
+      ? text(`Now using: ${current.label}${current.model ? ` · ${current.model}` : ['openai', 'gemini', 'claude'].includes(current.provider) ? ' · latest model' : ''}. Choose again to switch; only one AI is used at a time.`, `目前使用：${current.label}${current.model ? `・${current.model}` : ['openai', 'gemini', 'claude'].includes(current.provider) ? '・最新模型' : ''}。重新選擇即可更換；每次只會使用一個 AI。`)
       : text('Choose the AI you already use. Only this AI is used for the assistant, voice replies and mail. You can change it later in Settings.', '請選擇你已在使用的 AI。AI 助理、語音回覆及電郵都只會使用這一個 AI，之後可在設定中更換。')}</p>
     {current?.provider === 'gemini' && <label className="setup-checkbox"><input type="checkbox" checked={geminiBilled} disabled={!!busy} onChange={e => void confirmGeminiBilling(e.target.checked)} />{text('My Gemini API key has billing enabled. Google does not use paid-tier content to train its models, so JARVIS sends email to Gemini only after you confirm this.', '我的 Gemini API 金鑰已啟用付費。Google 不會以付費方案的內容訓練模型，因此 JARVIS 只會在你確認後才把電郵傳送給 Gemini。')}</label>}
     {current?.provider === 'compatible' && <p className="setup-hint">{text(`Email is not sent to ${current.label}. Google's rules for Gmail data allow only AI services that do not train on it. Chat and voice use ${current.label}; for email analysis and sorting, choose OpenAI, Claude, a local Ollama model, or Gemini with billing enabled.`, `電郵內容不會傳送至 ${current.label}。Google 對 Gmail 資料的規定只容許不會以此訓練模型的 AI 處理電郵。對話及語音會使用 ${current.label}；如需電郵分析及自動整理，請改選 OpenAI、Claude、本機 Ollama 模型，或已啟用付費的 Gemini。`)}</p>}
@@ -146,6 +149,13 @@ export default function ChooseAi({ onChosen, onBusyChange }: { onChosen?: (ai: C
       {option !== 'ollama' && <>
         <label>{text(`${name} API key`, `${name} API 密鑰`)}<input type="password" autoComplete="off" spellCheck={false} disabled={!!busy} value={apiKey} onChange={e => setApiKey(e.target.value)} placeholder={optionFor(current) === option ? text('Saved. Leave blank to keep it', '已儲存，留空即沿用') : text(`Paste your ${name} API key`, `貼上你的${zhName.trimEnd()} API 密鑰`)} /></label>
         {keyPage && <button type="button" disabled={!!busy} onClick={() => void openUrl(keyPage).catch(() => setError(text('Could not open the page.', '未能開啟頁面。')))}>{text('Get a key', '取得密鑰')}</button>}
+      </>}
+      {optionalModel && provider && <>
+        <button type="button" disabled={!!busy} onClick={() => void loadModels(provider)}>{text('Choose a model', '選擇模型')}</button>
+        {models && models.length > 0 && <label>{text('Model', '模型')}<select disabled={!!busy} value={model} onChange={e => setModel(e.target.value)}>
+          <option value="">{text('Latest (recommended): updates with JARVIS', '最新模型（建議）：隨 JARVIS 更新')}</option>{models.map(m => <option key={m} value={m}>{m}</option>)}
+        </select></label>}
+        {!models?.length && <p className="setup-hint">{text('Uses the latest recommended model unless you choose one.', '未選擇模型時，會使用最新的建議模型。')}</p>}
       </>}
       {needsModel && <>
         {option !== 'ollama' && <button type="button" disabled={!!busy || (option === 'other' && !otherUrl.trim())} onClick={() => void loadModels('compatible')}>{text('Load models', '載入模型')}</button>}

@@ -10,7 +10,15 @@ pub struct ModelPrice {
 
 pub fn price_for(model_id: &str) -> ModelPrice {
     let m = model_id.to_lowercase();
-    if m.contains("sonnet-4-6") || m.contains("sonnet-4.6") {
+    // Claude 5.5 rates from Anthropic's model table (2026-10-06); cache writes
+    // at 1.25x input as for earlier Claude models.
+    if m.contains("sonnet-5-5") {
+        ModelPrice { input_per_million: 2.0, output_per_million: 10.0, cache_read_per_million: 0.20, cache_write_per_million: 2.50 }
+    } else if m.contains("opus-5-5") {
+        ModelPrice { input_per_million: 4.0, output_per_million: 20.0, cache_read_per_million: 0.20, cache_write_per_million: 5.0 }
+    } else if m.contains("haiku-5-5") {
+        ModelPrice { input_per_million: 0.10, output_per_million: 0.50, cache_read_per_million: 0.01, cache_write_per_million: 0.125 }
+    } else if m.contains("sonnet-4-6") || m.contains("sonnet-4.6") {
         ModelPrice { input_per_million: 3.0, output_per_million: 15.0, cache_read_per_million: 0.30, cache_write_per_million: 3.75 }
     } else if m.contains("haiku-4-5") || m.contains("haiku-4.5") {
         ModelPrice { input_per_million: 1.0, output_per_million: 5.0, cache_read_per_million: 0.10, cache_write_per_million: 1.25 }

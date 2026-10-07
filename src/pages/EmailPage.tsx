@@ -62,6 +62,10 @@ export default function EmailPage({ onSetup }: { onSetup?: () => void }) {
   // Sorting needs the user's opt-in and something to classify with: a
   // TypeSafe key, or the AI chosen in setup.
   const triageReady = !!triage?.enabled && (!!triage.typesafe_key || !!triage.chosen_ai);
+  // Sorting is on but nothing can read the mail: say so instead of a button
+  // that fails on every email.
+  const noAi = !!triage?.enabled && !triageReady;
+  const noAiText = text("AI sorting is on, but you have not set up an AI yet. Choose “Set up your AI”.", "已開啟 AI 整理，但你尚未設定 AI。請按「設定你的 AI」。");
   const chosenAi = triage?.chosen_ai ?? null;
   const sortedBy = triage?.typesafe_key
     ? text(`TypeSafe Jev decides the category and whether it needs you; ${chosenAi ?? "no AI yet"} writes a summary and finds dates only for the emails that need one.`, `TypeSafe Jev 判斷分類及是否需要你處理；只有需要摘要或含日期的郵件，才交由${chosenAi ? ` ${chosenAi} ` : "（尚未選擇 AI）"}撰寫摘要及找出日期。`)
@@ -259,7 +263,7 @@ export default function EmailPage({ onSetup }: { onSetup?: () => void }) {
 
   return <div className="mail-workspace">
     <header className="mail-heading">
-      <div><h1>{text("Mail", "電郵工作區")}</h1><p role="status" className="mail-status">{statusText || (triageReady ? text("AI sorts new mail as it arrives. Copies stay on this Mac.", "新郵件同步後由 AI 自動整理；郵件副本保存在此 Mac。") : text("Local copies of your mailboxes. Turn on AI sorting in Analysis settings.", "信箱的本機副本。可在「分析設定」開啟 AI 自動整理。"))}</p></div>
+      <div><h1>{text("Mail", "電郵工作區")}</h1><p role="status" className="mail-status">{statusText || (noAi ? noAiText : triageReady ? text("AI sorts new mail as it arrives. Copies stay on this Mac.", "新郵件同步後由 AI 自動整理；郵件副本保存在此 Mac。") : text("Local copies of your mailboxes. Turn on AI sorting in Analysis settings.", "信箱的本機副本。可在「分析設定」開啟 AI 自動整理。"))}</p></div>
       <div className="mail-heading-actions">{onSetup && <button disabled={!!busy} onClick={onSetup}>{text("Setup guide", "設定導引")}</button>}<button disabled={!!busy || !workspace} onClick={openSettings}>{text("Analysis settings", "分析設定")}</button></div>
     </header>
     {error && <div role="alert" className="mail-alert"><span>{error}</span><button onClick={() => { setError(""); setRevision(n => n + 1); }}>{text("Reload", "重新載入")}</button></div>}
@@ -297,6 +301,8 @@ export default function EmailPage({ onSetup }: { onSetup?: () => void }) {
             <button disabled={!!busy || !(workspace?.accounts ?? []).some(item => item.connected)} onClick={() => sync(account && account.connected ? account : null)}>{busy === text("Sync mail", "同步郵件") ? text("Syncing…", "同步中…") : text("Sync", "同步")}</button>
             {triageReady
               ? <button className="mail-primary" disabled={!!busy || !triage?.untriaged} onClick={() => run(text("AI sorting", "AI 整理"), async () => setNotice(await triageNow(3)))}>{triage?.untriaged ? text(`Sort ${triage.untriaged} with AI`, `AI 整理 ${triage.untriaged} 封`) : text("All sorted", "已全部整理")}</button>
+              : noAi
+              ? <button className="mail-primary" disabled={!!busy} onClick={onSetup ?? openSettings}>{text("Set up your AI", "設定你的 AI")}</button>
               : <button className="mail-primary" disabled={!!busy || !workspace} onClick={openSettings}>{text("Turn on AI sorting", "開啟 AI 整理")}</button>}
           </div>
         </div>
@@ -343,7 +349,7 @@ export default function EmailPage({ onSetup }: { onSetup?: () => void }) {
             {message.triage ? <MailAiCard triage={message.triage} items={items} text={text} locale={locale} onError={setError}
                 onChanged={next => { setItems(list => list.map(item => item.id === next.id ? next : item)); refreshWorkspace(); if (next.status !== "open") void mail.mailGetMessage(message.id).then(setMessage).catch(() => undefined); }}
                 onAttention={attention => void mail.mailSetAttention(message.id, attention).then(() => { setMessage(m => m && m.triage ? { ...m, triage: { ...m.triage, attention } } : m); setPage(p => ({ ...p, messages: p.messages.map(m => m.id === message.id && m.triage ? { ...m, triage: { ...m.triage, attention } } : m) })); refreshWorkspace(); }).catch(e => setError(String(e)))} />
-              : <p className="mail-ai-pending">{triageReady ? text("Not sorted yet. Choose “Sort with AI” to summarise it.", "尚未整理。按「AI 整理」即可生成摘要。") : text("Turn on AI sorting to get a summary and follow-ups for each email.", "開啟 AI 整理後，每封郵件都會有摘要及待辦。")}</p>}
+              : <p className="mail-ai-pending">{noAi ? noAiText : triageReady ? text("Not sorted yet. Choose “Sort with AI” to summarise it.", "尚未整理。按「AI 整理」即可生成摘要。") : text("Turn on AI sorting to get a summary and follow-ups for each email.", "開啟 AI 整理後，每封郵件都會有摘要及待辦。")}</p>}
             <ReadableContent format="plain" text={(message.body && readableBody(message.body)) || decodeEntities(message.snippet) || text("This email has no readable text.", "此郵件沒有可顯示的文字。")} />
             {files && files.length > 0 && <ul className="mail-attachments" aria-label={text("Attachments", "附件")}>{files.map((file, index) => <li key={index}><Paperclip size={13} aria-hidden="true" /><span>{file.filename}</span>{fileSize(file.size) && <small>{fileSize(file.size)}</small>}</li>)}</ul>}
             {(files === null || files.length > 0) && <p className="mail-hint">{text("Attachments stay in Gmail. Open the email in Gmail to download them.", "附件保留在 Gmail，請在 Gmail 開啟原信下載。")}</p>}

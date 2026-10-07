@@ -21,7 +21,8 @@ pub struct AiChoice {
     pub api_key: Option<String>,
     /// "compatible" only.
     pub base_url: Option<String>,
-    /// "compatible" and "ollama".
+    /// Required for "compatible" and "ollama". Optional for "openai",
+    /// "gemini" and "claude": None follows the latest model JARVIS ships with.
     pub model: Option<String>,
 }
 
@@ -42,9 +43,9 @@ fn clean_key(key: Option<&str>) -> Option<String> {
 fn entry_for(choice: &AiChoice) -> Result<ProviderChainEntry, String> {
     let model = choice.model.as_deref().map(str::trim).filter(|m| !m.is_empty()).map(str::to_string);
     let (provider_type, endpoint_id, model_id, base_url) = match choice.provider.as_str() {
-        "openai" => ("openai", None, None, None),
-        "gemini" => ("gemini", None, None, None),
-        "claude" => ("claude", None, None, None),
+        "openai" => ("openai", None, model, None),
+        "gemini" => ("gemini", None, model, None),
+        "claude" => ("claude", None, model, None),
         "compatible" => {
             let base = compat::normalize_base_url(choice.base_url.as_deref().unwrap_or_default())?;
             ("openai", None, Some(model.ok_or("請選擇模型。")?), Some(base))
@@ -185,11 +186,87 @@ pub fn current_ai(db: State<'_, Arc<Database>>) -> Result<Option<CurrentAi>, Str
     Ok(describe(&saved_chain(&db)?))
 }
 
-/// Models the chosen service offers: an OpenAI-compatible service's own
-/// list, or the models installed in Ollama.
+/// Whether a model id ends in a dated snapshot ("-2025-08-07", "-0125").
+fn is_snapshot(id: &str) -> bool {
+    let tail: Vec<&str> = id.rsplit('-').take(3).collect();
+    let digits = |s: &str, n: usize| s.len() == n && s.chars().all(|c| c.is_ascii_digit());
+    digits(tail[0], 4) || (tail.len() == 3 && digits(tail[0], 2) && digits(tail[1], 2) && digits(tail[2], 4)) || digits(tail[0], 8)
+}
+
+/// The models a provider lists that can hold a conversation, newest name
+/// first; image, audio, embedding, coding and dated snapshot models are left
+/// out.
+fn chat_models(provider: &str, ids: Vec<String>) -> Vec<String> {
+    const NOT_CHAT: [&str; 14] = ["audio", "realtime", "tts", "transcribe", "image", "embedding", "search", "moderation", "dall-e", "whisper", "instruct", "computer-use", "codex", "-live"];
+    let mut models: Vec<String> = ids
+        .into_iter()
+        .map(|id| id.trim_start_matches("models/").to_string())
+        .filter(|id| match provider {
+            "openai" => id.starts_with("gpt-") || (id.starts_with('o') && id.chars().nth(1).is_some_and(|c| c.is_ascii_digit())),
+            "gemini" => id.starts_with("gemini-"),
+            "claude" => id.starts_with("claude-"),
+            _ => true,
+        })
+        .filter(|id| !NOT_CHAT.iter().any(|word| id.contains(word)) && !is_snapshot(id))
+        .collect();
+    models.sort_by(|a, b| b.cmp(a));
+    models.dedup();
+    models
+}
+
+/// The pasted key, or the one saved for this provider.
+async fn provider_key(account: &'static str, pasted: Option<&str>, name: &str) -> Result<String, String> {
+    if let Some(key) = clean_key(pasted) {
+        return Ok(key);
+    }
+    tokio::task::spawn_blocking(move || crate::integration_keys::resolve(account))
+        .await
+        .ok()
+        .flatten()
+        .ok_or_else(|| format!("請先輸入 {name} API 密鑰。"))
+}
+
+/// GET a provider's model list and pull the ids out of `list`/`field`.
+async fn fetch_models(name: &str, request: reqwest::RequestBuilder, list: &str, field: &str) -> Result<Vec<String>, String> {
+    let response = request.send().await.map_err(|_| format!("未能連接 {name}，請檢查網絡。"))?;
+    match response.status().as_u16() {
+        200 => {}
+        400 | 401 | 403 => return Err(format!("{name} 拒絕了這個 API 密鑰，請檢查後重試。")),
+        status => return Err(format!("{name} 暫時未能列出模型（{status}）。")),
+    }
+    let body: serde_json::Value = response.json().await.map_err(|_| format!("{name} 回覆的模型清單格式無效。"))?;
+    Ok(body
+        .get(list)
+        .and_then(|d| d.as_array())
+        .into_iter()
+        .flatten()
+        .filter_map(|m| m.get(field).and_then(|id| id.as_str()).map(str::to_string))
+        .collect())
+}
+
+/// Models the chosen service offers, read live from the provider so new
+/// models appear without an app update: OpenAI, Gemini, Claude, an
+/// OpenAI-compatible service, or the models installed in Ollama.
 #[tauri::command]
 pub async fn list_ai_models(provider: String, base_url: Option<String>, api_key: Option<String>) -> Result<Vec<String>, String> {
     match provider.as_str() {
+        "openai" => {
+            let key = provider_key("openai_api_key", api_key.as_deref(), "OpenAI").await?;
+            let ids = fetch_models("OpenAI", compat::client()?.get("https://api.openai.com/v1/models").bearer_auth(key), "data", "id").await?;
+            Ok(chat_models("openai", ids))
+        }
+        "gemini" => {
+            let key = provider_key("gemini_api_key", api_key.as_deref(), "Gemini").await?;
+            let request = compat::client()?.get(format!("{}/models?pageSize=1000", crate::ai::gemini::API_BASE)).header("x-goog-api-key", key);
+            let ids = fetch_models("Gemini", request, "models", "name").await?;
+            Ok(chat_models("gemini", ids))
+        }
+        "claude" => {
+            let key = provider_key("claude_api_key", api_key.as_deref(), "Claude").await?;
+            let request = compat::client()?.get("https://api.anthropic.com/v1/models?limit=1000").header("x-api-key", key).header("anthropic-version", "2023-06-01");
+            let ids = fetch_models("Claude", request, "data", "id").await?;
+            Ok(chat_models("claude", ids))
+        }
         "compatible" => {
             let base = compat::normalize_base_url(base_url.as_deref().unwrap_or_default())?;
             let key = match clean_key(api_key.as_deref()) {
@@ -242,6 +319,9 @@ mod tests {
         assert_eq!((ollama.provider_type.as_str(), ollama.endpoint_id.as_deref()), ("local", Some(OLLAMA_ENDPOINT)));
         assert_eq!(entry_for(&choice("gemini", None, None)).unwrap().model_id, None, "Gemini picks Flash or Pro per task");
         assert!(entry_for(&choice("compatible", Some("https://api.moonshot.ai/v1"), None)).is_err(), "a compatible service needs a model");
+        assert_eq!(entry_for(&choice("openai", None, None)).unwrap().model_id, None, "no model follows the latest");
+        assert_eq!(entry_for(&choice("claude", None, Some(" claude-opus-5-5 "))).unwrap().model_id.as_deref(), Some("claude-opus-5-5"));
+        assert_eq!(entry_for(&choice("openai", None, Some(""))).unwrap().model_id, None);
         assert!(entry_for(&choice("compatible", Some("http://evil.example/v1"), Some("m"))).is_err());
         assert!(entry_for(&choice("ollama", None, Some(" "))).is_err());
         assert!(entry_for(&choice("bedrock", None, None)).is_err());
@@ -275,5 +355,19 @@ mod tests {
     #[test]
     fn no_chain_means_no_ai_chosen() {
         assert_eq!(describe(&[]), None);
+    }
+
+    #[test]
+    fn model_lists_keep_only_chat_models() {
+        let ids = |list: &[&str]| list.iter().map(|s| s.to_string()).collect::<Vec<_>>();
+        assert_eq!(
+            chat_models("openai", ids(&["gpt-6-luna", "o4-mini", "gpt-4o-audio-preview", "text-embedding-3-small", "dall-e-3", "whisper-1", "omni-moderation-latest", "gpt-6-luna", "gpt-5-2025-08-07", "gpt-3.5-turbo-0125", "gpt-5.3-codex", "gpt-live-1", "gpt-6.1-sol"])),
+            ["o4-mini", "gpt-6.1-sol", "gpt-6-luna"]
+        );
+        assert_eq!(
+            chat_models("gemini", ids(&["models/gemini-3.7-flash", "models/gemini-embedding-001", "models/imagen-4", "models/gemini-3.1-pro-preview"])),
+            ["gemini-3.7-flash", "gemini-3.1-pro-preview"]
+        );
+        assert_eq!(chat_models("claude", ids(&["claude-sonnet-5-5", "claude-opus-5-5", "claude-3-5-sonnet-20241022"])), ["claude-sonnet-5-5", "claude-opus-5-5"]);
     }
 }

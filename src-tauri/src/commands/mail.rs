@@ -86,24 +86,20 @@ pub(crate) async fn triage_untriaged(db: &Database, language: Option<&str>) -> R
     if typesafe.is_none() && chosen.is_none() {
         return Err(crate::ai::NO_AI_CHOSEN.into());
     }
-    let settings = store::settings(db)?;
-    // Only the AI the user chose reads the mail: OpenAI keeps its strict-schema
-    // path when it is the choice, any other choice goes through its router.
+    // Only the AI the user chose reads the mail, with the model chosen with
+    // it (none: the latest JARVIS ships). OpenAI keeps its strict-schema path
+    // when TypeSafe classifies; that path only summarises, so without TypeSafe
+    // OpenAI goes through the router like every other choice.
+    let openai_model = chosen
+        .as_ref()
+        .and_then(|ai| ai.model.clone())
+        .unwrap_or_else(|| crate::ai::openai::OPENAI_MODEL.to_string());
     let (openai, assistant) = match chosen {
-        Some(ai) if ai.provider == "openai" => (openai_key().ok(), None),
+        Some(ai) if ai.provider == "openai" && typesafe.is_some() => (openai_key().ok(), None),
         Some(_) => (None, Some(crate::commands::ai_choice::rebuilt_router(db))),
         None => (None, None),
     };
-    let keys = triage::TriageKeys {
-        typesafe,
-        openai,
-        openai_model: if settings.openai_model.trim().is_empty() {
-            crate::ai::openai::OPENAI_MODEL.to_string()
-        } else {
-            settings.openai_model.trim().to_string()
-        },
-        assistant,
-    };
+    let keys = triage::TriageKeys { typesafe, openai, openai_model, assistant };
     let language = if language == Some("en") { "en" } else { "zh-HK" };
     let _run = TRIAGE_RUN.lock().await;
     triage::run(db, keys, language).await

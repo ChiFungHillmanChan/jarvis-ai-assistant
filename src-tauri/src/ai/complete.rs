@@ -66,7 +66,7 @@ async fn complete_one(router: &AiRouter, db: &Database, entry: &ProviderChainEnt
                 }
                 None => {
                     let key = router.openai_key.clone().ok_or("尚未設定 OpenAI API 密鑰。")?;
-                    ("https://api.openai.com/v1/chat/completions".to_string(), key, openai::OPENAI_MODEL.to_string(), "OpenAI".to_string())
+                    ("https://api.openai.com/v1/chat/completions".to_string(), key, entry.model_id.clone().unwrap_or_else(|| openai::OPENAI_MODEL.to_string()), "OpenAI".to_string())
                 }
             };
             let body = chat_completions_body(&model, request, entry.base_url.is_none());
@@ -126,7 +126,7 @@ async fn complete_one(router: &AiRouter, db: &Database, entry: &ProviderChainEnt
         }
         "claude" => {
             let key = router.claude_key.clone().ok_or("尚未設定 Claude API 密鑰。")?;
-            let model = super::claude::CLAUDE_MODEL.to_string();
+            let model = entry.model_id.clone().unwrap_or_else(|| super::claude::CLAUDE_MODEL.to_string());
             let mut body = json!({
                 "model": model,
                 "max_tokens": request.max_tokens,

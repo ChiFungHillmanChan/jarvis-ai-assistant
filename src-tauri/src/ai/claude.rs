@@ -92,10 +92,12 @@ struct SseUsage {
     cache_creation_input_tokens: Option<i64>,
 }
 
-pub const CLAUDE_MODEL: &str = "claude-sonnet-4-6";
+/// The latest Sonnet, used when the user has not chosen a model.
+pub const CLAUDE_MODEL: &str = "claude-sonnet-5-5";
 
 pub async fn send(
     api_key: &str,
+    model: &str,
     messages: Vec<(String, String)>,
     db: &crate::db::Database,
     google_auth: &std::sync::Arc<crate::auth::google::GoogleAuth>,
@@ -110,7 +112,7 @@ pub async fn send(
     let tool_defs = tools::get_tool_definitions();
     let claude_tools = tools::to_claude_format(&tool_defs);
     // Pre-compute static fields once to avoid re-allocating each iteration
-    let model: String = CLAUDE_MODEL.into();
+    let model: String = model.into();
     let system: String = tools::build_system_prompt(db);
 
     let mut claude_messages: Vec<ClaudeMessage> = messages

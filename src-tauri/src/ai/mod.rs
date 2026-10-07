@@ -844,6 +844,7 @@ impl AiRouter {
                     if let Some(ref key) = self.claude_key {
                         claude::send(
                             key,
+                            entry.model_id.as_deref().unwrap_or(claude::CLAUDE_MODEL),
                             messages.clone(),
                             db,
                             google_auth,
@@ -881,7 +882,7 @@ impl AiRouter {
                     if let Some(ref key) = self.openai_key {
                         openai::send(
                             key,
-                            openai::Target::OPENAI,
+                            openai::Target { base_url: None, model: entry.model_id.as_deref() },
                             messages.clone(),
                             db,
                             google_auth,

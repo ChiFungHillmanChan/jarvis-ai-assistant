@@ -32,13 +32,11 @@ struct OpenAIRequest {
 pub struct Target<'a> {
     /// None is api.openai.com.
     pub base_url: Option<&'a str>,
-    /// The chain row's model. api.openai.com always uses OPENAI_MODEL.
+    /// The chain row's model. On api.openai.com, None follows OPENAI_MODEL.
     pub model: Option<&'a str>,
 }
 
 impl Target<'_> {
-    pub const OPENAI: Target<'static> = Target { base_url: None, model: None };
-
     fn url(&self) -> String {
         match self.base_url {
             Some(base) => format!("{base}/chat/completions"),
@@ -48,7 +46,7 @@ impl Target<'_> {
 
     fn model(&self) -> Result<String, String> {
         match self.base_url {
-            None => Ok(OPENAI_MODEL.to_string()),
+            None => Ok(self.model.map(str::trim).filter(|m| !m.is_empty()).unwrap_or(OPENAI_MODEL).to_string()),
             Some(base) => self
                 .model
                 .map(str::to_string)
