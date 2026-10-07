@@ -157,6 +157,7 @@ pub(crate) mod encryption {
     /// Only an encrypted database whose key is gone is a hard failure, because
     /// its contents are unreadable without that key.
     pub fn open(path: &Path) -> Result<Connection> {
+        settle_interrupted_conversion(path)?;
         if is_plaintext(path)? {
             match key(true).and_then(|key| encrypt_in_place(path, &key).map(|_| key)) {
                 Ok(key) => return open_with_key(path, &key),
@@ -289,6 +290,35 @@ pub(crate) mod encryption {
         Ok(())
     }
 
+    /// Leave exactly one database behind a conversion that was cut short (app
+    /// quit, crash, power loss), so no second copy of the mail -- and no
+    /// plaintext one -- sits on disk until the user finds it.
+    fn settle_interrupted_conversion(path: &Path) -> Result<()> {
+        let staged = sibling(path, ".encrypting");
+        let retired = sibling(path, ".unencrypted");
+        if !retired.exists() {
+            // Stopped mid-export: the original was never touched.
+            remove_with_sidecars(&staged);
+        } else if !path.exists() {
+            // Stopped between the two renames. The original is the copy known
+            // to be complete; put it back and let this launch convert it again.
+            std::fs::rename(&retired, path)?;
+            remove_with_sidecars(&staged);
+            log::warn!("Database restored from an interrupted encryption");
+        } else if !staged.exists() {
+            // Stopped after the swap: the encrypted copy was checked before it
+            // replaced the original, so the original is surplus.
+            remove_with_sidecars(&retired);
+        } else {
+            log::error!(
+                "Database encryption was interrupted and a new database was opened since; \
+                 {} is kept because it may be the only copy of older data",
+                retired.display()
+            );
+        }
+        Ok(())
+    }
+
     fn apply_attach(conn: &Connection, target: &str, key: &str) -> Result<()> {
         if !is_key(key) {
             return Err("invalid database key".into());
@@ -352,6 +382,66 @@ pub(crate) mod encryption {
                 .collect();
             assert!(leftovers.is_empty(), "no staged or retired copies left: {leftovers:?}");
             drop(conn);
+            std::fs::remove_dir_all(dir).unwrap();
+        }
+
+        fn plaintext_db(path: &Path, body: &str) {
+            let conn = Connection::open(path).unwrap();
+            conn.execute_batch(&format!("CREATE TABLE mail(body TEXT); INSERT INTO mail VALUES ('{body}');")).unwrap();
+        }
+
+        fn files_in(dir: &Path) -> Vec<String> {
+            let mut names: Vec<String> = std::fs::read_dir(dir).unwrap()
+                .map(|e| e.unwrap().file_name().to_string_lossy().to_string())
+                .collect();
+            names.sort();
+            names
+        }
+
+        #[test]
+        fn a_conversion_stopped_between_the_renames_puts_the_original_back() {
+            let path = temp_db();
+            plaintext_db(&sibling(&path, ".unencrypted"), "kept");
+            drop(open_with_key(&sibling(&path, ".encrypting"), KEY).unwrap());
+            settle_interrupted_conversion(&path).unwrap();
+            let dir = path.parent().unwrap();
+            assert_eq!(files_in(dir), ["jarvis.db"], "one database, nothing beside it");
+            assert!(is_plaintext(&path).unwrap(), "the original, to be converted again");
+            let body: String = Connection::open(&path).unwrap()
+                .query_row("SELECT body FROM mail", [], |row| row.get(0)).unwrap();
+            assert_eq!(body, "kept");
+            std::fs::remove_dir_all(dir).unwrap();
+        }
+
+        #[test]
+        fn leftovers_beside_a_converted_database_are_removed() {
+            let path = temp_db();
+            drop(open_with_key(&path, KEY).unwrap().execute_batch("CREATE TABLE t(x)"));
+            plaintext_db(&sibling(&path, ".unencrypted"), "plaintext mail");
+            settle_interrupted_conversion(&path).unwrap();
+            let dir = path.parent().unwrap();
+            assert_eq!(files_in(dir), ["jarvis.db"]);
+
+            // A partial copy from a conversion cut short mid-export.
+            std::fs::write(sibling(&path, ".encrypting"), b"partial").unwrap();
+            std::fs::write(sibling(&path, ".encrypting-journal"), b"partial").unwrap();
+            settle_interrupted_conversion(&path).unwrap();
+            assert_eq!(files_in(dir), ["jarvis.db"]);
+            std::fs::remove_dir_all(dir).unwrap();
+        }
+
+        /// An earlier build that was stopped between the renames opened a new,
+        /// empty database on its next launch. The plaintext original is then the
+        /// only copy of the user's mail and must not be deleted.
+        #[test]
+        fn an_ambiguous_leftover_is_kept_rather_than_deleted() {
+            let path = temp_db();
+            drop(open_with_key(&path, KEY).unwrap().execute_batch("CREATE TABLE t(x)"));
+            plaintext_db(&sibling(&path, ".unencrypted"), "only copy");
+            drop(open_with_key(&sibling(&path, ".encrypting"), KEY).unwrap());
+            settle_interrupted_conversion(&path).unwrap();
+            let dir = path.parent().unwrap();
+            assert!(files_in(dir).contains(&"jarvis.db.unencrypted".to_string()));
             std::fs::remove_dir_all(dir).unwrap();
         }
 

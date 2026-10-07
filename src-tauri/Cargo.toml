@@ -7,7 +7,10 @@ edition = "2021"
 
 [lib]
 name = "jarvis_lib"
-crate-type = ["lib", "cdylib", "staticlib"]
+# Desktop only. The Tauri template's "cdylib" and "staticlib" exist for the
+# Android and iOS builds; on macOS they only added a ~300 MB archive and a
+# second link to every build.
+crate-type = ["lib"]
 
 [features]
 # Explicit, debug-only desktop QA with synthetic mail and no login Keychain.
