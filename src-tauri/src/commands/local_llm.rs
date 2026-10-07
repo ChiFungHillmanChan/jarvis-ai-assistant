@@ -595,7 +595,7 @@ mod tests {
         assert_eq!(chain[0].model_id, None, "position 0 must let the workload tier pick");
         assert_eq!(
             chain[1].model_id.as_deref(),
-            Some(crate::ai::gemini::MODEL_PRO)
+            Some(crate::ai::models::GEMINI_PRO)
         );
     }
 }

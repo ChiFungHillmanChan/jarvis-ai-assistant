@@ -470,7 +470,9 @@ fn native_chat_request<'a>(model: &'a str, prompt: &'a str, num_ctx: usize) -> O
         stream: false,
         // These small Qwen models otherwise spend the bounded output budget
         // in message.thinking and can return no answer, including for setup.
-        think: matches!(model, "qwen3.5:2b" | "qwen3.5:4b" | "qwen3.5:9b")
+        think: crate::ai::models::local_model(model)
+            .and_then(|m| m.setup.as_ref())
+            .is_some_and(|setup| setup.think_off)
             .then_some(false),
         options: OllamaOptions {
             num_ctx,
@@ -496,12 +498,10 @@ fn context_window(model_info: &serde_json::Value) -> Result<usize, String> {
 }
 
 fn cap_approved_local_context(model: &str, reported: usize) -> usize {
-    let limit = match model {
-        "qwen3.5:2b" | "qwen3.5:4b" => 4_096,
-        "qwen3.5:9b" => 8_192,
-        _ => return reported,
-    };
-    reported.min(limit)
+    match crate::ai::models::local_model(model).and_then(|m| m.setup.as_ref()) {
+        Some(setup) => reported.min(setup.context_cap),
+        None => reported,
+    }
 }
 
 fn ensure_prompt_fits(prompt: &str, num_ctx: usize) -> Result<(), String> {

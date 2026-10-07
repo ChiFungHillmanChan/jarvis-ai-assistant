@@ -35,7 +35,6 @@ use serde_json::{json, Value};
 use std::time::{Duration, Instant};
 
 const JEV_URL: &str = "https://api.typesafe.ai/v1/systemone";
-pub const JEV_MODEL: &str = "jev-latest";
 /// Jev accuracy drops as state fills with irrelevant detail; the opening of a
 /// message carries what these questions need.
 const JEV_TEXT_CHARS: usize = 1_500;
@@ -320,13 +319,13 @@ pub fn parse_jev(response: &Value) -> Result<JevAnswers, String> {
         action_required: noul("action_required")?,
         has_date: noul("has_date")?,
         importance: importance.get("score").and_then(Value::as_f64).ok_or_else(bad)?,
-        model: response.get("model").and_then(Value::as_str).unwrap_or(JEV_MODEL).to_string(),
+        model: response.get("model").and_then(Value::as_str).unwrap_or(crate::ai::models::JEV).to_string(),
         input_tokens: response.pointer("/usage/input_tokens").and_then(Value::as_i64).unwrap_or(0),
     })
 }
 
 async fn ask_jev(client: &reqwest::Client, key: &str, state: Value) -> Result<JevAnswers, String> {
-    let body = json!({"state": state, "model": JEV_MODEL, "questions": jev_questions()});
+    let body = json!({"state": state, "model": crate::ai::models::JEV, "questions": jev_questions()});
     let mut delay = Duration::from_millis(800);
     for attempt in 0..3 {
         let response = client.post(JEV_URL).bearer_auth(key).json(&body).send().await;
@@ -522,7 +521,8 @@ pub fn parse_luna<Tz: TimeZone>(value: &Value, subject: &str, text: &str, receiv
 }
 
 struct Outcome {
-    cost_micro: i64,
+    /// None while only local models ran: they are free.
+    cost_micro: Option<i64>,
     triaged: bool,
     summarized: bool,
     items: usize,
@@ -530,6 +530,13 @@ struct Outcome {
     luna_input: i64,
     luna_output: i64,
     error: Option<String>,
+}
+
+/// Add a request's cost; a local request (None) adds nothing.
+fn add_cost(total: &mut Option<i64>, cost: Option<i64>) {
+    if let Some(cost) = cost {
+        *total = Some(total.unwrap_or(0) + cost);
+    }
 }
 
 /// What Jev would otherwise answer, asked of the chosen AI in the same call
@@ -604,7 +611,7 @@ async fn triage_one(
     language: &str,
     message: TriageInput,
 ) -> Outcome {
-    let mut outcome = Outcome { cost_micro: 0, triaged: false, summarized: false, items: 0, jev_input: 0, luna_input: 0, luna_output: 0, error: None };
+    let mut outcome = Outcome { cost_micro: None, triaged: false, summarized: false, items: 0, jev_input: 0, luna_input: 0, luna_output: 0, error: None };
     let sent = sent_by_owner(&message.sender, owners);
     let replied_later = match message.thread_id.as_deref() {
         Some(thread) if !sent => store::later_senders_in_thread(db, thread, &message.received_at)
@@ -651,7 +658,7 @@ async fn triage_one(
                 Ok(answers) => {
                     crate::ai::cost::record_inference(db, "typesafe", Workload::Volume, &answers.model, answers.input_tokens, 0, 0, 0, started.elapsed().as_millis() as i64);
                     outcome.jev_input = answers.input_tokens;
-                    outcome.cost_micro += crate::ai::cost::compute_usd_cost_micro(&answers.model, answers.input_tokens, 0, 0, 0);
+                    add_cost(&mut outcome.cost_micro, crate::ai::models::usd_cost_micro("typesafe", &answers.model, answers.input_tokens, 0, 0, 0));
                     answers
                 }
                 Err(error) => {
@@ -665,7 +672,7 @@ async fn triage_one(
             let parsed = ask_chosen_ai(router, db, &instructions, &input, combined_schema()).await.and_then(|(value, done)| {
                 outcome.luna_input = done.input_tokens;
                 outcome.luna_output = done.output_tokens;
-                outcome.cost_micro += crate::ai::cost::compute_usd_cost_micro(&done.model, done.input_tokens, done.output_tokens, 0, 0);
+                add_cost(&mut outcome.cost_micro, done.cost_micro);
                 let extraction = parse_luna(&value, &message.subject, &text, received_date, &Local, &known_ids)?;
                 Ok((parse_combined(&value, &extraction.category), extraction, format!("{} · {}", done.provider, done.model)))
             });
@@ -714,14 +721,14 @@ async fn triage_one(
                 crate::ai::cost::record_inference(db, "openai-mail", Workload::Volume, &keys.openai_model, usage.input_tokens, usage.output_tokens, usage.cached_tokens, 0, started.elapsed().as_millis() as i64);
                 outcome.luna_input = usage.input_tokens;
                 outcome.luna_output = usage.output_tokens;
-                outcome.cost_micro += crate::ai::cost::compute_usd_cost_micro(&keys.openai_model, usage.input_tokens, usage.output_tokens, usage.cached_tokens, 0);
+                add_cost(&mut outcome.cost_micro, crate::ai::models::usd_cost_micro("openai-mail", &keys.openai_model, usage.input_tokens, usage.output_tokens, usage.cached_tokens, 0));
                 (value, keys.openai_model.clone())
             }))
         } else if let Some(router) = keys.assistant.as_ref() {
             Some(ask_chosen_ai(router, db, &instructions, &input, luna_schema()).await.map(|(value, done)| {
                 outcome.luna_input = done.input_tokens;
                 outcome.luna_output = done.output_tokens;
-                outcome.cost_micro += crate::ai::cost::compute_usd_cost_micro(&done.model, done.input_tokens, done.output_tokens, 0, 0);
+                add_cost(&mut outcome.cost_micro, done.cost_micro);
                 (value, format!("{} · {}", done.provider, done.model))
             }))
         } else {
@@ -810,9 +817,9 @@ pub async fn run(db: &Database, keys: TriageKeys, language: &str) -> Result<Mail
     .flatten();
     let mut run = MailTriageRun::default();
     let mut first_error = None;
-    let mut cost_micro = 0;
+    let mut cost_micro = None;
     for outcome in outcomes {
-        cost_micro += outcome.cost_micro;
+        add_cost(&mut cost_micro, outcome.cost_micro);
         run.triaged += outcome.triaged as usize;
         run.summarized += outcome.summarized as usize;
         run.items += outcome.items;
@@ -827,7 +834,7 @@ pub async fn run(db: &Database, keys: TriageKeys, language: &str) -> Result<Mail
         }
     }
     // Summed per request: long-context pricing applies to one request, not a run.
-    run.cost_usd = cost_micro as f64 / 1_000_000.0;
+    run.cost_usd = cost_micro.map(|micro| micro as f64 / 1_000_000.0);
     run.remaining = store::untriaged_count(db)?;
     run.warning = first_error;
     Ok(run)
@@ -1119,7 +1126,7 @@ mod tests {
         let keys = TriageKeys {
             typesafe: std::env::var("TYPESAFE_API_KEY").ok(),
             openai: std::env::var("OPENAI_API_KEY").ok(),
-            openai_model: crate::ai::openai::OPENAI_MODEL.into(),
+            openai_model: crate::ai::models::OPENAI_DEFAULT.into(),
             assistant: None,
         };
         let started = Instant::now();

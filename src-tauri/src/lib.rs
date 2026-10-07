@@ -556,6 +556,7 @@ pub fn run() {
             commands::ai_choice::choose_ai,
             commands::ai_choice::current_ai,
             commands::ai_choice::list_ai_models,
+            ai::models::ai_models,
             commands::local_llm::update_model_override,
             commands::system::open_url,
             tool_approval::resolve_tool_approval,

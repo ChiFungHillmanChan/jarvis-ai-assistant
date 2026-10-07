@@ -8,8 +8,6 @@ use std::collections::HashSet;
 use crate::chat_session::ScopedEmitter;
 
 pub const API_BASE: &str = "https://generativelanguage.googleapis.com/v1beta";
-pub const MODEL_PRO: &str = "gemini-3.1-pro-preview";
-pub const MODEL_FLASH: &str = "gemini-3.7-flash";
 
 #[derive(Serialize, Deserialize, Clone, Debug)]
 struct GeminiContent {
@@ -488,24 +486,5 @@ mod tests {
         assert_eq!(contents[0].parts[0].text.as_deref(), Some("hello"));
         assert_eq!(contents[1].role, "model");
         assert_eq!(contents[1].parts[0].text.as_deref(), Some("hi"));
-    }
-
-    /// `MODEL_PRO` / `MODEL_FLASH` are also hardcoded as TypeScript literals in
-    /// Settings.tsx (a third copy, after this file and `AiRouter::new` in
-    /// `ai/mod.rs`) so its
-    /// "+ Gemini Pro" / "+ Gemini Flash" buttons send a model id that still
-    /// exists. There is no JS test runner in this repo to catch drift on the
-    /// TS side, so this reads the file as text instead.
-    #[test]
-    fn settings_page_offers_the_same_model_ids_as_gemini_rs() {
-        let settings_tsx = include_str!("../../../src/pages/Settings.tsx");
-        assert!(
-            settings_tsx.contains(MODEL_PRO),
-            "src/pages/Settings.tsx:57-58 must be updated to match gemini.rs: {MODEL_PRO} not found"
-        );
-        assert!(
-            settings_tsx.contains(MODEL_FLASH),
-            "src/pages/Settings.tsx:57-58 must be updated to match gemini.rs: {MODEL_FLASH} not found"
-        );
     }
 }

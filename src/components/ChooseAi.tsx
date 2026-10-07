@@ -2,6 +2,7 @@ import { useEffect, useRef, useState } from 'react';
 import { useUiLocale } from '../i18n';
 import { aiServiceLabel, chooseAi, COMPATIBLE_SERVICES, currentAi, listAiModels, type AiProvider, type CurrentAi } from '../lib/ai-choice';
 import { getOptionalPreference, openUrl, setPreference } from '../lib/commands';
+import { useAiModels } from '../lib/ai-models';
 import LocalMailSetup from './LocalMailSetup';
 import '../styles/setup.css';
 
@@ -43,6 +44,7 @@ export default function ChooseAi({ onChosen, onBusyChange }: { onChosen?: (ai: C
   const [notice, setNotice] = useState('');
   const [geminiBilled, setGeminiBilled] = useState(false);
   const mounted = useRef(true);
+  const catalog = useAiModels();
 
   useEffect(() => {
     mounted.current = true;
@@ -69,6 +71,7 @@ export default function ChooseAi({ onChosen, onBusyChange }: { onChosen?: (ai: C
   // OpenAI, Gemini and Claude may pin a model; left blank, JARVIS follows the
   // latest model it ships with.
   const optionalModel = option === 'openai' || option === 'gemini' || option === 'claude';
+  const latest = !catalog ? '' : option === 'openai' ? catalog.defaults.openai : option === 'claude' ? catalog.defaults.claude : option === 'gemini' ? catalog.defaults.gemini_flash : '';
   const name = option === 'ollama' ? 'Ollama' : option === 'openai' ? 'OpenAI' : option === 'gemini' ? 'Gemini' : option === 'claude' ? 'Claude'
     : option === 'kimi' ? 'Kimi' : option === 'qwen' ? 'Qwen' : /^https?:\/\/[^/\s]+/.test(otherUrl.trim()) ? aiServiceLabel(otherUrl.trim()) : text('this service', '該服務');
   // Chinese text puts spaces around Latin names only ("向 Kimi 傳送", "向該服務傳送").
@@ -153,7 +156,7 @@ export default function ChooseAi({ onChosen, onBusyChange }: { onChosen?: (ai: C
       {optionalModel && provider && <>
         <button type="button" disabled={!!busy} onClick={() => void loadModels(provider)}>{text('Choose a model', '選擇模型')}</button>
         {models && models.length > 0 && <label>{text('Model', '模型')}<select disabled={!!busy} value={model} onChange={e => setModel(e.target.value)}>
-          <option value="">{text('Latest (recommended): updates with JARVIS', '最新模型（建議）：隨 JARVIS 更新')}</option>{models.map(m => <option key={m} value={m}>{m}</option>)}
+          <option value="">{text(`Latest (recommended)${latest ? `: ${latest}` : ''}, updates with JARVIS`, `最新模型（建議）${latest ? `：${latest}` : ''}，隨 JARVIS 更新`)}</option>{models.map(m => <option key={m} value={m}>{m}</option>)}
         </select></label>}
         {!models?.length && <p className="setup-hint">{text('Uses the latest recommended model unless you choose one.', '未選擇模型時，會使用最新的建議模型。')}</p>}
       </>}

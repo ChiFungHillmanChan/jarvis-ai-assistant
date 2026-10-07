@@ -31,29 +31,22 @@ fn ollama_app_installed() -> bool {
     cfg!(target_os = "macos") && std::path::Path::new("/Applications/Ollama.app").is_dir()
 }
 
+// The approved models and their sizes live in ai/models.rs.
 fn suggested_tag(ram_gb: f64) -> Option<&'static str> {
-    if ram_gb >= 24.0 { Some("qwen3.5:9b") }
-    else if ram_gb >= 16.0 { Some("qwen3.5:4b") }
-    else if ram_gb >= 8.0 { Some("qwen3.5:2b") }
-    else { None }
+    crate::ai::models::suggested_local_model(ram_gb)
+}
+
+fn approved(model: &str) -> Option<(&'static crate::ai::models::LocalModel, &'static crate::ai::models::LocalSetup)> {
+    let entry = crate::ai::models::local_model(model)?;
+    entry.setup.as_ref().map(|setup| (entry, setup))
 }
 
 fn disk_reserve_gb(model: &str) -> f64 {
-    match model {
-        "qwen3.5:2b" => 8.0,
-        "qwen3.5:4b" => 10.0,
-        "qwen3.5:9b" => 15.0,
-        _ => f64::INFINITY,
-    }
+    approved(model).map_or(f64::INFINITY, |(_, setup)| setup.disk_reserve_gb)
 }
 
 fn min_ram_gb(model: &str) -> Option<f64> {
-    match model {
-        "qwen3.5:2b" => Some(8.0),
-        "qwen3.5:4b" => Some(16.0),
-        "qwen3.5:9b" => Some(24.0),
-        _ => None,
-    }
+    approved(model).map(|(entry, _)| entry.min_ram_gb as f64)
 }
 
 fn validate_capacity(model: &str, ram_gb: f64, disk_gb: Option<f64>, installed: bool) -> Result<(), &'static str> {

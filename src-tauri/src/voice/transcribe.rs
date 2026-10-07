@@ -79,7 +79,7 @@ impl Transcriber {
         let url = format!(
             "{}/models/{}:generateContent",
             gemini::API_BASE,
-            gemini::MODEL_FLASH
+            crate::ai::models::GEMINI_FLASH
         );
 
         // Bounded, because this call sits between the user speaking and any

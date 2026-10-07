@@ -74,46 +74,26 @@ pub fn ram_to_recommendation(total_ram_gb: f64) -> &'static str {
     }
 }
 
-/// Curated model list for Ollama recommendations.
-const CURATED_MODELS: &[(&str, &str, &str, f64, u32, bool, &str)] = &[
-    // (id, name, param_size, download_gb, min_ram_gb, tool_capable, description)
-    ("qwen3.5:2b", "Qwen 3.5 2B", "2B", 2.7, 8, true, "Lightweight local assistant"),
-    ("llama3.2:3b", "Llama 3.2 3B", "3B", 2.0, 8, true, "Fast, good for chat and basic tasks"),
-    ("qwen2.5:7b", "Qwen 2.5 7B", "7B", 4.7, 8, true, "Strong tool use, multilingual"),
-    ("qwen3.5:4b", "Qwen 3.5 4B", "4B", 3.4, 16, true, "Multilingual local assistant"),
-    ("qwen3.5:9b", "Qwen 3.5 9B", "9B", 6.6, 24, true, "Multilingual local assistant"),
-    ("mistral:7b", "Mistral 7B", "7B", 4.1, 8, true, "Fast reasoning and tool use"),
-    ("qwen3:8b", "Qwen 3 8B", "8B", 5.2, 8, true, "Qwen multilingual model"),
-    ("deepseek-r1:7b", "DeepSeek R1 7B", "7B", 4.7, 8, false, "Deep reasoning, no tool support"),
-    ("qwen2.5:14b", "Qwen 2.5 14B", "14B", 9.0, 16, true, "Higher quality tool use"),
-    ("deepseek-r1:14b", "DeepSeek R1 14B", "14B", 9.0, 16, false, "Strong reasoning at 14B"),
-    ("qwen2.5:32b", "Qwen 2.5 32B", "32B", 20.0, 32, true, "Near-cloud quality"),
-    ("deepseek-r1:32b", "DeepSeek R1 32B", "32B", 20.0, 32, false, "Best local reasoning"),
-    ("llama3.3:70b", "Llama 3.3 70B", "70B", 43.0, 64, true, "Large general-purpose model"),
-];
-
+/// Size of a catalog model in ai/models.rs.
 pub fn curated_model_size(id: &str) -> Option<f64> {
-    CURATED_MODELS.iter().find(|entry| entry.0 == id).map(|entry| entry.3)
+    crate::ai::models::local_model(id).map(|m| m.download_gb)
 }
 
 /// Get curated models filtered by available RAM.
 /// `pulled_ids` is a list of model IDs already present on the endpoint.
 pub fn get_curated_models(total_ram_gb: f64, pulled_ids: &[String]) -> Vec<RecommendedModel> {
-    CURATED_MODELS
+    crate::ai::models::LOCAL_MODELS
         .iter()
-        .filter(|(_, _, _, _, min_ram, _, _)| (*min_ram as f64) <= total_ram_gb)
-        .map(|(id, name, param_size, dl_gb, min_ram, tools, desc)| {
-            let already_pulled = pulled_ids.iter().any(|p| p == id);
-            RecommendedModel {
-                id: id.to_string(),
-                name: name.to_string(),
-                param_size: param_size.to_string(),
-                download_size_gb: *dl_gb,
-                min_ram_gb: *min_ram,
-                tool_capable: *tools,
-                description: desc.to_string(),
-                already_pulled,
-            }
+        .filter(|m| (m.min_ram_gb as f64) <= total_ram_gb)
+        .map(|m| RecommendedModel {
+            id: m.id.to_string(),
+            name: m.label.to_string(),
+            param_size: m.param_size.to_string(),
+            download_size_gb: m.download_gb,
+            min_ram_gb: m.min_ram_gb,
+            tool_capable: m.tool_capable,
+            description: m.description.to_string(),
+            already_pulled: pulled_ids.iter().any(|p| p == m.id),
         })
         .collect()
 }

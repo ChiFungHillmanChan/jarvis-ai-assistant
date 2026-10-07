@@ -7,7 +7,8 @@ use tauri::State;
 pub struct ProviderBreakdown {
     pub provider: String,
     pub turns: i64,
-    pub usd_cost: f64,
+    /// None for a local provider: it is free, so the tokens are the spend.
+    pub usd_cost: Option<f64>,
     pub input_tokens: i64,
     pub output_tokens: i64,
 }
@@ -20,7 +21,8 @@ pub struct ExpensiveTurn {
     pub workload: String,
     pub input_tokens: i64,
     pub output_tokens: i64,
-    pub usd_cost: f64,
+    /// None for a local provider.
+    pub usd_cost: Option<f64>,
     pub latency_ms: i64,
 }
 
@@ -71,11 +73,12 @@ pub async fn get_cost_stats(db: State<'_, Arc<Database>>) -> Result<CostStats, S
             .map_err(|e| e.to_string())?;
         let rows = stmt
             .query_map(rusqlite::params![cutoff], |r| {
+                let provider: String = r.get(0)?;
                 let micro: i64 = r.get(2)?;
                 Ok(ProviderBreakdown {
-                    provider: r.get(0)?,
+                    usd_cost: (!crate::ai::models::is_local(&provider)).then(|| micro as f64 / 1_000_000.0),
+                    provider,
                     turns: r.get(1)?,
-                    usd_cost: micro as f64 / 1_000_000.0,
                     input_tokens: r.get(3)?,
                     output_tokens: r.get(4)?,
                 })
@@ -102,14 +105,15 @@ pub async fn get_cost_stats(db: State<'_, Arc<Database>>) -> Result<CostStats, S
         let rows = stmt
             .query_map(rusqlite::params![cutoff], |r| {
                 let micro: i64 = r.get(6)?;
+                let provider: String = r.get(1)?;
                 Ok(ExpensiveTurn {
                     ts: r.get(0)?,
-                    provider: r.get(1)?,
+                    usd_cost: (!crate::ai::models::is_local(&provider)).then(|| micro as f64 / 1_000_000.0),
+                    provider,
                     model_id: r.get(2)?,
                     workload: r.get(3)?,
                     input_tokens: r.get(4)?,
                     output_tokens: r.get(5)?,
-                    usd_cost: micro as f64 / 1_000_000.0,
                     latency_ms: r.get(7)?,
                 })
             })

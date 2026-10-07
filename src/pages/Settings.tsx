@@ -53,6 +53,7 @@ import { connectionStatuses, connectionsChanged } from "../lib/connections";
 import { DISPLAY_NAME_KEY, accountSectionVisible, displayNameChanged } from "../lib/account";
 import LocalAiSetup from "../components/LocalAiSetup";
 import ChooseAi from "../components/ChooseAi";
+import { useAiModels } from "../lib/ai-models";
 import { aiServiceLabel, currentAi, type CurrentAi } from "../lib/ai-choice";
 import AccountPanel from "../components/AccountPanel";
 import { UserRound } from "lucide-react";
@@ -68,12 +69,6 @@ const API_KEY_PROVIDERS = [
   { id: "openai", label: "OpenAI", help: "OpenAI chat and Mail analysis" },
 ] as const;
 
-// Must match gemini::MODEL_PRO / MODEL_FLASH in src-tauri/src/ai/gemini.rs. A
-// chain entry's model_id is sent to the API verbatim, so a stale id here is a
-// 404 on every request that reaches the entry.
-const GEMINI_MODEL_PRO = "gemini-3.1-pro-preview";
-const GEMINI_MODEL_FLASH = "gemini-3.7-flash";
-
 // Deleting a saved key is its own IPC call: set_api_key refuses a blank value
 // unless `remove` is set, so an accidental SAVE on the (permanently blank) key
 // field can no longer destroy a working credential. src/lib/commands.ts has no
@@ -84,6 +79,8 @@ function clearApiKey(provider: string): Promise<void> {
 }
 
 export default function Settings() {
+  // Model ids come from src-tauri/src/ai/models.rs, never from this file.
+  const models = useAiModels();
   const { appearance, setAppearance, open } = useWorkspace();
   const { locale, setLocale, saveError: localeSaveError, retrySave: retryLocaleSave, t, text } = useUiLocale();
   const [aiProvider, setAiProvider] = useState("gemini_primary");
@@ -775,11 +772,11 @@ export default function Settings() {
             )}
 
             <div style={{ display: "flex", gap: 6, marginTop: 8, flexWrap: "wrap" }}>
-              <button onClick={() => handleAddToChain("gemini", undefined, GEMINI_MODEL_PRO)} style={styles.saveBtn}>+ Gemini Pro</button>
-              <button onClick={() => handleAddToChain("gemini", undefined, GEMINI_MODEL_FLASH)} style={styles.saveBtn}>+ Gemini Flash</button>
+              <button disabled={!models} onClick={() => models && handleAddToChain("gemini", undefined, models.defaults.gemini_pro)} style={styles.saveBtn}>+ Gemini Pro</button>
+              <button disabled={!models} onClick={() => models && handleAddToChain("gemini", undefined, models.defaults.gemini_flash)} style={styles.saveBtn}>+ Gemini Flash</button>
               <button onClick={() => handleAddToChain("claude")} style={styles.saveBtn}>+ Claude</button>
               <button onClick={() => handleAddToChain("openai")} style={styles.saveBtn}>+ OpenAI</button>
-              <button onClick={() => handleAddToChain("bedrock", undefined, "anthropic.claude-sonnet-4-6")} style={styles.saveBtn}>+ Bedrock Claude</button>
+              <button disabled={!models} onClick={() => models && handleAddToChain("bedrock", undefined, models.defaults.bedrock)} style={styles.saveBtn}>+ Bedrock Claude</button>
             </div>
           </div>
 

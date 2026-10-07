@@ -92,8 +92,6 @@ struct SseUsage {
     cache_creation_input_tokens: Option<i64>,
 }
 
-/// The latest Sonnet, used when the user has not chosen a model.
-pub const CLAUDE_MODEL: &str = "claude-sonnet-5-5";
 
 pub async fn send(
     api_key: &str,

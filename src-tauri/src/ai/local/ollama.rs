@@ -15,25 +15,7 @@ struct OllamaModel {
     name: Option<String>,
 }
 
-/// Known model families that support native tool/function calling
-const TOOL_CAPABLE_FAMILIES: &[&str] = &[
-    "qwen2.5",
-    "qwen2",
-    "qwen3",
-    "llama3.1",
-    "llama3.2",
-    "llama3.3",
-    "llama4",
-    "mistral",
-    "mixtral",
-    "deepseek-v3",
-    "deepseek-r1",
-    "command-r",
-    "command-r-plus",
-    "firefunction",
-    "hermes",
-    "nemotron",
-];
+use crate::ai::models::TOOL_CAPABLE_FAMILIES;
 
 fn is_tool_capable_model(model_name: &str) -> bool {
     let lower = model_name.to_lowercase();

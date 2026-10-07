@@ -105,7 +105,8 @@ pub struct MailTriageRun {
     pub jev_input_tokens: i64,
     pub luna_input_tokens: i64,
     pub luna_output_tokens: i64,
-    pub cost_usd: f64,
+    /// None when only a local model ran: it is free, so show the tokens.
+    pub cost_usd: Option<f64>,
     pub warning: Option<String>,
 }
 
@@ -158,7 +159,7 @@ pub struct MailSettings {
 }
 
 fn default_openai_model() -> String {
-    crate::ai::openai::OPENAI_MODEL.into()
+    crate::ai::models::OPENAI_DEFAULT.into()
 }
 
 #[derive(Serialize)]

@@ -598,8 +598,8 @@ pub async fn send_local(
     Ok("I've completed the actions.".into())
 }
 
-/// Record a completed local turn. Local models have no price-table entry, so
-/// `compute_usd_cost_micro` returns 0 and the row costs nothing -- but the turn
+/// Record a completed local turn. Local models are free (models::usd_cost_micro
+/// returns None) and the row is stored at 0 with its tokens -- but the turn
 /// still counts, which is what the cost dashboard's local share is measured
 /// from. Without this every local turn was invisible and `local_share_pct` was
 /// structurally pinned to 0. Only successful turns are recorded, so a failed
@@ -641,9 +641,9 @@ mod tests {
 
     /// A local turn must cost 0 because it ran on the user's own hardware --
     /// which is a fact about the provider, not about whether the model id
-    /// happens to be missing from the cloud price table. `price_for` now bills
+    /// happens to be missing from the cloud price table. `models::price_for` bills
     /// unrecognised ids at the frontier rate on purpose, so this asserts the
-    /// provider check in `record_inference` rather than the table lookup.
+    /// local-provider rule rather than the table lookup.
     #[test]
     fn local_turns_are_recorded_at_zero_cost() {
         let db = crate::ai::cost::tests::temp_metrics_db("");

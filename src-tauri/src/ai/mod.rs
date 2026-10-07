@@ -2,6 +2,7 @@ pub mod bedrock;
 pub mod claude;
 pub mod compat;
 pub mod mail_policy;
+pub mod models;
 pub mod complete;
 pub mod cost;
 pub mod gemini;
@@ -39,8 +40,8 @@ pub struct ProviderChainEntry {
 /// dispatch so the emitted label never diverges from the model actually sent.
 fn gemini_model_for(model_override: Option<&str>, workload: Workload) -> &str {
     model_override.unwrap_or(match workload {
-        Workload::Premium => gemini::MODEL_PRO,
-        _ => gemini::MODEL_FLASH,
+        Workload::Premium => crate::ai::models::GEMINI_PRO,
+        _ => crate::ai::models::GEMINI_FLASH,
     })
 }
 
@@ -398,7 +399,7 @@ impl AiRouter {
                     position: 0,
                     provider_type: "gemini".into(),
                     endpoint_id: None,
-                    model_id: Some(gemini::MODEL_FLASH.into()),
+                    model_id: Some(crate::ai::models::GEMINI_FLASH.into()),
                     enabled: true,
                     base_url: None,
                 },
@@ -406,7 +407,7 @@ impl AiRouter {
                     position: 1,
                     provider_type: "gemini".into(),
                     endpoint_id: None,
-                    model_id: Some(gemini::MODEL_PRO.into()),
+                    model_id: Some(crate::ai::models::GEMINI_PRO.into()),
                     enabled: true,
                     base_url: None,
                 },
@@ -415,7 +416,7 @@ impl AiRouter {
                 position: 0,
                 provider_type: "gemini".into(),
                 endpoint_id: None,
-                model_id: Some(gemini::MODEL_PRO.into()),
+                model_id: Some(crate::ai::models::GEMINI_PRO.into()),
                 enabled: true,
                 base_url: None,
             }],
@@ -423,7 +424,7 @@ impl AiRouter {
                 position: 0,
                 provider_type: "gemini".into(),
                 endpoint_id: None,
-                model_id: Some(gemini::MODEL_FLASH.into()),
+                model_id: Some(crate::ai::models::GEMINI_FLASH.into()),
                 enabled: true,
                 base_url: None,
             }],
@@ -447,7 +448,7 @@ impl AiRouter {
                     position: 1,
                     provider_type: "gemini".into(),
                     endpoint_id: None,
-                    model_id: Some(gemini::MODEL_PRO.into()),
+                    model_id: Some(crate::ai::models::GEMINI_PRO.into()),
                     enabled: true,
                     base_url: None,
                 },
@@ -844,7 +845,7 @@ impl AiRouter {
                     if let Some(ref key) = self.claude_key {
                         claude::send(
                             key,
-                            entry.model_id.as_deref().unwrap_or(claude::CLAUDE_MODEL),
+                            entry.model_id.as_deref().unwrap_or(crate::ai::models::CLAUDE_DEFAULT),
                             messages.clone(),
                             db,
                             google_auth,
@@ -1595,18 +1596,18 @@ mod tests {
         assert!(chain[0].model_id.is_none());
         assert_eq!(
             gemini_model_for(chain[0].model_id.as_deref(), Workload::Volume),
-            gemini::MODEL_FLASH
+            crate::ai::models::GEMINI_FLASH
         );
         assert_eq!(
             gemini_model_for(chain[0].model_id.as_deref(), Workload::Premium),
-            gemini::MODEL_PRO
+            crate::ai::models::GEMINI_PRO
         );
         // The pinned fallback keeps its explicit model, as the named presets do.
-        assert_eq!(chain[1].model_id.as_deref(), Some(gemini::MODEL_PRO));
+        assert_eq!(chain[1].model_id.as_deref(), Some(crate::ai::models::GEMINI_PRO));
         let pro_only = AiRouter::new("gemini_pro_only");
         assert_eq!(
             gemini_model_for(pro_only.provider_chain()[0].model_id.as_deref(), Workload::Volume),
-            gemini::MODEL_PRO
+            crate::ai::models::GEMINI_PRO
         );
     }
 
@@ -1766,8 +1767,8 @@ mod tests {
     /// of the model they picked for being cheap.
     #[test]
     fn v20_rewrites_only_the_byte_for_byte_pre_fix_default() {
-        // These are HISTORICAL literals, deliberately not gemini::MODEL_FLASH
-        // and gemini::MODEL_PRO. V20 repairs rows that were written when
+        // These are HISTORICAL literals, deliberately not crate::ai::models::GEMINI_FLASH
+        // and crate::ai::models::GEMINI_PRO. V20 repairs rows that were written when
         // MODEL_FLASH held this exact value; the constant is free to move to
         // a newer id afterwards and the migration must keep targeting the old
         // one. Binding this test to the constants made it fail the moment

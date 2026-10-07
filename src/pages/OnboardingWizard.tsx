@@ -5,11 +5,13 @@ import * as mail from '../lib/mail';
 import { canStartFirstAnalysis } from '../lib/setup-flow';
 import { applyTestedMailSettings, getSetupStatus, setupError, testMailAiConnection, type SetupStatus } from '../lib/setup';
 import ChooseAi from '../components/ChooseAi';
+import { useAiModels } from '../lib/ai-models';
 import WindowControls from '../components/WindowControls';
 import ReadableContent from '../components/content/ReadableContent';
 import '../styles/setup.css';
 
 export default function OnboardingWizard({ onComplete }: { onComplete: () => void }) {
+  const models = useAiModels();
   const { locale, setLocale, text, saveError, retrySave } = useUiLocale();
   const [step, setStep] = useState(1);
   const [workspace, setWorkspace] = useState<mail.MailWorkspace | null>(null);
@@ -146,7 +148,7 @@ export default function OnboardingWizard({ onComplete }: { onComplete: () => voi
             <label>Access Key ID<input autoComplete="off" value={accessKey} onChange={event => { setAccessKey(event.target.value); setCredentialDirty(true); }} placeholder={text('Leave both keys blank to reuse saved credentials', '兩個欄位都留空會沿用已儲存憑證')} /></label>
             <label>Secret Access Key<input type="password" autoComplete="off" value={secretKey} onChange={event => { setSecretKey(event.target.value); setCredentialDirty(true); }} /></label>
             <label>{text('Region for new credentials', '新憑證使用的地區')}<select value={region} onChange={event => setRegion(event.target.value)}><option value="us-east-1">us-east-1 — US</option><option value="ap-southeast-1">ap-southeast-1 — Singapore</option><option value="ap-northeast-1">ap-northeast-1 — Tokyo</option><option value="eu-west-2">eu-west-2 — London</option></select></label>
-            <label>{text('Bedrock model ID', 'Bedrock 模型 ID')}<input required value={settings.bedrock_model} onChange={event => changeSettings({ ...settings, processing_mode: 'bedrock', bedrock_model: event.target.value })} placeholder="amazon.nova-micro-v1:0" /></label>
+            <label>{text('Bedrock model ID', 'Bedrock 模型 ID')}<input required value={settings.bedrock_model} onChange={event => changeSettings({ ...settings, processing_mode: 'bedrock', bedrock_model: event.target.value })} placeholder={models?.defaults.bedrock} /></label>
             <label className="setup-checkbox"><input type="checkbox" checked={consent} onChange={event => setConsent(event.target.checked)} />{text('The test sends synthetic text and may incur a small charge. Later mail analysis sends selected mail content, instructions and valid memories to this provider.', '測試會傳送合成文字，可能產生少量費用。之後分析郵件時，所選郵件內容、指示及有效記憶會傳送至此供應商。')}</label>
             <button type="button" className="setup-primary" disabled={!consent || settings.processing_mode !== 'bedrock'} onClick={() => void testAndSave()}>{text('Test and use Bedrock for mail', '測試並以 Bedrock 處理電郵')}</button>
           </details>

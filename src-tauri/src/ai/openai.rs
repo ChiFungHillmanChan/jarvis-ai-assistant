@@ -32,7 +32,7 @@ struct OpenAIRequest {
 pub struct Target<'a> {
     /// None is api.openai.com.
     pub base_url: Option<&'a str>,
-    /// The chain row's model. On api.openai.com, None follows OPENAI_MODEL.
+    /// The chain row's model. On api.openai.com, None follows models::OPENAI_DEFAULT.
     pub model: Option<&'a str>,
 }
 
@@ -46,7 +46,7 @@ impl Target<'_> {
 
     fn model(&self) -> Result<String, String> {
         match self.base_url {
-            None => Ok(self.model.map(str::trim).filter(|m| !m.is_empty()).unwrap_or(OPENAI_MODEL).to_string()),
+            None => Ok(self.model.map(str::trim).filter(|m| !m.is_empty()).unwrap_or(crate::ai::models::OPENAI_DEFAULT).to_string()),
             Some(base) => self
                 .model
                 .map(str::to_string)
@@ -155,7 +155,6 @@ struct SseFunctionDelta {
 }
 
 /// The OpenAI model used by chat and the mail workspace.
-pub const OPENAI_MODEL: &str = "gpt-6-luna";
 
 pub async fn send(
     api_key: &str,
@@ -575,7 +574,7 @@ mod tests {
     #[ignore]
     async fn live_compatible_service_takes_the_tool_request() {
         let key = std::env::var("GEMINI_API_KEY").expect("GEMINI_API_KEY");
-        let target = Target { base_url: Some(crate::ai::complete::tests::GEMINI_COMPAT), model: Some(crate::ai::gemini::MODEL_FLASH) };
+        let target = Target { base_url: Some(crate::ai::complete::tests::GEMINI_COMPAT), model: Some(crate::ai::models::GEMINI_FLASH) };
         let messages = vec![
             OpenAIMessage { role: "system".into(), content: Some("You are JARVIS. Use tools to answer.".into()), tool_calls: None, tool_call_id: None },
             OpenAIMessage { role: "user".into(), content: Some("What is on my calendar today? Use the calendar tool.".into()), tool_calls: None, tool_call_id: None },

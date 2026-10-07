@@ -4,7 +4,8 @@ import { useTauriCommand } from "../hooks/useTauriCommand";
 interface ProviderBreakdown {
   provider: string;
   turns: number;
-  usd_cost: number;
+  /** null for a local model: free, so the tokens are shown instead. */
+  usd_cost: number | null;
   input_tokens: number;
   output_tokens: number;
 }
@@ -16,7 +17,7 @@ interface ExpensiveTurn {
   workload: string;
   input_tokens: number;
   output_tokens: number;
-  usd_cost: number;
+  usd_cost: number | null;
   latency_ms: number;
 }
 
@@ -109,7 +110,7 @@ export default memo(function CostPanel() {
           <div key={p.provider} style={styles.providerRow}>
             <span style={styles.providerName}>{p.provider}</span>
             <span style={styles.providerTurns}>{p.turns}</span>
-            <span style={styles.providerCost}>{formatUsd(p.usd_cost)}</span>
+            <span style={styles.providerCost}>{p.usd_cost === null ? `${(p.input_tokens + p.output_tokens).toLocaleString()} tok` : formatUsd(p.usd_cost)}</span>
           </div>
         ))}
       </div>
@@ -124,7 +125,7 @@ export default memo(function CostPanel() {
                 <span style={styles.expensiveTokens}>
                   {t.input_tokens}+{t.output_tokens}
                 </span>
-                <span style={styles.expensiveCost}>{formatUsd(t.usd_cost)}</span>
+                <span style={styles.expensiveCost}>{t.usd_cost === null ? "free" : formatUsd(t.usd_cost)}</span>
               </div>
             ))}
           </div>

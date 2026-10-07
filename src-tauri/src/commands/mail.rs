@@ -93,7 +93,7 @@ pub(crate) async fn triage_untriaged(db: &Database, language: Option<&str>) -> R
     let openai_model = chosen
         .as_ref()
         .and_then(|ai| ai.model.clone())
-        .unwrap_or_else(|| crate::ai::openai::OPENAI_MODEL.to_string());
+        .unwrap_or_else(|| crate::ai::models::OPENAI_DEFAULT.to_string());
     let (openai, assistant) = match chosen {
         Some(ai) if ai.provider == "openai" && typesafe.is_some() => (openai_key().ok(), None),
         Some(_) => (None, Some(crate::commands::ai_choice::rebuilt_router(db))),

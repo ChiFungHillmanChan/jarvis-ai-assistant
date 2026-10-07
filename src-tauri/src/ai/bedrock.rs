@@ -13,17 +13,12 @@ use serde_json::json;
 use std::collections::{HashMap, HashSet};
 use crate::chat_session::ScopedEmitter;
 
-/// Legacy default model id used as a last-resort fallback when no per-workload
-/// routing entry is configured.  New code paths look up the model via
-/// `WorkloadRouter`; this constant is kept for the chain-entry default in
-/// `AiRouter` so the existing UI continues to render a sensible label.
-pub const DEFAULT_MODEL: &str = "global.anthropic.claude-sonnet-4-6";
-
+/// The Bedrock model: AWS_BEDROCK_MODEL_ID, else models::BEDROCK_DEFAULT.
 pub fn default_model() -> String {
     std::env::var("AWS_BEDROCK_MODEL_ID")
         .ok()
         .filter(|value| !value.trim().is_empty())
-        .unwrap_or_else(|| DEFAULT_MODEL.to_string())
+        .unwrap_or_else(|| crate::ai::models::BEDROCK_DEFAULT.to_string())
 }
 
 /// Build a Bedrock client from explicit credentials.  We intentionally do not

@@ -5,7 +5,7 @@
 //!
 //! Error bodies can echo the request (mail text), so they are never
 //! surfaced: only the provider and the HTTP status are.
-use super::{compat, gemini, openai, AiRouter, ProviderChainEntry, Workload};
+use super::{compat, gemini, AiRouter, ProviderChainEntry, Workload};
 use crate::db::Database;
 use serde_json::{json, Value};
 use std::time::Instant;
@@ -31,6 +31,8 @@ pub struct Completion {
     pub model: String,
     pub input_tokens: i64,
     pub output_tokens: i64,
+    /// From models::usd_cost_micro; None for a local model, which is free.
+    pub cost_micro: Option<i64>,
 }
 
 /// The chosen AI, tried in chain order. An empty chain means the user has not
@@ -44,8 +46,10 @@ pub async fn complete(router: &AiRouter, db: &Database, request: Request<'_>) ->
     for entry in entries {
         let started = Instant::now();
         match complete_one(router, db, entry, &request).await {
-            Ok(done) => {
-                super::cost::record_inference(db, &done.provider.to_lowercase(), Workload::Volume, &done.model, done.input_tokens, done.output_tokens, 0, 0, started.elapsed().as_millis() as i64);
+            Ok(mut done) => {
+                let provider = if entry.provider_type == "local" { "local".to_string() } else { done.provider.to_lowercase() };
+                done.cost_micro = super::models::usd_cost_micro(&provider, &done.model, done.input_tokens, done.output_tokens, 0, 0);
+                super::cost::record_inference(db, &provider, Workload::Volume, &done.model, done.input_tokens, done.output_tokens, 0, 0, started.elapsed().as_millis() as i64);
                 return Ok(done);
             }
             Err(error) => errors.push(error),
@@ -66,7 +70,7 @@ async fn complete_one(router: &AiRouter, db: &Database, entry: &ProviderChainEnt
                 }
                 None => {
                     let key = router.openai_key.clone().ok_or("尚未設定 OpenAI API 密鑰。")?;
-                    ("https://api.openai.com/v1/chat/completions".to_string(), key, entry.model_id.clone().unwrap_or_else(|| openai::OPENAI_MODEL.to_string()), "OpenAI".to_string())
+                    ("https://api.openai.com/v1/chat/completions".to_string(), key, entry.model_id.clone().unwrap_or_else(|| crate::ai::models::OPENAI_DEFAULT.to_string()), "OpenAI".to_string())
                 }
             };
             let body = chat_completions_body(&model, request, entry.base_url.is_none());
@@ -126,7 +130,7 @@ async fn complete_one(router: &AiRouter, db: &Database, entry: &ProviderChainEnt
         }
         "claude" => {
             let key = router.claude_key.clone().ok_or("尚未設定 Claude API 密鑰。")?;
-            let model = entry.model_id.clone().unwrap_or_else(|| super::claude::CLAUDE_MODEL.to_string());
+            let model = entry.model_id.clone().unwrap_or_else(|| crate::ai::models::CLAUDE_DEFAULT.to_string());
             let mut body = json!({
                 "model": model,
                 "max_tokens": request.max_tokens,
@@ -181,6 +185,7 @@ fn done(text: String, provider: String, model: String, input: Option<&Value>, ou
         model,
         input_tokens: input.and_then(Value::as_i64).unwrap_or(0),
         output_tokens: output.and_then(Value::as_i64).unwrap_or(0),
+        cost_micro: None,
     })
 }
 
@@ -285,7 +290,7 @@ pub(crate) mod tests {
         }
         let mut compatible = AiRouter::new("gemini_primary");
         compatible.set_compat_key(GEMINI_COMPAT, &key("GEMINI_API_KEY"));
-        compatible.set_provider_chain(vec![entry("openai", Some(super::super::gemini::MODEL_FLASH), Some(GEMINI_COMPAT))]);
+        compatible.set_provider_chain(vec![entry("openai", Some(crate::ai::models::GEMINI_FLASH), Some(GEMINI_COMPAT))]);
         cases.push(("compatible", compatible));
         for (name, router) in cases {
             let done = complete(&router, &db, Request { system: "Answer in one word.", user: "Reply with the single word OK.", json: false, max_tokens: 1_024 }).await;
@@ -298,7 +303,7 @@ pub(crate) mod tests {
         }
         let models = compat::list_models(GEMINI_COMPAT, &key("GEMINI_API_KEY")).await.unwrap();
         println!("compatible /models: {} ids, e.g. {:?}", models.len(), models.iter().take(3).collect::<Vec<_>>());
-        assert!(models.iter().any(|m| m == super::super::gemini::MODEL_FLASH));
+        assert!(models.iter().any(|m| m == crate::ai::models::GEMINI_FLASH));
     }
 
     #[tokio::test]
