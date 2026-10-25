@@ -235,7 +235,9 @@ Pro tier price: HK$148/mo ≈ US$19. Gross margin: **~80–94%** depending on TT
 
 ### 6.2 AWS Activate burn rate
 
-US$25K credits ÷ US$1.20/user/month = ~20,000 user-months of LLM inference. At 100 active paying users, credits cover **~16 years**. Reality: scale dilutes the cache hit rate and grows premium-tier usage. Realistic burn at 100–500 users: 18–24 months. Comfortable runway.
+US$5K credits ÷ US$1.20/user/month = ~4,200 user-months of LLM inference. At 100 active paying users, credits cover **~3.5 years** on paper. Reality: scale dilutes the cache hit rate and grows premium-tier usage. Realistic burn at 100–500 users: ~4–5 months. Short runway.
+
+US$5K is the planning figure. As of 2026-10-25 no Activate credits have been granted; the account has only US$194 of Free Tier credit.
 
 ---
 
