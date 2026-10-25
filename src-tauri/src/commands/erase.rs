@@ -2,8 +2,7 @@
 //!
 //! Disconnecting Google or deleting chat history each remove one thing. This
 //! removes everything JARVIS keeps on this Mac, for someone leaving JARVIS or
-//! passing the Mac on, then quits; the next launch starts like a fresh
-//! install. In order:
+//! passing the Mac on, then restarts it as a fresh install. In order:
 //!
 //! 1. Google access is revoked, while the tokens still exist.
 //! 2. The data folder: the database with its -wal and -shm, downloaded
@@ -14,6 +13,8 @@
 //!
 //! Nothing outside this Mac is touched: mail stays in Gmail, events in Google
 //! Calendar, pages JARVIS made in Notion, and the JARVIS account stays open.
+//! On this Mac, Ollama and its models are left alone: JARVIS never installs
+//! Ollama, only links to its download page, so it is the user's own.
 
 use std::path::Path;
 use std::sync::Arc;
@@ -42,7 +43,7 @@ pub(crate) const KEYCHAIN_SERVICES: &[&str] = &[
 const GOOGLE_TOKEN_SERVICES: &[&str] = &["com.jarvis.google", "com.jarvis.mail"];
 
 /// Returns the Keychain items that could not be deleted. When there are none
-/// the app quits and the caller never sees the result.
+/// the app restarts and the caller never sees the result.
 #[tauri::command]
 pub async fn delete_all_data(
     app: AppHandle,
@@ -69,8 +70,8 @@ pub async fn delete_all_data(
         }
     }
     if left.is_empty() {
-        log::info!("delete all: everything deleted, quitting");
-        app.exit(0);
+        log::info!("delete all: everything deleted, restarting");
+        app.request_restart();
     }
     Ok(left)
 }

@@ -1406,8 +1406,8 @@ export default function Settings() {
             <h2 className="settings-heading">{text('Delete all JARVIS data on this Mac', '刪除此 Mac 上的所有 JARVIS 資料')}</h2>
             <p style={styles.hint}>
               {text(
-                "Revokes JARVIS's access to Google, then deletes everything JARVIS keeps on this Mac: copies of your mail and calendar, chat history, memory, settings, downloaded models, backups, and every API key and sign-in JARVIS saved in the Keychain. JARVIS then quits and starts fresh next time. Nothing in Gmail, Google Calendar, Notion or GitHub is deleted, and your JARVIS account stays open. This cannot be undone.",
-                "先撤銷 JARVIS 的 Google 存取權限，然後刪除 JARVIS 在此 Mac 上保存的所有資料：郵件及日曆副本、對話記錄、記憶、設定、已下載的模型、備份，以及 JARVIS 存放在鑰匙圈的所有 API 密鑰及登入資料。完成後 JARVIS 會結束，下次開啟時重新開始。Gmail、Google 日曆、Notion 及 GitHub 中的內容不會刪除，你的 JARVIS 帳戶亦會保留。此操作無法復原。",
+                "Revokes JARVIS's access to Google, then deletes everything JARVIS keeps on this Mac: copies of your mail and calendar, chat history, memory, settings, downloaded models, backups, and every API key and sign-in JARVIS saved in the Keychain. JARVIS then restarts as a fresh install. Ollama and its models are not touched. Nothing in Gmail, Google Calendar, Notion or GitHub is deleted, and your JARVIS account stays open. This cannot be undone.",
+                "先撤銷 JARVIS 的 Google 存取權限，然後刪除 JARVIS 在此 Mac 上保存的所有資料：郵件及日曆副本、對話記錄、記憶、設定、已下載的模型、備份，以及 JARVIS 存放在鑰匙圈的所有 API 密鑰及登入資料。完成後 JARVIS 會以全新安裝狀態重新啟動。Ollama 及其中的模型不受影響。Gmail、Google 日曆、Notion 及 GitHub 中的內容不會刪除，你的 JARVIS 帳戶亦會保留。此操作無法復原。",
               )}
             </p>
             <p style={styles.privacyText}>
@@ -1425,14 +1425,14 @@ export default function Settings() {
             </label>
             <div style={{ marginTop: 14 }}>
               <button style={styles.dangerBtn} disabled={eraseConfirm !== "DELETE" || !!storageBusy} onClick={() => void handleDeleteAll()}>
-                {storageBusy || text('Delete everything and quit', '刪除所有資料並結束')}
+                {storageBusy || text('Delete everything and restart', '刪除所有資料並重新啟動')}
               </button>
             </div>
             {eraseError && <p role="alert" style={styles.errorText}>{eraseError}</p>}
             {eraseLeft.length > 0 && <div role="alert" style={styles.errorText}>
               {text(
-                "Your data was deleted, but these Keychain items could not be removed. Delete them in Keychain Access, then quit JARVIS:",
-                "資料已刪除，但以下鑰匙圈項目未能移除。請在「鑰匙圈存取」中刪除，然後結束 JARVIS：",
+                "Your data was deleted, but these Keychain items could not be removed. Delete them in Keychain Access, then quit and reopen JARVIS:",
+                "資料已刪除，但以下鑰匙圈項目未能移除。請在「鑰匙圈存取」中刪除，然後結束並重新開啟 JARVIS：",
               )}
               <ul>{eraseLeft.map(item => <li key={item}><code>{item}</code></li>)}</ul>
             </div>}
