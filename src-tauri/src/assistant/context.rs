@@ -91,7 +91,7 @@ impl DayContext {
                     let loc = location.map(|l| format!(" at {}", l)).unwrap_or_default();
                     Ok(format!("- {} ({}{})", summary, start, loc))
                 }).map_err(|e| e.to_string())?.collect::<Result<Vec<_>, _>>().map_err(|e| e.to_string())?;
-                if events.is_empty() { "No meetings today.".to_string() } else { events.join("\n") }
+                events
             };
 
             let unread: i64 = conn.query_row(UNREAD_COUNT_QUERY, [], |r| r.get(0)).unwrap_or(0);
@@ -118,11 +118,19 @@ impl DayContext {
         }; // Lock released here -- scheduler and other jobs can proceed
 
         let tasks_summary = format!("{} pending tasks. {} overdue. {} due today.\n{}", pending_count, overdue_count, due_today, urgent_tasks);
-        // Senders and subjects are Gmail data: only for an AI allowed to see email.
-        let email_summary = if crate::ai::mail_policy::check(db).is_ok() {
+        // Senders, subjects and event titles are Google data: only for an AI
+        // allowed to see them (ai::mail_policy).
+        let google_data_allowed = crate::ai::mail_policy::check(db).is_ok();
+        let email_summary = if google_data_allowed {
             format!("{} unread emails.\n{}", unread, important_senders)
         } else {
             format!("{} unread emails.", unread)
+        };
+        let calendar_summary = match todays_events.len() {
+            0 => "No meetings today.".to_string(),
+            _ if google_data_allowed => todays_events.join("\n"),
+            1 => "1 meeting today.".to_string(),
+            n => format!("{} meetings today.", n),
         };
         let github_summary = format!("{} open PRs, {} assigned issues.", open_prs, assigned_issues);
         let deadlines = urgent_tasks.clone();
@@ -130,7 +138,7 @@ impl DayContext {
         Ok(DayContext {
             greeting: format!("{}, {}.", greeting, crate::util::display_name(db)),
             tasks_summary,
-            calendar_summary: todays_events,
+            calendar_summary,
             email_summary,
             github_summary,
             deadlines,
@@ -442,5 +450,34 @@ mod tests {
             )
             .unwrap();
         assert_eq!(old_due_today, 1, "the UTC day counted yesterday's task");
+    }
+
+    /// Event titles and places are Google Calendar data, under the same rule
+    /// as mail (ai::mail_policy): an AI that may train on them only learns how
+    /// many meetings there are.
+    #[test]
+    fn calendar_titles_reach_only_an_ai_allowed_to_see_google_data() {
+        let db = Arc::new(crate::db::test_database());
+        {
+            let conn = db.conn.lock().unwrap();
+            conn.execute(
+                "INSERT INTO calendar_events (google_id, summary, start_time, end_time, location) VALUES ('e1', 'Term sheet call', ?1, ?1, 'Cyberport')",
+                [chrono::Local::now().to_rfc3339_opts(chrono::SecondsFormat::Secs, false)],
+            )
+            .unwrap();
+            conn.execute_batch(
+                "DELETE FROM provider_chain;
+                 INSERT INTO provider_chain(position, provider_type, enabled, base_url) VALUES (0, 'openai', 1, 'https://api.moonshot.ai/v1');",
+            )
+            .unwrap();
+        }
+        let blocked = DayContext::gather(&db).unwrap();
+        assert_eq!(blocked.calendar_summary, "1 meeting today.");
+        let sent = format!("{}{}", blocked.inline_context(), blocked.to_prompt());
+        assert!(!sent.contains("Term sheet") && !sent.contains("Cyberport"), "{sent}");
+
+        db.conn.lock().unwrap().execute("UPDATE provider_chain SET base_url = NULL", []).unwrap();
+        let allowed = DayContext::gather(&db).unwrap();
+        assert!(allowed.calendar_summary.contains("Term sheet call") && allowed.calendar_summary.contains("Cyberport"), "{}", allowed.calendar_summary);
     }
 }

@@ -1456,6 +1456,21 @@ mod tests {
             chat.contains("send_with_untrusted_context"),
             "a chat turn carrying [CONTEXT] or [OBSIDIAN NOTES] must be tainted"
         );
+
+        // The daily email briefing pastes the senders, subjects and snippets
+        // of up to 50 inbox messages and only needs text back, so every call
+        // is tainted and runs with tools switched off.
+        let daily = include_str!("../scheduler/daily_briefing.rs");
+        let daily = &daily[..daily.find("#[cfg(test)]").expect("daily_briefing has tests")];
+        assert!(!daily.contains(".send("), "no daily briefing call may take the untainted send");
+        let daily = daily.split_whitespace().collect::<Vec<_>>().join(" ");
+        let tainted = daily.matches("send_with_untrusted_context(").count();
+        assert!(tainted >= 2, "classify and summarise must both be tainted");
+        assert_eq!(
+            daily.matches("TOOL_EXECUTION_DISABLED .scope(true, router.send_with_untrusted_context(").count(),
+            tainted,
+            "every daily briefing call must run with tools switched off"
+        );
     }
 
     #[test]

@@ -585,6 +585,7 @@ pub fn run() {
             commands::storage::run_storage_sweep,
             commands::storage::purge_storage,
             commands::storage::set_retention_policy,
+            commands::erase::delete_all_data,
         ])
         .run(tauri::generate_context!())
         .expect("error while running JARVIS");

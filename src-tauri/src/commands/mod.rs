@@ -8,6 +8,7 @@ pub mod cost;
 pub mod cron;
 pub mod dashboard;
 pub mod email;
+pub mod erase;
 pub mod github;
 pub mod google_auth;
 pub mod launch;

@@ -17,6 +17,7 @@ trait SecretBackend {
     fn put(&self, service: &str, account: &str, secret: &[u8]) -> Result<(), String>;
     fn get(&self, service: &str, account: &str) -> Result<Vec<u8>, String>;
     fn delete(&self, service: &str, account: &str) -> Result<(), String>;
+    fn accounts(&self, service: &str) -> Result<Vec<String>, String>;
 }
 
 /// The real macOS login Keychain.
@@ -32,6 +33,25 @@ impl SecretBackend for RealKeychain {
     fn delete(&self, service: &str, account: &str) -> Result<(), String> {
         passwords::delete_generic_password(service, account).map_err(|e| e.to_string())
     }
+    /// Reads only the item attributes, never the secrets, so listing does not
+    /// raise a Keychain access prompt.
+    fn accounts(&self, service: &str) -> Result<Vec<String>, String> {
+        use security_framework::item::{ItemClass, ItemSearchOptions, Limit};
+        match ItemSearchOptions::new()
+            .class(ItemClass::generic_password())
+            .service(service)
+            .load_attributes(true)
+            .limit(Limit::All)
+            .search()
+        {
+            Ok(items) => Ok(items
+                .iter()
+                .filter_map(|item| item.simplify_dict()?.remove("acct"))
+                .collect()),
+            Err(e) if KeychainStore::is_not_found(&e.to_string()) => Ok(Vec::new()),
+            Err(e) => Err(e.to_string()),
+        }
+    }
 }
 
 #[cfg(not(any(test, feature = "native-qa")))]
@@ -46,7 +66,7 @@ fn backend() -> impl SecretBackend {
 
 /// Process-local stand-in for the login Keychain, used only in test builds.
 #[cfg(any(test, feature = "native-qa"))]
-mod memory {
+pub(crate) mod memory {
     use super::SecretBackend;
     use std::collections::HashMap;
     use std::sync::{Mutex, OnceLock};
@@ -77,7 +97,7 @@ mod memory {
 
     /// Make every operation on this one entry fail, standing in for a locked
     /// keychain returning errSecInteractionNotAllowed.
-    pub(super) fn seed_failure(service: &str, account: &str, message: &str) {
+    pub(crate) fn seed_failure(service: &str, account: &str, message: &str) {
         store()
             .lock()
             .unwrap()
@@ -113,6 +133,15 @@ mod memory {
                 None => Err(NOT_FOUND.to_string()),
             }
         }
+        fn accounts(&self, service: &str) -> Result<Vec<String>, String> {
+            Ok(store()
+                .lock()
+                .unwrap()
+                .keys()
+                .filter(|(s, _)| s == service)
+                .map(|(_, account)| account.clone())
+                .collect())
+        }
     }
 }
 
@@ -134,6 +163,14 @@ impl KeychainStore {
         backend()
             .delete(service, account)
             .map_err(|e| format!("keychain delete: {e}"))
+    }
+    /// Every account name saved under `service`, including ones only an older
+    /// build knew, so deleting all JARVIS data does not depend on remembering
+    /// them.
+    pub fn accounts(service: &str) -> Result<Vec<String>, String> {
+        backend()
+            .accounts(service)
+            .map_err(|e| format!("keychain list: {e}"))
     }
 
     /// True when a failure means "no such item", which is the ordinary case for
@@ -227,5 +264,24 @@ mod tests {
         assert_eq!(real.get(svc, acct).unwrap(), b"AKIA-TEST-SECRET".to_vec());
         real.delete(svc, acct).unwrap();
         assert!(real.get(svc, acct).is_err());
+    }
+
+    /// Listing against the real login Keychain, which the in-memory backend
+    /// cannot stand in for. Ignored for the same reason as the test above:
+    /// `cargo test -- --ignored accounts_against_the_real_keychain`.
+    #[test]
+    #[ignore]
+    fn accounts_against_the_real_keychain() {
+        let svc = "com.jarvis.test.accounts";
+        let real = RealKeychain;
+        assert_eq!(real.accounts(svc).unwrap(), Vec::<String>::new(), "none saved yet");
+        real.put(svc, "first", b"one").unwrap();
+        real.put(svc, "second", b"two").unwrap();
+        let mut accounts = real.accounts(svc).unwrap();
+        accounts.sort();
+        assert_eq!(accounts, ["first", "second"]);
+        real.delete(svc, "first").unwrap();
+        real.delete(svc, "second").unwrap();
+        assert!(real.accounts(svc).unwrap().is_empty());
     }
 }

@@ -38,6 +38,7 @@ import {
   getStorageUsage,
   runStorageSweep,
   purgeStorage,
+  deleteAllData,
   setRetentionPolicy,
 } from "../lib/commands";
 import type { GoogleAccounts } from "../lib/commands";
@@ -219,6 +220,9 @@ export default function Settings() {
   const [storageBusy, setStorageBusy] = useState("");
   const [storageNotice, setStorageNotice] = useState("");
   const [storageError, setStorageError] = useState("");
+  const [eraseConfirm, setEraseConfirm] = useState("");
+  const [eraseError, setEraseError] = useState("");
+  const [eraseLeft, setEraseLeft] = useState<string[]>([]);
 
   async function refreshSettings() {
     setLoadError(false);
@@ -320,6 +324,18 @@ export default function Settings() {
         ? text(`Deleted ${freed} chat turn(s).`, `已刪除 ${freed} 項對話記錄。`)
         : text(`Freed ${formatBytes(freed)}.`, `已釋放 ${formatBytes(freed)}。`);
     });
+  }
+
+  async function handleDeleteAll() {
+    if (storageBusy) return;
+    setStorageBusy(text("Deleting", "正在刪除")); setEraseError(""); setEraseLeft([]);
+    try {
+      setEraseLeft(await deleteAllData());
+    } catch (reason) {
+      setEraseError(reason instanceof Error ? reason.message : String(reason));
+    } finally {
+      setStorageBusy("");
+    }
   }
 
   function handleRetentionChange(days: number, enabled: boolean) {
@@ -1385,6 +1401,42 @@ export default function Settings() {
               </button>
             </div>
           </div>
+
+          <div className="settings-panel">
+            <h2 className="settings-heading">{text('Delete all JARVIS data on this Mac', '刪除此 Mac 上的所有 JARVIS 資料')}</h2>
+            <p style={styles.hint}>
+              {text(
+                "Revokes JARVIS's access to Google, then deletes everything JARVIS keeps on this Mac: copies of your mail and calendar, chat history, memory, settings, downloaded models, backups, and every API key and sign-in JARVIS saved in the Keychain. JARVIS then restarts as a fresh install. Ollama and its models are not touched. Nothing in Gmail, Google Calendar, Notion or GitHub is deleted, and your JARVIS account stays open. This cannot be undone.",
+                "先撤銷 JARVIS 的 Google 存取權限，然後刪除 JARVIS 在此 Mac 上保存的所有資料：郵件及日曆副本、對話記錄、記憶、設定、已下載的模型、備份，以及 JARVIS 存放在鑰匙圈的所有 API 密鑰及登入資料。完成後 JARVIS 會以全新安裝狀態重新啟動。Ollama 及其中的模型不受影響。Gmail、Google 日曆、Notion 及 GitHub 中的內容不會刪除，你的 JARVIS 帳戶亦會保留。此操作無法復原。",
+              )}
+            </p>
+            <p style={styles.privacyText}>
+              {text(
+                "If this Mac is offline, Google cannot be told. Remove JARVIS afterwards at myaccount.google.com/permissions.",
+                "如此 Mac 未有連線，便無法通知 Google；請之後到 myaccount.google.com/permissions 移除 JARVIS。",
+              )}
+            </p>
+            <label style={{ display: "block", marginTop: 12 }}>
+              <span style={{ display: "block", color: "var(--text-secondary)", fontSize: 12, marginBottom: 4 }}>
+                {text('Type DELETE to confirm', '請輸入 DELETE 以確認')}
+              </span>
+              <input style={styles.tokenInput} value={eraseConfirm} autoComplete="off" spellCheck={false}
+                disabled={!!storageBusy} onChange={(e) => setEraseConfirm(e.target.value)} />
+            </label>
+            <div style={{ marginTop: 14 }}>
+              <button style={styles.dangerBtn} disabled={eraseConfirm !== "DELETE" || !!storageBusy} onClick={() => void handleDeleteAll()}>
+                {storageBusy || text('Delete everything and restart', '刪除所有資料並重新啟動')}
+              </button>
+            </div>
+            {eraseError && <p role="alert" style={styles.errorText}>{eraseError}</p>}
+            {eraseLeft.length > 0 && <div role="alert" style={styles.errorText}>
+              {text(
+                "Your data was deleted, but these Keychain items could not be removed. Delete them in Keychain Access, then quit and reopen JARVIS:",
+                "資料已刪除，但以下鑰匙圈項目未能移除。請在「鑰匙圈存取」中刪除，然後結束並重新開啟 JARVIS：",
+              )}
+              <ul>{eraseLeft.map(item => <li key={item}><code>{item}</code></li>)}</ul>
+            </div>}
+          </div>
         </>)}
 
       </div>
@@ -1410,6 +1462,7 @@ const styles: Record<string, React.CSSProperties> = {
   tokenInput: { flex: 1, minWidth: 0, width: "100%", background: "var(--bg-primary)", border: "1px solid var(--border-primary)", borderRadius: 6, padding: "9px 11px", color: "var(--text-primary)", fontSize: 13, fontFamily: "inherit" },
   saveBtn: { background: "var(--surface-solid)", border: "1px solid var(--border-primary)", borderRadius: 6, padding: "8px 12px", color: "var(--text-primary)", cursor: "pointer", fontFamily: "inherit", fontSize: 13, whiteSpace: "nowrap" },
   actionBtn: { background: "var(--surface-solid)", border: "1px solid var(--border-primary)", borderRadius: 6, padding: "9px 14px", color: "var(--text-primary)", cursor: "pointer", fontFamily: "inherit", fontSize: 13 },
+  dangerBtn: { background: "var(--surface-solid)", border: "1px solid var(--accent-urgent)", borderRadius: 6, padding: "9px 14px", color: "var(--accent-urgent)", cursor: "pointer", fontFamily: "inherit", fontSize: 13 },
   select: { maxWidth: "100%", background: "var(--bg-primary)", border: "1px solid var(--border-primary)", borderRadius: 6, padding: "8px 10px", color: "var(--text-primary)", fontSize: 13, fontFamily: "inherit" },
   statusText: { color: "var(--text-secondary)", fontSize: 13, marginBottom: 12, lineHeight: 1.6 },
   progressShell: { marginTop: 12, width: "100%", height: 6, borderRadius: 4, overflow: "hidden", background: "var(--border-primary)" },

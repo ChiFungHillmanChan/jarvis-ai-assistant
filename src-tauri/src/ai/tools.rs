@@ -680,7 +680,8 @@ fn execute_memory_tool(
                     Ok(_) => format!("Forgot memory entry #{}.", id),
                     Err(e) => format!("Memory error: {}", e),
                 }
-            } else if let Some(keyword) = args["keyword"].as_str() {
+            } else if let Some(keyword) = args["keyword"].as_str().filter(|k| !k.trim().is_empty()) {
+                // An empty keyword is `LIKE '%%'`, which matches every row.
                 let pattern = format!("%{}%", keyword);
                 match conn.execute(
                     "DELETE FROM user_memory WHERE content LIKE ?1",
@@ -1343,7 +1344,7 @@ pub async fn execute_tool(
     ledger: &crate::ai::SideEffectLedger,
 ) -> String {
     if crate::chat_session::TOOL_EXECUTION_DISABLED.try_with(|v| *v).unwrap_or(false) {
-        return "Tools are disabled for this preview. Return only the requested schedule JSON.".into();
+        return "Tools are disabled for this request. Return only the requested output.".into();
     }
     crate::chat_session::TOOL_CALL_ID.scope(uuid::Uuid::new_v4().to_string(),
         crate::chat_session::TOOL_RESULT_AVAILABLE.scope(std::cell::Cell::new(false), async {
@@ -1374,11 +1375,23 @@ fn approval_detail(name: &str, args: &serde_json::Value, db: &crate::db::Databas
         "archive_email" => lookup("SELECT '\u{201c}' || coalesce(subject, '') || '\u{201d} ' || sender FROM emails WHERE gmail_id = ?1", &id("email_id")),
         "delete_event" => lookup("SELECT '\u{201c}' || summary || '\u{201d} ' || start_time FROM calendar_events WHERE account_id = '' AND google_id = ?1", &id("event_id")),
         "update_follow_up" => lookup("SELECT '\u{201c}' || title || '\u{201d}' FROM mail_items WHERE id = ?1", &id("item_id")),
+        "update_event" => lookup("SELECT '\u{201c}' || summary || '\u{201d} ' || start_time FROM calendar_events WHERE account_id = '' AND google_id = ?1", &id("event_id")),
+        "forget" => match args["keyword"].as_str() {
+            Some(keyword) => Some(format!("\u{201c}{keyword}\u{201d}")),
+            None => lookup("SELECT '\u{201c}' || content || '\u{201d}' FROM user_memory WHERE id = ?1", &id("id")),
+        },
+        "create_notion_page" => args["title"].as_str().map(|title| format!("\u{201c}{title}\u{201d}")),
+        "create_github_issue" => Some(format!(
+            "\u{201c}{}\u{201d} {}",
+            args["title"].as_str().unwrap_or(""),
+            args["repo"].as_str().unwrap_or("")
+        )),
         _ => None,
     };
     found.unwrap_or_else(|| format!("ID {}", id(match name {
         "archive_email" => "email_id",
-        "delete_event" => "event_id",
+        "delete_event" | "update_event" => "event_id",
+        "forget" => "id",
         _ => "item_id",
     })))
 }
@@ -1392,9 +1405,9 @@ async fn execute_tool_inner(
 ) -> String {
     let args: serde_json::Value = serde_json::from_str(args_str).unwrap_or_default();
 
-    // Google's rules for Gmail data: email content reaches the model only when
-    // the chosen AI does not train on it (see ai::mail_policy).
-    if matches!(name, "search_emails" | "read_email" | "list_follow_ups" | "update_follow_up" | "list_inbox_triage") {
+    // Google's rules for Gmail and Calendar data: their content reaches the
+    // model only when the chosen AI does not train on it (see ai::mail_policy).
+    if matches!(name, "search_emails" | "read_email" | "list_follow_ups" | "update_follow_up" | "list_inbox_triage" | "list_events") {
         if let Err(blocked) = crate::ai::mail_policy::check(db) {
             return blocked.tool_message();
         }
@@ -1402,7 +1415,9 @@ async fn execute_tool_inner(
 
     // A crafted email can ask the model to change the user's data: these wait
     // for the user's click (see tool_approval).
-    if crate::tool_approval::NEEDS_APPROVAL.contains(&name) {
+    if crate::tool_approval::NEEDS_APPROVAL.contains(&name)
+        || (ledger.saw_untrusted_read() && crate::tool_approval::NEEDS_APPROVAL_AFTER_UNTRUSTED_READ.contains(&name))
+    {
         let detail = approval_detail(name, &args, db);
         let status = args["status"].as_str().filter(|_| name == "update_follow_up");
         if !crate::tool_approval::confirm(name, detail, status).await {
@@ -2121,7 +2136,8 @@ mod memory_tests {
             &db,
             &tainted,
         );
-        assert_eq!(count(&db), 0, "forget must not be gated");
+        // The approval card one layer up (execute_tool) is what asks first.
+        assert_eq!(count(&db), 0, "forget is not refused here");
         assert_eq!(
             execute_memory_tool("list_memories", &serde_json::json!({}), &db, &tainted),
             "No memories stored yet."
@@ -2166,6 +2182,109 @@ mod memory_tests {
         );
         assert_eq!(out, TAINTED_TURN_REFUSAL);
         assert_eq!(count(&db), 0);
+    }
+
+    /// `LIKE '%%'` matches every row, so an empty keyword used to wipe the
+    /// whole memory in one call.
+    #[test]
+    fn forget_with_an_empty_keyword_deletes_nothing() {
+        let db = memory_db();
+        execute_memory_tool("remember", &serde_json::json!({ "content": "fact A" }), &db, &clean_turn());
+        for keyword in ["", "   "] {
+            let out = execute_memory_tool("forget", &serde_json::json!({ "keyword": keyword }), &db, &clean_turn());
+            assert_eq!(out, "Need either an id or a keyword to forget.");
+        }
+        assert_eq!(count(&db), 1);
+    }
+}
+
+#[cfg(test)]
+mod outbound_approval_tests {
+    use super::*;
+    use std::sync::{Arc, Mutex};
+
+    fn db() -> crate::db::Database {
+        let conn = rusqlite::Connection::open_in_memory().unwrap();
+        conn.execute_batch(
+            "CREATE TABLE user_memory (id INTEGER PRIMARY KEY AUTOINCREMENT, content TEXT NOT NULL,
+                 category TEXT NOT NULL DEFAULT 'fact', created_at DATETIME, updated_at DATETIME);
+             INSERT INTO user_memory (id, content) VALUES (7, 'Accountant is Kenny');
+             CREATE TABLE calendar_events (id INTEGER PRIMARY KEY AUTOINCREMENT, account_id TEXT NOT NULL DEFAULT '',
+                 google_id TEXT NOT NULL, summary TEXT NOT NULL, start_time TEXT NOT NULL, end_time TEXT NOT NULL);
+             INSERT INTO calendar_events (google_id, summary, start_time, end_time)
+                 VALUES ('evt1', 'Board meeting', '2026-11-02T10:00:00+08:00', '2026-11-02T11:00:00+08:00');",
+        )
+        .unwrap();
+        crate::db::Database { conn: Mutex::new(conn) }
+    }
+
+    async fn run(name: &str, args: serde_json::Value, db: &crate::db::Database, ledger: &crate::ai::SideEffectLedger) -> String {
+        let auth = Arc::new(crate::auth::google::GoogleAuth::new_empty());
+        execute_tool(name, &args.to_string(), db, &auth, ledger).await
+    }
+
+    fn after_email() -> crate::ai::SideEffectLedger {
+        let ledger = crate::ai::SideEffectLedger::new();
+        ledger.note("read_email");
+        ledger
+    }
+
+    fn memories(db: &crate::db::Database) -> i64 {
+        db.conn.lock().unwrap().query_row("SELECT COUNT(*) FROM user_memory", [], |r| r.get(0)).unwrap()
+    }
+
+    /// A crafted email can ask for exactly these calls: copy the inbox into a
+    /// Notion page or a GitHub issue other people read, move a meeting other
+    /// people attend, or wipe what JARVIS remembers.
+    #[tokio::test]
+    async fn after_an_email_was_read_tools_that_reach_other_people_wait_for_a_click() {
+        let db = db();
+        for (tool, args) in [
+            ("create_notion_page", serde_json::json!({"title": "Inbox", "content": "summaries", "parent_id": "p1"})),
+            ("create_github_issue", serde_json::json!({"repo": "acme/app", "title": "Inbox", "body": "summaries"})),
+            ("update_event", serde_json::json!({"event_id": "evt1", "start": "2026-11-02T07:00:00"})),
+            ("forget", serde_json::json!({"keyword": "Kenny"})),
+        ] {
+            let out = crate::tool_approval::TEST_ANSWER.scope(false, run(tool, args, &db, &after_email())).await;
+            assert!(out.starts_with(&format!("The user did not allow {tool}")), "{tool}: {out}");
+        }
+        assert_eq!(memories(&db), 1, "a declined forget leaves memory alone");
+    }
+
+    /// When the user asked and nothing outside has been read, no card. Own
+    /// calendar entries and Gmail drafts never need one: the event has no
+    /// attendees and the draft is sent by hand.
+    #[tokio::test]
+    async fn clean_turns_and_own_calendar_tools_do_not_ask() {
+        let db = db();
+        // No window in tests, so a card would come back as "did not allow".
+        let out = run("forget", serde_json::json!({"id": 7}), &db, &crate::ai::SideEffectLedger::new()).await;
+        assert_eq!(out, "Forgot memory entry #7.");
+        for (tool, args) in [
+            ("create_event", serde_json::json!({"title": "Lunch", "start": "2026-11-03T12:00:00", "end": "2026-11-03T13:00:00"})),
+            ("draft_email", serde_json::json!({"to": "kenny@example.com", "subject": "Hi", "body": "Hello"})),
+        ] {
+            let out = run(tool, args, &db, &after_email()).await;
+            assert!(!out.starts_with("The user did not allow"), "{tool} must not wait for a click: {out}");
+        }
+    }
+
+    /// The card names what the action touches, not an ID.
+    #[test]
+    fn the_card_names_what_the_action_touches() {
+        let db = db();
+        let detail = |name: &str, args: serde_json::Value| approval_detail(name, &args, &db);
+        assert_eq!(detail("forget", serde_json::json!({"id": 7})), "\u{201c}Accountant is Kenny\u{201d}");
+        assert_eq!(detail("forget", serde_json::json!({"keyword": "Kenny"})), "\u{201c}Kenny\u{201d}");
+        assert_eq!(
+            detail("update_event", serde_json::json!({"event_id": "evt1"})),
+            "\u{201c}Board meeting\u{201d} 2026-11-02T10:00:00+08:00"
+        );
+        assert_eq!(
+            detail("create_github_issue", serde_json::json!({"repo": "acme/app", "title": "Inbox"})),
+            "\u{201c}Inbox\u{201d} acme/app"
+        );
+        assert_eq!(detail("create_notion_page", serde_json::json!({"title": "Inbox"})), "\u{201c}Inbox\u{201d}");
     }
 }
 
@@ -2632,15 +2751,15 @@ mod local_data_tests {
     }
 
     #[tokio::test]
-    async fn email_tools_refuse_an_ai_that_may_train_on_email() {
+    async fn email_and_calendar_tools_refuse_an_ai_that_may_train_on_them() {
         let db = mail_db();
         db.conn.lock().unwrap().execute_batch(
             "DELETE FROM provider_chain;
              INSERT INTO provider_chain(position,provider_type,enabled,base_url) VALUES (0,'openai',1,'https://api.moonshot.ai/v1');",
         ).unwrap();
-        for tool in ["list_follow_ups", "list_inbox_triage", "read_email", "search_emails"] {
+        for tool in ["list_follow_ups", "list_inbox_triage", "read_email", "search_emails", "list_events"] {
             let out = run(tool, serde_json::json!({}), &db).await;
-            assert!(out.starts_with("Email content is not shared with Kimi"), "{tool}: {out}");
+            assert!(out.starts_with("Email and calendar content is not shared with Kimi"), "{tool}: {out}");
             assert!(!out.contains("Gold Badge"), "{tool} leaked mail content");
         }
     }

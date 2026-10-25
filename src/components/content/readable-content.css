@@ -43,3 +43,7 @@
 .readable-image-label { color: var(--text-secondary); }
 .readable-content .readable-link-error { color: var(--accent-urgent); }
 .readable-content :focus-visible { outline: 2px solid var(--cyan); outline-offset: 2px; }
+.readable-content .readable-link-confirm { margin-top: 12px; padding: 12px 14px; border: 1px solid var(--border-strong); border-radius: 8px; background: var(--surface-solid); }
+.readable-content .readable-link-confirm p { margin: 0 0 6px; }
+.readable-content .readable-link-confirm code { display: block; padding: 0; background: none; color: var(--text-secondary); overflow-wrap: anywhere; white-space: normal; }
+.readable-link-confirm-actions { display: flex; gap: 8px; margin-top: 10px; }

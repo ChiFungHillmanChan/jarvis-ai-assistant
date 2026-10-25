@@ -62,7 +62,7 @@ pub struct StorageUsage {
     pub data_dir: String,
 }
 
-fn jarvis_data_dir(db: &Database) -> Result<PathBuf, String> {
+pub(super) fn jarvis_data_dir(db: &Database) -> Result<PathBuf, String> {
     let conn = db.conn.lock().map_err(|e| e.to_string())?;
     // Follow the database actually opened by this process. In particular, an
     // isolated QA database must never report or purge production model/backups.
@@ -76,7 +76,7 @@ fn jarvis_data_dir(db: &Database) -> Result<PathBuf, String> {
 
 /// The WKWebView network cache. Tauri names it after the product, not the
 /// bundle id, which is why this is `jarvis` and not `com.jarvis.app`.
-fn jarvis_cache_dir() -> Option<PathBuf> {
+pub(super) fn jarvis_cache_dir() -> Option<PathBuf> {
     #[cfg(feature = "native-qa")]
     return crate::native_qa::directory().ok().map(|dir| dir.join("cache"));
     #[cfg(not(feature = "native-qa"))]
@@ -351,7 +351,7 @@ fn mail_body_bytes(conn: &Connection) -> i64 {
 
 /// Empty a directory without removing the directory itself, so the next write
 /// does not have to recreate it. A missing directory is already empty.
-fn remove_dir_contents(dir: &Path) -> Result<(), String> {
+pub(super) fn remove_dir_contents(dir: &Path) -> Result<(), String> {
     match std::fs::symlink_metadata(dir) {
         Ok(metadata) if metadata.is_dir() => {}
         Ok(_) => return Err("只可清理一般資料夾；不支援符號連結或其他檔案。".to_string()),
