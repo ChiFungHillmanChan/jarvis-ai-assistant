@@ -2,7 +2,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import { createElement } from 'react';
 import { renderToStaticMarkup } from 'react-dom/server';
-import { ContentBody, type ContentBodyProps } from '../src/components/content/content-body.ts';
+import { ContentBody, linkHost, type ContentBodyProps } from '../src/components/content/content-body.ts';
 
 const render = (text: string, props: Omit<ContentBodyProps, 'text'> = {}) =>
   renderToStaticMarkup(createElement(ContentBody, { text, ...props }));
@@ -76,4 +76,11 @@ test('relative and credential-bearing links stay readable without navigating the
   assert.doesNotMatch(html, /href="\/settings|href="https:\/\/password/);
   assert.match(html, /local/);
   assert.match(html, /href="mailto:help@example.test"/);
+});
+
+test('a link confirmation names where the link really goes, not its text', () => {
+  // The model writes the link text, and a query string can carry mail content.
+  assert.equal(linkHost('https://evil.example/invoice?d=Kenny%20owes%2012000'), 'evil.example');
+  assert.equal(linkHost('http://192.0.2.7:8080/x'), '192.0.2.7:8080');
+  assert.equal(linkHost('mailto:someone@example.test?body=secret'), 'someone@example.test');
 });

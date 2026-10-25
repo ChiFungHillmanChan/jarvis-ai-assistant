@@ -16,6 +16,16 @@ use tokio::sync::oneshot;
 /// Tools that change the user's data and so need a click first.
 pub const NEEDS_APPROVAL: &[&str] = &["remember", "archive_email", "delete_event", "update_follow_up"];
 
+/// Tools that reach other people -- Notion workspace members, the collaborators
+/// on a private repo, the attendees of an existing event -- or delete memory.
+/// They run without a click when the user asks for them, but once the turn has
+/// read text a stranger wrote, that text can ask for exactly these calls, so
+/// they wait for the user too. `create_event` (the user's own calendar, no
+/// attendees) and `draft_email` (the user sends the draft by hand) stay off:
+/// asking before every one would tax the commonest requests for no protection.
+pub const NEEDS_APPROVAL_AFTER_UNTRUSTED_READ: &[&str] =
+    &["update_event", "create_notion_page", "create_github_issue", "forget"];
+
 const WAIT: Duration = Duration::from_secs(120);
 
 static APP: OnceLock<tauri::AppHandle> = OnceLock::new();

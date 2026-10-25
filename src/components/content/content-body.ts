@@ -98,6 +98,14 @@ function safeUrl(value: string): string {
   } catch { return ''; }
 }
 
+/** Where a link goes, for the confirmation: the host, or a mailto address. */
+export function linkHost(value: string): string {
+  try {
+    const url = new URL(value);
+    return url.protocol === 'mailto:' ? url.pathname : url.host;
+  } catch { return value; }
+}
+
 export function ContentBody({ text, format = 'markdown', sourceIds = [], onSource, onOpenLink, tableLabel = '表格，可水平捲動', quoteLabels = ZH_QUOTE_LABELS }: ContentBodyProps) {
   if (format === 'plain') return createElement(PlainMail, { text, labels: quoteLabels });
   const validSources = new Set(sourceIds.filter(id => Number.isSafeInteger(id) && id > 0));

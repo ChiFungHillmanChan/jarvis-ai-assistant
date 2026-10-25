@@ -1,4 +1,4 @@
-//! Which AI may receive email content.
+//! Which AI may receive email and calendar content.
 //!
 //! Google's Limited Use rules for Gmail data forbid transferring it to be used
 //! to train AI models. OpenAI, Anthropic and Amazon Bedrock do not train on API
@@ -8,6 +8,12 @@
 //! that billing is on. Kimi, Qwen and other services have not been checked and
 //! do not receive email. Every path that sends email text to the chosen AI
 //! (sorting, analysis, briefings, chat context and tools) asks `check` first.
+//! Google Calendar data falls under the same Google rules, so event titles and
+//! places in the chat context and `list_events` ask it too.
+//!
+//! TypeSafe, which classifies mail when the user adds its key, is not the
+//! chosen AI and is not checked here: its privacy policy says it does not
+//! train or fine-tune models on prompts or other input.
 
 use super::compat;
 use super::ProviderChainEntry;
@@ -35,13 +41,14 @@ impl Blocked {
     /// For the model, which explains it to the user in their language.
     pub fn tool_message(&self) -> String {
         match self {
-            Blocked::GeminiBillingUnconfirmed => "Email content is not shared with Gemini yet. \
+            Blocked::GeminiBillingUnconfirmed => "Email and calendar content is not shared with Gemini yet. \
                 Gemini's free tier may use submitted content to train Google's models, so the user \
                 must first confirm in Settings > Models that their Gemini API key has billing enabled."
                 .to_string(),
             Blocked::NotAllowed(label) => format!(
-                "Email content is not shared with {label}. Google's rules for Gmail data do not allow \
-                 sending it to an AI service that may use it for training. Email features work with \
+                "Email and calendar content is not shared with {label}. Google's rules for Gmail and Calendar \
+                 data do not allow sending it to an AI service that may use it for training. Email and calendar \
+                 features work with \
                  OpenAI, Claude, AWS Bedrock, a local Ollama model, or Gemini with billing enabled; \
                  the user can choose one in Settings > Models."
             ),

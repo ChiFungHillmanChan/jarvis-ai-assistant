@@ -94,8 +94,8 @@ pub async fn run_briefing(
         return Ok(());
     }
 
-    // Clone router out of the Mutex so we can call .send() (which is async)
-    // without holding a non-Send MutexGuard across .await points.
+    // Clone router out of the Mutex so its async calls below do not hold a
+    // non-Send MutexGuard across .await points.
     let router_val: AiRouter = router
         .lock()
         .map_err(|e| format!("router lock: {e}"))?
@@ -220,8 +220,10 @@ async fn classify_with_nova(
 
     let chat_messages = vec![("user".to_string(), prompt)];
 
-    let response = router
-        .send(chat_messages, db, auth, app_handle, None, Workload::Volume)
+    // The prompt quotes strangers' subjects and snippets, which can ask for
+    // tool calls; classifying needs none.
+    let response = crate::chat_session::TOOL_EXECUTION_DISABLED
+        .scope(true, router.send_with_untrusted_context(chat_messages, db, auth, app_handle, None, Workload::Volume))
         .await
         .map_err(|e| format!("nova classify: {e}"))?;
 
@@ -309,8 +311,10 @@ async fn summarize_with_haiku(
 
     let chat_messages = vec![("user".to_string(), prompt)];
 
-    let response = router
-        .send(chat_messages, db, auth, app_handle, None, Workload::Tools)
+    // Same as classifying: the suggested actions come back as JSON, not as
+    // tool calls.
+    let response = crate::chat_session::TOOL_EXECUTION_DISABLED
+        .scope(true, router.send_with_untrusted_context(chat_messages, db, auth, app_handle, None, Workload::Tools))
         .await
         .map_err(|e| format!("haiku summarize: {e}"))?;
 

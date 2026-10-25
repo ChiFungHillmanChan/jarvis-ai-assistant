@@ -13,6 +13,10 @@ function describe({ tool_name, detail, status }: ApprovalRequest, text: Text): s
     case 'remember': return text(`Save to memory: ${detail}`, `儲存到記憶：${detail}`);
     case 'archive_email': return text(`Archive the email ${detail}`, `封存郵件 ${detail}`);
     case 'delete_event': return text(`Delete the calendar event ${detail}`, `刪除日曆活動 ${detail}`);
+    case 'update_event': return text(`Change the calendar event ${detail}`, `更改日曆活動 ${detail}`);
+    case 'forget': return text(`Delete from memory: ${detail}`, `從記憶中刪除：${detail}`);
+    case 'create_notion_page': return text(`Create the Notion page ${detail}`, `建立 Notion 頁面 ${detail}`);
+    case 'create_github_issue': return text(`Open the GitHub issue ${detail}`, `建立 GitHub issue ${detail}`);
     case 'update_follow_up':
       if (status === 'done') return text(`Mark the follow-up ${detail} as done`, `將跟進事項 ${detail} 標為完成`);
       if (status === 'dismissed') return text(`Dismiss the follow-up ${detail}`, `略過跟進事項 ${detail}`);
