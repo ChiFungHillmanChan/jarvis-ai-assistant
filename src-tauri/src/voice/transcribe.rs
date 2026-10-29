@@ -18,13 +18,33 @@ fn read_stt_language(db: &crate::db::Database) -> String {
     }).unwrap_or_else(|| "auto".into())
 }
 
-/// Whisper's language for the dictation setting. Anything but a fixed
-/// language ("auto", "bilingual") lets Whisper detect it.
-pub(crate) fn whisper_language(setting: &str) -> Option<&'static str> {
+/// Vocabulary size of large-v3 (and large-v3-turbo), the first Whisper models
+/// with a 100th language slot: Cantonese.
+const LARGE_V3_VOCAB: i32 = 51866;
+
+/// Whether the loaded model has a Cantonese language token. whisper.cpp takes
+/// language ids from one global table, where "yue" is 99, but ggml-base and
+/// every model before large-v3 have only 99 slots (ids 0-98). Asking those for
+/// "yue" selects the token after the last language, <|translate|>, and
+/// Cantonese came out as English nonsense.
+fn has_yue_token(n_vocab: i32) -> bool {
+    n_vocab >= LARGE_V3_VOCAB
+}
+
+/// Without it, "zh" rewrites Cantonese in Mandarin wording (明天下午 for
+/// 聽日下晝); with it, ggml-base keeps the speaker's words, in Traditional
+/// characters.
+const CANTONESE_PROMPT: &str = "以下係香港廣東話，用繁體中文書寫。";
+
+/// Whisper's language and initial prompt for the dictation setting, given the
+/// loaded model's vocabulary size. Anything but a fixed language ("auto",
+/// "bilingual") lets Whisper detect it.
+pub(crate) fn whisper_language(setting: &str, n_vocab: i32) -> (Option<&'static str>, Option<&'static str>) {
     match setting {
-        "yue" => Some("yue"),
-        "en" => Some("en"),
-        _ => None,
+        "yue" if has_yue_token(n_vocab) => (Some("yue"), None),
+        "yue" => (Some("zh"), Some(CANTONESE_PROMPT)),
+        "en" => (Some("en"), None),
+        _ => (None, None),
     }
 }
 
@@ -189,11 +209,16 @@ impl LocalTranscriber {
     }
 
     pub fn transcribe(&self, audio_data: &[f32], db: &crate::db::Database) -> Result<String, String> {
-        self.transcribe_as(audio_data, whisper_language(&read_stt_language(db)), DecodeProfile::REQUEST)
+        let (language, prompt) = whisper_language(&read_stt_language(db), self.ctx.n_vocab());
+        self.transcribe_with(audio_data, language, prompt, DecodeProfile::REQUEST)
     }
 
     /// Transcribe in a fixed language, or let Whisper detect it when `None`.
     pub fn transcribe_as(&self, audio_data: &[f32], language: Option<&str>, profile: DecodeProfile) -> Result<String, String> {
+        self.transcribe_with(audio_data, language, None, profile)
+    }
+
+    fn transcribe_with(&self, audio_data: &[f32], language: Option<&str>, prompt: Option<&str>, profile: DecodeProfile) -> Result<String, String> {
         if audio_data.len() < 1600 {
             return Ok(String::new());
         }
@@ -212,6 +237,9 @@ impl LocalTranscriber {
         params.set_print_timestamps(false);
         params.set_suppress_blank(true);
         params.set_single_segment(true);
+        if let Some(prompt) = prompt {
+            params.set_initial_prompt(prompt);
+        }
         if let Some(threads) = profile.threads {
             params.set_n_threads(threads);
         }
@@ -284,9 +312,48 @@ mod tests {
 
     #[test]
     fn whisper_language_follows_the_dictation_setting() {
-        assert_eq!(whisper_language("yue"), Some("yue"));
-        assert_eq!(whisper_language("en"), Some("en"));
-        assert_eq!(whisper_language("bilingual"), None);
-        assert_eq!(whisper_language("auto"), None);
+        assert_eq!(whisper_language("yue", LARGE_V3_VOCAB), (Some("yue"), None));
+        assert_eq!(whisper_language("en", BASE_VOCAB), (Some("en"), None));
+        assert_eq!(whisper_language("bilingual", BASE_VOCAB), (None, None));
+        assert_eq!(whisper_language("auto", BASE_VOCAB), (None, None));
+    }
+
+    const BASE_VOCAB: i32 = 51865;
+
+    /// ggml-base has 99 language slots, so "yue" (id 99) would select
+    /// <|translate|> and Cantonese came out as English nonsense.
+    #[test]
+    fn cantonese_on_a_model_without_a_yue_token_decodes_as_chinese_with_a_cantonese_prompt() {
+        assert_eq!(whisper_language("yue", BASE_VOCAB), (Some("zh"), Some(CANTONESE_PROMPT)));
+        assert!(CANTONESE_PROMPT.contains("廣東話"));
+    }
+
+    /// whisper.cpp's own count: `num_languages() = n_vocab - 51765 - 1` for a
+    /// multilingual model, and "yue" needs id 99 to be inside it.
+    #[test]
+    fn only_a_large_v3_sized_vocabulary_has_the_yue_token() {
+        assert!(!has_yue_token(BASE_VOCAB));
+        assert!(has_yue_token(LARGE_V3_VOCAB));
+        assert_eq!(whisper_rs::get_lang_id("yue"), Some(99));
+    }
+
+    /// Run by hand against the real model and a 16 kHz mono Cantonese clip, e.g.
+    /// `say -v Sinji -o /tmp/yue.wav --file-format=WAVE --data-format=LEI16@16000 '我聽日下晝三點要同陳生開會'`, then
+    /// `JARVIS_WHISPER_MODEL=.../ggml-base.bin JARVIS_CANTONESE_SAMPLE=/tmp/yue.wav cargo test
+    /// --release --lib the_cantonese_setting_writes_chinese -- --ignored --nocapture`
+    #[test]
+    #[ignore]
+    fn the_cantonese_setting_writes_chinese() {
+        let model = std::env::var("JARVIS_WHISPER_MODEL").expect("JARVIS_WHISPER_MODEL");
+        let sample = std::env::var("JARVIS_CANTONESE_SAMPLE").expect("JARVIS_CANTONESE_SAMPLE");
+        let mut reader = hound::WavReader::open(sample).unwrap();
+        assert_eq!((reader.spec().sample_rate, reader.spec().channels), (16_000, 1));
+        let audio: Vec<f32> = reader.samples::<i16>().map(|s| s.unwrap() as f32 / 32768.0).collect();
+        let transcriber = LocalTranscriber::new(std::path::Path::new(&model)).unwrap();
+        let (language, prompt) = whisper_language("yue", transcriber.ctx.n_vocab());
+        let text = transcriber.transcribe_with(&audio, language, prompt, DecodeProfile::REQUEST).unwrap();
+        println!("{language:?}: {text:?}");
+        let han = text.chars().filter(|c| ('\u{4e00}'..='\u{9fff}').contains(c)).count();
+        assert!(han * 2 >= text.chars().filter(|c| !c.is_whitespace()).count(), "mostly Chinese expected, heard {text:?}");
     }
 }
