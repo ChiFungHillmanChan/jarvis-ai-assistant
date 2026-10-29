@@ -6,6 +6,7 @@ import { DataStack } from '../lib/data-stack';
 import { ObservabilityStack } from '../lib/observability-stack';
 import { PaymentStack } from '../lib/payment-stack';
 import { AuditStack } from '../lib/audit-stack';
+import { AiProxyStack } from '../lib/ai-proxy-stack';
 
 const app = new cdk.App();
 
@@ -61,3 +62,5 @@ new AuditStack(app, `Jarvis-${env}-Audit`, {
   envName: env,
   kmsKey: auth.dataKey,
 });
+
+new AiProxyStack(app, `Jarvis-${env}-AiProxy`, { ...stackProps, envName: env, kmsKey: auth.dataKey, userPool: auth.userPool, userPoolClient: auth.userPoolClient, userMetaTable: data.userMetaTable, aiTables: data.aiTables, billingAlertEmail: ctx.billingAlertEmail });

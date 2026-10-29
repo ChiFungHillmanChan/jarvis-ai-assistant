@@ -9,11 +9,19 @@ export interface DataStackProps extends cdk.StackProps {
   kmsKey: kms.IKey;
 }
 
+export interface AiTables {
+  usage: ddb.ITable;
+  period: ddb.ITable;
+  grants: ddb.ITable;
+  config: ddb.ITable;
+}
+
 export class DataStack extends cdk.Stack {
   public readonly syncBucket: s3.Bucket;
   public readonly syncBucketName: string;
   public readonly userMetaTable: ddb.Table;
   public readonly pluginRegistryTable: ddb.Table;
+  public readonly aiTables: AiTables;
 
   constructor(scope: Construct, id: string, props: DataStackProps) {
     super(scope, id, props);
@@ -71,6 +79,33 @@ export class DataStack extends cdk.Stack {
       encryptionKey: props.kmsKey,
       removalPolicy: removal,
     });
+
+    // JARVIS AI credits (spec 5.1). All keys are strings; `ts` is an ISO timestamp.
+    const aiTable = (id: string, suffix: string, partitionKey: string, sortKey?: string) =>
+      new ddb.Table(this, id, {
+        tableName: `jarvis-${props.envName}-ai-${suffix}`,
+        partitionKey: { name: partitionKey, type: ddb.AttributeType.STRING },
+        sortKey: sortKey ? { name: sortKey, type: ddb.AttributeType.STRING } : undefined,
+        billingMode: ddb.BillingMode.PAY_PER_REQUEST,
+        encryption: ddb.TableEncryption.CUSTOMER_MANAGED,
+        encryptionKey: props.kmsKey,
+        pointInTimeRecoverySpecification: { pointInTimeRecoveryEnabled: isProd },
+        removalPolicy: removal,
+        ...(suffix === 'usage' ? { timeToLiveAttribute: 'expiresAt' } : {}),
+      });
+    const aiUsage = aiTable('AiUsageTable', 'usage', 'userId', 'sk');
+    aiUsage.addGlobalSecondaryIndex({
+      indexName: 'periodKey-index',
+      partitionKey: { name: 'periodKey', type: ddb.AttributeType.STRING },
+      sortKey: { name: 'ts', type: ddb.AttributeType.STRING },
+      projectionType: ddb.ProjectionType.ALL,
+    });
+    this.aiTables = {
+      usage: aiUsage,
+      period: aiTable('AiPeriodTable', 'period', 'userId', 'periodKey'),
+      grants: aiTable('AiGrantsTable', 'grants', 'userId', 'grantId'),
+      config: aiTable('AiConfigTable', 'config', 'config'),
+    };
 
     new cdk.CfnOutput(this, 'SyncBucketName', {
       value: this.syncBucket.bucketName,
