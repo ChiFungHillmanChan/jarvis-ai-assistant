@@ -55,6 +55,7 @@ new PaymentStack(app, `Jarvis-${env}-Payment`, {
   userMetaTable: data.userMetaTable,
   userPool: auth.userPool,
   userPoolClient: auth.userPoolClient,
+  aiTables: data.aiTables,
 });
 
 new AuditStack(app, `Jarvis-${env}-Audit`, {
