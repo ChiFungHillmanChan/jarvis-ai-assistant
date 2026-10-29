@@ -31,7 +31,7 @@ export class ObservabilityStack extends cdk.Stack {
         detailType: ['GuardDuty Finding'],
         detail: { severity: [{ numeric: ['>=', 4] }] },
       },
-      targets: [new targets.SnsTopic(alertTopic)],
+      targets: [new targets.SnsTopic(alertTopic, { authorizeUsingRole: true })],
     });
 
     const thresholds = props.envName === 'prod' ? [50, 100, 500] : [5, 10, 25];
