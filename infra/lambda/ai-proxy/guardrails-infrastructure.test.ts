@@ -142,7 +142,7 @@ test('every env alarms when a served request could not be metered', () => {
     const idOf = (resource: any) => Object.keys(template.Resources).find(k => template.Resources[k] === resource);
     const logGroups = ofType(template, 'AWS::Logs::LogGroup').filter((l: any) => l.Properties.LogGroupName === `/aws/lambda/jarvis-${env}-ai-proxy`);
     assert.equal(logGroups.length, 1);
-    const filters = ofType(template, 'AWS::Logs::MetricFilter');
+    const filters = ofType(template, 'AWS::Logs::MetricFilter').filter((x: any) => x.Properties.MetricTransformations[0].MetricName === `MeterFailed-${env}`);
     assert.equal(filters.length, 1);
     const f = filters[0].Properties;
     assert.deepEqual(f.LogGroupName, { Ref: idOf(logGroups[0]) });
@@ -161,6 +161,37 @@ test('every env alarms when a served request could not be metered', () => {
     assert.equal(a.Period, 300);
     assert.equal(a.EvaluationPeriods, 1);
     assert.equal(a.Threshold, 1);
+    assert.equal(a.ComparisonOperator, 'GreaterThanOrEqualToThreshold');
+    assert.equal(a.TreatMissingData, 'notBreaching');
+    assert.deepEqual(a.AlarmActions, [{ Ref: idOf(topic) }]);
+  }
+});
+
+test('every env alarms on handled errors, which the Lambda Errors alarm cannot see', () => {
+  for (const env of ['sandbox', 'dev']) {
+    const template = proxy(env);
+    const idOf = (resource: any) => Object.keys(template.Resources).find(k => template.Resources[k] === resource);
+    const logGroup = ofType(template, 'AWS::Logs::LogGroup').find((l: any) => l.Properties.LogGroupName === `/aws/lambda/jarvis-${env}-ai-proxy`);
+    const filters = ofType(template, 'AWS::Logs::MetricFilter').filter((x: any) => x.Properties.MetricTransformations[0].MetricName === `HandledErrors-${env}`);
+    assert.equal(filters.length, 1);
+    const f = filters[0].Properties;
+    assert.deepEqual(f.LogGroupName, { Ref: idOf(logGroup) });
+    // A bad request is logged with status error too, but it is the client's fault and must not page.
+    assert.ok(f.FilterPattern.includes('($.event = "converse") && ($.status = "error") && ($.code != "bad_request")'), f.FilterPattern);
+    assert.ok(f.FilterPattern.includes('($.event = "jwks_unavailable")'), f.FilterPattern);
+    assert.deepEqual(f.MetricTransformations, [{ MetricNamespace: 'Jarvis/AiProxy', MetricName: `HandledErrors-${env}`, MetricValue: '1', Unit: 'Count' }]);
+
+    const topic = ofType(template, 'AWS::SNS::Topic').find((t: any) => t.Properties.TopicName === `jarvis-${env}-ai-alerts`);
+    const alarms = ofType(template, 'AWS::CloudWatch::Alarm').filter((a: any) => a.Properties.AlarmName === `jarvis-${env}-ai-handled-errors`);
+    assert.equal(alarms.length, 1);
+    const a = alarms[0].Properties;
+    assert.equal(a.Namespace, 'Jarvis/AiProxy');
+    assert.equal(a.MetricName, `HandledErrors-${env}`);
+    assert.equal(a.Dimensions, undefined);
+    assert.equal(a.Statistic, 'Sum');
+    assert.equal(a.Period, 300);
+    assert.equal(a.EvaluationPeriods, 1);
+    assert.equal(a.Threshold, 5);
     assert.equal(a.ComparisonOperator, 'GreaterThanOrEqualToThreshold');
     assert.equal(a.TreatMissingData, 'notBreaching');
     assert.deepEqual(a.AlarmActions, [{ Ref: idOf(topic) }]);

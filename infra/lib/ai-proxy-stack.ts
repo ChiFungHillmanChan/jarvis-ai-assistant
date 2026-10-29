@@ -198,6 +198,32 @@ export class AiProxyStack extends cdk.Stack {
       treatMissingData: cw.TreatMissingData.NOT_BREACHING,
     }).addAlarmAction(new cwActions.SnsAction(alertTopic));
 
+    // The Errors alarm sees only unhandled errors, but the handler catches everything, so IAM/KMS gaps, Bedrock failures
+    // and JWKS outages all become handled 5xx responses. Count them from the log; a bad_request is the client's fault.
+    const handledErrors = new logs.MetricFilter(this, 'HandledErrorsFilter', {
+      logGroup,
+      filterPattern: logs.FilterPattern.any(
+        logs.FilterPattern.all(
+          logs.FilterPattern.stringValue('$.event', '=', 'converse'),
+          logs.FilterPattern.stringValue('$.status', '=', 'error'),
+          logs.FilterPattern.stringValue('$.code', '!=', 'bad_request'),
+        ),
+        logs.FilterPattern.stringValue('$.event', '=', 'jwks_unavailable'),
+      ),
+      metricNamespace: 'Jarvis/AiProxy',
+      metricName: `HandledErrors-${props.envName}`,
+      metricValue: '1',
+      unit: cw.Unit.COUNT,
+    });
+    new cw.Alarm(this, 'HandledErrorsAlarm', {
+      alarmName: `jarvis-${props.envName}-ai-handled-errors`,
+      metric: handledErrors.metric({ statistic: 'Sum', period: cdk.Duration.minutes(5) }),
+      threshold: 5,
+      evaluationPeriods: 1,
+      comparisonOperator: cw.ComparisonOperator.GREATER_THAN_OR_EQUAL_TO_THRESHOLD,
+      treatMissingData: cw.TreatMissingData.NOT_BREACHING,
+    }).addAlarmAction(new cwActions.SnsAction(alertTopic));
+
     // Account-wide Bedrock budget: one per account, so only the sandbox stack owns it.
     if (props.envName !== 'sandbox') return;
 
