@@ -13,6 +13,8 @@ export interface AiConfig {
   defaultCapMicros: number;
   trialCreditMicros: number;
   globalPause: boolean;
+  /** False: a Stripe subscription alone never gives JARVIS AI; only an admin grant does. */
+  subscriptionAccess: boolean;
   models: Record<Workload, { primary: string; fallback: string | null }>;
   prices: Record<string, ModelPrice>;
   pricesCheckedOn: string;
@@ -38,6 +40,9 @@ export function parseConfig(value: unknown): AiConfig | null {
   if (!Number.isSafeInteger(multiplierBps) || (multiplierBps as number) < 10_000) return null;
   if (!positive(includedMicros) || !positive(defaultCapMicros) || !positive(trialCreditMicros)) return null;
   if (typeof globalPause !== 'boolean') return null;
+  // A row written before this field existed keeps subscriptions off.
+  const subscriptionAccess = value.subscriptionAccess === undefined ? false : value.subscriptionAccess;
+  if (typeof subscriptionAccess !== 'boolean') return null;
   if (typeof pricesCheckedOn !== 'string' || !/^\d{4}-\d{2}-\d{2}$/.test(pricesCheckedOn)) return null;
 
   if (!isObject(value.models) || !isObject(value.prices)) return null;
@@ -65,6 +70,7 @@ export function parseConfig(value: unknown): AiConfig | null {
     defaultCapMicros,
     trialCreditMicros,
     globalPause,
+    subscriptionAccess,
     models,
     prices,
     pricesCheckedOn,

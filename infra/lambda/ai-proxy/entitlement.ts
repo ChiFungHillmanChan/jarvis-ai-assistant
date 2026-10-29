@@ -67,8 +67,9 @@ export function resolvePlan(meta: Record<string, unknown> | undefined, grants: G
     };
   }
 
+  // Until subscriptionAccess is on, access is approved by hand: a subscription is treated as no subscription.
   const status = meta?.subscriptionStatus;
-  if (meta?.tier === 'pro' && (status === 'active' || status === 'trialing')) {
+  if (config.subscriptionAccess && meta?.tier === 'pro' && (status === 'active' || status === 'trialing')) {
     const { periodStartsAt, periodEndsAt } = meta;
     const month = hkMonth(now);
     const stripePeriod = typeof periodStartsAt === 'string' && typeof periodEndsAt === 'string';

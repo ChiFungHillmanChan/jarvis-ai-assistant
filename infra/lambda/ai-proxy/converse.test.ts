@@ -90,7 +90,10 @@ test('denials return their status and never call Bedrock', async () => {
     [{ loadUser: async () => ({ meta: { aiSuspended: true }, grants: [grant()] }) }, 403, { error: 'suspended' }],
     [{ loadConfig: async () => ({ ...DEFAULT_CONFIG, globalPause: true }) }, 503, { error: 'paused' }],
     [{ periodUsed: async () => 20_000_000 }, 402, { error: 'cap_reached', capMicros: 20_000_000, periodEndsAt: '2026-11-30T16:00:00.000Z' }],
-    [{ loadUser: async () => ({ meta: { tier: 'pro', subscriptionStatus: 'trialing' }, grants: [] }), periodUsed: async () => 20_000_000 }, 402, { error: 'trial_credit_used' }],
+    [{ loadUser: async () => ({ meta: { tier: 'pro', subscriptionStatus: 'trialing' }, grants: [] }), loadConfig: async () => ({ ...DEFAULT_CONFIG, subscriptionAccess: true }), periodUsed: async () => 20_000_000 }, 402, { error: 'trial_credit_used' }],
+    // With the shipped config a paid or trialing subscription alone is not access.
+    [{ loadUser: async () => ({ meta: { tier: 'pro', subscriptionStatus: 'active' }, grants: [] }) }, 402, { error: 'not_entitled' }],
+    [{ loadUser: async () => ({ meta: { tier: 'pro', subscriptionStatus: 'trialing' }, grants: [] }) }, 402, { error: 'not_entitled' }],
   ];
   for (const [over, status, expected] of cases) {
     const { deps, calls } = fakeDeps(over); const { out, sink } = fakeSink();

@@ -38,6 +38,18 @@ test('a missing row uses defaults; an invalid row pauses', () => {
   assert.equal(effectiveConfig({ config: 'current', body: JSON.stringify({ ...DEFAULT_CONFIG, globalPause: true }) }).config.globalPause, true);
 });
 
+test('subscriptionAccess ships off, is false when a stored row omits it, and must be a boolean', () => {
+  assert.equal(DEFAULT_CONFIG.subscriptionAccess, false);
+  const { subscriptionAccess, ...missing } = DEFAULT_CONFIG;
+  assert.equal(parseConfig(missing).subscriptionAccess, false);
+  assert.deepEqual(effectiveConfig({ config: 'current', body: JSON.stringify(missing) }), { config: DEFAULT_CONFIG, invalid: false });
+  assert.equal(parseConfig({ ...DEFAULT_CONFIG, subscriptionAccess: true }).subscriptionAccess, true);
+  for (const odd of ['true', 1, 0, null, {}]) {
+    assert.equal(parseConfig({ ...DEFAULT_CONFIG, subscriptionAccess: odd }), null, JSON.stringify(odd));
+    assert.equal(effectiveConfig({ config: 'current', body: JSON.stringify({ ...DEFAULT_CONFIG, subscriptionAccess: odd }) }).invalid, true);
+  }
+});
+
 test('every catalog model has a region and a default price', () => {
   for (const id of Object.keys(CATALOG)) { assert.ok(CATALOG[id].region); assert.ok(DEFAULT_CONFIG.prices[id], id); }
 });
