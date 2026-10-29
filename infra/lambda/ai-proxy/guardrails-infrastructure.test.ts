@@ -201,3 +201,44 @@ test('the proxy role still has no wildcard Bedrock Allow', () => {
     .filter((s: any) => s.Effect === 'Deny');
   assert.deepEqual(attachedDeny, []);
 });
+
+test('every env alarms on proxy errors, throttles and invocation floods', () => {
+  const expected = [
+    { suffix: 'errors', metric: 'Errors', threshold: 5 },
+    { suffix: 'throttles', metric: 'Throttles', threshold: 1 },
+    { suffix: 'invocations-flood', metric: 'Invocations', threshold: 3000 },
+  ];
+  for (const env of ['sandbox', 'dev']) {
+    const template = proxy(env);
+    const topicId = Object.keys(template.Resources).find(k =>
+      template.Resources[k].Type === 'AWS::SNS::Topic' && template.Resources[k].Properties.TopicName === `jarvis-${env}-ai-alerts`);
+    const fnId = Object.keys(template.Resources).find(k =>
+      template.Resources[k].Type === 'AWS::Lambda::Function' && template.Resources[k].Properties.FunctionName === `jarvis-${env}-ai-proxy`);
+    for (const e of expected) {
+      const found = ofType(template, 'AWS::CloudWatch::Alarm').filter((x: any) => x.Properties.AlarmName === `jarvis-${env}-ai-proxy-${e.suffix}`);
+      assert.equal(found.length, 1, e.suffix);
+      const a = found[0].Properties;
+      assert.equal(a.Namespace, 'AWS/Lambda');
+      assert.equal(a.MetricName, e.metric);
+      assert.deepEqual(a.Dimensions, [{ Name: 'FunctionName', Value: { Ref: fnId } }]);
+      assert.equal(a.Statistic, 'Sum');
+      assert.equal(a.Period, 300);
+      assert.equal(a.EvaluationPeriods, 1);
+      assert.equal(a.Threshold, e.threshold);
+      assert.equal(a.ComparisonOperator, 'GreaterThanOrEqualToThreshold');
+      assert.equal(a.TreatMissingData, 'notBreaching');
+      assert.deepEqual(a.AlarmActions, [{ Ref: topicId }]);
+    }
+  }
+});
+
+test('the budget action role trusts Budgets only for this account', () => {
+  const roles = ofType(proxy('sandbox'), 'AWS::IAM::Role').filter((r: any) =>
+    JSON.stringify(r.Properties.AssumeRolePolicyDocument).includes('budgets.amazonaws.com'));
+  assert.equal(roles.length, 1);
+  const statements = roles[0].Properties.AssumeRolePolicyDocument.Statement;
+  assert.equal(statements.length, 1);
+  assert.deepEqual(statements[0].Principal, { Service: 'budgets.amazonaws.com' });
+  assert.equal(statements[0].Action, 'sts:AssumeRole');
+  assert.deepEqual(statements[0].Condition, { StringEquals: { 'aws:SourceAccount': '111111111111' } });
+});

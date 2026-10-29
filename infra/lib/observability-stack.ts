@@ -1,5 +1,7 @@
 import * as cdk from 'aws-cdk-lib';
 import * as cw from 'aws-cdk-lib/aws-cloudwatch';
+import * as events from 'aws-cdk-lib/aws-events';
+import * as targets from 'aws-cdk-lib/aws-events-targets';
 import * as budgets from 'aws-cdk-lib/aws-budgets';
 import * as sns from 'aws-cdk-lib/aws-sns';
 import * as snsSubs from 'aws-cdk-lib/aws-sns-subscriptions';
@@ -20,6 +22,17 @@ export class ObservabilityStack extends cdk.Stack {
       displayName: `JARVIS ${props.envName} alerts`,
     });
     alertTopic.addSubscription(new snsSubs.EmailSubscription(props.billingAlertEmail));
+
+    // GuardDuty findings of medium severity (4.0) or higher. Does nothing until GuardDuty is enabled in the account.
+    new events.Rule(this, 'GuardDutyFindingsRule', {
+      ruleName: `jarvis-${props.envName}-guardduty-findings`,
+      eventPattern: {
+        source: ['aws.guardduty'],
+        detailType: ['GuardDuty Finding'],
+        detail: { severity: [{ numeric: ['>=', 4] }] },
+      },
+      targets: [new targets.SnsTopic(alertTopic)],
+    });
 
     const thresholds = props.envName === 'prod' ? [50, 100, 500] : [5, 10, 25];
     for (const limit of thresholds) {

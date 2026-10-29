@@ -113,3 +113,68 @@ test('the AI tables are on-demand, KMS-encrypted and keyed as the spec says', ()
   assert.deepEqual(gsi.KeySchema, [{ AttributeName: 'periodKey', KeyType: 'HASH' }, { AttributeName: 'ts', KeyType: 'RANGE' }]);
   assert.deepEqual(gsi.Projection, { ProjectionType: 'ALL' });
 });
+
+// Real tables with the same secondary indexes as the data stack, so a grant that reaches /index/* would show.
+const proxyWithRealTables = () => synthStack('lib/ai-proxy-stack.ts', 'AiProxyStack', (base: any, cdk: any) => {
+  const ddb = cdk.aws_dynamodb;
+  const key = new cdk.aws_kms.Key(base, 'DataKey');
+  const table = (id: string, pk: string, sk?: string, index?: string) => {
+    const t = new ddb.Table(base, id, {
+      partitionKey: { name: pk, type: ddb.AttributeType.STRING },
+      ...(sk ? { sortKey: { name: sk, type: ddb.AttributeType.STRING } } : {}),
+      encryption: ddb.TableEncryption.CUSTOMER_MANAGED,
+      encryptionKey: key,
+    });
+    if (index) t.addGlobalSecondaryIndex({ indexName: 'by-other', partitionKey: { name: index, type: ddb.AttributeType.STRING } });
+    return t;
+  };
+  return {
+    envName: 'sandbox',
+    billingAlertEmail: 'alerts@example.test',
+    kmsKey: key,
+    userPool: cdk.aws_cognito.UserPool.fromUserPoolId(base, 'Pool', 'ap-southeast-1_fixture'),
+    userPoolClient: cdk.aws_cognito.UserPoolClient.fromUserPoolClientId(base, 'Client', 'fixture-client'),
+    userMetaTable: table('TblUsers', 'userId', undefined, 'email'),
+    aiTables: {
+      usage: table('TblUsage', 'userId', 'sk', 'periodKey'),
+      period: table('TblPeriod', 'userId', 'periodKey'),
+      grants: table('TblGrants', 'userId', 'grantId'),
+      config: table('TblConfig', 'config'),
+    },
+  };
+});
+
+test('the proxy role gets exactly the DynamoDB actions store.ts calls, on table ARNs only', () => {
+  // Derived from every send(new XCommand) in lambda/ai-proxy/store.ts, per table.
+  const expected: Record<string, string[]> = {
+    TblConfig: ['dynamodb:GetItem'],
+    TblUsers: ['dynamodb:GetItem'],
+    TblGrants: ['dynamodb:Query'],
+    TblPeriod: ['dynamodb:GetItem', 'dynamodb:UpdateItem'],
+    TblUsage: ['dynamodb:PutItem'],
+    AiLimitsTable: ['dynamodb:GetItem', 'dynamodb:PutItem', 'dynamodb:UpdateItem'],
+  };
+  const template = proxyWithRealTables();
+  const granted: Record<string, Set<string>> = Object.fromEntries(Object.keys(expected).map(k => [k, new Set<string>()]));
+  const ddbStatements = allowStatements(template).filter((s: any) => asList(s.Action).some((a: string) => a.startsWith('dynamodb:')));
+  for (const s of ddbStatements) {
+    for (const resource of asList(s.Resource)) {
+      const text = JSON.stringify(resource);
+      assert.ok(!text.includes('/index/'), `no index resource: ${text}`);
+      const matches = Object.keys(expected).filter(name => text.includes(name));
+      assert.equal(matches.length, 1, `resource maps to one table: ${text}`);
+      for (const a of asList(s.Action)) granted[matches[0]].add(a);
+    }
+  }
+  for (const [name, actions] of Object.entries(expected)) {
+    assert.deepEqual([...granted[name]].sort(), actions, name);
+  }
+});
+
+test('the proxy role keeps its data key permissions', () => {
+  const kms = allowStatements(proxyWithRealTables()).filter((s: any) => asList(s.Action).some((a: string) => a.startsWith('kms:')));
+  assert.ok(kms.length > 0, 'a key statement exists');
+  for (const s of kms) {
+    assert.deepEqual(asList(s.Action).sort(), ['kms:Decrypt', 'kms:DescribeKey', 'kms:Encrypt', 'kms:GenerateDataKey*', 'kms:ReEncrypt*']);
+  }
+});

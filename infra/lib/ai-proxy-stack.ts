@@ -82,12 +82,18 @@ export class AiProxyStack extends cdk.Stack {
       bundling: { minify: true, sourceMap: true },
     });
 
-    props.userMetaTable.grantReadData(proxyFn);
-    props.aiTables.grants.grantReadData(proxyFn);
-    props.aiTables.config.grantReadData(proxyFn);
-    props.aiTables.period.grantReadWriteData(proxyFn);
-    limitsTable.grantReadWriteData(proxyFn);
-    props.aiTables.usage.grantWriteData(proxyFn);
+    // Exactly the calls lambda/ai-proxy/store.ts makes, per table. table.grant() would add /index/* on tables that
+    // have a secondary index, and the proxy queries no index, so the grant names the table ARN only.
+    const allow = (table: ddb.ITable, ...actions: string[]) =>
+      iam.Grant.addToPrincipal({ grantee: proxyFn, actions, resourceArns: [table.tableArn] });
+    allow(props.aiTables.config, 'dynamodb:GetItem');
+    allow(props.userMetaTable, 'dynamodb:GetItem');
+    allow(props.aiTables.grants, 'dynamodb:Query');
+    allow(props.aiTables.period, 'dynamodb:GetItem', 'dynamodb:UpdateItem');
+    allow(props.aiTables.usage, 'dynamodb:PutItem');
+    allow(limitsTable, 'dynamodb:GetItem', 'dynamodb:PutItem', 'dynamodb:UpdateItem');
+    // Plain table grants carry no key permissions, so the data key keeps the same actions the table read/write grants gave it.
+    props.kmsKey.grant(proxyFn, 'kms:Decrypt', 'kms:DescribeKey', 'kms:Encrypt', 'kms:GenerateDataKey*', 'kms:ReEncrypt*');
 
     // Bedrock is called only in the regions and models of the catalog, never '*'.
     this.proxyRole.addToPolicy(new iam.PolicyStatement({
@@ -104,7 +110,7 @@ export class AiProxyStack extends cdk.Stack {
     });
     this.proxyUrl = url.url;
 
-    this.addGuardrails(props, logGroup);
+    this.addGuardrails(props, logGroup, proxyFn);
 
     new cdk.CfnOutput(this, 'AiProxyUrl', {
       value: this.proxyUrl,
@@ -113,7 +119,7 @@ export class AiProxyStack extends cdk.Stack {
     });
   }
 
-  private addGuardrails(props: AiProxyStackProps, logGroup: logs.ILogGroup): void {
+  private addGuardrails(props: AiProxyStackProps, logGroup: logs.ILogGroup, proxyFn: lambda.IFunction): void {
     const alertTopic = new sns.Topic(this, 'AiAlertTopic', {
       topicName: `jarvis-${props.envName}-ai-alerts`,
       displayName: `JARVIS ${props.envName} AI alerts`,
@@ -153,6 +159,23 @@ export class AiProxyStack extends cdk.Stack {
       treatMissingData: cw.TreatMissingData.NOT_BREACHING,
     }).addAlarmAction(new cwActions.SnsAction(alertTopic));
 
+    // Detect floods and failures on the proxy itself: its Function URL is public and reserved concurrency is only 50.
+    const proxyAlarms = [
+      { id: 'ProxyErrorsAlarm', suffix: 'errors', metric: proxyFn.metricErrors, threshold: 5 },
+      { id: 'ProxyThrottlesAlarm', suffix: 'throttles', metric: proxyFn.metricThrottles, threshold: 1 },
+      { id: 'ProxyInvocationsFloodAlarm', suffix: 'invocations-flood', metric: proxyFn.metricInvocations, threshold: 3000 },
+    ];
+    for (const a of proxyAlarms) {
+      new cw.Alarm(this, a.id, {
+        alarmName: `jarvis-${props.envName}-ai-proxy-${a.suffix}`,
+        metric: a.metric.call(proxyFn, { statistic: 'Sum', period: cdk.Duration.minutes(5) }),
+        threshold: a.threshold,
+        evaluationPeriods: 1,
+        comparisonOperator: cw.ComparisonOperator.GREATER_THAN_OR_EQUAL_TO_THRESHOLD,
+        treatMissingData: cw.TreatMissingData.NOT_BREACHING,
+      }).addAlarmAction(new cwActions.SnsAction(alertTopic));
+    }
+
     // A served request whose meter write failed twice is uncounted, so it no longer counts towards the cap.
     // Metric filter dimensions can only come from log fields and the converse log has no env, so the env is in the metric name.
     const meterFailed = new logs.MetricFilter(this, 'MeterFailedFilter', {
@@ -187,8 +210,12 @@ export class AiProxyStack extends cdk.Stack {
       })],
     });
 
+    // Budgets assumes this role only for budgets of this account (confused-deputy guard).
     const budgetRole = new iam.Role(this, 'BedrockBudgetActionRole', {
-      assumedBy: new iam.ServicePrincipal('budgets.amazonaws.com'),
+      assumedBy: new iam.PrincipalWithConditions(
+        new iam.ServicePrincipal('budgets.amazonaws.com'),
+        { StringEquals: { 'aws:SourceAccount': this.account } },
+      ),
     });
     budgetRole.addToPolicy(new iam.PolicyStatement({
       actions: ['iam:AttachRolePolicy', 'iam:DetachRolePolicy'],
