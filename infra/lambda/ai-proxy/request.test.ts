@@ -12,6 +12,12 @@ test('a minimal request gets the defaults', () => {
   assert.deepEqual(parseRequest(raw), { workload: 'chat', system: null, messages: [{ role: 'user', content: [{ text: 'hi' }] }], tools: null, maxTokens: 2048, requestId: id, requestChars: raw.length });
 });
 
+test('requestChars counts UTF-8 bytes, so Chinese text is not undercounted', () => {
+  const raw = ok({ messages: [{ role: 'user', content: [{ text: '你好' }] }] });
+  assert.equal(parseRequest(raw).requestChars, Buffer.byteLength(raw));
+  assert.ok(parseRequest(raw).requestChars > raw.length);
+});
+
 test('maxTokens is clamped; nonsense falls back to the default', () => {
   assert.equal(parseRequest(ok({ maxTokens: 99999 })).maxTokens, 8192);
   assert.equal(parseRequest(ok({ maxTokens: 300 })).maxTokens, 300);

@@ -6,6 +6,7 @@ export type ProxyEvent =
   | { type: 'done'; stopReason: string; modelId: string; inputTokens: number; outputTokens: number; billedMicros: number; period: { key: string; usedMicros: number; capMicros: number } }
   | { type: 'error'; code: string };
 
+/** streamedChars is UTF-8 bytes of streamed output (the name predates the byte rule); input to estimateUsage. */
 export interface StreamSummary { stopReason: string | null; usage: Usage | null; streamedChars: number; failed: boolean }
 
 type Held = { kind: 'text'; block: number; text: string } | { kind: 'tool'; event: ProxyEvent };
@@ -58,15 +59,15 @@ export async function relay(
       if (d) {
         const delta = d.delta ?? {};
         if (typeof delta.text === 'string' && delta.text.length > 0) {
-          summary.streamedChars += delta.text.length;
+          summary.streamedChars += Buffer.byteLength(delta.text, 'utf8');
           out({ type: 'delta', text: delta.text }, d.contentBlockIndex);
         }
         if (typeof delta.toolUse?.input === 'string') {
-          summary.streamedChars += delta.toolUse.input.length;
+          summary.streamedChars += Buffer.byteLength(delta.toolUse.input, 'utf8');
           const tb = toolBlocks.get(d.contentBlockIndex);
           if (tb) tb.input += delta.toolUse.input;
         }
-        if (typeof delta.reasoningContent?.text === 'string') summary.streamedChars += delta.reasoningContent.text.length;
+        if (typeof delta.reasoningContent?.text === 'string') summary.streamedChars += Buffer.byteLength(delta.reasoningContent.text, 'utf8');
       }
 
       const stop = ev.contentBlockStop;

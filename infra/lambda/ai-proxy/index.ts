@@ -1,4 +1,5 @@
 import { CognitoJwtVerifier } from 'aws-jwt-verify';
+import { FetchError, JwksNotAvailableInCacheError } from 'aws-jwt-verify/error';
 import { clientInfo } from '../me/body';
 import { converse } from './converse';
 import type { Sink } from './converse';
@@ -44,7 +45,13 @@ export const handler = awslambda.streamifyResponse(async (event, responseStream)
     let userId = '';
     try {
       userId = (await verifier.verify(token)).sub;
-    } catch {
+    } catch (error) {
+      // Signing keys that cannot be fetched are our upstream failing, not a bad token: the client may retry.
+      // FetchError also covers NonRetryableFetchError. Every other failure (signature, expiry, client, token_use, unknown kid) is a 401.
+      if (error instanceof FetchError || error instanceof JwksNotAvailableInCacheError) {
+        console.log(JSON.stringify({ event: 'jwks_unavailable' }));
+        return fail(503, { error: 'upstream_error' });
+      }
       return fail(401, { error: 'unauthenticated' });
     }
 

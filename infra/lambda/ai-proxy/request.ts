@@ -12,6 +12,7 @@ export interface ConverseRequest {
   tools: Record<string, unknown> | null;
   maxTokens: number;
   requestId: string;
+  /** UTF-8 bytes of the raw body (the name predates the byte rule); input to estimateUsage. */
   requestChars: number;
 }
 
@@ -73,6 +74,6 @@ export function parseRequest(raw: string): ConverseRequest | null {
     tools: tools === undefined ? null : (tools as Record<string, unknown>),
     maxTokens: Math.min(wanted, MAX_TOKENS),
     requestId,
-    requestChars: raw.length,
+    requestChars: Buffer.byteLength(raw, 'utf8'),
   };
 }

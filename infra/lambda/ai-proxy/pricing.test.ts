@@ -17,7 +17,16 @@ test('cost and billed are integer micros rounded up', () => {
   assert.equal(big, 166187); assert.ok(Number.isSafeInteger(big));
 });
 
-test('estimates round up from characters', () => assert.deepEqual(estimateUsage(1001, 7), { inputTokens: 501, outputTokens: 4 }));
+test('estimates round up from UTF-8 bytes, three bytes per token', () => {
+  assert.deepEqual(estimateUsage(1001, 7), { inputTokens: 334, outputTokens: 3 });
+  const english = 'Hello, how are you?';
+  const chinese = '你好嗎，今日天氣好唔好？';
+  assert.equal(Buffer.byteLength(english), 19);
+  assert.equal(Buffer.byteLength(chinese), 36);
+  assert.deepEqual(estimateUsage(Buffer.byteLength(english), Buffer.byteLength(english)), { inputTokens: 7, outputTokens: 7 });
+  // Twelve characters cost three bytes each, so the estimate is 12 tokens: not the 6 a characters-based rule would give.
+  assert.deepEqual(estimateUsage(Buffer.byteLength(chinese), Buffer.byteLength(chinese)), { inputTokens: 12, outputTokens: 12 });
+});
 
 test('cap overshoot is bounded: 8 in flight at the largest request stays under US$1.50', () => {
   // 131,072 input tokens = the largest context in the catalog today; revisit if a bigger-context model is added

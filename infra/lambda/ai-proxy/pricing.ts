@@ -12,7 +12,10 @@ export function billedMicros(cost: number, multiplierBps: number): number {
   return Math.ceil((cost * multiplierBps) / 10_000);
 }
 
-/** Token estimate used only when the provider reports no usage: two characters per token, rounded up. */
-export function estimateUsage(requestChars: number, streamedChars: number): Usage {
-  return { inputTokens: Math.ceil(requestChars / 2), outputTokens: Math.ceil(streamedChars / 2) };
+/**
+ * Token estimate used only when the provider reports no usage: three UTF-8 bytes per token, rounded up.
+ * Bytes, not characters, so Chinese (three bytes a character) is not undercounted. Callers pass byte lengths.
+ */
+export function estimateUsage(requestBytes: number, streamedBytes: number): Usage {
+  return { inputTokens: Math.ceil(requestBytes / 3), outputTokens: Math.ceil(streamedBytes / 3) };
 }

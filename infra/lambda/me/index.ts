@@ -6,7 +6,7 @@ import { clientInfo, meBody } from './body';
 import { readTrialDays } from '../stripe-checkout/trial';
 import { effectiveConfig } from '../ai-proxy/config';
 import { jarvisAiStatus, resolvePlan } from '../ai-proxy/entitlement';
-import type { Grant } from '../ai-proxy/entitlement';
+import type { Grant, JarvisAiStatus } from '../ai-proxy/entitlement';
 
 const cognito = new CognitoIdentityProviderClient({});
 const ddb = DynamoDBDocumentClient.from(new DynamoDBClient({}));
@@ -62,25 +62,37 @@ export async function handler(event: APIGatewayProxyEventV2WithJWTAuthorizer): P
   if (!sub || !username) return { statusCode: 401, body: 'Missing identity' };
 
   const now = new Date();
-  const [row, grants, configRow, email] = await Promise.all([
-    ddb.send(new GetCommand({ TableName: process.env.USER_META_TABLE!, Key: { userId: sub } })),
+  // The AI reads must never take /me down: any failure leaves jarvisAi null and the rest of the response as today.
+  const aiReads = Promise.all([
     grantsFor(sub),
     ddb.send(new GetCommand({ TableName: process.env.AI_CONFIG_TABLE!, Key: { config: 'current' } })),
+  ]).catch(() => null);
+  const [row, email, reads] = await Promise.all([
+    ddb.send(new GetCommand({ TableName: process.env.USER_META_TABLE!, Key: { userId: sub } })),
     emailFor(username),
+    aiReads,
     touch(sub, event.headers ?? {}, now),
   ]);
-  const { config } = effectiveConfig(configRow.Item);
-  // The period key comes only from resolvePlan, so /me and the proxy always count the same month.
-  const plan = resolvePlan(row.Item, grants, config, now);
-  const used = plan.periodKey
-    ? ((await ddb.send(new GetCommand({ TableName: process.env.AI_PERIOD_TABLE!, Key: { userId: sub, periodKey: plan.periodKey } }))).Item?.billedMicros as number | undefined) ?? 0
-    : 0;
+  let jarvisAi: JarvisAiStatus | null = null;
+  try {
+    if (!reads) throw new Error('ai reads failed');
+    const [grants, configRow] = reads;
+    const { config } = effectiveConfig(configRow.Item);
+    // The period key comes only from resolvePlan, so /me and the proxy always count the same month.
+    const plan = resolvePlan(row.Item, grants, config, now);
+    const used = plan.periodKey
+      ? ((await ddb.send(new GetCommand({ TableName: process.env.AI_PERIOD_TABLE!, Key: { userId: sub, periodKey: plan.periodKey } }))).Item?.billedMicros as number | undefined) ?? 0
+      : 0;
+    jarvisAi = jarvisAiStatus(plan, used, config.globalPause, row.Item);
+  } catch {
+    console.log(JSON.stringify({ event: 'me_ai_unavailable' }));
+  }
   return {
     statusCode: 200,
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({
       ...meBody(sub, email, row.Item, readTrialDays(process.env.TRIAL_DAYS) ?? 0),
-      jarvisAi: jarvisAiStatus(plan, used, config.globalPause, row.Item),
+      jarvisAi,
     }),
   };
 }

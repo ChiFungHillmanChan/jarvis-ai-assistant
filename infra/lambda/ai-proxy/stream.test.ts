@@ -27,7 +27,7 @@ test('reasoning content is never emitted', async () => {
     { contentBlockDelta: { contentBlockIndex: 0, delta: { reasoningContent: { text: 'thinking...' } } } },
     text('答案', 1), stop('end_turn'), usage]), { dsml: false, hasTools: false }, (e: any) => out.push(e));
   assert.deepEqual(out, [{ type: 'delta', text: '答案' }]);
-  assert.equal(s.streamedChars, 13);
+  assert.equal(s.streamedChars, 17, 'bytes: 11 for the reasoning text and 6 for two Chinese characters');
 });
 
 test('a text block with no contentBlockStart streams, and an empty text block emits nothing', async () => {
@@ -106,7 +106,7 @@ test('DSML mode without a tool block emits the text once, after messageStop', as
   const s = await relay(watched(), { dsml: true, hasTools: true }, (e: any) => { out.push(e); seen.push('emit'); });
   assert.deepEqual(out, [{ type: 'delta', text: '你好' }]);
   assert.deepEqual(seen, ['contentBlockDelta', 'messageStop', 'emit', 'metadata']);
-  assert.equal(s.streamedChars, 2);
+  assert.equal(s.streamedChars, 6, 'bytes: two Chinese characters');
 });
 
 test('DSML text is kept when dsml is on but the request had no tools', async () => {

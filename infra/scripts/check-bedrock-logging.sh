@@ -19,7 +19,7 @@ console.log([...new Set(regions)].join('\n'));
 
 for r in $regions; do
   if ! out=$(aws bedrock get-model-invocation-logging-configuration \
-      --region "$r" --profile "${AWS_PROFILE:-jarvis}" \
+      --region "$r" --profile "${AWS_PROFILE:-jarvis-deploy}" \
       --query loggingConfig --output json); then
     echo "Could not read Bedrock invocation logging in $r; refusing to deploy" >&2
     exit 1

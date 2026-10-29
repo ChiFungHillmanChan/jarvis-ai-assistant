@@ -252,8 +252,8 @@ test('a mid-stream failure meters an estimate and sends an error event', async (
   assert.equal(out.ended, true);
   assert.equal(calls.meter.length, 1);
   assert.equal(calls.meter[0].status, 'error');
-  assert.equal(calls.meter[0].outputTokens, 4);
-  assert.equal(calls.meter[0].inputTokens, Math.ceil(body().length / 2));
+  assert.equal(calls.meter[0].outputTokens, 3);
+  assert.equal(calls.meter[0].inputTokens, Math.ceil(Buffer.byteLength(body()) / 3));
   assert.equal(calls.released, 1);
   assert.equal(calls.logs.length, 1);
   assert.deepEqual([calls.logs[0].status, calls.logs[0].code], ['error', 'upstream_error']);
@@ -295,9 +295,18 @@ test('a failing start is a disconnect: Bedrock is still relayed, metered and rel
 test('output without reported usage is metered from an estimate', async () => {
   const { deps, calls } = fakeDeps({ openStream: async () => from([text('abcdefg'), stop('end_turn')]) }); const { out, sink } = fakeSink();
   await converse(deps, caller, body(), sink);
-  assert.equal(calls.meter[0].outputTokens, 4);
-  assert.equal(calls.meter[0].inputTokens, Math.ceil(body().length / 2));
+  assert.equal(calls.meter[0].outputTokens, 3);
+  assert.equal(calls.meter[0].inputTokens, Math.ceil(Buffer.byteLength(body()) / 3));
   assert.equal(out.events.at(-1).type, 'done');
+});
+
+test('a Chinese reply without reported usage is estimated from its bytes, not its characters', async () => {
+  const reply = '你好嗎，今日天氣好唔好？';
+  const { deps, calls } = fakeDeps({ openStream: async () => from([text(reply), stop('end_turn')]) }); const { sink } = fakeSink();
+  const chinese = body({ messages: [{ role: 'user', content: [{ text: '你好' }] }] });
+  await converse(deps, caller, chinese, sink);
+  assert.equal(calls.meter[0].outputTokens, 12);
+  assert.equal(calls.meter[0].inputTokens, Math.ceil(Buffer.byteLength(chinese) / 3));
 });
 
 test('the daily alarm fires only when this request crosses US$20', async () => {
