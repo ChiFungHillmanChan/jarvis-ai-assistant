@@ -104,7 +104,7 @@ export class AiProxyStack extends cdk.Stack {
     });
     this.proxyUrl = url.url;
 
-    this.addGuardrails(props);
+    this.addGuardrails(props, logGroup);
 
     new cdk.CfnOutput(this, 'AiProxyUrl', {
       value: this.proxyUrl,
@@ -113,7 +113,7 @@ export class AiProxyStack extends cdk.Stack {
     });
   }
 
-  private addGuardrails(props: AiProxyStackProps): void {
+  private addGuardrails(props: AiProxyStackProps, logGroup: logs.ILogGroup): void {
     const alertTopic = new sns.Topic(this, 'AiAlertTopic', {
       topicName: `jarvis-${props.envName}-ai-alerts`,
       displayName: `JARVIS ${props.envName} AI alerts`,
@@ -130,6 +130,28 @@ export class AiProxyStack extends cdk.Stack {
         statistic: 'Sum',
         period: cdk.Duration.minutes(5),
       }),
+      threshold: 1,
+      evaluationPeriods: 1,
+      comparisonOperator: cw.ComparisonOperator.GREATER_THAN_OR_EQUAL_TO_THRESHOLD,
+      treatMissingData: cw.TreatMissingData.NOT_BREACHING,
+    }).addAlarmAction(new cwActions.SnsAction(alertTopic));
+
+    // A served request whose meter write failed twice is uncounted, so it no longer counts towards the cap.
+    // Metric filter dimensions can only come from log fields and the converse log has no env, so the env is in the metric name.
+    const meterFailed = new logs.MetricFilter(this, 'MeterFailedFilter', {
+      logGroup,
+      filterPattern: logs.FilterPattern.all(
+        logs.FilterPattern.stringValue('$.event', '=', 'converse'),
+        logs.FilterPattern.booleanValue('$.meterFailed', true),
+      ),
+      metricNamespace: 'Jarvis/AiProxy',
+      metricName: `MeterFailed-${props.envName}`,
+      metricValue: '1',
+      unit: cw.Unit.COUNT,
+    });
+    new cw.Alarm(this, 'MeterFailedAlarm', {
+      alarmName: `jarvis-${props.envName}-ai-meter-failed`,
+      metric: meterFailed.metric({ statistic: 'Sum', period: cdk.Duration.minutes(5) }),
       threshold: 1,
       evaluationPeriods: 1,
       comparisonOperator: cw.ComparisonOperator.GREATER_THAN_OR_EQUAL_TO_THRESHOLD,
@@ -165,6 +187,8 @@ export class AiProxyStack extends cdk.Stack {
         timeUnit: 'MONTHLY',
         budgetLimit: { amount: 100, unit: 'USD' },
         costFilters: { Service: ['Amazon Bedrock'] },
+        // Count real spend only: with credits included, the alerts and the kill switch would fire late.
+        costTypes: { includeCredit: false, includeRefund: false },
       },
       notificationsWithSubscribers: [50, 80, 100].map(threshold => ({
         notification: {

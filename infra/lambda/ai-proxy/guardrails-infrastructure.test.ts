@@ -33,6 +33,9 @@ test('sandbox owns the Bedrock-only budget with alerts at 50, 80 and 100 percent
   assert.equal(Budget.TimeUnit, 'MONTHLY');
   assert.deepEqual(Budget.BudgetLimit, { Amount: 100, Unit: 'USD' });
   assert.deepEqual(Budget.CostFilters, { Service: ['Amazon Bedrock'] });
+  // Credits and refunds would hide real Bedrock spend, so the alerts and the kill switch count only real cost.
+  assert.equal(Budget.CostTypes.IncludeCredit, false);
+  assert.equal(Budget.CostTypes.IncludeRefund, false);
   assert.deepEqual(NotificationsWithSubscribers.map((n: any) => n.Notification.Threshold), [50, 80, 100]);
   for (const n of NotificationsWithSubscribers) {
     assert.equal(n.Notification.NotificationType, 'ACTUAL');
@@ -100,9 +103,8 @@ test('other envs get no budget or action, but keep the per-user alarm', () => {
   assert.equal(ofType(template, 'AWS::Budgets::Budget').length, 0);
   assert.equal(ofType(template, 'AWS::Budgets::BudgetsAction').length, 0);
   assert.equal(ofType(template, 'AWS::IAM::ManagedPolicy').length, 0);
-  const alarms = ofType(template, 'AWS::CloudWatch::Alarm');
+  const alarms = ofType(template, 'AWS::CloudWatch::Alarm').filter((a: any) => a.Properties.AlarmName === 'jarvis-dev-ai-user-daily-over-20usd');
   assert.equal(alarms.length, 1);
-  assert.equal(alarms[0].Properties.AlarmName, 'jarvis-dev-ai-user-daily-over-20usd');
   assert.equal(alarms[0].Properties.MetricName, 'UserDailyBilledOver20');
   assert.deepEqual(alarms[0].Properties.Dimensions, [{ Name: 'Env', Value: 'dev' }]);
 });
@@ -118,8 +120,9 @@ test('every env alarms on the per-user daily metric and notifies the AI alerts t
     assert.equal(subs[0].Properties.Protocol, 'email');
     assert.equal(subs[0].Properties.Endpoint, 'alerts@example.test');
     assert.deepEqual(subs[0].Properties.TopicArn, { Ref: topicId });
-    const a = ofType(template, 'AWS::CloudWatch::Alarm')[0].Properties;
-    assert.equal(a.AlarmName, `jarvis-${env}-ai-user-daily-over-20usd`);
+    const daily = ofType(template, 'AWS::CloudWatch::Alarm').filter((x: any) => x.Properties.AlarmName === `jarvis-${env}-ai-user-daily-over-20usd`);
+    assert.equal(daily.length, 1);
+    const a = daily[0].Properties;
     assert.equal(a.Namespace, 'Jarvis/AiProxy');
     assert.equal(a.MetricName, 'UserDailyBilledOver20');
     assert.deepEqual(a.Dimensions, [{ Name: 'Env', Value: env }]);
@@ -130,6 +133,37 @@ test('every env alarms on the per-user daily metric and notifies the AI alerts t
     assert.equal(a.ComparisonOperator, 'GreaterThanOrEqualToThreshold');
     assert.equal(a.TreatMissingData, 'notBreaching');
     assert.deepEqual(a.AlarmActions, [{ Ref: topicId }]);
+  }
+});
+
+test('every env alarms when a served request could not be metered', () => {
+  for (const env of ['sandbox', 'dev']) {
+    const template = proxy(env);
+    const idOf = (resource: any) => Object.keys(template.Resources).find(k => template.Resources[k] === resource);
+    const logGroups = ofType(template, 'AWS::Logs::LogGroup').filter((l: any) => l.Properties.LogGroupName === `/aws/lambda/jarvis-${env}-ai-proxy`);
+    assert.equal(logGroups.length, 1);
+    const filters = ofType(template, 'AWS::Logs::MetricFilter');
+    assert.equal(filters.length, 1);
+    const f = filters[0].Properties;
+    assert.deepEqual(f.LogGroupName, { Ref: idOf(logGroups[0]) });
+    assert.equal(f.FilterPattern, '{ ($.event = "converse") && ($.meterFailed IS TRUE) }');
+    // The converse log has no env field, so the env is in the metric name; the filter reads only this env's log group.
+    assert.deepEqual(f.MetricTransformations, [{ MetricNamespace: 'Jarvis/AiProxy', MetricName: `MeterFailed-${env}`, MetricValue: '1', Unit: 'Count' }]);
+
+    const topic = ofType(template, 'AWS::SNS::Topic').find((t: any) => t.Properties.TopicName === `jarvis-${env}-ai-alerts`);
+    const alarms = ofType(template, 'AWS::CloudWatch::Alarm').filter((a: any) => a.Properties.AlarmName === `jarvis-${env}-ai-meter-failed`);
+    assert.equal(alarms.length, 1);
+    const a = alarms[0].Properties;
+    assert.equal(a.Namespace, 'Jarvis/AiProxy');
+    assert.equal(a.MetricName, `MeterFailed-${env}`);
+    assert.equal(a.Dimensions, undefined);
+    assert.equal(a.Statistic, 'Sum');
+    assert.equal(a.Period, 300);
+    assert.equal(a.EvaluationPeriods, 1);
+    assert.equal(a.Threshold, 1);
+    assert.equal(a.ComparisonOperator, 'GreaterThanOrEqualToThreshold');
+    assert.equal(a.TreatMissingData, 'notBreaching');
+    assert.deepEqual(a.AlarmActions, [{ Ref: idOf(topic) }]);
   }
 });
 
