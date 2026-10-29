@@ -1,4 +1,5 @@
 import { CognitoJwtVerifier } from 'aws-jwt-verify';
+import { clientInfo } from '../me/body';
 import { converse } from './converse';
 import type { Sink } from './converse';
 import { createDeps } from './store';
@@ -48,8 +49,8 @@ export const handler = awslambda.streamifyResponse(async (event, responseStream)
     }
 
     const raw: string = event.body ? (event.isBase64Encoded ? Buffer.from(event.body, 'base64').toString('utf8') : event.body) : '';
-    const version: unknown = event.headers?.['x-jarvis-app-version'];
-    const appVersion = typeof version === 'string' && version.length <= 32 ? version : null;
+    // The same check as /me, so only a version label, never free text, reaches ai-usage.
+    const { appVersion } = clientInfo(event.headers ?? {});
 
     const sink: Sink = {
       fail,
