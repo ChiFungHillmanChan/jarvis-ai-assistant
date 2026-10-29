@@ -1,4 +1,4 @@
-import type { MailMessage } from './mail';
+import type { MailAnalysis, MailMessage } from './mail';
 
 export function mailSourceUrl(message: Pick<MailMessage, 'provider_id' | 'account_email'>): string | null {
   if (!/^[a-f\d]{1,64}$/i.test(message.provider_id) || !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(message.account_email)) return null;
@@ -73,6 +73,21 @@ export function categoryLabel(category: string, text: Text): string {
     case 'personal': return text('Personal', '個人事務');
     case 'promotions': return text('Promotions and newsletters', '推廣及電子報');
     default: return category;
+  }
+}
+
+/**
+ * Who answered a group analysis. With "Same AI as the assistant" the backend
+ * reports "Provider · model" for the AI that answered (mail/analysis.rs), so
+ * that string already names it; only "local" mode is Ollama on this Mac.
+ */
+export function analysisSource(result: Pick<MailAnalysis, 'mode' | 'model'>, text: Text): string {
+  switch (result.mode) {
+    case 'assistant': return result.model;
+    case 'openai': return `OpenAI ${result.model}`;
+    case 'bedrock': return `AWS Bedrock ${result.model}`;
+    case 'local': return text(`Local Ollama ${result.model}`, `本機 Ollama ${result.model}`);
+    default: return result.model;
   }
 }
 

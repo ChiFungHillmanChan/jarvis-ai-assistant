@@ -5,7 +5,7 @@ import type { MailAccount, MailAnalysis, MailItem, MailMemory, MailMemoryInput, 
 import { useWorkspaceValue } from "../workspace/WorkspaceContext";
 import ReadableContent from "../components/content/ReadableContent";
 import { CategoryTag, MailAgenda, MailAiCard } from "../components/mail/MailItems";
-import { backendUtc, categoryLabel, decodeEntities, fileSize, formatDue, MAIL_CATEGORIES, mailSourceUrl, parseSender, readableBody, revealMailSource } from "../lib/mail-presentation";
+import { analysisSource, backendUtc, categoryLabel, decodeEntities, fileSize, formatDue, MAIL_CATEGORIES, mailSourceUrl, parseSender, readableBody, revealMailSource } from "../lib/mail-presentation";
 import { openUrl } from "../lib/commands";
 import { useAiModels } from "../lib/ai-models";
 import { useUiLocale } from "../i18n";
@@ -372,7 +372,7 @@ export default function EmailPage({ onSetup }: { onSetup?: () => void }) {
               <p className="mail-hint">{workspace?.settings.processing_mode === "assistant" ? text("Uses the AI chosen in Settings → Your AI. The group's emails, instructions and active memories are sent to it.", "使用在「設定 → 你的 AI」選擇的 AI；群組郵件、指示及有效記憶會傳送至該 AI。") : workspace?.settings.processing_mode === "openai" ? text(`Uses ${workspace.settings.openai_model} on your OpenAI account. The group's emails, instructions and active memories are sent to OpenAI.`, `使用你 OpenAI 帳戶的 ${workspace.settings.openai_model}；群組郵件、指示及有效記憶會傳送至 OpenAI。`) : workspace?.settings.processing_mode === "bedrock" ? text("Uses your AWS Bedrock account. The group's emails, instructions and active memories are sent to AWS.", "使用你的 AWS Bedrock；群組郵件、指示及有效記憶會傳送至 AWS。") : text("Uses Ollama on this Mac only, with no cloud fallback.", "只使用此 Mac 上的 Ollama，不會自動改用雲端。")}</p>
               <button className="mail-primary" disabled={!!busy} onClick={() => run(text("Analyze group", "分析群組"), async () => { const result = await mail.mailAnalyzeGroup(group.id); setAnalysis({ groupId: group.id, result }); }, false)}>{busy === text("Analyze group", "分析群組") ? text("Analysing…", "分析中…") : text("Analyse this group", "分析此群組")}</button>
               {analysis?.groupId === group.id && <div className="mail-analysis-result">
-                <p className="mail-hint">{analysis.result.mode === "openai" ? "OpenAI" : analysis.result.mode === "bedrock" ? "AWS Bedrock" : text("Local Ollama", "本機 Ollama")} {analysis.result.model}{analysis.result.input_tokens ? text(`, ${analysis.result.input_tokens + analysis.result.output_tokens} tokens`, `，${analysis.result.input_tokens + analysis.result.output_tokens} tokens`) : ""}{analysis.result.omitted_messages ? text(`, ${analysis.result.omitted_messages} emails not included`, `，${analysis.result.omitted_messages} 封未納入`) : ""}</p>
+                <p className="mail-hint">{analysisSource(analysis.result, text)}{analysis.result.input_tokens ? text(`, ${analysis.result.input_tokens + analysis.result.output_tokens} tokens`, `，${analysis.result.input_tokens + analysis.result.output_tokens} tokens`) : ""}{analysis.result.omitted_messages ? text(`, ${analysis.result.omitted_messages} emails not included`, `，${analysis.result.omitted_messages} 封未納入`) : ""}</p>
                 <ReadableContent text={analysis.result.text} sourceIds={analysis.result.source_ids} onSource={openSource} />
               </div>}
             </div>
