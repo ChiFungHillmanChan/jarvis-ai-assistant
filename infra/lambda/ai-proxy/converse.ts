@@ -93,6 +93,7 @@ export async function converse(deps: Deps, caller: { userId: string; appVersion:
   let streaming = false;
 
   // The client may already be gone; a failing sink must never change what is metered.
+  const start = () => { try { sink.start(); } catch { /* disconnected */ } };
   const send = (event: ProxyEvent) => { try { sink.send(event); } catch { /* disconnected */ } };
   const end = () => { try { sink.end(); } catch { /* disconnected */ } };
   const refuse = (code: ErrorCode, extra: Record<string, unknown> = {}, status: RequestLog['status'] = 'denied') => {
@@ -147,7 +148,7 @@ export async function converse(deps: Deps, caller: { userId: string; appVersion:
       entry.modelId = modelId;
       const catalog = CATALOG[modelId];
 
-      sink.start();
+      start();
       streaming = true;
       const summary = await relay(events, { dsml: catalog.dsml, hasTools: request.tools !== null }, send);
 

@@ -276,6 +276,18 @@ test('client disconnect still meters reported usage and releases', async () => {
   assert.equal(out.status, 200);
 });
 
+test('a failing start is a disconnect: Bedrock is still relayed, metered and released', async () => {
+  const { deps, calls } = fakeDeps(); const { out, sink } = fakeSink({ start: () => { throw new Error('socket closed'); } });
+  await converse(deps, caller, body(), sink);
+  assert.equal(calls.meter.length, 1);
+  assert.deepEqual([calls.meter[0].inputTokens, calls.meter[0].outputTokens, calls.meter[0].billedMicros, calls.meter[0].status], [1000, 500, BILLED, 'ok']);
+  assert.equal(calls.released, 1);
+  assert.equal(calls.logs.length, 1);
+  assert.deepEqual([calls.logs[0].status, calls.logs[0].code, calls.logs[0].billedMicros, calls.logs[0].meterFailed], ['ok', null, BILLED, false]);
+  assert.equal(out.events.at(-1).type, 'done');
+  assert.deepEqual([out.status, out.body], [200, null], 'no error response is attempted on a started stream');
+});
+
 test('output without reported usage is metered from an estimate', async () => {
   const { deps, calls } = fakeDeps({ openStream: async () => from([text('abcdefg'), stop('end_turn')]) }); const { out, sink } = fakeSink();
   await converse(deps, caller, body(), sink);
