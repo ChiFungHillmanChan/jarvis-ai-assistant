@@ -13,10 +13,22 @@ test('parseConfig rejects unsafe values', () => {
     { multiplierBps: 9999 }, { includedMicros: 1.5 }, { defaultCapMicros: -1 }, { globalPause: 'no' },
     { prices: { 'qwen.qwen3-32b-v1:0': DEFAULT_CONFIG.prices['qwen.qwen3-32b-v1:0'] } }, // referenced deepseek has no price
     { pricesCheckedOn: '29/10/2026' },
+    { models: { ...DEFAULT_CONFIG.models, chat: { primary: 'constructor', fallback: null } } }, // inherited key, not a catalog model
+    { models: { ...DEFAULT_CONFIG.models, chat: { primary: 'qwen.qwen3-32b-v1:0', fallback: 'toString' } } },
+    { prices: JSON.parse('{"__proto__":{"inputMicrosPerMTok":1,"outputMicrosPerMTok":1}}') },
   ];
   for (const over of bad) assert.equal(parseConfig({ ...DEFAULT_CONFIG, ...over }), null, JSON.stringify(over));
   const { voice, ...missing } = DEFAULT_CONFIG.models;
   assert.equal(parseConfig({ ...DEFAULT_CONFIG, models: missing }), null);
+});
+
+test('a __proto__ key in prices cannot alter the parsed prices', () => {
+  const prices = JSON.parse('{"__proto__":{"inputMicrosPerMTok":1,"outputMicrosPerMTok":1}}');
+  Object.assign(prices, DEFAULT_CONFIG.prices);
+  const parsed = parseConfig({ ...DEFAULT_CONFIG, prices });
+  assert.deepEqual(parsed, DEFAULT_CONFIG);
+  assert.equal(Object.getPrototypeOf(parsed.prices), Object.prototype);
+  assert.equal(Object.hasOwn(parsed.prices, '__proto__'), false);
 });
 
 test('a missing row uses defaults; an invalid row pauses', () => {

@@ -45,7 +45,7 @@ export function parseConfig(value: unknown): AiConfig | null {
   for (const [id, raw] of Object.entries(value.prices)) {
     const price = parsePrice(raw);
     if (!price) return null;
-    if (id in CATALOG) prices[id] = price;
+    if (Object.hasOwn(CATALOG, id)) prices[id] = price; // own keys only: '__proto__' and 'constructor' are dropped
   }
 
   const models = {} as AiConfig['models'];
@@ -53,9 +53,9 @@ export function parseConfig(value: unknown): AiConfig | null {
     const entry = value.models[workload];
     if (!isObject(entry)) return null;
     const { primary, fallback } = entry;
-    if (typeof primary !== 'string' || !(primary in CATALOG)) return null;
-    if (fallback !== null && (typeof fallback !== 'string' || !(fallback in CATALOG) || fallback === primary)) return null;
-    if (!prices[primary] || (fallback !== null && !prices[fallback])) return null;
+    if (typeof primary !== 'string' || !Object.hasOwn(CATALOG, primary)) return null;
+    if (fallback !== null && (typeof fallback !== 'string' || !Object.hasOwn(CATALOG, fallback) || fallback === primary)) return null;
+    if (!Object.hasOwn(prices, primary) || (fallback !== null && !Object.hasOwn(prices, fallback))) return null;
     models[workload] = { primary, fallback };
   }
 

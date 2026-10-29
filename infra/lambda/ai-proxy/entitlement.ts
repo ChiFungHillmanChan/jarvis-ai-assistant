@@ -42,12 +42,12 @@ export function hkMonth(now: Date): { key: string; endsAt: string } {
   };
 }
 
-/** Newest grant that is not revoked and covers now; validUntil is exclusive. */
+/** Newest grant that is not revoked and covers now; validUntil is exclusive. A grant without a valid credit is ignored (fail closed). */
 export function activeGrant(grants: Grant[], now: Date): Grant | null {
   const t = now.getTime();
   let best: Grant | null = null;
   for (const g of grants) {
-    if (g.revokedAt || !(Date.parse(g.validFrom) <= t && t < Date.parse(g.validUntil))) continue;
+    if (g.revokedAt || !Number.isSafeInteger(g.creditMicros) || !(g.creditMicros > 0) || !(Date.parse(g.validFrom) <= t && t < Date.parse(g.validUntil))) continue;
     if (!best || Date.parse(g.createdAt) > Date.parse(best.createdAt)) best = g;
   }
   return best;

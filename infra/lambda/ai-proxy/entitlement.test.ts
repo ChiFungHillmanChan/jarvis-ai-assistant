@@ -57,6 +57,14 @@ test('activeGrant ignores revoked, expired and future grants and picks the newes
   assert.equal(activeGrant([grant(), grant({ grantId: 'g2', createdAt: '2026-11-10T00:00:00Z' })], now).grantId, 'g2');
 });
 
+test('a grant without a valid creditMicros is not active, so the user is not entitled', () => {
+  const { creditMicros, ...missing } = grant();
+  for (const g of [missing, grant({ creditMicros: 0 }), grant({ creditMicros: 1.5 }), grant({ creditMicros: '20000000' })]) {
+    assert.equal(activeGrant([g], now), null, JSON.stringify(g));
+    assert.deepEqual(resolvePlan(undefined, [g], DEFAULT_CONFIG, now), NONE);
+  }
+});
+
 test('hkMonth uses Hong Kong time at the month boundary', () => {
   assert.deepEqual(hkMonth(new Date('2026-10-31T15:59:59Z')), { key: 'm2026-10', endsAt: '2026-10-31T16:00:00.000Z' });
   assert.deepEqual(hkMonth(new Date('2026-10-31T16:00:00Z')), { key: 'm2026-11', endsAt: '2026-11-30T16:00:00.000Z' });
