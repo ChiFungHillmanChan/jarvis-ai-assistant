@@ -113,14 +113,10 @@ export class AuthStack extends cdk.Stack {
         adminUserPassword: false,
         custom: false,
       },
-      // Exactly the attributes the Google provider maps above (Cognito requires mapped attributes
-      // to be client-writable). Anything else, including custom:tier and custom:stripeCustomerId,
-      // is server-side only.
-      writeAttributes: new cognito.ClientAttributes().withStandardAttributes({
-        email: true,
-        emailVerified: true,
-        givenName: true,
-      }),
+      // Write attributes stay at Cognito's default: Cognito refuses email_verified as a client write
+      // attribute, and Google sign-in must store it for account linking. Users still cannot change
+      // attributes because UpdateUserAttributes needs the aws.cognito.signin.user.admin scope, which
+      // SRP is off for and the OAuth scopes below never include.
       preventUserExistenceErrors: true,
       enableTokenRevocation: true,
       refreshTokenValidity: cdk.Duration.days(30),

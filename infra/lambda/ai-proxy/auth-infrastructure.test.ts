@@ -16,9 +16,12 @@ test('the app client signs in only through the hosted UI, refreshing with its to
   assert.ok(!client.Properties.ExplicitAuthFlows.includes('ALLOW_USER_SRP_AUTH'));
 });
 
-test('the app client can write only the attributes the Google provider maps', () => {
+test('the app client keeps default write attributes and cannot reach UpdateUserAttributes', () => {
   const [[, client]] = appClients(auth());
-  assert.deepEqual([...client.Properties.WriteAttributes].sort(), ['email', 'email_verified', 'given_name']);
+  assert.equal(client.Properties.WriteAttributes, undefined);
+  const scopes: string[] = client.Properties.AllowedOAuthScopes;
+  assert.ok(!scopes.includes('aws.cognito.signin.user.admin'));
+  assert.deepEqual([...scopes].sort(), ['email', 'openid', 'profile']);
 });
 
 test('the app client is updated in place, not replaced', () => {
