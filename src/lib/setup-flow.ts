@@ -1,5 +1,25 @@
+import type { MailTriageStatus } from './mail';
+
 export function canStartFirstAnalysis(readiness: string, selectedMessages: number) {
   return readiness === 'ready' && selectedMessages > 0;
+}
+
+/**
+ * What AI sorting sends and to whom, for the consent asked during setup
+ * (src-tauri/src/mail/triage.rs). TypeSafe Jev classifies only when the user
+ * added a TypeSafe key; otherwise the AI chosen in setup does all of it.
+ */
+export function triageConsentText(triage: Pick<MailTriageStatus, 'typesafe_key' | 'chosen_ai'>, text: (en: string, zh: string) => string): string {
+  const ai = triage.chosen_ai;
+  if (triage.typesafe_key) return text(
+    `TypeSafe Jev receives the sender, recipients, subject, the first 1,500 characters and your mailbox addresses to sort each email.${ai ? ` Only emails that need a summary or mention a date go to ${ai}, up to 6,000 characters.` : ''}`,
+    `TypeSafe Jev 會收到寄件人、收件人、主旨、正文開頭 1,500 字及你的信箱地址，用來分類每封郵件。${ai ? `只有需要摘要或含日期的郵件，才會把最多 6,000 字傳送至 ${ai}。` : ''}`);
+  if (ai === 'Ollama') return text(
+    'The sender, recipients, subject and up to 6,000 characters of each email go to Ollama on this Mac, so the mail does not leave this Mac.',
+    '每封郵件的寄件人、收件人、主旨及最多 6,000 字正文會交由此 Mac 上的 Ollama 處理，郵件不會離開此 Mac。');
+  return text(
+    `The sender, recipients, subject and up to 6,000 characters of each email are sent to ${ai}, the AI you chose.`,
+    `每封郵件的寄件人、收件人、主旨及最多 6,000 字正文會傳送至你選擇的 ${ai}。`);
 }
 
 /** Subscribe before starting; only this operation's terminal event may complete it. */

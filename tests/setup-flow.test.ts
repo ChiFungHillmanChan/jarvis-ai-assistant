@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { followJob, canStartFirstAnalysis } from '../src/lib/setup-flow.ts';
+import { followJob, canStartFirstAnalysis, triageConsentText } from '../src/lib/setup-flow.ts';
 
 test('job progress ignores an old job and waits for the matching terminal event', async () => {
   let deliver: (event: { jobId: string; stage: string }) => void = () => {};
@@ -38,4 +38,34 @@ test('first analysis requires a tested AI and selected local mail, not a live Gm
   assert.equal(canStartFirstAnalysis('saved_unverified', 3), false);
   assert.equal(canStartFirstAnalysis('ready', 3), true, 'downloaded mail remains usable after Gmail disconnects');
   assert.equal(canStartFirstAnalysis('ready', 0), false);
+});
+
+const en = (value: string) => value;
+const zh = (_en: string, value: string) => value;
+
+test('the AI sorting consent names who receives the mail', () => {
+  const chosenOnly = { typesafe_key: false, chosen_ai: 'OpenAI' };
+  assert.match(triageConsentText(chosenOnly, en), /sent to OpenAI/);
+  assert.doesNotMatch(triageConsentText(chosenOnly, en), /TypeSafe/);
+  assert.match(triageConsentText(chosenOnly, zh), /OpenAI/);
+
+  // With a TypeSafe key, Jev classifies every email and the chosen AI writes summaries.
+  const withJev = { typesafe_key: true, chosen_ai: 'Claude' };
+  assert.match(triageConsentText(withJev, en), /TypeSafe Jev/);
+  assert.match(triageConsentText(withJev, en), /go to Claude/);
+  assert.match(triageConsentText(withJev, zh), /TypeSafe Jev.*Claude/);
+
+  // Ollama runs on this Mac: nothing leaves it.
+  assert.match(triageConsentText({ typesafe_key: false, chosen_ai: 'Ollama' }, en), /does not leave this Mac/);
+});
+
+test('the AI sorting consent is written Chinese, not colloquial Cantonese', () => {
+  for (const triage of [
+    { typesafe_key: false, chosen_ai: 'OpenAI' },
+    { typesafe_key: true, chosen_ai: 'Gemini' },
+    { typesafe_key: true, chosen_ai: null },
+    { typesafe_key: false, chosen_ai: 'Ollama' },
+  ]) {
+    assert.doesNotMatch(triageConsentText(triage, zh), /[係嘅咗唔啲嚟咁冇]/);
+  }
 });

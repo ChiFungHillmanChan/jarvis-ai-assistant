@@ -2,7 +2,7 @@ import { useEffect, useRef, useState } from 'react';
 import { useUiLocale } from '../i18n';
 import { getAwsCredentialsStatus, markOnboardingComplete, setApiKey, setAwsCredentials } from '../lib/commands';
 import * as mail from '../lib/mail';
-import { canStartFirstAnalysis } from '../lib/setup-flow';
+import { canStartFirstAnalysis, triageConsentText } from '../lib/setup-flow';
 import { applyTestedMailSettings, getSetupStatus, setupError, testMailAiConnection, type SetupStatus } from '../lib/setup';
 import ChooseAi from '../components/ChooseAi';
 import { useAiModels } from '../lib/ai-models';
@@ -35,6 +35,7 @@ export default function OnboardingWizard({ onComplete }: { onComplete: () => voi
   const [localBusy, setLocalBusy] = useState(false);
   const [loading, setLoading] = useState(true);
   const [credentialDirty, setCredentialDirty] = useState(false);
+  const [triageDeclined, setTriageDeclined] = useState(false);
   const operation = useRef(false);
   const mounted = useRef(true);
   const firstGroup = useRef<number | null>(null);
@@ -158,6 +159,12 @@ export default function OnboardingWizard({ onComplete }: { onComplete: () => voi
           {workspace.accounts.length > 0 && <label>{text('Mailbox', '信箱')}<select value={accountId} onChange={event => setAccountId(event.target.value)}>{workspace.accounts.map(account => <option key={account.id} value={account.id}>{account.email} · {account.connected ? text('Connected', '已連接') : text('Disconnected', '已斷開')} · {account.message_count}</option>)}</select></label>}
           <div className="setup-actions"><button type="button" onClick={() => void run(connectingGmail, async () => { const account = await mail.mailConnectAccount(); setAccountId(account.id); await syncAccount(account.id); })}>{text('Connect Gmail and sync first batch', '連接 Gmail 並同步首批郵件')}</button><button type="button" disabled={!workspace.accounts.find(account => account.id === accountId)?.connected} onClick={() => void run(text('Syncing mail', '同步郵件'), () => syncAccount(accountId))}>{text('Sync selected mailbox', '同步所選信箱')}</button></div>
           <p className="setup-hint">{text('Up to 50 messages per sync, not a full backup. Company accounts may need administrator approval. If sign-in expires or is blocked, check the account policy before retrying.', '每次最多同步 50 封，並非完整備份。公司帳戶可能需要管理員批准；登入逾時或被封鎖時，請先核對帳戶政策。')}</p>
+          {(workspace.triage.chosen_ai || workspace.triage.typesafe_key) && <div className="setup-current"><h2>{text('Sort new mail with AI', '以 AI 整理新郵件')}</h2>
+            {workspace.triage.enabled ? <p>{text('AI sorting is on. You can turn it off in Mail, under Analysis settings.', '已開啟 AI 整理。可在電郵工作區的「分析設定」關閉。')}</p>
+              : triageDeclined ? <p>{text('AI sorting stays off. You can turn it on later in Mail, under Analysis settings.', 'AI 整理維持關閉。之後可在電郵工作區的「分析設定」開啟。')}</p>
+              : <><p>{text('JARVIS can read each new email once to sort it, write a summary and list its follow-ups and dates.', 'JARVIS 可讀取每封新郵件一次，用來分類、撰寫摘要，並列出待辦事項及日期。')} {triageConsentText(workspace.triage, text)}</p>
+                <div className="setup-actions"><button type="button" className="setup-primary" onClick={() => void run(text('Turning on AI sorting', '開啟 AI 整理'), async () => { await mail.mailSetAutoTriage(true); await reload(); })}>{text('Turn on', '開啟')}</button><button type="button" onClick={() => setTriageDeclined(true)}>{text('Not now', '暫不開啟')}</button></div></>}
+          </div>}
         </>}
         {step === 3 && <>
           <p>{text('Select 2–5 short messages for one customer or project. Grouping them does not change Gmail labels.', '選取同一客戶或項目的 2–5 封簡短郵件；加入群組不會變更 Gmail 標籤。')}</p>
