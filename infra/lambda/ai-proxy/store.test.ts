@@ -46,7 +46,7 @@ test('config is cached for 30 seconds', async () => {
 
 test('a usage item holds metadata only', () => {
   const item = usageItem({ userId: 'u1', requestId: 'r1', ts: '2026-11-15T04:00:00.000Z', periodKey: 'm2026-11', workload: 'chat', modelId: 'qwen.qwen3-32b-v1:0', region: 'ap-northeast-1', inputTokens: 1, outputTokens: 2, costMicros: 3, billedMicros: 5, status: 'ok', latencyMs: 9, appVersion: null });
-  assert.deepEqual(Object.keys(item).sort(), ['billedMicros', 'costMicros', 'expiresAt', 'inputTokens', 'latencyMs', 'modelId', 'outputTokens', 'periodKey', 'region', 'requestId', 'sk', 'status', 'ts', 'userId', 'workload']);
+  assert.deepEqual(Object.keys(item).sort(), ['appVersion', 'billedMicros', 'costMicros', 'expiresAt', 'inputTokens', 'latencyMs', 'modelId', 'outputTokens', 'periodKey', 'region', 'requestId', 'sk', 'status', 'ts', 'userId', 'workload']);
   assert.equal(item.sk, '2026-11-15T04:00:00.000Z#r1');
   assert.equal(item.expiresAt, 1794715200 + 400 * 86400);
 });

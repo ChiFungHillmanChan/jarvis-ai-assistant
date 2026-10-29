@@ -68,7 +68,7 @@ export function cachedConfig(
   };
 }
 
-/** Metadata only: no prompt, reply, tool data, or app version ever reaches the table. */
+/** Metadata only: no prompt, reply or tool data ever reaches the table. The app version is a short client label, not content. */
 export function usageItem(record: UsageRecord): Record<string, unknown> {
   return {
     userId: record.userId,
@@ -85,6 +85,7 @@ export function usageItem(record: UsageRecord): Record<string, unknown> {
     billedMicros: record.billedMicros,
     status: record.status,
     latencyMs: record.latencyMs,
+    appVersion: record.appVersion,
     expiresAt: Math.floor(Date.parse(record.ts) / 1000) + USAGE_TTL_DAYS * 86_400,
   };
 }
