@@ -64,4 +64,7 @@ new AuditStack(app, `Jarvis-${env}-Audit`, {
   kmsKey: auth.dataKey,
 });
 
-new AiProxyStack(app, `Jarvis-${env}-AiProxy`, { ...stackProps, envName: env, kmsKey: auth.dataKey, userPool: auth.userPool, userPoolClient: auth.userPoolClient, userMetaTable: data.userMetaTable, aiTables: data.aiTables, billingAlertEmail: ctx.billingAlertEmail });
+// Sandbox only: the Bedrock budget and kill switch exist only there, so dev/prod get a proxy in a later PR together with their own.
+if (env === 'sandbox') {
+  new AiProxyStack(app, `Jarvis-${env}-AiProxy`, { ...stackProps, envName: env, kmsKey: auth.dataKey, userPool: auth.userPool, userPoolClient: auth.userPoolClient, userMetaTable: data.userMetaTable, aiTables: data.aiTables, billingAlertEmail: ctx.billingAlertEmail });
+}
