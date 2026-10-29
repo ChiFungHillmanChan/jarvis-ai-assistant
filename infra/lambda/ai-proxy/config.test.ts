@@ -67,3 +67,12 @@ test('globalDailyCapMicros ships at US$10, takes the default when a stored row o
 test('every catalog model has a region and a default price', () => {
   for (const id of Object.keys(CATALOG)) { assert.ok(CATALOG[id].region); assert.ok(DEFAULT_CONFIG.prices[id], id); }
 });
+
+test('a row built from the shipped defaults with the two runbook overrides is valid', () => {
+  const body = JSON.stringify({ ...DEFAULT_CONFIG, globalPause: true, globalDailyCapMicros: 5_000_000 });
+  const { config, invalid } = effectiveConfig({ config: 'current', body });
+  assert.equal(invalid, false);
+  assert.equal(config.globalPause, true);
+  assert.equal(config.globalDailyCapMicros, 5_000_000);
+  assert.deepEqual(config.models, DEFAULT_CONFIG.models);
+});
