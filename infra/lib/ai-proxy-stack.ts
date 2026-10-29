@@ -1,4 +1,7 @@
 import * as cdk from 'aws-cdk-lib';
+import * as budgets from 'aws-cdk-lib/aws-budgets';
+import * as cw from 'aws-cdk-lib/aws-cloudwatch';
+import * as cwActions from 'aws-cdk-lib/aws-cloudwatch-actions';
 import * as cognito from 'aws-cdk-lib/aws-cognito';
 import * as ddb from 'aws-cdk-lib/aws-dynamodb';
 import * as iam from 'aws-cdk-lib/aws-iam';
@@ -6,6 +9,8 @@ import * as kms from 'aws-cdk-lib/aws-kms';
 import * as lambda from 'aws-cdk-lib/aws-lambda';
 import * as nodejs from 'aws-cdk-lib/aws-lambda-nodejs';
 import * as logs from 'aws-cdk-lib/aws-logs';
+import * as sns from 'aws-cdk-lib/aws-sns';
+import * as snsSubs from 'aws-cdk-lib/aws-sns-subscriptions';
 import { Construct } from 'constructs';
 import * as path from 'path';
 import type { AiTables } from './data-stack';
@@ -18,7 +23,6 @@ export interface AiProxyStackProps extends cdk.StackProps {
   userPoolClient: cognito.IUserPoolClient;
   userMetaTable: ddb.ITable;
   aiTables: AiTables;
-  // Used by the cost guardrails added to this stack in a later task.
   billingAlertEmail: string;
 }
 
@@ -100,10 +104,91 @@ export class AiProxyStack extends cdk.Stack {
     });
     this.proxyUrl = url.url;
 
+    this.addGuardrails(props);
+
     new cdk.CfnOutput(this, 'AiProxyUrl', {
       value: this.proxyUrl,
       description: 'POST streaming AI requests here with a Cognito access token',
       exportName: `Jarvis-${props.envName}-AiProxyUrl`,
     });
+  }
+
+  private addGuardrails(props: AiProxyStackProps): void {
+    const alertTopic = new sns.Topic(this, 'AiAlertTopic', {
+      topicName: `jarvis-${props.envName}-ai-alerts`,
+      displayName: `JARVIS ${props.envName} AI alerts`,
+    });
+    alertTopic.addSubscription(new snsSubs.EmailSubscription(props.billingAlertEmail));
+
+    // The proxy writes this EMF metric once a user's billed amount passes US$20 in a Hong Kong day.
+    new cw.Alarm(this, 'UserDailyOver20Alarm', {
+      alarmName: `jarvis-${props.envName}-ai-user-daily-over-20usd`,
+      metric: new cw.Metric({
+        namespace: 'Jarvis/AiProxy',
+        metricName: 'UserDailyBilledOver20',
+        dimensionsMap: { Env: props.envName },
+        statistic: 'Sum',
+        period: cdk.Duration.minutes(5),
+      }),
+      threshold: 1,
+      evaluationPeriods: 1,
+      comparisonOperator: cw.ComparisonOperator.GREATER_THAN_OR_EQUAL_TO_THRESHOLD,
+      treatMissingData: cw.TreatMissingData.NOT_BREACHING,
+    }).addAlarmAction(new cwActions.SnsAction(alertTopic));
+
+    // Account-wide Bedrock budget: one per account, so only the sandbox stack owns it.
+    if (props.envName !== 'sandbox') return;
+
+    const killSwitch = new iam.ManagedPolicy(this, 'BedrockKillSwitch', {
+      managedPolicyName: 'jarvis-bedrock-kill-switch',
+      statements: [new iam.PolicyStatement({
+        effect: iam.Effect.DENY,
+        actions: ['bedrock:InvokeModel*'],
+        resources: ['*'],
+      })],
+    });
+
+    const budgetRole = new iam.Role(this, 'BedrockBudgetActionRole', {
+      assumedBy: new iam.ServicePrincipal('budgets.amazonaws.com'),
+    });
+    budgetRole.addToPolicy(new iam.PolicyStatement({
+      actions: ['iam:AttachRolePolicy', 'iam:DetachRolePolicy'],
+      resources: [this.proxyRole.roleArn],
+      conditions: { ArnEquals: { 'iam:PolicyARN': killSwitch.managedPolicyArn } },
+    }));
+
+    const subscribers = [{ subscriptionType: 'EMAIL', address: props.billingAlertEmail }];
+    const budget = new budgets.CfnBudget(this, 'BedrockMonthlyBudget', {
+      budget: {
+        budgetName: 'jarvis-bedrock-monthly',
+        budgetType: 'COST',
+        timeUnit: 'MONTHLY',
+        budgetLimit: { amount: 100, unit: 'USD' },
+        costFilters: { Service: ['Amazon Bedrock'] },
+      },
+      notificationsWithSubscribers: [50, 80, 100].map(threshold => ({
+        notification: {
+          notificationType: 'ACTUAL',
+          comparisonOperator: 'GREATER_THAN',
+          threshold,
+          thresholdType: 'PERCENTAGE',
+        },
+        subscribers,
+      })),
+    });
+
+    const action = new budgets.CfnBudgetsAction(this, 'BedrockKillSwitchAction', {
+      budgetName: 'jarvis-bedrock-monthly',
+      notificationType: 'ACTUAL',
+      actionType: 'APPLY_IAM_POLICY',
+      actionThreshold: { type: 'PERCENTAGE', value: 150 },
+      approvalModel: 'AUTOMATIC',
+      executionRoleArn: budgetRole.roleArn,
+      definition: {
+        iamActionDefinition: { policyArn: killSwitch.managedPolicyArn, roles: [this.proxyRole.roleName] },
+      },
+      subscribers: [{ type: 'EMAIL', address: props.billingAlertEmail }],
+    });
+    action.addDependency(budget);
   }
 }
