@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { fileSize, mailSourceUrl, parseSender, readableBody, revealMailSource } from '../src/lib/mail-presentation.ts';
+import { analysisSource, fileSize, mailSourceUrl, parseSender, readableBody, revealMailSource } from '../src/lib/mail-presentation.ts';
 
 test('Gmail source links target the message and its owning account', () => {
   const href = mailSourceUrl({ provider_id: '18afe12b09', account_email: 'first+work@example.test' });
@@ -107,4 +107,16 @@ test('due dates read naturally in both languages', () => {
   assert.equal(formatDue('2026-09-27', null, 'zh-HK'), '9月27日（週日）');
   assert.equal(formatDue('2026-09-27', '15:00', 'zh-HK', false), '9月27日 15:00');
   assert.match(formatDue('2026-09-27', null, 'en-GB'), /Sun/);
+});
+
+test('a group analysis names the AI that answered and says Ollama only when it was', () => {
+  const text = (en: string) => en;
+  // "Same AI as the assistant": the backend reports "Provider · model" for the AI that answered.
+  assert.equal(analysisSource({ mode: 'assistant', model: 'Gemini · gemini-3.7-flash' }, text), 'Gemini · gemini-3.7-flash');
+  assert.equal(analysisSource({ mode: 'assistant', model: 'OpenAI · gpt-6-luna' }, text), 'OpenAI · gpt-6-luna');
+  assert.equal(analysisSource({ mode: 'assistant', model: 'Ollama · qwen3:8b' }, text), 'Ollama · qwen3:8b');
+  assert.equal(analysisSource({ mode: 'openai', model: 'gpt-6-luna' }, text), 'OpenAI gpt-6-luna');
+  assert.equal(analysisSource({ mode: 'bedrock', model: 'amazon.nova-lite-v1:0' }, text), 'AWS Bedrock amazon.nova-lite-v1:0');
+  assert.equal(analysisSource({ mode: 'local', model: 'qwen3:8b' }, text), 'Local Ollama qwen3:8b');
+  assert.equal(analysisSource({ mode: 'local', model: 'qwen3:8b' }, (_en, zh) => zh), '本機 Ollama qwen3:8b');
 });
