@@ -62,7 +62,7 @@ test('at most 16 tools per request', () => {
 });
 
 test('toolResult content carries only text or JSON', () => {
-  assert.ok(parseRequest(ok({ messages: withResult([{ text: 'two found' }, { json: { count: 2 } }]) })));
+  assert.ok(parseRequest(ok({ messages: withResult([{ text: 'two found' }, { json: { count: 2 } }]), tools: toolSpecs(1) })));
   const bad: unknown[] = [
     { image: { format: 'png', source: { bytes: 'AAAA' } } },
     { document: { format: 'pdf', name: 'a', source: { s3Location: { uri: 's3://b/k' } } } },
@@ -76,6 +76,35 @@ test('toolResult content carries only text or JSON', () => {
     {},
     'text',
   ];
-  for (const item of bad) assert.equal(parseRequest(ok({ messages: withResult([{ text: 'fine' }, item]) })), null, JSON.stringify(item));
-  assert.equal(parseRequest(ok({ messages: [{ role: 'user', content: [{ toolResult: { toolUseId: 't1' } }] }] })), null);
+  for (const item of bad) assert.equal(parseRequest(ok({ messages: withResult([{ text: 'fine' }, item]), tools: toolSpecs(1) })), null, JSON.stringify(item));
+  assert.equal(parseRequest(ok({ messages: [{ role: 'user', content: [{ toolResult: { toolUseId: 't1' } }] }], tools: toolSpecs(1) })), null);
+});
+
+test('each tool entry is exactly { toolSpec: {...} }: no cachePoint, system tool or extra key', () => {
+  const bad: unknown[] = [
+    { cachePoint: { type: 'default' } },
+    { systemTool: { name: 'nova_grounding' } },
+    { toolSpec: { name: 'a' }, cachePoint: { type: 'default' } },
+    { toolSpec: 'a' },
+    { toolSpec: null },
+    { toolSpec: [] },
+    {},
+    null,
+    'toolSpec',
+  ];
+  for (const entry of bad) assert.equal(parseRequest(ok({ tools: { tools: [{ toolSpec: { name: 'ok' } }, entry] } })), null, JSON.stringify(entry));
+  assert.ok(parseRequest(ok({ tools: { tools: [{ toolSpec: { name: 'ok' } }] } })));
+});
+
+test('a toolResult with empty content is rejected, a non-empty one is not', () => {
+  assert.equal(parseRequest(ok({ messages: withResult([]), tools: toolSpecs(1) })), null);
+  assert.ok(parseRequest(ok({ messages: withResult([{ text: 'x' }]), tools: toolSpecs(1) })));
+});
+
+test('toolUse and toolResult blocks need tools in the request', () => {
+  assert.equal(parseRequest(ok({ messages: withResult([{ text: 'x' }]) })), null);
+  assert.equal(parseRequest(ok({ workload: 'mail_analysis', messages: withResult([{ text: 'x' }]) })), null);
+  const useOnly = [{ role: 'assistant', content: [{ toolUse: { toolUseId: 't1', name: 'search_mail', input: {} } }] }];
+  assert.equal(parseRequest(ok({ messages: useOnly })), null);
+  for (const workload of ['chat', 'voice']) assert.ok(parseRequest(ok({ workload, messages: withResult([{ text: 'x' }]), tools: toolSpecs(1) })), workload);
 });

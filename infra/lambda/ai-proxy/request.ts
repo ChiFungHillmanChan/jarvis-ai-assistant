@@ -39,7 +39,18 @@ function validBlock(block: unknown): boolean {
   if (keys.length !== 1 || !BLOCK_KEYS.includes(keys[0])) return false;
   if (keys[0] !== 'toolResult') return true;
   const { toolResult } = block;
-  return isObject(toolResult) && Array.isArray(toolResult.content) && toolResult.content.every(validToolResultItem);
+  return isObject(toolResult) && Array.isArray(toolResult.content) && toolResult.content.length > 0 && toolResult.content.every(validToolResultItem);
+}
+
+// Bedrock also allows cachePoint and system tools in the tool list (on some models); only toolSpec entries are accepted.
+function validTool(tool: unknown): boolean {
+  if (!isObject(tool)) return false;
+  const keys = Object.keys(tool);
+  return keys.length === 1 && keys[0] === 'toolSpec' && isObject(tool.toolSpec);
+}
+
+function hasToolBlock(messages: unknown[]): boolean {
+  return messages.some(m => (m as { content: Record<string, unknown>[] }).content.some(b => 'toolUse' in b || 'toolResult' in b));
 }
 
 function validMessage(message: unknown): boolean {
@@ -64,7 +75,10 @@ export function parseRequest(raw: string): ConverseRequest | null {
   if (tools !== undefined) {
     if (!TOOL_WORKLOADS.includes(workload as Workload)) return null;
     if (!isObject(tools) || !Array.isArray(tools.tools) || tools.tools.length === 0 || tools.tools.length > MAX_TOOLS) return null;
+    if (!tools.tools.every(validTool)) return null;
   }
+  // Bedrock rejects tool blocks without a tool configuration, which would otherwise surface as a 502.
+  if (tools === undefined && hasToolBlock(messages)) return null;
 
   const wanted = Number.isSafeInteger(maxTokens) && (maxTokens as number) > 0 ? (maxTokens as number) : DEFAULT_MAX_TOKENS;
   return {
