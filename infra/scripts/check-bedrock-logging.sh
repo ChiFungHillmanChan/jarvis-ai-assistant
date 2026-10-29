@@ -8,8 +8,14 @@ cd "$(dirname "$0")/.."
 
 regions=$(node -e "
 const c = require('./config/jarvis-ai.json').catalog;
-console.log([...new Set(Object.values(c).map(m => m.region))].join('\n'));
+const regions = Object.values(c).map(m => m && m.region);
+if (!regions.every(r => typeof r === 'string' && r !== '')) {
+  console.error('A catalog model has no region; refusing to deploy');
+  process.exit(1);
+}
+console.log([...new Set(regions)].join('\n'));
 ")
+[ -n "$regions" ] || { echo "No catalog regions found; refusing to deploy" >&2; exit 1; }
 
 for r in $regions; do
   if ! out=$(aws bedrock get-model-invocation-logging-configuration \

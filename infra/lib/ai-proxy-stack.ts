@@ -190,5 +190,7 @@ export class AiProxyStack extends cdk.Stack {
       subscribers: [{ type: 'EMAIL', address: props.billingAlertEmail }],
     });
     action.addDependency(budget);
+    // GetAtt on the role does not wait for its attach/detach policy; Budgets may check it on create.
+    action.node.addDependency(budgetRole);
   }
 }

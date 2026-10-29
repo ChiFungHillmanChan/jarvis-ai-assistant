@@ -68,6 +68,11 @@ test('the 150 percent action applies the kill switch to the proxy role automatic
     JSON.stringify(r.Properties.AssumeRolePolicyDocument).includes('budgets.amazonaws.com'));
   assert.equal(roles.length, 1);
   assert.equal(a.ExecutionRoleArn['Fn::GetAtt'][0], Object.keys(template.Resources).find(k => template.Resources[k] === roles[0]));
+  const budgetRoleId = a.ExecutionRoleArn['Fn::GetAtt'][0];
+  const defaultPolicyId = Object.keys(template.Resources).find(k =>
+    template.Resources[k].Type === 'AWS::IAM::Policy' && template.Resources[k].Properties.Roles.some((r: any) => r.Ref === budgetRoleId));
+  assert.ok(defaultPolicyId, 'the budgets role has a policy');
+  assert.ok(asList(actions[0].DependsOn).includes(defaultPolicyId), 'action waits for the role policy');
   const attached = ofType(template, 'AWS::IAM::Policy').filter((p: any) =>
     p.Properties.Roles.some((r: any) => r.Ref === a.ExecutionRoleArn['Fn::GetAtt'][0]));
   const stmts = attached.flatMap((p: any) => p.Properties.PolicyDocument.Statement);
