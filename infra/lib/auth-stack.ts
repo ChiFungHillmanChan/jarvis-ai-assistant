@@ -106,11 +106,21 @@ export class AuthStack extends cdk.Stack {
     this.userPoolClient = this.userPool.addClient('JarvisAppClient', {
       userPoolClientName: `jarvis-${props.envName}-app`,
       authFlows: {
-        userSrp: true,
+        // The desktop app signs in only through the hosted UI (authorization code + PKCE). SRP
+        // would hand out tokens carrying aws.cognito.signin.user.admin.
+        userSrp: false,
         userPassword: false,
         adminUserPassword: false,
         custom: false,
       },
+      // Exactly the attributes the Google provider maps above (Cognito requires mapped attributes
+      // to be client-writable). Anything else, including custom:tier and custom:stripeCustomerId,
+      // is server-side only.
+      writeAttributes: new cognito.ClientAttributes().withStandardAttributes({
+        email: true,
+        emailVerified: true,
+        givenName: true,
+      }),
       preventUserExistenceErrors: true,
       enableTokenRevocation: true,
       refreshTokenValidity: cdk.Duration.days(30),
