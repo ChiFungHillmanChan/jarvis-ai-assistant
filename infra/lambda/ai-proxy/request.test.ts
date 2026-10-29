@@ -34,3 +34,42 @@ test('anything outside the contract is rejected', () => {
     ok({ tools: { toolChoice: {} } }), ok({ system: 'x'.repeat(524288) })])
     assert.equal(parseRequest(raw), null, raw.slice(0, 60));
 });
+
+const toolSpecs = (n: number) => ({ tools: Array.from({ length: n }, (_, i) => ({ toolSpec: { name: `tool_${i}` } })) });
+const withResult = (content: unknown[]) => [
+  { role: 'user', content: [{ text: 'find invoices' }] },
+  { role: 'assistant', content: [{ toolUse: { toolUseId: 't1', name: 'search_mail', input: {} } }] },
+  { role: 'user', content: [{ toolResult: { toolUseId: 't1', content } }] },
+];
+
+test('chat and voice may send tools; mail workloads may not', () => {
+  for (const workload of ['chat', 'voice']) assert.ok(parseRequest(ok({ workload, tools: toolSpecs(1) })), workload);
+  for (const workload of ['mail_sort', 'mail_analysis']) {
+    assert.equal(parseRequest(ok({ workload, tools: toolSpecs(1) })), null, workload);
+    assert.ok(parseRequest(ok({ workload })), `${workload} without tools`);
+  }
+});
+
+test('at most 16 tools per request', () => {
+  assert.ok(parseRequest(ok({ tools: toolSpecs(16) })));
+  assert.equal(parseRequest(ok({ tools: toolSpecs(17) })), null);
+});
+
+test('toolResult content carries only text or JSON', () => {
+  assert.ok(parseRequest(ok({ messages: withResult([{ text: 'two found' }, { json: { count: 2 } }]) })));
+  const bad: unknown[] = [
+    { image: { format: 'png', source: { bytes: 'AAAA' } } },
+    { document: { format: 'pdf', name: 'a', source: { s3Location: { uri: 's3://b/k' } } } },
+    { video: { format: 'mp4', source: { s3Location: { uri: 's3://b/k' } } } },
+    { s3Location: { uri: 's3://b/k' } },
+    { text: 'x', json: {} },
+    { text: 'x', extra: 1 },
+    { text: 7 },
+    { json: 'not an object' },
+    { json: null },
+    {},
+    'text',
+  ];
+  for (const item of bad) assert.equal(parseRequest(ok({ messages: withResult([{ text: 'fine' }, item]) })), null, JSON.stringify(item));
+  assert.equal(parseRequest(ok({ messages: [{ role: 'user', content: [{ toolResult: { toolUseId: 't1' } }] }] })), null);
+});
