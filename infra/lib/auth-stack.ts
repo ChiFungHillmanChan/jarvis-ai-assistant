@@ -113,10 +113,10 @@ export class AuthStack extends cdk.Stack {
         adminUserPassword: false,
         custom: false,
       },
-      // Write attributes stay at Cognito's default: Cognito refuses email_verified as a client write
-      // attribute, and Google sign-in must store it for account linking. Users still cannot change
-      // attributes because UpdateUserAttributes needs the aws.cognito.signin.user.admin scope, which
-      // SRP is off for and the OAuth scopes below never include.
+      // Write attributes stay at Cognito's default: it refuses email_verified as a client write
+      // attribute, and Google sign-in must store it for account linking. After sign-up, users can't
+      // change attributes (UpdateUserAttributes needs the aws.cognito.signin.user.admin scope; SRP is
+      // off and the OAuth scopes never include it). At sign-up, the pre-sign-up trigger refuses custom:*.
       preventUserExistenceErrors: true,
       enableTokenRevocation: true,
       refreshTokenValidity: cdk.Duration.days(30),

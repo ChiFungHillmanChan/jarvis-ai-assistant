@@ -23,6 +23,16 @@ export type LinkDecision =
   | { action: 'link'; destinationUsername: string; providerName: string; providerUserId: string }
   | { action: 'reject'; message: string };
 
+export const CUSTOM_ATTRIBUTES_REFUSED = 'Custom attributes cannot be set at sign-up.';
+
+/**
+ * The app client keeps Cognito's default write attributes, so the unauthenticated SignUp API would
+ * accept custom:* attributes. Nothing legitimate sends them at sign-up; refuse every one.
+ */
+export function hasCustomAttribute(attributeNames: string[]): boolean {
+  return attributeNames.some((name) => name.startsWith('custom:'));
+}
+
 /** The identity provider name configured in infra/lib/auth-stack.ts. */
 const GOOGLE = 'Google';
 

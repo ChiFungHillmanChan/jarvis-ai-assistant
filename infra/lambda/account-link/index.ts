@@ -4,11 +4,13 @@ import {
   CognitoIdentityProviderClient,
   ListUsersCommand,
 } from '@aws-sdk/client-cognito-identity-provider';
-import { decide } from './decide';
+import { CUSTOM_ATTRIBUTES_REFUSED, decide, hasCustomAttribute } from './decide';
 
 const cognito = new CognitoIdentityProviderClient({});
 
 export async function handler(event: PreSignUpTriggerEvent): Promise<PreSignUpTriggerEvent> {
+  if (hasCustomAttribute(Object.keys(event.request.userAttributes))) throw new Error(CUSTOM_ATTRIBUTES_REFUSED);
+
   const email = event.request.userAttributes.email;
   if (!email) return event;
 

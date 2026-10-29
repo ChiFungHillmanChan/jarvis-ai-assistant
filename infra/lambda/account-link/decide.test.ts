@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { decide } from './decide.ts';
+import { decide, hasCustomAttribute } from './decide.ts';
 
 const native = { username: 'native-user-uuid', federated: false, verified: true };
 const unverifiedNative = { username: 'unverified-native-uuid', federated: false, verified: false };
@@ -61,4 +61,24 @@ test('an email sign-up for an address an unverified Google account holds is allo
 test('ordinary sign-ups and admin-created users pass through', () => {
   assert.deepEqual(decide('PreSignUp_SignUp', 'person@example.com', true, []), { action: 'allow' });
   assert.deepEqual(decide('PreSignUp_AdminCreateUser', 'x', true, [google]), { action: 'allow' });
+});
+
+test('sign-up is refused when it carries custom:tier', () => {
+  assert.equal(hasCustomAttribute(Object.keys({ email: 'a@b.c', 'custom:tier': 'pro' })), true);
+});
+
+test('sign-up is refused when it carries custom:stripeCustomerId', () => {
+  assert.equal(hasCustomAttribute(['custom:stripeCustomerId']), true);
+});
+
+test('sign-up is refused when a custom attribute is mixed with normal ones', () => {
+  assert.equal(hasCustomAttribute(['email', 'email_verified', 'given_name', 'custom:tier']), true);
+});
+
+test('sign-up with only the standard attributes is allowed', () => {
+  assert.equal(hasCustomAttribute(['email', 'email_verified', 'given_name']), false);
+});
+
+test('sign-up with no attributes is allowed', () => {
+  assert.equal(hasCustomAttribute(Object.keys({})), false);
 });
