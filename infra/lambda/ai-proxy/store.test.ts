@@ -30,6 +30,56 @@ test('acquire refuses when both attempts fail and rethrows other errors', async 
   await assert.rejects(acquireLease(async () => { if (n++ === 0) throw ccf(); throw new Error('boom2'); }, 'lim', 'u1', NOW), /boom2/);
 });
 
+/** One in-flight row that evaluates only the two conditional updates acquireLease sends, atomically per call like DynamoDB. */
+function inflightTable(row: { n?: number; expiresAt?: number } | undefined) {
+  const state = { row: row ? { ...row } : undefined };
+  const send = async (c: any) => {
+    const { UpdateExpression: update, ConditionExpression: condition, ExpressionAttributeValues: v } = c.input;
+    const r = state.row;
+    if (update === 'ADD n :one SET expiresAt = :exp' && condition === 'attribute_not_exists(n) OR (n < :max AND expiresAt >= :now)') {
+      if (!(r?.n === undefined || (r.n < v[':max'] && r.expiresAt !== undefined && r.expiresAt >= v[':now']))) throw ccf();
+      state.row = { n: (r?.n ?? 0) + v[':one'], expiresAt: v[':exp'] };
+      return {};
+    }
+    if (update === 'SET n = :one, expiresAt = :exp' && condition === 'expiresAt < :now') {
+      if (!(r?.expiresAt !== undefined && r.expiresAt < v[':now'])) throw ccf();
+      state.row = { n: v[':one'], expiresAt: v[':exp'] };
+      return {};
+    }
+    throw new Error(`unexpected command: ${update} / ${condition}`);
+  };
+  return { state, send };
+}
+
+// After a normal release the row is n = 0 with an expiresAt from the last acquire.
+const IDLE = { n: 0, expiresAt: 1_800_000_000 - 10 };
+
+test('parallel requests after an idle period all get a slot', async () => {
+  const { state, send } = inflightTable(IDLE);
+  const granted = await Promise.all(Array.from({ length: 6 }, () => acquireLease(send, 'lim', 'u1', NOW)));
+  assert.deepEqual(granted, [true, true, true, true, true, true]);
+  assert.equal(state.row!.n, 6);
+  assert.equal(state.row!.expiresAt, 1_800_000_360);
+});
+
+test('after an idle period a caller past the in-flight max is still refused', async () => {
+  const { state, send } = inflightTable(IDLE);
+  const granted = await Promise.all(Array.from({ length: 9 }, () => acquireLease(send, 'lim', 'u1', NOW)));
+  assert.equal(granted.filter(Boolean).length, 8);
+  assert.equal(granted.filter(g => !g).length, 1);
+  assert.equal(state.row!.n, 8);
+});
+
+test('a lost reset retries the normal acquire once and rethrows its other errors', async () => {
+  const sent: any[] = [];
+  let n = 0;
+  assert.equal(await acquireLease(async (c: any) => { sent.push(c.input); if (n++ < 2) throw ccf(); return {}; }, 'lim', 'u1', NOW), true);
+  assert.equal(sent.length, 3);
+  assert.deepEqual(sent[2], sent[0]);
+  let m = 0;
+  await assert.rejects(acquireLease(async () => { if (m++ < 2) throw ccf(); throw new Error('boom3'); }, 'lim', 'u1', NOW), /boom3/);
+});
+
 test('config is cached for 30 seconds', async () => {
   let reads = 0;
   let t = 0;

@@ -24,18 +24,22 @@ export async function acquireLease(send: Send, table: string, userId: string, no
   const key = { pk: `inflight#${userId}` };
   const seconds = epochSeconds(now);
   const exp = seconds + LEASE_SECONDS;
-  try {
-    await send(new UpdateCommand({
-      TableName: table,
-      Key: key,
-      UpdateExpression: 'ADD n :one SET expiresAt = :exp',
-      ConditionExpression: 'attribute_not_exists(n) OR (n < :max AND expiresAt >= :now)',
-      ExpressionAttributeValues: { ':one': 1, ':max': MAX_IN_FLIGHT, ':now': seconds, ':exp': exp },
-    }));
-    return true;
-  } catch (error) {
-    if (!isConditionFailed(error)) throw error;
-  }
+  const take = async (): Promise<boolean> => {
+    try {
+      await send(new UpdateCommand({
+        TableName: table,
+        Key: key,
+        UpdateExpression: 'ADD n :one SET expiresAt = :exp',
+        ConditionExpression: 'attribute_not_exists(n) OR (n < :max AND expiresAt >= :now)',
+        ExpressionAttributeValues: { ':one': 1, ':max': MAX_IN_FLIGHT, ':now': seconds, ':exp': exp },
+      }));
+      return true;
+    } catch (error) {
+      if (isConditionFailed(error)) return false;
+      throw error;
+    }
+  };
+  if (await take()) return true;
   // Full or expired. With no acquire in the last LEASE_SECONDS nothing can still be running, so reset the count.
   try {
     await send(new UpdateCommand({
@@ -47,9 +51,10 @@ export async function acquireLease(send: Send, table: string, userId: string, no
     }));
     return true;
   } catch (error) {
-    if (isConditionFailed(error)) return false;
-    throw error;
+    if (!isConditionFailed(error)) throw error;
   }
+  // A parallel request may have just won the reset and refreshed the lease, so try the normal acquire once more.
+  return take();
 }
 
 export function cachedConfig(
