@@ -180,3 +180,5 @@ done
 ```
 
 指令重複執行會因已存在而報錯，這是正常的；先用 `aws guardduty list-detectors` 與 `aws accessanalyzer list-analyzers` 查看是否已啟用。
+
+警報涵蓋範圍有限：GuardDuty finding 的警報規則只存在於 `ap-southeast-1`；`ap-northeast-1` 的 GuardDuty finding 及所有 IAM Access Analyzer finding 只會出現在 console，不會發出電郵，須定期手動查看。
