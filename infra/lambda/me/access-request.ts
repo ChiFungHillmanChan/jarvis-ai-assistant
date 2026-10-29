@@ -32,7 +32,7 @@ export async function handler(event: APIGatewayProxyEventV2WithJWTAuthorizer): P
   } catch (error) {
     if ((error as { name?: unknown } | null)?.name !== 'ConditionalCheckFailedException') throw error;
   }
-  const row = await ddb.send(new GetCommand({ TableName: table, Key: { userId: sub } }));
+  const row = await ddb.send(new GetCommand({ TableName: table, Key: { userId: sub }, ConsistentRead: true }));
   const stored = row.Item?.aiAccessRequestedAt;
   if (typeof stored !== 'string') throw new Error('access request not recorded');
   return reply(stored);
