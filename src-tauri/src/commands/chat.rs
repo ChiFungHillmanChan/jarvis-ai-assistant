@@ -16,11 +16,15 @@ use crate::chat_session::{self, ScopedEmitter};
 /// `ai/routing.rs` -- without them a Cantonese user asking "今日有咩會議" got
 /// an answer with no calendar data in it, which quietly broke the bilingual
 /// positioning on the default provider.
+///
+/// English terms match whole words only (a plural "s" allowed): as substrings,
+/// "pr" matched "prefer" and "project", so ordinary sentences pulled in the
+/// [CONTEXT] block and marked the turn as having read outside text.
 fn needs_personal_context(lower: &str, raw: &str) -> bool {
     const EN: &[&str] = &[
         "task", "meeting", "email", "deadline", "schedule", "today", "calendar",
         "work on", "priority", "github", "pr", "issue", "notion", "what should",
-        "remind", "status", "busy", "free", "obsidian", "notes", "vault", "job",
+        "remind", "reminder", "status", "busy", "free", "obsidian", "notes", "vault", "job",
         "resume", "interview", "application",
     ];
     const ZH: &[&str] = &[
@@ -28,7 +32,17 @@ fn needs_personal_context(lower: &str, raw: &str) -> bool {
         "任務", "任务", "日程", "行事曆", "日曆", "日历", "死線", "截止",
         "提醒", "待辦", "待办", "要做", "安排", "未讀", "未读",
     ];
-    EN.iter().any(|k| lower.contains(k)) || ZH.iter().any(|k| raw.contains(k))
+    EN.iter().any(|k| contains_word(lower, k)) || ZH.iter().any(|k| raw.contains(k))
+}
+
+fn contains_word(text: &str, word: &str) -> bool {
+    let is_word_char = |c: char| c.is_alphanumeric();
+    text.match_indices(word).any(|(start, _)| {
+        let rest = &text[start + word.len()..];
+        let rest = rest.strip_prefix('s').unwrap_or(rest);
+        !text[..start].chars().next_back().is_some_and(is_word_char)
+            && !rest.chars().next().is_some_and(is_word_char)
+    })
 }
 
 #[derive(Serialize, Deserialize, Clone)]
@@ -242,8 +256,8 @@ async fn send_scoped(
     // The [CONTEXT] block quotes today's event titles, and the [OBSIDIAN NOTES]
     // block below quotes note bodies. Neither arrives through a tool call, so
     // the per-turn ledger only knows this turn read text a stranger may have
-    // written if the call site says so -- and `remember` writes a standing
-    // instruction into every later system prompt.
+    // written if the call site says so -- and that is what makes the tools in
+    // tool_approval::NEEDS_APPROVAL_AFTER_UNTRUSTED_READ wait for a click.
     let mut untrusted_context = !all_messages.is_empty();
 
     // Search Obsidian for relevant notes (with 3s timeout to avoid blocking)
@@ -517,6 +531,26 @@ mod tests {
         assert!(asks("what meetings do I have today"));
         assert!(asks("any urgent email"));
         assert!(!asks("write me a haiku about rust"));
+    }
+
+    /// "pr" used to match inside "prefer" and "project", so ordinary sentences
+    /// pulled in the [CONTEXT] block and tainted the turn.
+    #[test]
+    fn a_trigger_inside_another_word_does_not_count() {
+        assert!(!asks("remember I prefer tea"));
+        assert!(!asks("my project is called Atlas"));
+        assert!(!asks("add footnotes to the essay"));
+        assert!(!asks("explain multitasking"));
+    }
+
+    #[test]
+    fn whole_word_triggers_and_plurals_still_count() {
+        assert!(asks("any open PRs"));
+        assert!(asks("review this PR"));
+        assert!(asks("what tasks are due"));
+        assert!(asks("show my reminders"));
+        assert!(asks("what should I work on next"));
+        assert!(asks("am I free at 3?"));
     }
 
     #[test]

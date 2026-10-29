@@ -198,9 +198,10 @@ const UNTRUSTED_READ_TOOLS: &[&str] = &[
 /// whichever provider is currently running. Providers bump it as they execute;
 /// the router reads it to decide whether a fallback would duplicate work.
 ///
-/// It also records whether the turn has read untrusted content, which
-/// `ai::tools` uses to refuse `remember`: a fact saved now lands in every
-/// future system prompt, so a one-shot injection would become standing.
+/// It also records whether the turn has read untrusted content, after which
+/// `ai::tools` asks the user before running the tools in
+/// `tool_approval::NEEDS_APPROVAL_AFTER_UNTRUSTED_READ`: injected text can ask
+/// for exactly those calls.
 #[derive(Clone, Default)]
 pub struct SideEffectLedger {
     side_effects: Arc<AtomicUsize>,
@@ -227,8 +228,8 @@ impl SideEffectLedger {
     /// carries text authored off this device -- mirrored email subjects,
     /// calendar titles, Obsidian note bodies pasted in as context rather than
     /// fetched by a tool call. Nothing calls `note` on those paths, so without
-    /// this the turn looks clean and `remember` accepts whatever the injected
-    /// text asked it to store.
+    /// this the turn looks clean and the tools that wait for a click after an
+    /// untrusted read would run without one.
     pub fn untrusted() -> Self {
         let ledger = Self::default();
         ledger.untrusted_read.store(true, Ordering::Relaxed);
@@ -712,8 +713,8 @@ impl AiRouter {
     /// `ask_jarvis` pastes the same block plus today's event titles, and the
     /// chat [CONTEXT] and [OBSIDIAN NOTES] blocks do the same. None of that
     /// arrives through a tool call, so the ledger would otherwise report a
-    /// clean turn and `remember` would store a standing instruction a stranger
-    /// wrote in a subject line.
+    /// clean turn and a stranger's subject line could move a meeting or wipe
+    /// a memory without the user's click.
     pub async fn send_with_untrusted_context(
         &self,
         messages: Vec<(String, String)>,
