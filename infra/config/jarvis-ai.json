@@ -10,6 +10,7 @@
     "trialCreditMicros": 20000000,
     "globalPause": false,
     "subscriptionAccess": false,
+    "globalDailyCapMicros": 10000000,
     "models": {
       "chat": { "primary": "qwen.qwen3-32b-v1:0", "fallback": "deepseek.v3.2" },
       "mail_analysis": { "primary": "qwen.qwen3-32b-v1:0", "fallback": "deepseek.v3.2" },

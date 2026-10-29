@@ -167,6 +167,27 @@ test('every env alarms when a served request could not be metered', () => {
   }
 });
 
+test('every env alarms when the real-time global daily ceiling is reached', () => {
+  for (const env of ['sandbox', 'dev']) {
+    const template = proxy(env);
+    const topic = ofType(template, 'AWS::SNS::Topic').find((t: any) => t.Properties.TopicName === `jarvis-${env}-ai-alerts`);
+    const topicId = Object.keys(template.Resources).find(k => template.Resources[k] === topic);
+    const alarms = ofType(template, 'AWS::CloudWatch::Alarm').filter((x: any) => x.Properties.AlarmName === `jarvis-${env}-ai-global-daily-ceiling`);
+    assert.equal(alarms.length, 1);
+    const a = alarms[0].Properties;
+    assert.equal(a.Namespace, 'Jarvis/AiProxy');
+    assert.equal(a.MetricName, 'GlobalDailyCeilingReached');
+    assert.deepEqual(a.Dimensions, [{ Name: 'Env', Value: env }]);
+    assert.equal(a.Statistic, 'Sum');
+    assert.equal(a.Period, 300);
+    assert.equal(a.EvaluationPeriods, 1);
+    assert.equal(a.Threshold, 1);
+    assert.equal(a.ComparisonOperator, 'GreaterThanOrEqualToThreshold');
+    assert.equal(a.TreatMissingData, 'notBreaching');
+    assert.deepEqual(a.AlarmActions, [{ Ref: topicId }]);
+  }
+});
+
 test('the proxy role still has no wildcard Bedrock Allow', () => {
   const template = proxy('sandbox');
   const bedrockAllows = ofType(template, 'AWS::IAM::Policy')

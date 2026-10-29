@@ -37,6 +37,10 @@ export interface Limits {
   claim(userId: string, requestId: string, now: Date): Promise<boolean>;
   /** Returns the new daily total. */
   addDaily(userId: string, billedMicros: number, now: Date): Promise<number>;
+  /** Billed total across all users for the Hong Kong day of `now`, 0 when nothing is counted yet. */
+  globalDaily(now: Date): Promise<number>;
+  /** Returns the new global daily total. */
+  addGlobalDaily(billedMicros: number, now: Date): Promise<number>;
 }
 
 export interface UsageRecord {
@@ -74,6 +78,7 @@ export interface Deps {
   meter(record: UsageRecord): Promise<void>;
   log(entry: RequestLog): void;
   dailyAlarm(userHash: string): void;
+  globalCeilingAlarm(): void;
 }
 
 /** Only the exception name is read, never its message: provider errors can echo prompt content. */
@@ -117,6 +122,10 @@ export async function converse(deps: Deps, caller: { userId: string; appVersion:
     }
 
     const { limits } = deps;
+    // The Budgets kill switch acts on billing data that can lag a day; this ceiling is real time and fails closed.
+    let globalTotal: number;
+    try { globalTotal = await limits.globalDaily(now); } catch { return refuse('paused', {}, 'error'); }
+    if (globalTotal >= config.globalDailyCapMicros) return refuse('paused');
     if (!(await limits.hit(caller.userId, request.workload, RATE_PER_MINUTE[request.workload], now))) return refuse('rate_limited');
     if (!(await limits.acquire(caller.userId, now))) return refuse('rate_limited');
 
@@ -172,6 +181,11 @@ export async function converse(deps: Deps, caller: { userId: string; appVersion:
         try {
           const dailyTotal = await limits.addDaily(caller.userId, billed, now);
           if (dailyTotal >= DAILY_ALERT_MICROS && dailyTotal - billed < DAILY_ALERT_MICROS) deps.dailyAlarm(entry.userHash);
+        } catch { /* best effort */ }
+        try {
+          const total = await limits.addGlobalDaily(billed, now);
+          const cap = config.globalDailyCapMicros;
+          if (total >= cap && total - billed < cap) deps.globalCeilingAlarm();
         } catch { /* best effort */ }
         entry.inputTokens = tokens.inputTokens;
         entry.outputTokens = tokens.outputTokens;

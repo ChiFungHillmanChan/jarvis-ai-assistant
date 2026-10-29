@@ -35,3 +35,15 @@ export function writeDailyAlarmMetric(userHash: string, env: string): void {
     userHash,
   }));
 }
+
+/** EMF line for the global daily ceiling alarm. Counts across all users, so it carries no user data. */
+export function writeGlobalCeilingMetric(env: string): void {
+  console.log(JSON.stringify({
+    _aws: {
+      Timestamp: Date.now(),
+      CloudWatchMetrics: [{ Namespace: 'Jarvis/AiProxy', Dimensions: [['Env']], Metrics: [{ Name: 'GlobalDailyCeilingReached', Unit: 'Count' }] }],
+    },
+    Env: env,
+    GlobalDailyCeilingReached: 1,
+  }));
+}

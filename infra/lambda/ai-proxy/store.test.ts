@@ -2,7 +2,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import { loadTs } from '../../test-support/load-ts.cjs';
 
-const { acquireLease, cachedConfig, usageItem } = loadTs('lambda/ai-proxy/store.ts');
+const { acquireLease, cachedConfig, usageItem, readGlobalDaily, addGlobalDailyTotal } = loadTs('lambda/ai-proxy/store.ts');
 
 const ccf = () => Object.assign(new Error('c'), { name: 'ConditionalCheckFailedException' });
 const NOW = new Date(1_800_000_000_000);
@@ -99,4 +99,34 @@ test('a usage item holds metadata only', () => {
   assert.deepEqual(Object.keys(item).sort(), ['appVersion', 'billedMicros', 'costMicros', 'expiresAt', 'inputTokens', 'latencyMs', 'modelId', 'outputTokens', 'periodKey', 'region', 'requestId', 'sk', 'status', 'ts', 'userId', 'workload']);
   assert.equal(item.sk, '2026-11-15T04:00:00.000Z#r1');
   assert.equal(item.expiresAt, 1794715200 + 400 * 86400);
+});
+
+test('the global daily total is one strongly consistent read of the Hong Kong day counter, 0 when absent', async () => {
+  const sent: any[] = [];
+  const at = new Date('2026-11-15T16:30:00Z'); // 00:30 on 16 Nov in Hong Kong
+  assert.equal(await readGlobalDaily(async (c: any) => { sent.push(c); return { Item: { pk: 'day#global#2026-11-16', billedMicros: 4_200 } }; }, 'lim', at), 4_200);
+  assert.equal(sent.length, 1);
+  assert.equal(sent[0].constructor.name, 'GetCommand');
+  assert.deepEqual(sent[0].input, { TableName: 'lim', Key: { pk: 'day#global#2026-11-16' }, ConsistentRead: true });
+  assert.equal(await readGlobalDaily(async () => ({}), 'lim', at), 0);
+  const before = new Date('2026-11-15T15:59:59Z'); // 23:59:59 on 15 Nov in Hong Kong
+  await readGlobalDaily(async (c: any) => { sent.push(c); return {}; }, 'lim', before);
+  assert.deepEqual(sent[1].input.Key, { pk: 'day#global#2026-11-15' });
+});
+
+test('adding to the global daily total is one atomic ADD on the Hong Kong day counter that expires after two days', async () => {
+  const sent: any[] = [];
+  const at = new Date('2026-11-15T16:30:00Z');
+  const total = await addGlobalDailyTotal(async (c: any) => { sent.push(c); return { Attributes: { billedMicros: 9_818 } }; }, 'lim', 818, at);
+  assert.equal(total, 9_818);
+  assert.equal(sent.length, 1);
+  assert.equal(sent[0].constructor.name, 'UpdateCommand');
+  assert.deepEqual(sent[0].input, {
+    TableName: 'lim',
+    Key: { pk: 'day#global#2026-11-16' },
+    UpdateExpression: 'ADD billedMicros :b SET expiresAt = :exp',
+    ExpressionAttributeValues: { ':b': 818, ':exp': Math.floor(at.getTime() / 1000) + 2 * 86_400 },
+    ReturnValues: 'UPDATED_NEW',
+  });
+  await assert.rejects(addGlobalDailyTotal(async () => { throw new Error('boom'); }, 'lim', 1, at), /boom/);
 });

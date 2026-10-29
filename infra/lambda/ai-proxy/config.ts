@@ -15,6 +15,8 @@ export interface AiConfig {
   globalPause: boolean;
   /** False: a Stripe subscription alone never gives JARVIS AI; only an admin grant does. */
   subscriptionAccess: boolean;
+  /** Billed total across all users per Hong Kong day at which every request is paused, in real time. */
+  globalDailyCapMicros: number;
   models: Record<Workload, { primary: string; fallback: string | null }>;
   prices: Record<string, ModelPrice>;
   pricesCheckedOn: string;
@@ -43,6 +45,9 @@ export function parseConfig(value: unknown): AiConfig | null {
   // A row written before this field existed keeps subscriptions off.
   const subscriptionAccess = value.subscriptionAccess === undefined ? false : value.subscriptionAccess;
   if (typeof subscriptionAccess !== 'boolean') return null;
+  // A row written before this field existed gets the shipped ceiling, never no ceiling.
+  const globalDailyCapMicros = value.globalDailyCapMicros === undefined ? DEFAULT_CONFIG.globalDailyCapMicros : value.globalDailyCapMicros;
+  if (!positive(globalDailyCapMicros)) return null;
   if (typeof pricesCheckedOn !== 'string' || !/^\d{4}-\d{2}-\d{2}$/.test(pricesCheckedOn)) return null;
 
   if (!isObject(value.models) || !isObject(value.prices)) return null;
@@ -71,6 +76,7 @@ export function parseConfig(value: unknown): AiConfig | null {
     trialCreditMicros,
     globalPause,
     subscriptionAccess,
+    globalDailyCapMicros,
     models,
     prices,
     pricesCheckedOn,

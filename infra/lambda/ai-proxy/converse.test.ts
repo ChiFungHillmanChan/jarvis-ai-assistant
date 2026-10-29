@@ -4,7 +4,7 @@ import { loadTs } from '../../test-support/load-ts.cjs';
 
 const { DEFAULT_CONFIG, CATALOG } = loadTs('lambda/ai-proxy/config.ts');
 const { converse, ERROR_STATUS, RATE_PER_MINUTE, MAX_IN_FLIGHT, DAILY_ALERT_MICROS } = loadTs('lambda/ai-proxy/converse.ts');
-const { userHash, writeLog, writeDailyAlarmMetric } = loadTs('lambda/ai-proxy/log.ts');
+const { userHash, writeLog, writeDailyAlarmMetric, writeGlobalCeilingMetric } = loadTs('lambda/ai-proxy/log.ts');
 
 const now = new Date('2026-11-15T04:00:00Z');
 const grant = (over = {}) => ({ grantId: 'g1', type: 'trial', creditMicros: 20_000_000, validFrom: '2026-11-01T00:00:00Z', validUntil: '2026-12-31T00:00:00Z', createdAt: '2026-11-01T00:00:00Z', ...over });
@@ -21,7 +21,7 @@ const named = (name: string, message = 'x') => Object.assign(new Error(message),
 const BILLED = 818;
 
 function fakeDeps(over: Record<string, any> = {}, limitsOver: Record<string, any> = {}) {
-  const calls: any = { opened: [], meter: [], released: 0, logs: [], alarms: [], hit: [], acquire: 0, claim: 0, daily: [] };
+  const calls: any = { opened: [], meter: [], released: 0, logs: [], alarms: [], hit: [], acquire: 0, claim: 0, daily: [], globalReads: [], global: [], ceilingAlarms: [] };
   const deps: any = {
     now: () => now,
     loadUser: async () => ({ meta: undefined, grants: [grant()] }),
@@ -33,6 +33,8 @@ function fakeDeps(over: Record<string, any> = {}, limitsOver: Record<string, any
       release: async () => { calls.released++; },
       claim: async () => { calls.claim++; return true; },
       addDaily: async (_u: string, billed: number) => { calls.daily.push(billed); return billed; },
+      globalDaily: async (at: Date) => { calls.globalReads.push(at); return 0; },
+      addGlobalDaily: async (billed: number) => { calls.global.push(billed); return billed; },
       ...limitsOver,
     },
     openStream: async (entry: any, input: any) => {
@@ -42,6 +44,7 @@ function fakeDeps(over: Record<string, any> = {}, limitsOver: Record<string, any
     meter: async (record: any) => { calls.meter.push(record); },
     log: (entry: any) => { calls.logs.push(entry); },
     dailyAlarm: (hash: string) => { calls.alarms.push(hash); },
+    globalCeilingAlarm: (...args: any[]) => { calls.ceilingAlarms.push(args); },
     ...over,
   };
   return { deps, calls };
@@ -104,6 +107,7 @@ test('denials return their status and never call Bedrock', async () => {
     assert.equal(calls.opened.length, 0);
     assert.equal(calls.meter.length, 0);
     assert.equal(calls.hit.length, 0);
+    assert.equal(calls.globalReads.length, 0, 'denials come before the global ceiling');
     assert.equal(calls.logs.length, 1);
     assert.equal(calls.logs[0].status, 'denied');
     assert.equal(calls.logs[0].code, expected.error);
@@ -332,6 +336,95 @@ test('a failing daily counter does not break the response', async () => {
   assert.equal(calls.logs[0].status, 'ok');
 });
 
+const CAP = DEFAULT_CONFIG.globalDailyCapMicros;
+
+test('at or above the global daily ceiling every request is paused before any limit or Bedrock call', async () => {
+  const cases: [Record<string, any>, number][] = [
+    [{}, CAP],
+    [{}, CAP + 1],
+    [{ loadConfig: async () => ({ ...DEFAULT_CONFIG, globalDailyCapMicros: 5_000 }) }, 5_000],
+  ];
+  for (const [over, total] of cases) {
+    const { deps, calls } = fakeDeps(over, { globalDaily: async (at: Date) => { calls.globalReads.push(at); return total; } }); const { out, sink } = fakeSink();
+    await converse(deps, caller, body(), sink);
+    assert.equal(out.status, 503, String(total));
+    assert.deepEqual(out.body, { error: 'paused' });
+    assert.equal(out.started, false);
+    assert.deepEqual(calls.globalReads, [now]);
+    assert.equal(calls.opened.length, 0);
+    assert.equal(calls.meter.length, 0);
+    assert.deepEqual(calls.global, []);
+    assert.equal(calls.hit.length, 0);
+    assert.equal(calls.acquire, 0);
+    assert.equal(calls.released, 0);
+    assert.equal(calls.logs.length, 1);
+    assert.deepEqual([calls.logs[0].status, calls.logs[0].code, calls.logs[0].billedMicros], ['denied', 'paused', 0]);
+  }
+});
+
+test('below the global daily ceiling the request streams and adds its billed amount to the global total', async () => {
+  const { deps, calls } = fakeDeps({}, { globalDaily: async (at: Date) => { calls.globalReads.push(at); return CAP - 1; } }); const { out, sink } = fakeSink();
+  await converse(deps, caller, body(), sink);
+  assert.equal(out.status, 200);
+  assert.equal(out.events.at(-1).type, 'done');
+  assert.deepEqual(calls.globalReads, [now]);
+  assert.equal(calls.opened.length, 1);
+  assert.equal(calls.meter.length, 1);
+  assert.deepEqual(calls.global, [BILLED]);
+  assert.deepEqual(calls.ceilingAlarms, []);
+});
+
+test('the global ceiling alarm fires once, only when this request crosses the ceiling', async () => {
+  const cases: [number, any[][]][] = [
+    [CAP + 100, [[]]], // crossed by this request
+    [CAP, [[]]], // reached exactly by this request
+    [CAP - 1, []], // still below
+    [CAP + BILLED, []], // was already at the ceiling before this request
+    [CAP + 5_000_000, []], // already above
+  ];
+  for (const [total, fired] of cases) {
+    const { deps, calls } = fakeDeps({}, { addGlobalDaily: async (billed: number) => { calls.global.push(billed); return total; } });
+    await converse(deps, caller, body(), fakeSink().sink);
+    assert.deepEqual(calls.global, [BILLED], String(total));
+    assert.deepEqual(calls.ceilingAlarms, fired, String(total));
+    assert.deepEqual(calls.alarms, [], 'the per-user alarm is separate');
+  }
+});
+
+test('a failing global total read fails closed: 503 paused and no Bedrock call', async () => {
+  const { deps, calls } = fakeDeps({}, { globalDaily: async () => { throw new Error('ddb down'); } }); const { out, sink } = fakeSink();
+  await converse(deps, caller, body(), sink);
+  assert.equal(out.status, 503);
+  assert.deepEqual(out.body, { error: 'paused' });
+  assert.equal(out.started, false);
+  assert.equal(calls.opened.length, 0);
+  assert.equal(calls.meter.length, 0);
+  assert.equal(calls.hit.length, 0);
+  assert.equal(calls.logs.length, 1);
+  assert.equal(calls.logs[0].code, 'paused');
+});
+
+test('a failing global counter write does not break the response, and a failing per-user counter still adds to the global total', async () => {
+  {
+    const { deps, calls } = fakeDeps({}, { addGlobalDaily: async () => { throw new Error('ddb down'); } }); const { out, sink } = fakeSink();
+    await converse(deps, caller, body(), sink);
+    assert.equal(out.events.at(-1).type, 'done');
+    assert.equal(out.ended, true);
+    assert.equal(calls.meter.length, 1);
+    assert.deepEqual(calls.daily, [BILLED]);
+    assert.deepEqual(calls.ceilingAlarms, []);
+    assert.equal(calls.released, 1);
+    assert.equal(calls.logs.length, 1);
+    assert.deepEqual([calls.logs[0].status, calls.logs[0].code], ['ok', null]);
+  }
+  {
+    const { deps, calls } = fakeDeps({}, { addDaily: async () => { throw new Error('ddb down'); } }); const { out, sink } = fakeSink();
+    await converse(deps, caller, body(), sink);
+    assert.equal(out.events.at(-1).type, 'done');
+    assert.deepEqual(calls.global, [BILLED]);
+  }
+});
+
 test('an unexpected throw becomes upstream_error before or after the stream starts', async () => {
   const early = fakeDeps({ loadUser: async () => { throw new Error('boom'); } }); const e = fakeSink();
   await converse(early.deps, caller, body(), e.sink);
@@ -384,4 +477,13 @@ test('the log module emits only closed shapes', (t) => {
   assert.equal(emf.Env, 'prod');
   assert.equal(emf.UserDailyBilledOver20, 1);
   assert.equal(emf.userHash, 'abc123');
+
+  writeGlobalCeilingMetric('sandbox');
+  const ceiling = JSON.parse(log.mock.calls[2].arguments[0]);
+  assert.deepEqual(ceiling._aws.CloudWatchMetrics, [{ Namespace: 'Jarvis/AiProxy', Dimensions: [['Env']], Metrics: [{ Name: 'GlobalDailyCeilingReached', Unit: 'Count' }] }]);
+  assert.equal(typeof ceiling._aws.Timestamp, 'number');
+  // No user data: only the EMF envelope, the env dimension and the metric value.
+  assert.deepEqual(Object.keys(ceiling).sort(), ['Env', 'GlobalDailyCeilingReached', '_aws']);
+  assert.equal(ceiling.Env, 'sandbox');
+  assert.equal(ceiling.GlobalDailyCeilingReached, 1);
 });

@@ -6,7 +6,7 @@ import type { AiConfig, CatalogEntry, Workload } from './config';
 import { MAX_IN_FLIGHT } from './converse';
 import type { BedrockInput, Deps, UsageRecord } from './converse';
 import type { Grant } from './entitlement';
-import { writeDailyAlarmMetric, writeLog } from './log';
+import { writeDailyAlarmMetric, writeGlobalCeilingMetric, writeLog } from './log';
 
 /** A leased in-flight slot outlives the 300 s Lambda timeout, so an expired lease can never still be running. */
 export const LEASE_SECONDS = 360;
@@ -96,6 +96,24 @@ export function usageItem(record: UsageRecord): Record<string, unknown> {
 }
 
 const hkDay = (now: Date): string => new Date(now.getTime() + HK_OFFSET_MS).toISOString().slice(0, 10);
+const globalDayKey = (now: Date) => ({ pk: `day#global#${hkDay(now)}` });
+
+/** Strongly consistent: the ceiling check must see the latest served request. */
+export async function readGlobalDaily(send: Send, table: string, now: Date): Promise<number> {
+  const out = await send(new GetCommand({ TableName: table, Key: globalDayKey(now), ConsistentRead: true }));
+  return (out.Item?.billedMicros as number | undefined) ?? 0;
+}
+
+export async function addGlobalDailyTotal(send: Send, table: string, billedMicros: number, now: Date): Promise<number> {
+  const out = await send(new UpdateCommand({
+    TableName: table,
+    Key: globalDayKey(now),
+    UpdateExpression: 'ADD billedMicros :b SET expiresAt = :exp',
+    ExpressionAttributeValues: { ':b': billedMicros, ':exp': epochSeconds(now) + 2 * 86_400 },
+    ReturnValues: 'UPDATED_NEW',
+  }));
+  return out.Attributes.billedMicros as number;
+}
 
 export function createDeps(env: Record<string, string | undefined>): Deps {
   const ddb = DynamoDBDocumentClient.from(new DynamoDBClient({}));
@@ -202,6 +220,8 @@ export function createDeps(env: Record<string, string | undefined>): Deps {
         }));
         return out.Attributes.billedMicros as number;
       },
+      globalDaily: now => readGlobalDaily(send, limitsTable, now),
+      addGlobalDaily: (billedMicros, now) => addGlobalDailyTotal(send, limitsTable, billedMicros, now),
     },
     async openStream(entry: CatalogEntry, input: BedrockInput) {
       let client = bedrock.get(entry.region);
@@ -231,5 +251,6 @@ export function createDeps(env: Record<string, string | undefined>): Deps {
     },
     log: writeLog,
     dailyAlarm: userHash => writeDailyAlarmMetric(userHash, alarmEnv),
+    globalCeilingAlarm: () => writeGlobalCeilingMetric(alarmEnv),
   };
 }

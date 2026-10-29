@@ -50,6 +50,20 @@ test('subscriptionAccess ships off, is false when a stored row omits it, and mus
   }
 });
 
+test('globalDailyCapMicros ships at US$10, takes the default when a stored row omits it, and must be a positive safe integer', () => {
+  assert.equal(DEFAULT_CONFIG.globalDailyCapMicros, 10_000_000);
+  const { globalDailyCapMicros, ...missing } = DEFAULT_CONFIG;
+  assert.equal(parseConfig(missing).globalDailyCapMicros, DEFAULT_CONFIG.globalDailyCapMicros);
+  assert.deepEqual(effectiveConfig({ config: 'current', body: JSON.stringify(missing) }), { config: DEFAULT_CONFIG, invalid: false });
+  assert.equal(parseConfig({ ...DEFAULT_CONFIG, globalDailyCapMicros: 3_000_000 }).globalDailyCapMicros, 3_000_000);
+  for (const odd of [0, -1, 1.5, 2 ** 53, '10000000', null, true, {}]) {
+    assert.equal(parseConfig({ ...DEFAULT_CONFIG, globalDailyCapMicros: odd }), null, JSON.stringify(odd));
+    const row = effectiveConfig({ config: 'current', body: JSON.stringify({ ...DEFAULT_CONFIG, globalDailyCapMicros: odd }) });
+    assert.equal(row.invalid, true, JSON.stringify(odd));
+    assert.equal(row.config.globalPause, true, JSON.stringify(odd));
+  }
+});
+
 test('every catalog model has a region and a default price', () => {
   for (const id of Object.keys(CATALOG)) { assert.ok(CATALOG[id].region); assert.ok(DEFAULT_CONFIG.prices[id], id); }
 });

@@ -136,6 +136,23 @@ export class AiProxyStack extends cdk.Stack {
       treatMissingData: cw.TreatMissingData.NOT_BREACHING,
     }).addAlarmAction(new cwActions.SnsAction(alertTopic));
 
+    // The proxy writes this EMF metric once the billed total across all users reaches globalDailyCapMicros in a Hong Kong day.
+    // From then on it pauses every request until the next Hong Kong day.
+    new cw.Alarm(this, 'GlobalDailyCeilingAlarm', {
+      alarmName: `jarvis-${props.envName}-ai-global-daily-ceiling`,
+      metric: new cw.Metric({
+        namespace: 'Jarvis/AiProxy',
+        metricName: 'GlobalDailyCeilingReached',
+        dimensionsMap: { Env: props.envName },
+        statistic: 'Sum',
+        period: cdk.Duration.minutes(5),
+      }),
+      threshold: 1,
+      evaluationPeriods: 1,
+      comparisonOperator: cw.ComparisonOperator.GREATER_THAN_OR_EQUAL_TO_THRESHOLD,
+      treatMissingData: cw.TreatMissingData.NOT_BREACHING,
+    }).addAlarmAction(new cwActions.SnsAction(alertTopic));
+
     // A served request whose meter write failed twice is uncounted, so it no longer counts towards the cap.
     // Metric filter dimensions can only come from log fields and the converse log has no env, so the env is in the metric name.
     const meterFailed = new logs.MetricFilter(this, 'MeterFailedFilter', {
