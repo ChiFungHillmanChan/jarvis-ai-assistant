@@ -160,14 +160,15 @@ aws budgets execute-budget-action --profile jarvis-deploy \
 **為所有人暫停 AI，或調整全域每日上限。** 兩者都在 DynamoDB 表 `jarvis-<env>-ai-config`，鍵為 `{"config": "current"}` 的那一列，設定以 JSON 字串存放在 `body` 欄位內：`globalPause`（`true` 即暫停，請求回 503 `paused`）及 `globalDailyCapMicros`（當日香港時間所有用戶合計的 billed 微美元上限，整數；shipped default 為 10000000，即 US$10）。proxy 最多快取 30 秒，`/me` 每次重讀，毋須部署；改動最遲約 30 秒生效。
 
 ```bash
-# 1. 查看現有的列；沒有輸出代表尚未建立，此時改用 defaults（見第 2 步）
+# 1. 在 infra/ 內把現有的列存成 ai-config-item.json；內容為 null 代表尚未建立，第 2 步會改用 defaults
 aws dynamodb get-item --profile jarvis-deploy --region ap-southeast-1 \
-  --table-name jarvis-<env>-ai-config --key '{"config":{"S":"current"}}'
+  --table-name jarvis-<env>-ai-config --key '{"config":{"S":"current"}}' \
+  --query Item --output json > ai-config-item.json
 
-# 2a. 列已存在：以其 body 為底，只修改 globalPause / globalDailyCapMicros，其餘欄位原樣保留，整列寫成 ai-config-item.json
-# 2b. 列不存在：在 infra/ 內執行以下指令，以 config/jarvis-ai.json 的完整 defaults 產生 ai-config-item.json
-#     PAUSE 與 CAP 皆可省略；省略時沿用 defaults（不暫停、US$10）
-PAUSE=true CAP=5000000 node -e 'const d=require("./config/jarvis-ai.json").defaults;if(process.env.PAUSE)d.globalPause=process.env.PAUSE==="true";if(process.env.CAP)d.globalDailyCapMicros=Number(process.env.CAP);if(!Number.isSafeInteger(d.globalDailyCapMicros)||d.globalDailyCapMicros<=0)throw new Error("CAP must be a positive integer");require("fs").writeFileSync("ai-config-item.json",JSON.stringify({config:{S:"current"},body:{S:JSON.stringify(d)}}))'
+# 2. 以現有列的 body 為底（列不存在時用 config/jarvis-ai.json 的完整 defaults），只修改 globalPause / globalDailyCapMicros，
+#    其餘欄位原樣保留，結果寫回 ai-config-item.json。指令前不加變數即不作任何修改。
+#    暫停：在指令前加 PAUSE=true；恢復：加 PAUSE=false；改上限：加 CAP=<微美元整數>（例如 CAP=5000000 即 US$5）
+node -e 'const fs=require("fs");const row=JSON.parse(fs.readFileSync("ai-config-item.json","utf8"));const d=row?JSON.parse(row.body.S):require("./config/jarvis-ai.json").defaults;if(process.env.PAUSE&&!["true","false"].includes(process.env.PAUSE))throw new Error("PAUSE must be true or false");if(process.env.PAUSE)d.globalPause=process.env.PAUSE==="true";if(process.env.CAP)d.globalDailyCapMicros=Number(process.env.CAP);if(!Number.isSafeInteger(d.globalDailyCapMicros)||d.globalDailyCapMicros<=0)throw new Error("CAP must be a positive integer");fs.writeFileSync("ai-config-item.json",JSON.stringify({config:{S:"current"},body:{S:JSON.stringify(d)}}))'
 
 # 3. 整列寫入
 aws dynamodb put-item --profile jarvis-deploy --region ap-southeast-1 \
