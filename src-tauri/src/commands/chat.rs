@@ -25,18 +25,21 @@ fn needs_personal_context(lower: &str, raw: &str) -> bool {
         "task", "meeting", "email", "deadline", "schedule", "today", "calendar",
         "work on", "priority", "github", "pr", "issue", "notion", "what should",
         "remind", "reminder", "status", "busy", "free", "obsidian", "notes", "vault", "job",
-        "resume", "interview", "application",
+        "resume", "interview", "application", "inbox", "mail",
     ];
     const ZH: &[&str] = &[
         "今日", "今天", "會議", "会议", "開會", "开会", "郵件", "邮件", "電郵",
         "任務", "任务", "日程", "行事曆", "日曆", "日历", "死線", "截止",
-        "提醒", "待辦", "待办", "要做", "安排", "未讀", "未读",
+        "提醒", "待辦", "待办", "要做", "安排", "未讀", "未读", "跟進", "跟进", "覆",
     ];
     EN.iter().any(|k| contains_word(lower, k)) || ZH.iter().any(|k| raw.contains(k))
 }
 
+/// Only ASCII letters and digits join a word: the terms are English, and in
+/// code-mixed Cantonese ("有冇email") a Chinese character next to one is a
+/// boundary, not part of the word.
 fn contains_word(text: &str, word: &str) -> bool {
-    let is_word_char = |c: char| c.is_alphanumeric();
+    let is_word_char = |c: char| c.is_ascii_alphanumeric();
     text.match_indices(word).any(|(start, _)| {
         let rest = &text[start + word.len()..];
         let rest = rest.strip_prefix('s').unwrap_or(rest);
@@ -112,9 +115,9 @@ async fn send_scoped(
     let msg_lower = message.to_lowercase();
     let history_session = session_id.clone();
 
-    let (history, context_messages) = tokio::task::spawn_blocking(
-        move || -> Result<(Vec<(String, String)>, Vec<(String, String)>), String> {
-            let history = save_turn_and_load_history(&db_arc, &history_session, &msg_clone)?;
+    let (history, context_messages, message_id) = tokio::task::spawn_blocking(
+        move || -> Result<(Vec<(String, String)>, Vec<(String, String)>, i64), String> {
+            let (message_id, history) = save_turn(&db_arc, &history_session, &msg_clone)?;
 
             // Only add context for questions about personal data (saves tokens)
             let needs_context = needs_personal_context(&msg_lower, &msg_clone);
@@ -127,7 +130,7 @@ async fn send_scoped(
                 }
             }
 
-            Ok((history, ctx_msgs))
+            Ok((history, ctx_msgs, message_id))
         },
     )
     .await
@@ -160,7 +163,7 @@ async fn send_scoped(
             let db_arc2 = db.clone();
             let search_session = session_id.clone();
             let results: Vec<String> = tokio::task::spawn_blocking(move || -> Result<Vec<String>, String> {
-                Ok(search_history(&db_arc2, &search_session, &topic)?
+                Ok(search_history(&db_arc2, &search_session, &topic, Some(message_id))?
                     .into_iter()
                     .map(|(role, content, date)| format!("[{} - {}]: {}", date.unwrap_or_default(), role, crate::util::truncate_bytes(&content, 100)))
                     .collect())
@@ -396,14 +399,18 @@ pub(crate) fn save_turn_with(
 /// Up to ten of the session's messages that mention `topic`, newest first, as
 /// (role, content, created_at). The matches go to the chosen AI to summarise,
 /// so messages it must not be shown are left out, as in the history above.
-pub(crate) fn search_history(db: &Database, session_id: &str, topic: &str) -> Result<Vec<(String, String, Option<String>)>, String> {
+///
+/// With `before`, only messages saved before that id. Chat saves the message
+/// it is answering first, and that message always contains its own topic, so
+/// without this every "search for ..." matched itself.
+pub(crate) fn search_history(db: &Database, session_id: &str, topic: &str, before: Option<i64>) -> Result<Vec<(String, String, Option<String>)>, String> {
     let withheld = crate::ai::mail_policy::withheld(db);
     let conn = db.conn.lock().map_err(|e| e.to_string())?;
     let mut stmt = conn
-        .prepare("SELECT role, content, created_at FROM conversations WHERE content LIKE ?1 AND session_id = ?2 AND id > ?3 ORDER BY created_at DESC LIMIT 10")
+        .prepare("SELECT role, content, created_at FROM conversations WHERE content LIKE ?1 AND session_id = ?2 AND id > ?3 AND id < ?4 ORDER BY created_at DESC LIMIT 10")
         .map_err(|e| e.to_string())?;
     let found = stmt
-        .query_map(rusqlite::params![format!("%{topic}%"), session_id, withheld.conversations], |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)))
+        .query_map(rusqlite::params![format!("%{topic}%"), session_id, withheld.conversations, before.unwrap_or(i64::MAX)], |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)))
         .map_err(|e| e.to_string())?
         .collect::<Result<Vec<_>, _>>()
         .map_err(|e| e.to_string())?;
@@ -569,6 +576,20 @@ mod tests {
         assert_eq!(remaining, 2);
     }
 
+    /// The user's message is saved before the search runs, so it always
+    /// matched its own topic: "search for flights" lost the session history.
+    #[test]
+    fn a_conversation_search_skips_the_message_being_answered() {
+        let db = crate::db::test_database();
+        save_turn(&db, "s1", "book flights to Tokyo").unwrap();
+        let (current, _) = save_turn(&db, "s1", "search for the DHL invoice").unwrap();
+        assert!(search_history(&db, "s1", "the DHL invoice", Some(current)).unwrap().is_empty());
+        let (next, _) = save_turn(&db, "s1", "search for flights").unwrap();
+        let found = search_history(&db, "s1", "flights", Some(next)).unwrap();
+        assert_eq!(found.len(), 1, "{found:?}");
+        assert_eq!(found[0].1, "book flights to Tokyo");
+    }
+
     #[test]
     fn session_migration_retains_existing_legacy_rows() {
         let conn = Connection::open_in_memory().unwrap();
@@ -598,6 +619,17 @@ mod tests {
         assert!(asks("what meetings do I have today"));
         assert!(asks("any urgent email"));
         assert!(!asks("write me a haiku about rust"));
+    }
+
+    /// Hong Kong users mix English into Cantonese with no space between.
+    #[test]
+    fn code_mixed_cantonese_pulls_in_personal_context() {
+        assert!(asks("有冇email"));
+        assert!(asks("睇下inbox"));
+        assert!(asks("有冇新mail"));
+        assert!(asks("呢單要跟進"));
+        assert!(asks("我要覆邊個"));
+        assert!(!asks("幫我寫首詩"));
     }
 
     /// "pr" used to match inside "prefer" and "project", so ordinary sentences
@@ -708,8 +740,8 @@ mod tests {
         persist_scoped_reply(&db.conn.lock().unwrap(), "Hi", "s1").unwrap();
         assert_eq!(contents(save_turn_and_load_history(&db, "s1", "and again").unwrap()), ["hello", "Hi", "and again"]);
 
-        assert!(search_history(&db, "s1", "Kenny").unwrap().is_empty());
-        assert_eq!(search_history(&db, "s1", "hello").unwrap().len(), 1);
+        assert!(search_history(&db, "s1", "Kenny", None).unwrap().is_empty());
+        assert_eq!(search_history(&db, "s1", "hello", None).unwrap().len(), 1);
     }
 
     /// The AI can be changed while a turn that read an email is still
