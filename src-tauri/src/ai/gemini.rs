@@ -113,7 +113,8 @@ pub async fn send(
     });
 
     let max_iterations = 5;
-    for _ in 0..max_iterations {
+    for round in 0..max_iterations {
+        let final_round = round + 1 == max_iterations;
         // Per-round usage: Gemini reports usageMetadata cumulatively within one
         // request, so overwrite within a round and fold into totals when it ends.
         let mut usage = UsageMetadata::default();
@@ -122,7 +123,7 @@ pub async fn send(
             API_BASE, model
         );
 
-        let request_body = json!({
+        let mut request_body = json!({
             "contents": contents,
             "tools": gemini_tools,
             "systemInstruction": system_instruction,
@@ -130,6 +131,10 @@ pub async fn send(
                 "maxOutputTokens": 4096
             }
         });
+        if final_round {
+            // The last allowed round answers from what earlier rounds gathered.
+            request_body["toolConfig"] = json!({"functionCallingConfig": {"mode": "NONE"}});
+        }
 
         let response = client
             .post(&url)
@@ -277,7 +282,7 @@ pub async fn send(
         total_output_tokens += usage.candidates_token_count.unwrap_or(0);
         total_cached_tokens += usage.cached_content_token_count.unwrap_or(0);
 
-        if !function_call_parts.is_empty() {
+        if !function_call_parts.is_empty() && !final_round {
             let mut assistant_parts: Vec<GeminiPart> = Vec::new();
             let full_text = text_parts.join("");
             if !full_text.is_empty() {
@@ -378,6 +383,17 @@ pub async fn send(
             );
             return Ok(text_parts.join(""));
         }
+        if final_round && !function_call_parts.is_empty() {
+            crate::ai::cost::record_inference(
+                db, "gemini", workload, model,
+                total_prompt_tokens,
+                total_output_tokens,
+                total_cached_tokens,
+                0,
+                started_at.elapsed().as_millis() as i64,
+            );
+            return Ok(tools::tool_limit_fallback(&tools::read_language_pref(db)).into());
+        }
         log::warn!(
             "[gemini] empty response: model={} finish_reason={:?} function_calls={} events={} bytes={} first_chunk={:?}",
             model,
@@ -407,7 +423,8 @@ pub async fn send(
         0,
         started_at.elapsed().as_millis() as i64,
     );
-    Ok("I've completed the actions.".into())
+    // The last round always returns above.
+    Ok(tools::tool_limit_fallback(&tools::read_language_pref(db)).into())
 }
 
 /// Map persisted `(role, content)` rows to Gemini contents. Rows whose content

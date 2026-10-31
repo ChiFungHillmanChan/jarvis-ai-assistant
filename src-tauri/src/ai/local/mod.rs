@@ -27,6 +27,9 @@ struct ChatCompletionRequest {
     messages: Vec<LocalMessage>,
     #[serde(skip_serializing_if = "Option::is_none")]
     tools: Option<Vec<serde_json::Value>>,
+    /// "none" on the last allowed round when native tools are sent.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    tool_choice: Option<&'static str>,
     #[serde(skip_serializing_if = "Option::is_none")]
     max_tokens: Option<u32>,
     stream: bool,
@@ -235,7 +238,8 @@ pub async fn send_local(
     };
 
     let max_iterations = 5;
-    for _ in 0..max_iterations {
+    for round in 0..max_iterations {
+        let final_round = round + 1 == max_iterations;
         // Per-round usage: the OpenAI-compatible stream reports one usage
         // object per request, so overwrite within a round and fold into the
         // totals when the round ends.
@@ -244,6 +248,7 @@ pub async fn send_local(
             model: model.to_string(),
             messages: local_messages.clone(),
             tools: request_tools.clone(),
+            tool_choice: (final_round && request_tools.is_some()).then_some("none"),
             max_tokens: Some(4096.min(context_length / 2)),
             stream: true,
             response_format: if use_response_format {
@@ -483,7 +488,7 @@ pub async fn send_local(
         }
 
         // Handle native tool calls (OpenAI format)
-        if finish_reason.as_deref() == Some("tool_calls") && !tool_map.is_empty() {
+        if finish_reason.as_deref() == Some("tool_calls") && !tool_map.is_empty() && !final_round {
             let text_content = text_parts.join("");
             let mut tool_calls_vec: Vec<LocalToolCall> = Vec::new();
             let mut sorted_indices: Vec<usize> = tool_map.keys().copied().collect();
@@ -586,7 +591,11 @@ pub async fn send_local(
             total_prompt_tokens, total_completion_tokens,
             &started_at,
         );
-        return Ok(text_parts.join(""));
+        let text = text_parts.join("");
+        if final_round && text.trim().is_empty() {
+            return Ok(tools::tool_limit_fallback(&tools::read_language_pref(db)).into());
+        }
+        return Ok(text);
     }
 
     let _ = app_handle.emit("chat-token", json!({"token": "", "done": true}));
@@ -595,7 +604,7 @@ pub async fn send_local(
         total_prompt_tokens, total_completion_tokens,
         &started_at,
     );
-    Ok("I've completed the actions.".into())
+    Ok(tools::tool_limit_fallback(&tools::read_language_pref(db)).into())
 }
 
 /// Record a completed local turn. Local models are free (models::usd_cost_micro

@@ -110,7 +110,8 @@ pub async fn send(
         .build();
 
     let max_iterations = 5;
-    for _ in 0..max_iterations {
+    for round in 0..max_iterations {
+        let final_round = round + 1 == max_iterations;
         let start = std::time::Instant::now();
         let response = client
             .converse()
@@ -138,7 +139,8 @@ pub async fn send(
         let text_parts = collect_text(&output_message);
         let tool_uses = collect_tool_uses(&output_message);
 
-        if !tool_uses.is_empty() || response.stop_reason() == &StopReason::ToolUse {
+        // The last round runs no tools.
+        if (!tool_uses.is_empty() || response.stop_reason() == &StopReason::ToolUse) && !final_round {
             bedrock_messages.push(output_message);
 
             let mut executed_tools: HashSet<String> = HashSet::new();
@@ -190,6 +192,11 @@ pub async fn send(
                     .build()?;
                 result_blocks.push(ContentBlock::ToolResult(tool_result));
             }
+            // Converse has no "no tools" choice while the history holds tool
+            // calls, so the next, last round is told in words.
+            if round + 2 == max_iterations {
+                result_blocks.push(ContentBlock::Text(FINAL_ROUND_NOTE.to_string()));
+            }
 
             bedrock_messages.push(
                 Message::builder()
@@ -208,7 +215,10 @@ pub async fn send(
             continue;
         }
 
-        let final_text = text_parts.join("");
+        let mut final_text = text_parts.join("");
+        if final_round && final_text.trim().is_empty() {
+            final_text = tools::tool_limit_fallback(&tools::read_language_pref(db)).to_string();
+        }
         let _ = app_handle.emit(
             "chat-status",
             json!({
@@ -226,9 +236,13 @@ pub async fn send(
         return Ok(final_text);
     }
 
+    // The last round always returns above.
     let _ = app_handle.emit("chat-token", json!({"token": "", "done": true}));
-    Ok("I've completed the actions.".into())
+    Ok(tools::tool_limit_fallback(&tools::read_language_pref(db)).into())
 }
+
+/// Sent with the tool results before the last allowed round.
+const FINAL_ROUND_NOTE: &str = "Tool limit reached. Do not call any more tools: answer the user now from the results above, and say briefly what you could not check.";
 
 /// Render a Converse SDK error with the cause chain attached.
 ///

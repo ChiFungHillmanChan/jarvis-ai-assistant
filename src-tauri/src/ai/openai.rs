@@ -22,6 +22,10 @@ struct OpenAIRequest {
     /// verified live 2026-09-25. Not sent to compatible services.
     #[serde(skip_serializing_if = "Option::is_none")]
     reasoning_effort: Option<&'static str>,
+    /// "none" on the last allowed round, so the model answers from what the
+    /// earlier rounds gathered instead of asking for another tool.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    tool_choice: Option<&'static str>,
     stream: bool,
     stream_options: StreamOptions,
 }
@@ -60,7 +64,7 @@ impl Target<'_> {
         self.base_url.map(|b| super::compat::label(b).to_lowercase()).unwrap_or_else(|| "openai".into())
     }
 
-    fn request(&self, model: String, messages: Vec<OpenAIMessage>, tools: Vec<serde_json::Value>) -> OpenAIRequest {
+    fn request(&self, model: String, messages: Vec<OpenAIMessage>, tools: Vec<serde_json::Value>, final_round: bool) -> OpenAIRequest {
         let official = self.base_url.is_none();
         OpenAIRequest {
             model,
@@ -69,6 +73,7 @@ impl Target<'_> {
             max_completion_tokens: official.then_some(4096),
             max_tokens: (!official).then_some(4096),
             reasoning_effort: official.then_some("none"),
+            tool_choice: final_round.then_some("none"),
             stream: true,
             stream_options: StreamOptions { include_usage: true },
         }
@@ -199,11 +204,12 @@ pub async fn send(
     );
 
     let max_iterations = 5;
-    for _ in 0..max_iterations {
+    for round in 0..max_iterations {
+        let final_round = round + 1 == max_iterations;
         // Per-round usage: OpenAI sends one usage chunk per request, so
         // overwrite within a round and fold into totals when it ends.
         let mut usage = OpenAIUsage::default();
-        let request = target.request(model_id.clone(), openai_messages.clone(), openai_tools.clone());
+        let request = target.request(model_id.clone(), openai_messages.clone(), openai_tools.clone(), final_round);
 
         let response = client
             .post(target.url())
@@ -350,8 +356,9 @@ pub async fn send(
 
         // Handle tool calls. Some compatible services finish a tool-call
         // turn with "stop", so any complete call counts; a reply cut off by
-        // the length limit may carry half-written arguments.
-        if !tool_map.is_empty() && finish_reason.as_deref() != Some("length") {
+        // the length limit may carry half-written arguments. The last round
+        // runs no tools: a service that ignores tool_choice gets the fallback.
+        if !tool_map.is_empty() && finish_reason.as_deref() != Some("length") && !final_round {
             let text_content = text_parts.join("");
             let mut tool_calls_vec: Vec<ToolCall> = Vec::new();
             let mut sorted_indices: Vec<usize> = tool_map.keys().copied().collect();
@@ -459,18 +466,15 @@ pub async fn send(
             0, 0,
             started_at.elapsed().as_millis() as i64,
         );
-        return Ok(text_parts.join(""));
+        let text = text_parts.join("");
+        if final_round && text.trim().is_empty() {
+            return Ok(tools::tool_limit_fallback(&tools::read_language_pref(db)).into());
+        }
+        return Ok(text);
     }
 
-    let _ = app_handle.emit("chat-token", json!({"token": "", "done": true}));
-    crate::ai::cost::record_inference(
-        db, &provider, workload, &model_id,
-        total_prompt_tokens,
-        total_completion_tokens,
-        0, 0,
-        started_at.elapsed().as_millis() as i64,
-    );
-    Ok("I've completed the actions.".into())
+    // The last round always returns above.
+    Ok(tools::tool_limit_fallback(&tools::read_language_pref(db)).into())
 }
 
 type ToolSlots = HashMap<usize, (String, String, String, Option<serde_json::Value>)>;
@@ -545,6 +549,20 @@ mod tests {
         assert!(plain.get("extra_content").is_none(), "OpenAI itself never sees the field");
     }
 
+    /// The last allowed round must get an answer, not another tool call
+    /// that nothing will run.
+    #[test]
+    fn only_the_last_round_turns_tools_off() {
+        let official = Target { base_url: None, model: None };
+        let compatible = Target { base_url: Some("https://api.moonshot.ai/v1"), model: Some("kimi-k2") };
+        for target in [official, compatible] {
+            let last = serde_json::to_value(target.request("m".into(), Vec::new(), Vec::new(), true)).unwrap();
+            assert_eq!(last["tool_choice"], "none");
+            let earlier = serde_json::to_value(target.request("m".into(), Vec::new(), Vec::new(), false)).unwrap();
+            assert!(earlier.get("tool_choice").is_none(), "{earlier}");
+        }
+    }
+
     #[test]
     fn sse_chunk_parses_final_usage_chunk_with_empty_choices() {
         let json = r#"{"choices":[],"usage":{"prompt_tokens":100,"completion_tokens":42}}"#;
@@ -580,7 +598,7 @@ mod tests {
             OpenAIMessage { role: "user".into(), content: Some("What is on my calendar today? Use the calendar tool.".into()), tool_calls: None, tool_call_id: None },
         ];
         let tools = tools::to_openai_format(&tools::get_tool_definitions());
-        let request = target.request(target.model().unwrap(), messages, tools);
+        let request = target.request(target.model().unwrap(), messages, tools, false);
         let wire = serde_json::to_value(&request).unwrap();
         assert!(wire.get("reasoning_effort").is_none() && wire.get("max_completion_tokens").is_none() && wire["max_tokens"] == 4096);
         let response = Client::new().post(target.url()).bearer_auth(&key).json(&request).send().await.unwrap();

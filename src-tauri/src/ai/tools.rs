@@ -534,6 +534,16 @@ pub fn tool_status_detail(name: &str, arguments: &str) -> Option<String> {
     Some(line.chars().take(STEP_DETAIL_MAX_CHARS - 1).chain(std::iter::once('…')).collect())
 }
 
+/// The reply when a turn used every tool round and the model still gave no
+/// answer. Same language rule as `tool_voice_narration`.
+pub fn tool_limit_fallback(language: &str) -> &'static str {
+    if language == "yue" {
+        "我查了幾個地方，但在完成前用盡了步驟，未能整理出答案。請把問題說得具體一點，我再試一次。"
+    } else {
+        "I looked in a few places but ran out of steps before I could answer. Could you narrow it down? I'll try again."
+    }
+}
+
 /// Short spoken line played at the first tool call of a turn. `language` is
 /// the saved response language: `yue` hears Chinese, everything else English
 /// (a `bilingual` request's language is not known until the reply is written).
@@ -3100,6 +3110,17 @@ mod step_tests {
         assert!(detail.ends_with('…'));
         assert_eq!(tool_status_detail("search_emails", "not json"), None);
         assert_eq!(tool_status_detail("search_emails", r#"{"query":"   "}"#), None);
+    }
+
+    #[test]
+    fn the_tool_limit_reply_follows_the_response_language() {
+        assert!(tool_limit_fallback("en").is_ascii());
+        assert!(tool_limit_fallback("bilingual").is_ascii());
+        let chinese = tool_limit_fallback("yue");
+        assert!(!chinese.is_ascii());
+        for colloquial in ["嘅", "咗", "唔", "冇", "啲", "係"] {
+            assert!(!chinese.contains(colloquial), "{chinese}");
+        }
     }
 
     #[test]

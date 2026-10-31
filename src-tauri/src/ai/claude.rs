@@ -13,6 +13,10 @@ struct ClaudeRequest {
     max_tokens: u32,
     system: String,
     tools: Vec<serde_json::Value>,
+    /// {"type":"none"} on the last allowed round, so the model answers from
+    /// what the earlier rounds gathered instead of asking for another tool.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    tool_choice: Option<serde_json::Value>,
     messages: Vec<ClaudeMessage>,
     stream: bool,
 }
@@ -129,12 +133,14 @@ pub async fn send(
     let started_at = std::time::Instant::now();
 
     let max_iterations = 5;
-    for _ in 0..max_iterations {
+    for round in 0..max_iterations {
+        let final_round = round + 1 == max_iterations;
         let request = ClaudeRequest {
             model: model.clone(),
             max_tokens: 4096,
             system: system.clone(),
             tools: claude_tools.clone(),
+            tool_choice: final_round.then(|| json!({"type": "none"})),
             messages: claude_messages.clone(),
             stream: true,
         };
@@ -325,8 +331,9 @@ pub async fn send(
             })
             .collect();
 
-        // If there are tool calls, execute them and continue
-        if !tool_uses.is_empty() {
+        // If there are tool calls, execute them and continue. The last round
+        // runs no tools.
+        if !tool_uses.is_empty() && !final_round {
             // Build assistant message with text and tool_use blocks
             let mut assistant_blocks: Vec<ContentBlock> = Vec::new();
             for text in &text_parts {
@@ -427,6 +434,9 @@ pub async fn send(
         if !text_parts.is_empty() {
             return Ok(text_parts.join(""));
         }
+        if final_round {
+            return Ok(tools::tool_limit_fallback(&tools::read_language_pref(db)).into());
+        }
         return Ok(String::new());
     }
 
@@ -437,5 +447,22 @@ pub async fn send(
         total_input_tokens, total_output_tokens, total_cache_read, total_cache_write,
         started_at.elapsed().as_millis() as i64,
     );
-    Ok("I've completed the actions.".into())
+    // The last round always returns above.
+    Ok(tools::tool_limit_fallback(&tools::read_language_pref(db)).into())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The last allowed round must get an answer, not another tool call
+    /// that nothing will run.
+    #[test]
+    fn only_the_last_round_turns_tools_off() {
+        let request = |tool_choice| {
+            serde_json::to_value(ClaudeRequest { model: "m".into(), max_tokens: 1, system: String::new(), tools: Vec::new(), tool_choice, messages: Vec::new(), stream: true }).unwrap()
+        };
+        assert_eq!(request(Some(json!({"type": "none"})))["tool_choice"]["type"], "none");
+        assert!(request(None).get("tool_choice").is_none());
+    }
 }
