@@ -354,7 +354,7 @@ pub fn get_tool_definitions() -> Vec<Tool> {
         },
         Tool {
             name: "render_status".into(),
-            description: "Show a status card for a completed action. Use after creating tasks, syncing data, or completing any action.".into(),
+            description: "Show a status card for an action. Call it in the same batch of tool calls as the action it reports (for example together with create_task), never as a separate step after that action's result: an extra step only makes the user wait.".into(),
             parameters: json!({
                 "type": "object",
                 "properties": {
@@ -3053,6 +3053,15 @@ mod local_data_tests {
         assert_eq!(deadlines, vec![Some("2026-11-01".to_string())], "the refused task must not be saved");
         run("create_task", serde_json::json!({"title": "No date"}), &db).await;
         assert_eq!(db.conn.lock().unwrap().query_row("SELECT COUNT(*) FROM tasks WHERE deadline IS NULL", [], |r| r.get::<_, i64>(0)).unwrap(), 1);
+    }
+
+    /// render_status asked for its own round after every action: one more
+    /// model call of latency and one step closer to the round cap.
+    #[test]
+    fn render_status_rides_along_with_the_action() {
+        let tool = get_tool_definitions().into_iter().find(|t| t.name == "render_status").unwrap();
+        assert!(!tool.description.contains("Use after"), "{}", tool.description);
+        assert!(tool.description.contains("same batch"), "{}", tool.description);
     }
 
     /// Tasks have no time of day, so the model must be told not to promise
