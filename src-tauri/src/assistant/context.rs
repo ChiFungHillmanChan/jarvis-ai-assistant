@@ -153,7 +153,9 @@ impl DayContext {
         })
     }
 
-    /// The one-line [CONTEXT] block injected ahead of a chat turn.
+    /// The one-line [CONTEXT] block injected ahead of a chat turn. Every line
+    /// of a section is kept: with only the first, three meetings read as
+    /// "just standup today".
     ///
     /// A section whose mirror has never been synced is omitted rather than
     /// reported as zero: "EMAIL: 0 unread emails." is a statement about the
@@ -161,15 +163,19 @@ impl DayContext {
     /// empty table. Omitting it leaves the model to call the live tool instead
     /// of confidently answering "you have no unread mail".
     pub fn inline_context(&self) -> String {
-        fn first_line(s: &str) -> &str {
-            s.lines().next().unwrap_or("")
+        fn one_line(s: &str) -> String {
+            s.lines()
+                .map(|line| line.trim().trim_start_matches("- "))
+                .filter(|line| !line.is_empty())
+                .collect::<Vec<_>>()
+                .join("; ")
         }
-        let mut parts = vec![format!("TASKS: {}", first_line(&self.tasks_summary))];
+        let mut parts = vec![format!("TASKS: {}", one_line(&self.tasks_summary))];
         if self.has_synced_calendar {
-            parts.push(format!("CALENDAR: {}", first_line(&self.calendar_summary)));
+            parts.push(format!("CALENDAR: {}", one_line(&self.calendar_summary)));
         }
         if self.has_synced_email {
-            parts.push(format!("EMAIL: {}", first_line(&self.email_summary)));
+            parts.push(format!("EMAIL: {}", one_line(&self.email_summary)));
         }
         parts.push(format!("GITHUB: {}", self.github_summary));
         format!("[CONTEXT] {}\n{}", parts.join(" | "), CACHE_NOTE)
@@ -456,6 +462,26 @@ mod tests {
             )
             .unwrap();
         assert_eq!(old_due_today, 1, "the UTC day counted yesterday's task");
+    }
+
+    #[test]
+    fn context_keeps_every_meeting_and_task_on_one_line() {
+        let ctx = DayContext {
+            greeting: String::new(),
+            tasks_summary: "2 pending tasks. 0 overdue. 1 due today.\n- Call Mary (due 2026-10-31)\n- File VAT (due 2026-11-02)".into(),
+            calendar_summary: "- Standup (09:00)\n- Design review (11:00)\n- Investor call (15:00 at Cyberport)".into(),
+            email_summary: "1 unread emails.\n- sam@example.com -- Q3 report".into(),
+            github_summary: "0 open PRs, 0 assigned issues.".into(),
+            deadlines: String::new(),
+            has_synced_email: true,
+            has_synced_calendar: true,
+        };
+        let block = ctx.inline_context();
+        let first = block.lines().next().unwrap();
+        for expected in ["Call Mary", "File VAT", "Standup", "Design review", "Investor call (15:00 at Cyberport)", "Q3 report"] {
+            assert!(first.contains(expected), "{expected} missing from {first}");
+        }
+        assert!(first.contains("CALENDAR: Standup (09:00); Design review (11:00); Investor call"), "{first}");
     }
 
     /// Event titles and places are Google Calendar data, under the same rule
