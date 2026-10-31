@@ -335,12 +335,7 @@ pub async fn mail_analyze_group(
     } else {
         None
     };
-    let started = std::time::Instant::now();
-    let result = analysis::analyze(context, creds, openai_key, assistant).await?;
-    if result.mode == "openai" {
-        crate::ai::cost::record_inference(&db, "openai-mail", crate::ai::Workload::Volume, &result.model, result.input_tokens, result.output_tokens, result.cached_tokens, 0, started.elapsed().as_millis() as i64);
-    }
-    Ok(result)
+    analysis::analyze(context, creds, openai_key, assistant, Some(&db)).await
 }
 
 fn select_openai_key(

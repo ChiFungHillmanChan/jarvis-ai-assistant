@@ -29,8 +29,11 @@ pub struct Completion {
     /// Shown to the user, e.g. "Kimi (kimi-k2)".
     pub provider: String,
     pub model: String,
+    /// Includes `cached_tokens`.
     pub input_tokens: i64,
     pub output_tokens: i64,
+    /// Read from the provider's cache, billed at its cached rate.
+    pub cached_tokens: i64,
     /// From models::usd_cost_micro; None for a local model, which is free.
     pub cost_micro: Option<i64>,
 }
@@ -48,14 +51,19 @@ pub async fn complete(router: &AiRouter, db: &Database, request: Request<'_>) ->
         match complete_one(router, db, entry, &request).await {
             Ok(mut done) => {
                 let provider = if entry.provider_type == "local" { "local".to_string() } else { done.provider.to_lowercase() };
-                done.cost_micro = super::models::usd_cost_micro(&provider, &done.model, done.input_tokens, done.output_tokens, 0, 0);
-                super::cost::record_inference(db, &provider, Workload::Volume, &done.model, done.input_tokens, done.output_tokens, 0, 0, started.elapsed().as_millis() as i64);
+                record(db, &provider, &mut done, started.elapsed().as_millis() as i64);
                 return Ok(done);
             }
             Err(error) => errors.push(error),
         }
     }
     Err(errors.join("；"))
+}
+
+/// Price the completion and store it as one Volume row.
+fn record(db: &Database, provider: &str, done: &mut Completion, latency_ms: i64) {
+    done.cost_micro = super::models::usd_cost_micro(provider, &done.model, done.input_tokens, done.output_tokens, done.cached_tokens, 0);
+    super::cost::record_inference(db, provider, Workload::Volume, &done.model, done.input_tokens, done.output_tokens, done.cached_tokens, 0, latency_ms);
 }
 
 async fn complete_one(router: &AiRouter, db: &Database, entry: &ProviderChainEntry, request: &Request<'_>) -> Result<Completion, String> {
@@ -121,12 +129,7 @@ async fn complete_one(router: &AiRouter, db: &Database, entry: &ProviderChainEnt
             }
             let url = format!("{}/models/{model}:generateContent", gemini::API_BASE);
             let value = post(&client, &url, "Gemini", |r| r.header("x-goog-api-key", &key), &body).await?;
-            let text = value
-                .pointer("/candidates/0/content/parts")
-                .and_then(Value::as_array)
-                .map(|parts| parts.iter().filter(|p| p.get("thought").and_then(Value::as_bool) != Some(true)).filter_map(|p| p.get("text").and_then(Value::as_str)).collect::<String>())
-                .unwrap_or_default();
-            done(text, "Gemini".into(), model, value.pointer("/usageMetadata/promptTokenCount"), value.pointer("/usageMetadata/candidatesTokenCount"))
+            gemini_result(&value, model)
         }
         "claude" => {
             let key = router.claude_key.clone().ok_or("尚未設定 Claude API 密鑰。")?;
@@ -172,7 +175,23 @@ fn chat_completions_body(model: &str, request: &Request<'_>, official: bool) -> 
 
 fn chat_completions_result(value: &Value, provider: String, model: String) -> Result<Completion, String> {
     let text = value.pointer("/choices/0/message/content").and_then(Value::as_str).unwrap_or_default().to_string();
-    done(text, provider, model, value.pointer("/usage/prompt_tokens"), value.pointer("/usage/completion_tokens"))
+    let mut done = done(text, provider, model, value.pointer("/usage/prompt_tokens"), value.pointer("/usage/completion_tokens"))?;
+    done.cached_tokens = value.pointer("/usage/prompt_tokens_details/cached_tokens").and_then(Value::as_i64).unwrap_or(0);
+    Ok(done)
+}
+
+fn gemini_result(value: &Value, model: String) -> Result<Completion, String> {
+    let text = value
+        .pointer("/candidates/0/content/parts")
+        .and_then(Value::as_array)
+        .map(|parts| parts.iter().filter(|p| p.get("thought").and_then(Value::as_bool) != Some(true)).filter_map(|p| p.get("text").and_then(Value::as_str)).collect::<String>())
+        .unwrap_or_default();
+    let usage = |field: &str| value.pointer(&format!("/usageMetadata/{field}")).and_then(Value::as_i64).unwrap_or(0);
+    let mut done = done(text, "Gemini".into(), model, value.pointer("/usageMetadata/promptTokenCount"), value.pointer("/usageMetadata/candidatesTokenCount"))?;
+    // Thinking is billed as output; candidatesTokenCount leaves it out.
+    done.output_tokens += usage("thoughtsTokenCount");
+    done.cached_tokens = usage("cachedContentTokenCount");
+    Ok(done)
 }
 
 fn done(text: String, provider: String, model: String, input: Option<&Value>, output: Option<&Value>) -> Result<Completion, String> {
@@ -185,6 +204,7 @@ fn done(text: String, provider: String, model: String, input: Option<&Value>, ou
         model,
         input_tokens: input.and_then(Value::as_i64).unwrap_or(0),
         output_tokens: output.and_then(Value::as_i64).unwrap_or(0),
+        cached_tokens: 0,
         cost_micro: None,
     })
 }
@@ -255,6 +275,42 @@ pub(crate) mod tests {
         assert!(chat_completions_result(&json!({"choices": [{"message": {"content": "  "}}]}), "Kimi".into(), "m".into()).is_err());
         let ok = chat_completions_result(&json!({"choices": [{"message": {"content": "OK"}}], "usage": {"prompt_tokens": 5, "completion_tokens": 1}}), "Kimi".into(), "m".into()).unwrap();
         assert_eq!((ok.text.as_str(), ok.input_tokens, ok.output_tokens), ("OK", 5, 1));
+    }
+
+    fn luna_cache_hit() -> Value {
+        json!({"choices": [{"message": {"content": "OK"}}], "usage": {"prompt_tokens": 20173, "completion_tokens": 195, "prompt_tokens_details": {"cached_tokens": 19824}}})
+    }
+
+    /// prompt_tokens includes the cached prefix, which OpenAI bills at a
+    /// tenth of the price; dropping it overstated mail analysis cost.
+    #[test]
+    fn cached_prompt_tokens_are_read_from_a_completion() {
+        let done = chat_completions_result(&luna_cache_hit(), "OpenAI".into(), "gpt-6-luna".into()).unwrap();
+        assert_eq!((done.input_tokens, done.output_tokens, done.cached_tokens), (20_173, 195, 19_824));
+    }
+
+    /// gpt-6-luna: 349 x $0.10 + 19,824 x $0.01 + 195 x $0.50 per 1M = 331
+    /// micro-USD, stored with the cached count.
+    #[test]
+    fn a_completion_is_priced_and_stored_with_its_cached_tokens() {
+        let db = crate::ai::cost::tests::temp_metrics_db("");
+        let mut done = chat_completions_result(&luna_cache_hit(), "OpenAI".into(), "gpt-6-luna".into()).unwrap();
+        record(&db, "openai", &mut done, 1);
+        assert_eq!(done.cost_micro, Some(331));
+        let stored: (i64, i64) = db.conn.lock().unwrap().query_row("SELECT cache_read_tokens, usd_cost_micro FROM inference_metrics", [], |r| Ok((r.get(0)?, r.get(1)?))).unwrap();
+        assert_eq!(stored, (19_824, 331));
+    }
+
+    /// Thinking is billed as output, but candidatesTokenCount leaves it out.
+    #[test]
+    fn gemini_thinking_counts_as_output() {
+        let value = json!({
+            "candidates": [{"content": {"parts": [{"text": "planning", "thought": true}, {"text": "OK"}]}}],
+            "usageMetadata": {"promptTokenCount": 1000, "candidatesTokenCount": 200, "thoughtsTokenCount": 800, "cachedContentTokenCount": 300}
+        });
+        let done = gemini_result(&value, crate::ai::models::GEMINI_FLASH.into()).unwrap();
+        assert_eq!(done.text, "OK");
+        assert_eq!((done.input_tokens, done.output_tokens, done.cached_tokens), (1_000, 1_000, 300));
     }
 
     /// Gemini's OpenAI-compatible endpoint stands in for Kimi and Qwen: a

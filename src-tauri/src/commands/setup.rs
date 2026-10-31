@@ -351,6 +351,7 @@ pub async fn test_mail_ai_connection(
         credential.aws,
         credential.openai,
         assistant,
+        Some(&db),
     )
     .await
     {
@@ -532,7 +533,7 @@ mod tests {
             bedrock_model: String::new(),
             openai_model: String::new(),
         };
-        let result = analysis::analyze(synthetic_context(settings), None, None, None)
+        let result = analysis::analyze(synthetic_context(settings), None, None, None, None)
             .await
             .expect("the production local setup probe must return an answer");
         assert!(synthetic_facts_present(&result.text), "synthetic facts failed: {}", result.text);

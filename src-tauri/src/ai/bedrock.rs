@@ -41,15 +41,16 @@ async fn client_for(creds: &AwsCredentials) -> aws_sdk_bedrockruntime::Client {
     aws_sdk_bedrockruntime::Client::new(&cfg)
 }
 
-/// One-shot helper used by the integration test below.  Sends a single user
-/// message and returns the assistant's text reply -- no tool loop, no caching,
-/// no metrics.  This is intentionally minimal so it can serve as a "round trip
-/// works" smoke test for a freshly-saved AWS credential set.
+/// One-shot helper used by mail analysis and the integration test below.
+/// Sends a single user message and returns the assistant's text reply and the
+/// usage Bedrock reported -- no tool loop, no caching. This is intentionally
+/// minimal so it can serve as a "round trip works" smoke test for a
+/// freshly-saved AWS credential set.
 pub async fn send_simple(
     creds: &AwsCredentials,
     model_id: &str,
     user_text: &str,
-) -> Result<String, String> {
+) -> Result<(String, Option<TokenUsage>), String> {
     let client = client_for(creds).await;
     let msg = Message::builder()
         .role(ConversationRole::User)
@@ -76,7 +77,7 @@ pub async fn send_simple(
         })
         .collect::<Vec<_>>()
         .join("");
-    Ok(text)
+    Ok((text, out.usage))
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -382,17 +383,25 @@ async fn record_metrics(
     usage: &TokenUsage,
     latency_ms: i64,
 ) {
+    let cache_read = usage.cache_read_input_tokens().unwrap_or(0) as i64;
+    let cache_write = usage.cache_write_input_tokens().unwrap_or(0) as i64;
     crate::ai::cost::record_inference(
         db,
         "bedrock",
         workload,
         model_id,
-        usage.input_tokens() as i64,
+        inclusive_input(usage),
         usage.output_tokens() as i64,
-        usage.cache_read_input_tokens().unwrap_or(0) as i64,
-        usage.cache_write_input_tokens().unwrap_or(0) as i64,
+        cache_read,
+        cache_write,
         latency_ms,
     );
+}
+
+/// Converse's inputTokens leaves out the tokens read from or written to the
+/// cache; the cost table counts input inclusive, so they are added back.
+pub fn inclusive_input(usage: &TokenUsage) -> i64 {
+    (usage.input_tokens() + usage.cache_read_input_tokens().unwrap_or(0) + usage.cache_write_input_tokens().unwrap_or(0)) as i64
 }
 
 fn json_to_document(value: &serde_json::Value) -> Document {
@@ -448,6 +457,18 @@ fn document_to_json(document: &Document) -> serde_json::Value {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Sonnet 4.6, a cache hit: inputTokens 2,400, cacheRead 6,400, 250 out
+    /// = $0.0072 + $0.00192 + $0.00375. Subtracting the cache from inputTokens
+    /// a second time recorded $0.00567.
+    #[tokio::test]
+    async fn cached_input_is_not_subtracted_twice() {
+        let db = crate::ai::cost::tests::temp_metrics_db("");
+        let usage = TokenUsage::builder().input_tokens(2_400).output_tokens(250).total_tokens(9_050).cache_read_input_tokens(6_400).build().unwrap();
+        record_metrics(&db, crate::ai::Workload::Tools, "global.anthropic.claude-sonnet-4-6", &usage, 1).await;
+        let (input, micro): (i64, i64) = db.conn.lock().unwrap().query_row("SELECT input_tokens, usd_cost_micro FROM inference_metrics", [], |r| Ok((r.get(0)?, r.get(1)?))).unwrap();
+        assert_eq!((input, micro), (8_800, 12_870));
+    }
 
     /// A persisted assistant row with no text must not reach the model: the
     /// Converse API rejects an empty text block, and one such row would fail
@@ -548,7 +569,8 @@ mod tests {
             "Say only the word: pong",
         )
         .await
-        .unwrap();
+        .unwrap()
+        .0;
         assert!(resp.to_lowercase().contains("pong"), "got: {resp}");
     }
 

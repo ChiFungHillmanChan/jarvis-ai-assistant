@@ -87,8 +87,25 @@ struct StreamOptions {
 
 #[derive(Deserialize, Debug, Default, Clone)]
 struct OpenAIUsage {
+    /// Includes the cached tokens below.
     prompt_tokens: Option<i64>,
     completion_tokens: Option<i64>,
+    #[serde(default)]
+    prompt_tokens_details: Option<PromptTokensDetails>,
+}
+
+#[derive(Deserialize, Debug, Default, Clone)]
+struct PromptTokensDetails {
+    cached_tokens: Option<i64>,
+}
+
+impl OpenAIUsage {
+    /// Fold one request into the turn. OpenAI caches long prompt prefixes on
+    /// its own and bills them at the cached rate.
+    fn add_to(&self, turn: &mut crate::ai::cost::TurnUsage) {
+        let cached = self.prompt_tokens_details.as_ref().and_then(|d| d.cached_tokens).unwrap_or(0);
+        turn.add_request(self.prompt_tokens.unwrap_or(0), self.completion_tokens.unwrap_or(0), cached, 0);
+    }
 }
 
 #[derive(Serialize, Deserialize, Clone, Debug)]
@@ -173,10 +190,9 @@ pub async fn send(
     ledger: &crate::ai::SideEffectLedger,
 ) -> Result<String, Box<dyn std::error::Error + Send + Sync>> {
     let started_at = std::time::Instant::now();
-    let mut total_prompt_tokens: i64 = 0;
-    let mut total_completion_tokens: i64 = 0;
     let model_id = target.model()?;
     let provider = target.provider();
+    let mut turn = crate::ai::cost::TurnUsage::new(&provider, &model_id);
     let client = Client::builder()
         .read_timeout(std::time::Duration::from_secs(60))
         // A redirect would carry the key and the conversation elsewhere.
@@ -207,26 +223,30 @@ pub async fn send(
     for round in 0..max_iterations {
         let final_round = round + 1 == max_iterations;
         // Per-round usage: OpenAI sends one usage chunk per request, so
-        // overwrite within a round and fold into totals when it ends.
+        // overwrite within a round and fold into the turn when it ends.
         let mut usage = OpenAIUsage::default();
         let request = target.request(model_id.clone(), openai_messages.clone(), openai_tools.clone(), final_round);
 
-        let response = client
-            .post(target.url())
-            .header("Authorization", format!("Bearer {}", api_key))
-            .header("Content-Type", "application/json")
-            .json(&request)
-            .send()
-            .await?;
+        let sent = send_retrying(|| {
+            client
+                .post(target.url())
+                .header("Authorization", format!("Bearer {}", api_key))
+                .header("Content-Type", "application/json")
+                .json(&request)
+        })
+        .await;
+        let response = match sent {
+            Ok(response) => response,
+            Err(e) => {
+                turn.record_if_billed(db, workload, started_at.elapsed().as_millis() as i64);
+                return Err(e.into());
+            }
+        };
 
         if !response.status().is_success() {
             let status = response.status();
             let body = response.text().await.unwrap_or_default();
-            record_partial_usage(
-                db, &provider, workload, &model_id,
-                total_prompt_tokens, total_completion_tokens,
-                &started_at,
-            );
+            turn.record_if_billed(db, workload, started_at.elapsed().as_millis() as i64);
             let name = target.base_url.map(super::compat::label).unwrap_or_else(|| "OpenAI".into());
             return Err(format!("{name} API error {}: {}", status, body).into());
         }
@@ -244,13 +264,8 @@ pub async fn send(
                 Ok(bytes) => bytes,
                 Err(e) => {
                     let _ = app_handle.emit("chat-state", json!({"state": "idle"}));
-                    total_prompt_tokens += usage.prompt_tokens.unwrap_or(0);
-                    total_completion_tokens += usage.completion_tokens.unwrap_or(0);
-                    record_partial_usage(
-                        db, &provider, workload, &model_id,
-                        total_prompt_tokens, total_completion_tokens,
-                        &started_at,
-                    );
+                    usage.add_to(&mut turn);
+                    turn.record_if_billed(db, workload, started_at.elapsed().as_millis() as i64);
                     return Err(format!("Stream error: {}", e).into());
                 }
             };
@@ -351,8 +366,7 @@ pub async fn send(
             }
         }
 
-        total_prompt_tokens += usage.prompt_tokens.unwrap_or(0);
-        total_completion_tokens += usage.completion_tokens.unwrap_or(0);
+        usage.add_to(&mut turn);
 
         // Handle tool calls. Some compatible services finish a tool-call
         // turn with "stop", so any complete call counts; a reply cut off by
@@ -456,16 +470,10 @@ pub async fn send(
 
         // No tool calls -- emit done and return the text
         let _ = app_handle.emit("chat-token", json!({"token": "", "done": true}));
-        if total_prompt_tokens == 0 && total_completion_tokens == 0 && !text_parts.is_empty() {
+        if turn.is_empty() && !text_parts.is_empty() {
             log::warn!("[openai] no usage chunk received for non-empty response; recording zero tokens");
         }
-        crate::ai::cost::record_inference(
-            db, &provider, workload, &model_id,
-            total_prompt_tokens,
-            total_completion_tokens,
-            0, 0,
-            started_at.elapsed().as_millis() as i64,
-        );
+        turn.record(db, workload, started_at.elapsed().as_millis() as i64);
         let text = text_parts.join("");
         if final_round && text.trim().is_empty() {
             return Ok(tools::tool_limit_fallback(&tools::read_language_pref(db)).into());
@@ -496,23 +504,32 @@ fn tool_slot(slots: &ToolSlots, index: Option<usize>, id: Option<&str>, position
     }
 }
 
-/// Record usage accumulated so far when a turn ends abnormally, so tokens
-/// already billed by completed rounds are not lost from telemetry.
-fn record_partial_usage(
-    db: &crate::db::Database,
-    provider: &str,
-    workload: crate::ai::Workload,
-    model_id: &str,
-    prompt_tokens: i64,
-    completion_tokens: i64,
-    started_at: &std::time::Instant,
-) {
-    if prompt_tokens > 0 || completion_tokens > 0 {
-        crate::ai::cost::record_inference(
-            db, provider, workload, model_id,
-            prompt_tokens, completion_tokens, 0, 0,
-            started_at.elapsed().as_millis() as i64,
-        );
+/// Send once more after a transient failure (429 or 5xx): with "Choose one
+/// AI" there is no other provider to fall back to, and a resend usually works.
+async fn send_retrying(build: impl Fn() -> reqwest::RequestBuilder) -> Result<reqwest::Response, reqwest::Error> {
+    let response = build().send().await?;
+    let retry_after = response.headers().get(reqwest::header::RETRY_AFTER).and_then(|v| v.to_str().ok());
+    match retry_delay(response.status().as_u16(), retry_after) {
+        Some(delay) => {
+            log::warn!("[openai] {} -- retrying once in {:?}", response.status(), delay);
+            drop(response);
+            tokio::time::sleep(delay).await;
+            build().send().await
+        }
+        None => Ok(response),
+    }
+}
+
+/// The wait before the one retry, or None when the status is not transient or
+/// the service asks for a longer wait than the user should sit through.
+fn retry_delay(status: u16, retry_after: Option<&str>) -> Option<std::time::Duration> {
+    if !matches!(status, 429 | 500 | 502 | 503 | 504) {
+        return None;
+    }
+    match retry_after.map(|v| v.trim().parse::<f64>()) {
+        None | Some(Err(_)) => Some(std::time::Duration::from_secs(1)),
+        Some(Ok(secs)) if (0.0..=5.0).contains(&secs) => Some(std::time::Duration::from_secs_f64(secs)),
+        Some(Ok(_)) => None,
     }
 }
 
@@ -561,6 +578,34 @@ mod tests {
             let earlier = serde_json::to_value(target.request("m".into(), Vec::new(), Vec::new(), false)).unwrap();
             assert!(earlier.get("tool_choice").is_none(), "{earlier}");
         }
+    }
+
+    #[test]
+    fn transient_failures_are_retried_once_after_a_short_wait() {
+        use std::time::Duration;
+        for status in [429, 500, 502, 503, 504] {
+            assert_eq!(retry_delay(status, None), Some(Duration::from_secs(1)), "{status}");
+        }
+        assert_eq!(retry_delay(429, Some("2")), Some(Duration::from_secs(2)));
+        assert_eq!(retry_delay(503, Some("0.5")), Some(Duration::from_millis(500)));
+        assert_eq!(retry_delay(429, Some("60")), None, "a long wait fails now instead of hanging the turn");
+        assert_eq!(retry_delay(429, Some("Wed, 21 Oct 2026 07:28:00 GMT")), Some(Duration::from_secs(1)));
+        for status in [200, 400, 401, 403, 404] {
+            assert_eq!(retry_delay(status, None), None, "{status}");
+        }
+    }
+
+    /// prompt_tokens includes the cached prefix; dropping
+    /// prompt_tokens_details billed every cached token at 10x its price.
+    #[test]
+    fn cached_prompt_tokens_reach_the_turn() {
+        let chunk: SseChunk = serde_json::from_str(r#"{"choices":[],"usage":{"prompt_tokens":20173,"completion_tokens":195,"prompt_tokens_details":{"cached_tokens":19824}}}"#).unwrap();
+        let db = crate::ai::cost::tests::temp_metrics_db("");
+        let mut turn = crate::ai::cost::TurnUsage::new("openai", "gpt-6-luna");
+        chunk.usage.unwrap().add_to(&mut turn);
+        turn.record(&db, crate::ai::Workload::Tools, 1);
+        let (cached, micro): (i64, i64) = db.conn.lock().unwrap().query_row("SELECT cache_read_tokens, usd_cost_micro FROM inference_metrics", [], |r| Ok((r.get(0)?, r.get(1)?))).unwrap();
+        assert_eq!((cached, micro), (19_824, 331));
     }
 
     #[test]
