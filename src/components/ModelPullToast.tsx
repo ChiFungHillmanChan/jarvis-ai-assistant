@@ -1,14 +1,24 @@
+import { useEffect, useState } from 'react';
+import { listen } from '@tauri-apps/api/event';
 import { useUiLocale } from '../i18n';
 import type { ModelPullProgress } from "../lib/types";
 
-interface ModelPullToastProps {
-  progress: ModelPullProgress | null;
-  visible: boolean;
-}
-
-export default function ModelPullToast({ progress, visible }: ModelPullToastProps) {
+/** Ollama download progress. It keeps its own state: a pull sends an event for
+ * every progress line, and only this toast needs to redraw for them. */
+export default function ModelPullToast() {
   const { text } = useUiLocale();
-  if (!visible || !progress) return null;
+  const [progress, setProgress] = useState<ModelPullProgress | null>(null);
+  useEffect(() => {
+    let timer: ReturnType<typeof setTimeout>;
+    const unlisten = listen<ModelPullProgress>('model-pull-progress', ({ payload }) => {
+      clearTimeout(timer);
+      // Byte counts change on every event; the toast shows only the model and percent.
+      setProgress(previous => previous && previous.model === payload.model && previous.status === payload.status && previous.percent === payload.percent ? previous : payload);
+      if (payload.status === 'complete' || payload.status === 'error') timer = setTimeout(() => setProgress(null), 3000);
+    });
+    return () => { clearTimeout(timer); void unlisten.then(fn => fn()).catch(() => {}); };
+  }, []);
+  if (!progress) return null;
 
   return (
     <div style={styles.container} className="animate-fade-in">
