@@ -2,6 +2,7 @@ import { useCallback, useEffect, useState } from "react";
 import { listen } from "@tauri-apps/api/event";
 import type { VoiceState } from "../lib/types";
 import { getVoiceState, startListening, stopListening } from "../lib/commands";
+import { sameVoiceState } from "../lib/always-listening";
 
 export function useVoiceState() {
   const [state, setState] = useState<VoiceState>("Idle");
@@ -21,7 +22,7 @@ export function useVoiceState() {
 
         unlisten = await listen<VoiceState>("voice-state", (event) => {
           if (mounted) {
-            setState(event.payload);
+            setState(previous => sameVoiceState(previous, event.payload) ? previous : event.payload);
           }
         });
       } catch (e) {

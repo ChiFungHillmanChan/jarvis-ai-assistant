@@ -36,3 +36,11 @@ export function canSwitchListening(status: WakeWordStatus | null, busy: boolean,
 export function voiceStateKind(state: VoiceState): string {
   return typeof state === 'object' ? Object.keys(state)[0] : state;
 }
+
+/** Equal states, payload included. Each event arrives as a new object, so an
+ * unchanged state would otherwise re-render everything that reads it. */
+export function sameVoiceState(a: VoiceState, b: VoiceState): boolean {
+  if (typeof a !== 'object' || typeof b !== 'object') return a === b;
+  const kind = voiceStateKind(a);
+  return kind === voiceStateKind(b) && (a as Record<string, unknown>)[kind] === (b as Record<string, unknown>)[kind];
+}
