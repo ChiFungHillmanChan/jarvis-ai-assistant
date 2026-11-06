@@ -1,4 +1,4 @@
-import { useState, useEffect, useRef, useCallback, lazy, Suspense } from 'react';
+import { useState, useEffect, useRef, useCallback, lazy, memo, Suspense } from 'react';
 import { invoke } from '@tauri-apps/api/core';
 import { listen } from '@tauri-apps/api/event';
 import { MessageSquare, Search, Minimize2, X, Command } from 'lucide-react';
@@ -35,6 +35,21 @@ const NotionPage = lazy(() => import('./pages/NotionPage'));
 const ConnectionsPage = lazy(() => import('./workspace/ConnectionsPage'));
 const ResultWorkspace = lazy(() => import('./workspace/ResultWorkspace'));
 
+// Tool pages stay mounted while hidden. AppShell re-renders on every streamed
+// chat frame and voice update, so these pages take only stable props.
+const ToolPage = memo(function ToolPage({ view, onSetup }: { view: Exclude<WorkspaceView, 'home' | 'chat'>; onSetup: () => void }) {
+  switch (view) {
+    case 'email': return <EmailPage onSetup={onSetup} />;
+    case 'calendar': return <CalendarPage />;
+    case 'github': return <GitHubPage />;
+    case 'notion': return <NotionPage />;
+    case 'cron': return <CronDashboard />;
+    case 'settings': return <Settings />;
+    case 'connections': return <ConnectionsPage />;
+    case 'result': return <ResultWorkspace />;
+  }
+});
+
 function CommandPicker({ onClose }: { onClose: () => void }) {
   const { locale, text } = useUiLocale();
   const { state, dispatch, open, newTask } = useWorkspace();
@@ -63,6 +78,7 @@ function CommandPicker({ onClose }: { onClose: () => void }) {
 function AppShell() {
   const { text } = useUiLocale();
   const [setupOpen, setSetupOpen] = useState(false);
+  const openSetup = useCallback(() => setSetupOpen(true), []);
   const { state, ready, saveError, dispatch, writeValue, readValue } = useWorkspace();
   const chat = useChatContext();
   const activity = useAssistantActivity();
@@ -139,14 +155,7 @@ function AppShell() {
     switch (tab.view) {
       case 'home': return <AutomationOverview activity={activity} onVoice={toggleVoice} listening={listening} voiceState={voice.state} />;
       case 'chat': return chat.sessionId === tab.sessionId ? <AssistantPanel full onVoice={toggleVoice} /> : <div className="workspace-loading">{text("Opening task…", "正在開啟工作…")}</div>;
-      case 'email': return <EmailPage onSetup={() => setSetupOpen(true)} />;
-      case 'calendar': return <CalendarPage />;
-      case 'github': return <GitHubPage />;
-      case 'notion': return <NotionPage />;
-      case 'cron': return <CronDashboard />;
-      case 'settings': return <Settings />;
-      case 'connections': return <ConnectionsPage />;
-      case 'result': return <ResultWorkspace />;
+      default: return <ToolPage view={tab.view} onSetup={openSetup} />;
     }
   }
   if (setupOpen) return <OnboardingWizard onComplete={() => { setSetupOpen(false); dispatch({ type: 'open', view: 'email' }); }} />;
