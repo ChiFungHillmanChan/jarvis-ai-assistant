@@ -7,6 +7,7 @@ import { stopSpeaking } from '../lib/commands';
 import { useUiLocale } from '../i18n';
 import { chatStatusText } from '../lib/chat-status';
 import { chatErrorText } from '../lib/chat-error';
+import { historyStart } from './history';
 
 export default function AssistantPanel({ full = false, onClose, onVoice }: { full?: boolean; onClose?: () => void; onVoice?: () => void }) {
   const { text } = useUiLocale();
@@ -17,6 +18,10 @@ export default function AssistantPanel({ full = false, onClose, onVoice }: { ful
   const end = useRef<HTMLDivElement>(null);
   const messages = useRef<HTMLDivElement>(null);
   const follow = useRef(true);
+  // Older messages stay hidden until asked for; the count is fixed once the history loads.
+  const [hidden, setHidden] = useState<number | null>(null);
+  const start = historyStart(chat.messages.length, hidden);
+  useEffect(() => { if (hidden === null && !chat.historyLoading) setHidden(start); }, [hidden, chat.historyLoading, start]);
   useEffect(() => { if (follow.current) end.current?.scrollIntoView({ block: 'nearest', behavior: 'auto' }); }, [chat.messages, chat.streamingText, chat.sessionId]);
   function submit() {
     if (!input.trim() || chat.busy || chat.historyLoading) return;
@@ -31,7 +36,8 @@ export default function AssistantPanel({ full = false, onClose, onVoice }: { ful
     <div className="assistant-messages" ref={messages} onScroll={() => { const el = messages.current; if (el) follow.current = el.scrollHeight - el.scrollTop - el.clientHeight < 70; }}>
       {chat.historyLoading && <p className="workspace-empty">{text('Loading conversation…', '正在載入對話…')}</p>}
       {!chat.historyLoading && !chat.messages.length && <div className="assistant-welcome"><h1>{text('What would you like to get done?', '需要處理甚麼工作？')}</h1><p>{text('Give JARVIS an instruction. Tool results open in their own workspace, and your conversation stays here.', '向 JARVIS 提供工作指示。工具結果會在獨立工作區開啟，對話則保留於此。')}</p><div className="assistant-prompts"><button onClick={() => setInput('What is on my calendar today?')}>{text('Review my calendar', '查看我的日曆')}</button><button onClick={() => setInput('Show the email waiting for a reply in my connected Google account.')}>{text('Find email to follow up', '尋找待跟進郵件')}</button></div><small>{text('Uses the accounts connected to Assistant. Mail workspace accounts are managed separately.', '使用已連接至助理的帳戶。郵件工作區帳戶需另行管理。')}</small></div>}
-      {chat.messages.map((message, index) => <article key={`${message.id ?? 'local'}-${index}`} className={`assistant-message ${message.role}`}><div className="message-author">{message.role === 'user' ? text('You', '你') : 'JARVIS'}</div><MessageRenderer content={message.content} />{message.steps && <details className="assistant-steps"><summary>{text(`What I did · ${message.steps.length}`, `處理過程 · ${message.steps.length} 步`)}</summary><ol>{message.steps.map((step, i) => <li key={i}>{chatStatusText(step.status, text, step.detail)}</li>)}</ol></details>}</article>)}
+      {start > 0 && <button type="button" className="text-button assistant-earlier" onClick={() => setHidden(0)}>{text(`Show ${start} earlier message${start === 1 ? '' : 's'}`, `顯示較早的 ${start} 則訊息`)}</button>}
+      {chat.messages.slice(start).map((message, i) => <article key={`${message.id ?? 'local'}-${start + i}`} className={`assistant-message ${message.role}`}><div className="message-author">{message.role === 'user' ? text('You', '你') : 'JARVIS'}</div><MessageRenderer content={message.content} />{message.steps && <details className="assistant-steps"><summary>{text(`What I did · ${message.steps.length}`, `處理過程 · ${message.steps.length} 步`)}</summary><ol>{message.steps.map((step, i) => <li key={i}>{chatStatusText(step.status, text, step.detail)}</li>)}</ol></details>}</article>)}
       {chat.currentStatus && <div className="assistant-progress" role="status"><span className="status-dot" />{chatStatusText(chat.currentStatus, text, chat.currentDetail)}</div>}
       {chat.streamingText && <article className="assistant-message assistant"><MessageRenderer content={chat.streamingText} /></article>}
       {chat.error && (() => { const shown = chatErrorText(chat.error, text); return <div className="workspace-error" role="alert"><span className="error-text">{shown.message}</span><button className="text-button" onClick={() => void chat.reloadHistory()}>{text('Reload history', '重新載入紀錄')}</button>{shown.detail && <details><summary>{text('Technical details', '技術資料')}</summary>{shown.detail}</details>}</div>; })()}<div ref={end} />

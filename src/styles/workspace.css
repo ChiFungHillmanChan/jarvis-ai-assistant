@@ -198,6 +198,7 @@
 .assistant-header-actions { display:flex; margin-left:auto; gap:2px; }
 .assistant-messages { flex:1; overflow:auto; padding:24px; min-height:0; overflow-wrap:anywhere; }
 .assistant-full .assistant-messages { width:100%; max-width:870px; margin:0 auto; padding:28px 40px; }
+.assistant-earlier { display:block; margin:0 auto 18px; }
 .assistant-welcome { margin:7vh auto 30px; max-width:580px; }
 .assistant-welcome h1 { font-size:30px; font-weight:500; line-height:1.25; letter-spacing:-.8px; margin-bottom:18px; }
 .assistant-welcome p { color:var(--text-secondary); font-size:14px; line-height:1.7; }
