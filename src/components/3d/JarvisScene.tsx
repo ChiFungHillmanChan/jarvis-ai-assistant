@@ -376,15 +376,30 @@ export default memo(function JarvisScene({ contained = false, minimalLabels = fa
     if (!ctx) return;
 
     function resize() {
-      if (!canvas) return;
+      if (!canvas) return false;
       const bounds = canvas.getBoundingClientRect();
-      canvas.width = contained ? bounds.width : window.innerWidth;
-      canvas.height = contained ? bounds.height : window.innerHeight;
+      const width = Math.floor(contained ? bounds.width : window.innerWidth);
+      const height = Math.floor(contained ? bounds.height : window.innerHeight);
+      // Setting a canvas size clears the canvas, even to the same value.
+      if (canvas.width === width && canvas.height === height) return false;
+      canvas.width = width;
+      canvas.height = height;
+      return true;
     }
     resize();
-    window.addEventListener("resize", resize);
-    const observer = new ResizeObserver(() => { resize(); resume(); });
+    // Draw at once after a real change, or the cleared canvas shows until the next frame.
+    const refit = () => { if (resize()) drawFrame(); resume(); };
+    window.addEventListener("resize", refit);
+    const observer = new ResizeObserver(refit);
     observer.observe(canvas);
+    // A hidden tab stays mounted with display:none. Stop drawing while the
+    // canvas is off screen, and start again when it comes back.
+    let onScreen = true;
+    const visibility = new IntersectionObserver(entries => {
+      onScreen = entries[entries.length - 1].isIntersecting;
+      resume();
+    });
+    visibility.observe(canvas);
     const reducedMotion = window.matchMedia("(prefers-reduced-motion: reduce)");
 
     // Load data after dashboard has had time to initialize
@@ -462,7 +477,11 @@ export default memo(function JarvisScene({ contained = false, minimalLabels = fa
     window.addEventListener("mousedown", onDown);
     window.addEventListener("mousemove", onMove);
     window.addEventListener("mouseup", onUp);
-    window.addEventListener("wheel", onWheel, { passive: false });
+    // A non-passive wheel listener makes the WebView wait for this script
+    // before it scrolls anything underneath. Contained, only the canvas itself
+    // can take the event, so the listener stays on it.
+    if (contained) canvas.addEventListener("wheel", onWheel, { passive: false });
+    else window.addEventListener("wheel", onWheel, { passive: false });
     window.addEventListener("dblclick", onDblClick);
 
     // Cached gradients -- rebuilt only on resize
@@ -485,13 +504,15 @@ export default memo(function JarvisScene({ contained = false, minimalLabels = fa
     const LISTENING_FRAME_MS = 22; // ~45fps listening/low activity
     const ACTIVE_FRAME_MS = 16;    // ~60fps active/interacting
 
+    const interacting = () => dragging.current || focusTarget.current !== null || arcsRef.current.length > 0;
+
     function animate(timestamp?: number) {
       if (!canvas || !ctx) return;
-      if (document.hidden) { animRef.current = 0; return; }
+      if (document.hidden || !onScreen) { animRef.current = 0; return; }
 
       // Throttle frame rate based on activity
       const now = timestamp || performance.now();
-      const isInteracting = dragging.current || focusTarget.current !== null || arcsRef.current.length > 0;
+      const isInteracting = interacting();
       const al = activityLevelRef.current;
       const frameInterval = isInteracting || al === "active" || al === "processing"
         ? ACTIVE_FRAME_MS
@@ -502,7 +523,13 @@ export default memo(function JarvisScene({ contained = false, minimalLabels = fa
         return;
       }
       lastFrameTime = now;
+      drawFrame();
+      animRef.current = reducedMotion.matches ? 0 : requestAnimationFrame(animate);
+    }
 
+    function drawFrame() {
+      if (!canvas || !ctx) return;
+      const isInteracting = interacting();
       try { // --- begin frame ---
       const activity = activityLevelRef.current;
       time.current += reducedMotion.matches ? 0 : 0.006;
@@ -1177,10 +1204,9 @@ export default memo(function JarvisScene({ contained = false, minimalLabels = fa
       } catch (e) {
         console.error("[JarvisScene] Animation error:", e);
       }
-      animRef.current = reducedMotion.matches ? 0 : requestAnimationFrame(animate);
     }
 
-    const resume = () => { if (!document.hidden && !animRef.current) animRef.current = requestAnimationFrame(animate); };
+    const resume = () => { if (!document.hidden && onScreen && !animRef.current) animRef.current = requestAnimationFrame(animate); };
     document.addEventListener("visibilitychange", resume);
     reducedMotion.addEventListener("change", resume);
     animRef.current = requestAnimationFrame(animate);
@@ -1190,15 +1216,17 @@ export default memo(function JarvisScene({ contained = false, minimalLabels = fa
       clearTimeout(loadTimer);
       clearTimeout(rotateTimer);
       observer.disconnect();
+      visibility.disconnect();
       document.removeEventListener("visibilitychange", resume);
       reducedMotion.removeEventListener("change", resume);
       document.body.style.userSelect = "";
       document.body.style.webkitUserSelect = "";
       document.body.style.cursor = "";
-      window.removeEventListener("resize", resize);
+      window.removeEventListener("resize", refit);
       window.removeEventListener("mousedown", onDown);
       window.removeEventListener("mousemove", onMove);
       window.removeEventListener("mouseup", onUp);
+      canvas.removeEventListener("wheel", onWheel);
       window.removeEventListener("wheel", onWheel);
       window.removeEventListener("dblclick", onDblClick);
     };
