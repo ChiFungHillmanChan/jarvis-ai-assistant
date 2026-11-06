@@ -1,4 +1,5 @@
 import type { MailAnalysis, MailMessage } from './mail';
+import { dateFormat } from './date-format.ts';
 
 export function mailSourceUrl(message: Pick<MailMessage, 'provider_id' | 'account_email'>): string | null {
   if (!/^[a-f\d]{1,64}$/i.test(message.provider_id) || !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(message.account_email)) return null;
@@ -136,10 +137,10 @@ export function formatDue(date: string | null, time: string | null, locale: stri
   if (Number.isNaN(day.getTime())) return date;
   let label: string;
   if (locale.startsWith('zh')) {
-    const week = weekday ? `（${day.toLocaleDateString(locale, { weekday: 'short' })}）` : '';
+    const week = weekday ? `（${dateFormat(locale, { weekday: 'short' }).format(day)}）` : '';
     label = `${day.getMonth() + 1}月${day.getDate()}日${week}`;
   } else {
-    label = day.toLocaleDateString(locale, weekday ? { weekday: 'short', day: 'numeric', month: 'short' } : { day: 'numeric', month: 'short' });
+    label = dateFormat(locale, weekday ? { weekday: 'short', day: 'numeric', month: 'short' } : { day: 'numeric', month: 'short' }).format(day);
   }
   return time ? `${label} ${time}` : label;
 }

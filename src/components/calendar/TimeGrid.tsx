@@ -1,5 +1,6 @@
 import { useEffect, useMemo, useRef } from "react";
 import { dayKey, dayStart, layoutAllDay, layoutTimed, type CalendarEntry } from "../../lib/calendar-layout";
+import { dateFormat } from "../../lib/date-format";
 
 const HOUR_HEIGHT = 48;
 const HOURS = Array.from({ length: 24 }, (_, hour) => hour);
@@ -15,7 +16,7 @@ interface Props {
   onOpenDay: (day: string) => void;
 }
 
-export const formatTime = (value: Date, locale: string) => value.toLocaleTimeString(locale, { hour: "numeric", minute: "2-digit" });
+export const formatTime = (value: Date, locale: string) => dateFormat(locale, { hour: "numeric", minute: "2-digit" }).format(value);
 
 function offsetLabel(now: Date) {
   const minutes = -now.getTimezoneOffset();
@@ -40,7 +41,7 @@ export default function TimeGrid({ days, entries, now, selectedId, locale, text,
     scroller.current?.scrollTo({ top: hour * HOUR_HEIGHT });
   }, [days[0], days.length, showsToday]);
 
-  const hourLabel = (hour: number) => new Date(2000, 0, 1, hour).toLocaleTimeString(locale, { hour: "numeric" });
+  const hourLabel = (hour: number) => dateFormat(locale, { hour: "numeric" }).format(new Date(2000, 0, 1, hour));
   const entryClass = (entry: CalendarEntry, base: string) => `${base}${entry.source === "mail" ? ` ${base}--mail` : ""}${entry.id === selectedId ? " is-selected" : ""}`;
 
   // One scroll container with a sticky header keeps the columns aligned with the scrollbar.
@@ -50,8 +51,8 @@ export default function TimeGrid({ days, entries, now, selectedId, locale, text,
         <span className="cal-grid__zone">{offsetLabel(now)}</span>
         {days.map(day => {
           const date = dayStart(day);
-          return <button key={day} className={`cal-grid__day${day === today ? " is-today" : ""}`} onClick={() => onOpenDay(day)} aria-label={date.toLocaleDateString(locale, { weekday: "long", month: "long", day: "numeric" })}>
-            <span>{date.toLocaleDateString(locale, { weekday: "short" })}</span>
+          return <button key={day} className={`cal-grid__day${day === today ? " is-today" : ""}`} onClick={() => onOpenDay(day)} aria-label={dateFormat(locale, { weekday: "long", month: "long", day: "numeric" }).format(date)}>
+            <span>{dateFormat(locale, { weekday: "short" }).format(date)}</span>
             <strong>{date.getDate()}</strong>
           </button>;
         })}
