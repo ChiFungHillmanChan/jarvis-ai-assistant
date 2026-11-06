@@ -14,7 +14,9 @@ use crate::{
 use std::sync::Arc;
 use tauri::State;
 
-#[tauri::command]
+// `async` runs these on a worker thread. A plain command runs on the main
+// thread, and the queries take long enough on a large mailbox to stall the window.
+#[tauri::command(async)]
 pub fn mail_workspace(db: State<Arc<Database>>, account_id: Option<String>) -> Result<MailWorkspace, String> {
     Ok(MailWorkspace {
         accounts: store::list_accounts(&db)?,
@@ -223,7 +225,7 @@ pub async fn mail_sync_account(
 ) -> Result<MailSyncResult, String> {
     sync::sync_account(&db, &state, &account_id, older).await
 }
-#[tauri::command]
+#[tauri::command(async)]
 pub fn mail_list_messages(
     db: State<Arc<Database>>,
     account_id: Option<String>,

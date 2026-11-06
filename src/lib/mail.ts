@@ -17,7 +17,8 @@ export type MailView = 'attention' | 'due' | 'untriaged' | MailCategory;
 export interface MailTriageStatus { enabled: boolean; typesafe_key: boolean; openai_key: boolean; chosen_ai: string | null; untriaged: number; attention: number; open_items: number; categories: [MailCategory, number][] }
 export interface MailTriageRun { triaged: number; summarized: number; items: number; failed: number; remaining: number; jev_input_tokens: number; luna_input_tokens: number; luna_output_tokens: number; cost_usd: number | null; warning: string | null }
 export interface MailItem { id: number; message_id: number; kind: 'task' | 'deadline' | 'event' | 'reply'; title: string; due_date: string | null; due_time: string | null; end_time: string | null; location: string | null; evidence: string; evidence_verified: boolean; status: 'open' | 'done' | 'dismissed'; remind_at: string | null; reminded_at: string | null; calendar_event_id: string | null; subject: string; sender: string; superseded_by: number | null }
-export interface MailPage { messages: MailMessage[]; total: number }
+// total is null for a search: the backend does not count every match.
+export interface MailPage { messages: MailMessage[]; total: number | null; has_more: boolean }
 export interface MailSyncResult { saved: number; has_more: boolean; warning: string | null }
 export interface MailAnalysis { text: string; mode: string; model: string; source_ids: number[]; omitted_messages: number; input_tokens: number; output_tokens: number; cached_tokens: number }
 export const mailWorkspace = (accountId?: string) => invoke<MailWorkspace>("mail_workspace", { accountId: accountId || undefined });

@@ -173,7 +173,9 @@ pub struct MailWorkspace {
 #[derive(Serialize)]
 pub struct MailPage {
     pub messages: Vec<MailMessage>,
-    pub total: i64,
+    /// None for a search: counting every match would read each body twice.
+    pub total: Option<i64>,
+    pub has_more: bool,
 }
 
 #[derive(Serialize)]

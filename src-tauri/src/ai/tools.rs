@@ -869,8 +869,12 @@ fn execute_local_data_tool(
                     )
                 })
                 .collect();
-            if page.total as usize > lines.len() {
-                lines.insert(0, format!("Showing the newest {} of {} messages.", lines.len(), page.total));
+            // A search is not counted (store::list_messages), so it can only say that more match.
+            let shown = lines.len();
+            match page.total {
+                Some(total) if total as usize > shown => lines.insert(0, format!("Showing the newest {shown} of {total} messages.")),
+                None if page.has_more || page.messages.len() > shown => lines.insert(0, format!("Showing the newest {shown} matching messages; more match.")),
+                _ => {}
             }
             Ok(lines.join("\n"))
         }
@@ -2812,6 +2816,26 @@ mod local_data_tests {
 
         let bad = run("list_inbox_triage", serde_json::json!({"view": "everything"}), &db).await;
         assert!(bad.contains("attention"), "an unknown view names the valid ones:\n{bad}");
+    }
+
+    /// The model is told when it sees only part of the list. A search has no
+    /// total (store::list_messages), so it says only that more messages match.
+    #[tokio::test]
+    async fn list_inbox_triage_says_when_more_messages_exist() {
+        let db = mail_db();
+        {
+            let conn = db.conn.lock().unwrap();
+            for id in 101..=130 {
+                conn.execute(
+                    "INSERT INTO mail_messages(id,account_id,provider_id,subject,received_at) VALUES (?1,'a',?2,'Invoice','2026-09-10')",
+                    rusqlite::params![id, format!("g{id}")],
+                ).unwrap();
+            }
+        }
+        let browsed = run("list_inbox_triage", serde_json::json!({}), &db).await;
+        assert!(browsed.starts_with("Showing the newest 25 of 33 messages."), "{browsed}");
+        let searched = run("list_inbox_triage", serde_json::json!({"query": "invoice"}), &db).await;
+        assert!(searched.starts_with("Showing the newest 25 matching messages; more match."), "{searched}");
     }
 
     /// The schema enum is what the model can pick from; a category added to
