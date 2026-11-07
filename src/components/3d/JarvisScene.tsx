@@ -392,8 +392,8 @@ export default memo(function JarvisScene({ contained = false, minimalLabels = fa
     window.addEventListener("resize", refit);
     const observer = new ResizeObserver(refit);
     observer.observe(canvas);
-    // A hidden tab stays mounted with display:none. Stop drawing while the
-    // canvas is off screen, and start again when it comes back.
+    // Stop drawing while the canvas is out of view, as when the one-column
+    // layout scrolls it away, and start again when it comes back.
     let onScreen = true;
     const visibility = new IntersectionObserver(entries => {
       onScreen = entries[entries.length - 1].isIntersecting;
