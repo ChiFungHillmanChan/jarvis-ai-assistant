@@ -1,4 +1,4 @@
-import { useState, useEffect, useRef, useCallback, lazy, Suspense } from 'react';
+import { useState, useEffect, useRef, useCallback, lazy, memo, Suspense } from 'react';
 import { invoke } from '@tauri-apps/api/core';
 import { listen } from '@tauri-apps/api/event';
 import { MessageSquare, Search, Minimize2, X, Command } from 'lucide-react';
@@ -16,7 +16,6 @@ import ToastContainer, { showToast } from './components/Toast';
 import WindowControls from './components/WindowControls';
 import { ChatProvider, useChatContext } from './hooks/ChatContext';
 import ModelPullToast from './components/ModelPullToast';
-import type { ModelPullProgress } from './lib/types';
 import { WorkspaceProvider, WorkspaceTabScope, useWorkspace } from './workspace/WorkspaceContext';
 import WorkspaceTabs from './workspace/WorkspaceTabs';
 import AssistantPanel from './workspace/AssistantPanel';
@@ -34,6 +33,21 @@ const GitHubPage = lazy(() => import('./pages/GitHubPage'));
 const NotionPage = lazy(() => import('./pages/NotionPage'));
 const ConnectionsPage = lazy(() => import('./workspace/ConnectionsPage'));
 const ResultWorkspace = lazy(() => import('./workspace/ResultWorkspace'));
+
+// Tool pages stay mounted while hidden. AppShell re-renders on every streamed
+// chat frame and voice update, so these pages take only stable props.
+const ToolPage = memo(function ToolPage({ view, onSetup }: { view: Exclude<WorkspaceView, 'home' | 'chat'>; onSetup: () => void }) {
+  switch (view) {
+    case 'email': return <EmailPage onSetup={onSetup} />;
+    case 'calendar': return <CalendarPage />;
+    case 'github': return <GitHubPage />;
+    case 'notion': return <NotionPage />;
+    case 'cron': return <CronDashboard />;
+    case 'settings': return <Settings />;
+    case 'connections': return <ConnectionsPage />;
+    case 'result': return <ResultWorkspace />;
+  }
+});
 
 function CommandPicker({ onClose }: { onClose: () => void }) {
   const { locale, text } = useUiLocale();
@@ -63,6 +77,7 @@ function CommandPicker({ onClose }: { onClose: () => void }) {
 function AppShell() {
   const { text } = useUiLocale();
   const [setupOpen, setSetupOpen] = useState(false);
+  const openSetup = useCallback(() => setSetupOpen(true), []);
   const { state, ready, saveError, dispatch, writeValue, readValue } = useWorkspace();
   const chat = useChatContext();
   const activity = useAssistantActivity();
@@ -71,7 +86,6 @@ function AppShell() {
   const [assistant, setAssistant] = useState(false);
   const [wallpaper, setWallpaper] = useState(false);
   const [raised, setRaised] = useState(false);
-  const [progress, setProgress] = useState<ModelPullProgress | null>(null);
   const voice = useVoiceState();
   const activeTab = state.tabs.find(t => t.id === state.activeId) || state.tabs[0];
   const stateRef = useRef(state); stateRef.current = state;
@@ -113,13 +127,11 @@ function AppShell() {
   useEffect(() => {
     void invoke<boolean>('get_wallpaper_status').then(setWallpaper).catch(() => {});
     void invoke<boolean>('is_wallpaper_raised').then(setRaised).catch(() => {});
-    let timer: ReturnType<typeof setTimeout>;
     const listeners = [
       listen<boolean>('wallpaper-status', e => setWallpaper(e.payload)),
       listen<boolean>('wallpaper-raised', e => setRaised(e.payload)),
-      listen<ModelPullProgress>('model-pull-progress', ({ payload }) => { clearTimeout(timer); setProgress(payload); if (payload.status === 'complete' || payload.status === 'error') timer = setTimeout(() => setProgress(null), 3000); }),
     ];
-    return () => { clearTimeout(timer); listeners.forEach(p => { void p.then(fn => fn()).catch(() => {}); }); };
+    return () => { listeners.forEach(p => { void p.then(fn => fn()).catch(() => {}); }); };
   }, []);
   useEffect(() => {
     function key(e: KeyboardEvent) {
@@ -139,14 +151,7 @@ function AppShell() {
     switch (tab.view) {
       case 'home': return <AutomationOverview activity={activity} onVoice={toggleVoice} listening={listening} voiceState={voice.state} />;
       case 'chat': return chat.sessionId === tab.sessionId ? <AssistantPanel full onVoice={toggleVoice} /> : <div className="workspace-loading">{text("Opening task…", "正在開啟工作…")}</div>;
-      case 'email': return <EmailPage onSetup={() => setSetupOpen(true)} />;
-      case 'calendar': return <CalendarPage />;
-      case 'github': return <GitHubPage />;
-      case 'notion': return <NotionPage />;
-      case 'cron': return <CronDashboard />;
-      case 'settings': return <Settings />;
-      case 'connections': return <ConnectionsPage />;
-      case 'result': return <ResultWorkspace />;
+      default: return <ToolPage view={tab.view} onSetup={openSetup} />;
     }
   }
   if (setupOpen) return <OnboardingWizard onComplete={() => { setSetupOpen(false); dispatch({ type: 'open', view: 'email' }); }} />;
@@ -159,7 +164,7 @@ function AppShell() {
       if ((tab.view === 'home' || tab.view === 'chat') && !active) return null;
       return <section className={`workspace-page view-${tab.view}`} key={tab.id} id={`page-${tab.id}`} role="tabpanel" aria-labelledby={`tab-${tab.id}`} hidden={!active}><WorkspaceTabScope id={tab.id}><ErrorBoundary><Suspense fallback={<div className="workspace-loading">{text("Opening workspace…", "正在開啟工作區…")}</div>}>{render(tab)}</Suspense></ErrorBoundary></WorkspaceTabScope></section>;
     })}</div>{assistant && activeTab.view !== 'chat' && <div className="workspace-assistant-dock"><WorkspaceTabScope key={chat.sessionId} id={`task:${chat.sessionId}`}><AssistantPanel onClose={() => setAssistant(false)} onVoice={toggleVoice} /></WorkspaceTabScope></div>}</div><footer className="workspace-statusbar"><span className={`status-dot ${chat.busy || listening ? 'is-working' : ''}`} /><span>{listening ? text('Listening · Press ⌘⇧J to finish', '聆聽中 · 按 ⌘⇧J 完成') : chat.busy ? text('Assistant working · You can keep using your tools', 'AI 助理處理中 · 可繼續使用其他工具') : awaitingWakeWord ? text('Listening for "Hey Jarvis"', '正在等候「Hey Jarvis」') : text('Ready', '就緒')}</span>{chat.busy && <button className="text-button" onClick={() => dispatch({ type: 'open', view: 'chat', id: `task:${chat.runningSessionId}`, sessionId: chat.runningSessionId!, title: 'Assistant' })}>{text("View task", "查看工作")}</button>}<span className="grow" /><button className="text-button" onClick={() => setSearch(true)}><Command size={12} />{text("K Search", "K 搜尋")}</button></footer></main></div>
-    {search && <CommandPicker onClose={() => setSearch(false)} />}<ToastContainer /><ModelPullToast progress={progress} visible={progress !== null} /><UpdateToast /><ToolApproval />
+    {search && <CommandPicker onClose={() => setSearch(false)} />}<ToastContainer /><ModelPullToast /><UpdateToast /><ToolApproval />
   </div>;
 }
 function AppGate() {

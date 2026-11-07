@@ -281,22 +281,32 @@ pub fn list_messages(
     );
     let filter=format!("FROM mail_messages m JOIN mail_accounts a ON a.id=m.account_id{TRIAGE_JOIN} WHERE (?1 IS NULL OR m.account_id=?1) AND (?2 IS NULL OR EXISTS(SELECT 1 FROM mail_group_members gm WHERE gm.group_id=?2 AND gm.message_id=m.id)) AND (?3='%%' OR m.subject LIKE ?3 ESCAPE '\\' OR m.sender LIKE ?3 ESCAPE '\\' OR m.body LIKE ?3 ESCAPE '\\' OR m.snippet LIKE ?3 ESCAPE '\\' OR t.summary LIKE ?3 ESCAPE '\\') AND (?5 IS NULL OR (?5='attention' AND t.attention=1) OR (?5='untriaged' AND t.message_id IS NULL) OR (?5='due' AND EXISTS(SELECT 1 FROM mail_items i WHERE i.message_id=m.id AND i.status='open')) OR t.category=?5)");
     let conn = db.conn.lock().map_err(err)?;
-    // SQLite counts parameters up to the highest index (?5), so the count
-    // statement takes all five even though it never reads the offset.
-    let total = conn
-        .query_row(
-            &format!("SELECT COUNT(*) {filter}"),
-            params![account_id, group_id, pattern, offset, view],
-            |r| r.get(0),
+    // A search matches against every message body. Counting all the matches
+    // would scan the bodies a second time on each keystroke, so a search
+    // reads one extra row to tell whether another page exists instead.
+    let total = if query.is_empty() {
+        // SQLite counts parameters up to the highest index (?5), so the count
+        // statement takes all five even though it never reads the offset.
+        Some(
+            conn.query_row(
+                &format!("SELECT COUNT(*) {filter}"),
+                params![account_id, group_id, pattern, offset, view],
+                |r| r.get(0),
+            )
+            .map_err(err)?,
         )
-        .map_err(err)?;
-    let mut stmt=conn.prepare(&format!("SELECT {MESSAGE_COLUMNS},NULL,m.is_read,m.is_inbox,m.received_at{TRIAGE_COLUMNS} {filter} ORDER BY m.received_at DESC,m.id DESC LIMIT 50 OFFSET ?4")).map_err(err)?;
-    let messages = stmt
+    } else {
+        None
+    };
+    let mut stmt=conn.prepare(&format!("SELECT {MESSAGE_COLUMNS},NULL,m.is_read,m.is_inbox,m.received_at{TRIAGE_COLUMNS} {filter} ORDER BY m.received_at DESC,m.id DESC LIMIT 51 OFFSET ?4")).map_err(err)?;
+    let mut messages = stmt
         .query_map(params![account_id, group_id, pattern, offset, view], message_row)
         .map_err(err)?
         .collect::<Result<Vec<_>, _>>()
         .map_err(err)?;
-    Ok(MailPage { messages, total })
+    let has_more = messages.len() > 50;
+    messages.truncate(50);
+    Ok(MailPage { messages, total, has_more })
 }
 const GROUP_SELECT: &str="SELECT g.id,g.name,g.instructions,(SELECT COUNT(*) FROM mail_group_members gm WHERE gm.group_id=g.id) FROM mail_groups g";
 fn group_row(r: &Row<'_>) -> rusqlite::Result<MailGroup> {
@@ -1461,14 +1471,13 @@ mod tests {
             let mut actual_ids = Vec::new();
             for offset in [0, 50, 100, 150] {
                 let page = list_messages(&db, account_id, group_id, "needle", offset, None).unwrap();
+                let left = total - i64::from(offset);
                 assert_eq!(
-                    page.total, total,
+                    (page.total, page.has_more),
+                    (None, left > 50),
                     "account={account_id:?}, group={group_id:?}"
                 );
-                assert_eq!(
-                    page.messages.len(),
-                    (total - i64::from(offset)).clamp(0, 50) as usize
-                );
+                assert_eq!(page.messages.len(), left.clamp(0, 50) as usize);
                 assert!(page.messages.iter().all(|message| message.body.is_none()));
                 actual_ids.extend(message_ids(&page));
             }
@@ -1476,10 +1485,21 @@ mod tests {
                 actual_ids, expected_ids,
                 "account={account_id:?}, group={group_id:?}"
             );
+            // Browsing counts. Messages 121 and 122 miss the search and are in
+            // no group, so only the account and unscoped counts include them.
+            let unmatched = if group_id.is_some() { 0 } else if account_id.is_some() { 1 } else { 2 };
+            assert_eq!(
+                list_messages(&db, account_id, group_id, "", 0, None).unwrap().total,
+                Some(total + unmatched),
+                "account={account_id:?}, group={group_id:?}"
+            );
         }
         let empty_tail = list_messages(&db, None, None, "needle", u32::MAX, None).unwrap();
-        assert_eq!(empty_tail.total, 120);
+        assert_eq!((empty_tail.total, empty_tail.has_more), (None, false));
         assert!(empty_tail.messages.is_empty());
+        let browse_tail = list_messages(&db, None, None, "", u32::MAX, None).unwrap();
+        assert_eq!(browse_tail.total, Some(122));
+        assert!(browse_tail.messages.is_empty());
     }
 
     // A wildcard escape regression or omission of any searchable field must fail.
@@ -1497,15 +1517,13 @@ mod tests {
             (5,'a','near-match','100Xpaidinvoice','','','','2026-09-10');"#,
         ).unwrap();
         let page = list_messages(&db, Some("a"), None, r"  100%_paid\invoice  ", 0, None).unwrap();
-        assert_eq!(page.total, 4);
         assert_eq!(message_ids(&page), vec![4, 3, 2, 1]);
-        assert_eq!(
-            list_messages(&db, None, None, "' OR 1=1 --", 0, None)
-                .unwrap()
-                .total,
-            0
-        );
-        assert_eq!(list_messages(&db, None, None, "   ", 0, None).unwrap().total, 5);
+        assert!(!page.has_more);
+        assert!(list_messages(&db, None, None, "' OR 1=1 --", 0, None)
+            .unwrap()
+            .messages
+            .is_empty());
+        assert_eq!(list_messages(&db, None, None, "   ", 0, None).unwrap().total, Some(5));
         assert!(list_messages(&db, None, None, &"字".repeat(500), 0, None).is_ok());
         assert!(list_messages(&db, None, None, &"字".repeat(501), 0, None).is_err());
     }
@@ -1548,7 +1566,7 @@ mod tests {
             message_ids(&list_messages(&db, None, Some(group.id), "", 0, None).unwrap()),
             vec![3]
         );
-        assert_eq!(list_messages(&db, None, None, "", 0, None).unwrap().total, 3);
+        assert_eq!(list_messages(&db, None, None, "", 0, None).unwrap().total, Some(3));
     }
 
     // Catches notes lost during editing, the expiry date being treated as already
@@ -1717,7 +1735,7 @@ mod tests {
         assert_eq!(list_groups(&db).unwrap().len(), 1);
         assert_eq!(context(&db, other.id).unwrap().messages[0].id, 2);
         assert!(list_memories(&db, group.id).is_err());
-        assert_eq!(list_messages(&db, None, None, "", 0, None).unwrap().total, 1);
+        assert_eq!(list_messages(&db, None, None, "", 0, None).unwrap().total, Some(1));
         let conn = db.conn.lock().unwrap();
         assert_eq!(
             conn.query_row(
@@ -1834,6 +1852,30 @@ mod tests {
           (2,'b','same','Second project','two','Private second project','2026-09-09');").unwrap();
         db
     }
+    // A search reads every message body. Counting all matches would read them
+    // a second time on each keystroke, so the page fetches one extra row instead.
+    #[test]
+    fn search_pages_report_more_without_counting_and_browsing_keeps_the_total() {
+        let db = crate::db::test_database();
+        {
+            let mut conn = db.conn.lock().unwrap();
+            let tx = conn.transaction().unwrap();
+            tx.execute("INSERT INTO mail_accounts(id,email) VALUES ('a','a@example.com')", []).unwrap();
+            for id in 1..=51 {
+                tx.execute(
+                    "INSERT INTO mail_messages(id,account_id,provider_id,subject,received_at) VALUES (?1,'a',?2,'Invoice','2026-09-10')",
+                    params![id, format!("provider-{id}")],
+                ).unwrap();
+            }
+            tx.commit().unwrap();
+        }
+        let first = list_messages(&db, None, None, "invoice", 0, None).unwrap();
+        assert_eq!((first.messages.len(), first.has_more, first.total), (50, true, None));
+        let last = list_messages(&db, None, None, "invoice", 50, None).unwrap();
+        assert_eq!((last.messages.len(), last.has_more, last.total), (1, false, None));
+        let browse = list_messages(&db, None, None, "", 0, None).unwrap();
+        assert_eq!((browse.messages.len(), browse.has_more, browse.total), (50, true, Some(51)));
+    }
     #[test]
     fn deleting_a_group_keeps_mail_and_other_groups() {
         let db = seeded();
@@ -1842,7 +1884,7 @@ mod tests {
         set_group_members(&db, first.id, &[1, 2], true).unwrap();
         set_group_members(&db, second.id, &[1], true).unwrap();
         delete_group(&db, first.id).unwrap();
-        assert_eq!(list_messages(&db, None, None, "", 0, None).unwrap().total, 2);
+        assert_eq!(list_messages(&db, None, None, "", 0, None).unwrap().total, Some(2));
         assert_eq!(
             list_messages(&db, None, Some(second.id), "", 0, None)
                 .unwrap()
@@ -1860,7 +1902,7 @@ mod tests {
             list_messages(&db, None, Some(group.id), "", 0, None)
                 .unwrap()
                 .total,
-            0
+            Some(0)
         );
         set_group_members(&db, group.id, &[1, 1], true).unwrap();
         set_group_members(&db, group.id, &[1], true).unwrap();
@@ -1868,19 +1910,17 @@ mod tests {
             list_messages(&db, None, Some(group.id), "", 0, None)
                 .unwrap()
                 .total,
-            1
+            Some(1)
         );
     }
     #[test]
     fn search_treats_wildcards_literally_and_scopes_account_and_group() {
         let db = seeded();
-        assert_eq!(list_messages(&db, None, None, "%", 0, None).unwrap().total, 1);
-        assert_eq!(
-            list_messages(&db, Some("b"), None, "100%", 0, None)
-                .unwrap()
-                .total,
-            0
-        );
+        assert_eq!(list_messages(&db, None, None, "%", 0, None).unwrap().messages.len(), 1);
+        assert!(list_messages(&db, Some("b"), None, "100%", 0, None)
+            .unwrap()
+            .messages
+            .is_empty());
         assert_eq!(
             list_messages(&db, None, None, "Private", 0, None)
                 .unwrap()
@@ -1982,7 +2022,7 @@ mod tests {
         let context = context(&db, group.id).unwrap();
         assert_eq!(context.messages[0].id, 1);
         assert_eq!(context.messages[0].body.as_deref(), Some("new body"));
-        assert_eq!(list_messages(&db, None, None, "", 0, None).unwrap().total, 2);
+        assert_eq!(list_messages(&db, None, None, "", 0, None).unwrap().total, Some(2));
     }
     // Unlike inserting an old-format row after all migrations, this catches an
     // upgrade that drops or rewrites a pre-existing inbox or user preference.
@@ -2047,7 +2087,7 @@ mod tests {
             );
         }
         assert!(list_accounts(&db).unwrap().is_empty());
-        assert_eq!(list_messages(&db, None, None, "", 0, None).unwrap().total, 0);
+        assert_eq!(list_messages(&db, None, None, "", 0, None).unwrap().total, Some(0));
         assert_eq!(settings(&db).unwrap().processing_mode, "local");
         let group = save_group(&db, None, "Created after upgrade", "").unwrap();
         drop(db);

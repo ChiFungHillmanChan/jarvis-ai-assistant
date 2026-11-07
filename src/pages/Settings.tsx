@@ -702,17 +702,17 @@ export default function Settings() {
   const voiceInputReady = geminiSpeech || Boolean(wakeStatus?.model_downloaded);
 
   const SECTIONS = [
-    { id: "account", label: t("accountSection"), Icon: () => <UserRound size={17} /> },
-    { id: "ai", label: text("Models", "模型"), Icon: () => <Cpu size={17} /> },
-    { id: "keys", label: t("apiKeys"), Icon: () => <Key size={17} /> },
-    { id: "google", label: text("Assistant Google", "助手 Google"), Icon: () => <Globe size={17} /> },
-    { id: "notion", label: "Notion", Icon: () => <NotionMark size={17} /> },
-    { id: "github", label: "GitHub", Icon: () => <GithubMark size={17} /> },
-    { id: "obsidian", label: "Obsidian", Icon: () => <Gem size={17} /> },
-    { id: "voice", label: text("Voice", "語音"), Icon: () => <Mic size={17} /> },
-    { id: "assistant", label: t("navAssistant"), Icon: () => <Bot size={17} /> },
-    { id: "appearance", label: text("Appearance", "外觀"), Icon: () => <Palette size={17} /> },
-    { id: "storage", label: text("Storage", "儲存空間"), Icon: () => <HardDrive size={17} /> },
+    { id: "account", label: t("accountSection"), icon: <UserRound size={17} /> },
+    { id: "ai", label: text("Models", "模型"), icon: <Cpu size={17} /> },
+    { id: "keys", label: t("apiKeys"), icon: <Key size={17} /> },
+    { id: "google", label: text("Assistant Google", "助手 Google"), icon: <Globe size={17} /> },
+    { id: "notion", label: "Notion", icon: <NotionMark size={17} /> },
+    { id: "github", label: "GitHub", icon: <GithubMark size={17} /> },
+    { id: "obsidian", label: "Obsidian", icon: <Gem size={17} /> },
+    { id: "voice", label: text("Voice", "語音"), icon: <Mic size={17} /> },
+    { id: "assistant", label: t("navAssistant"), icon: <Bot size={17} /> },
+    { id: "appearance", label: text("Appearance", "外觀"), icon: <Palette size={17} /> },
+    { id: "storage", label: text("Storage", "儲存空間"), icon: <HardDrive size={17} /> },
   ];
 
   // Mirrors the sidebar: the Account section only appears once accounts are
@@ -729,7 +729,7 @@ export default function Settings() {
             <button key={s.id} onClick={() => setSection(s.id)}
               className={`settings-nav-item${active ? " is-active" : ""}`}
               aria-current={active ? "page" : undefined}>
-              <s.Icon /> <span>{s.label}</span>
+              {s.icon} <span>{s.label}</span>
             </button>
           );
         })}

@@ -1,5 +1,5 @@
-import { createElement, useId, useState, type MouseEvent, type ReactElement } from 'react';
-import Markdown from 'react-markdown';
+import { createElement, useId, useMemo, useRef, useState, type MouseEvent, type ReactElement } from 'react';
+import Markdown, { type Components } from 'react-markdown';
 import remarkGfm from 'remark-gfm';
 import { ChevronRight } from 'lucide-react';
 import { quoteAuthor, quoteThread, splitQuotes, type MailPart, type MailQuote } from './mail-quotes.ts';
@@ -107,30 +107,43 @@ export function linkHost(value: string): string {
 }
 
 export function ContentBody({ text, format = 'markdown', sourceIds = [], onSource, onOpenLink, tableLabel = '表格，可水平捲動', quoteLabels = ZH_QUOTE_LABELS }: ContentBodyProps) {
-  if (format === 'plain') return createElement(PlainMail, { text, labels: quoteLabels });
-  const validSources = new Set(sourceIds.filter(id => Number.isSafeInteger(id) && id > 0));
-  const sourceId = (url: string) => /^jarvis-source:\d+$/.test(url) && validSources.has(Number(url.slice(14))) ? Number(url.slice(14)) : null;
-  // Some models wrap the entire document in a Markdown fence. Only unwrap an
-  // explicitly labelled document; actual code samples keep their contents intact.
-  const wrapped = text.match(/^\s*(`{3,}|~{3,})(?:markdown|md)\s*\r?\n([\s\S]*)\r?\n\1\s*$/i);
-  return createElement(Markdown, {
-    children: wrapped ? wrapped[2] : text,
-    remarkPlugins: [remarkGfm, mailCitations(onSource ? validSources : new Set())],
-    skipHtml: true,
-    urlTransform: url => onSource && sourceId(url) !== null ? url : safeUrl(url),
-    components: {
+  // Parents pass new callbacks on every render, and a streamed reply renders
+  // on every frame. Reading the callbacks through a ref keeps the components
+  // below stable: new component functions would remount every table and link.
+  const callbacks = useRef({ onSource, onOpenLink });
+  callbacks.current = { onSource, onOpenLink };
+  const citing = !!onSource, linking = !!onOpenLink;
+  const sources = sourceIds.filter(id => Number.isSafeInteger(id) && id > 0).join(',');
+  const options = useMemo(() => {
+    const validSources = new Set(sources ? sources.split(',').map(Number) : []);
+    const sourceId = (url: string) => /^jarvis-source:\d+$/.test(url) && validSources.has(Number(url.slice(14))) ? Number(url.slice(14)) : null;
+    const components: Components = {
       a: ({ href, children, title }) => {
         const id = href ? sourceId(href) : null;
-        if (id !== null && onSource) return createElement('button', { type: 'button', className: 'readable-source', 'data-source-id': id, onClick: () => onSource(id) }, children);
+        if (id !== null && citing) return createElement('button', { type: 'button', className: 'readable-source', 'data-source-id': id, onClick: () => callbacks.current.onSource?.(id) }, children);
         if (!href) return createElement('span', null, children);
         return createElement('a', {
           href, title, target: '_blank', rel: 'noopener noreferrer',
-          onClick: onOpenLink ? (event: MouseEvent<HTMLAnchorElement>) => { event.preventDefault(); onOpenLink(href); } : undefined,
+          onClick: linking ? (event: MouseEvent<HTMLAnchorElement>) => { event.preventDefault(); callbacks.current.onOpenLink?.(href); } : undefined,
         }, children);
       },
       // Display the description without loading remote images or tracking pixels.
       img: ({ alt }) => createElement('span', { className: 'readable-image-label' }, alt || ''),
       table: ({ children }) => createElement('div', { className: 'readable-table', role: 'region', 'aria-label': tableLabel, tabIndex: 0 }, createElement('table', null, children)),
-    },
-  });
+    };
+    return {
+      remarkPlugins: [remarkGfm, mailCitations(citing ? validSources : new Set())],
+      urlTransform: (url: string) => citing && sourceId(url) !== null ? url : safeUrl(url),
+      components,
+    };
+  }, [sources, citing, linking, tableLabel]);
+  // The same element for the same input lets React skip parsing it again.
+  const plainLabels = format === 'plain' ? quoteLabels : null;
+  return useMemo(() => {
+    if (plainLabels) return createElement(PlainMail, { text, labels: plainLabels });
+    // Some models wrap the entire document in a Markdown fence. Only unwrap an
+    // explicitly labelled document; actual code samples keep their contents intact.
+    const wrapped = text.match(/^\s*(`{3,}|~{3,})(?:markdown|md)\s*\r?\n([\s\S]*)\r?\n\1\s*$/i);
+    return createElement(Markdown, { children: wrapped ? wrapped[2] : text, skipHtml: true, ...options });
+  }, [text, plainLabels, options]);
 }

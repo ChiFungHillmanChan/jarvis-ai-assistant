@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { canSwitchListening, setAlwaysListening, voiceStateKind, type ListeningApi } from '../src/lib/always-listening.ts';
+import { canSwitchListening, sameVoiceState, setAlwaysListening, voiceStateKind, type ListeningApi } from '../src/lib/always-listening.ts';
 
 function fakeMac(modelDownloaded: boolean) {
   const calls: string[] = [];
@@ -57,4 +57,12 @@ test('status is re-read when the voice state changes kind, not on every download
   assert.equal(voiceStateKind({ ModelDownloading: 5 }), voiceStateKind({ ModelDownloading: 60 }));
   assert.notEqual(voiceStateKind('WakeWordListening'), voiceStateKind('Idle'));
   assert.notEqual(voiceStateKind({ Error: 'mic' }), voiceStateKind('Idle'));
+});
+
+test('a repeated voice-state event keeps the current state, so nothing re-renders', () => {
+  assert.equal(sameVoiceState({ ModelDownloading: 5 }, { ModelDownloading: 5 }), true);
+  assert.equal(sameVoiceState('Idle', 'Idle'), true);
+  assert.equal(sameVoiceState({ ModelDownloading: 5 }, { ModelDownloading: 6 }), false);
+  assert.equal(sameVoiceState({ Error: 'mic' }, { Error: 'network' }), false);
+  assert.equal(sameVoiceState('Idle', { Error: 'Idle' }), false);
 });

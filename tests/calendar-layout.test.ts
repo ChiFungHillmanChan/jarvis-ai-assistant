@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { viewRange, stepAnchor, toEntries, entryDays, layoutTimed, layoutAllDay, freeBlocks, todaySummary } from '../src/lib/calendar-layout.ts';
+import { viewRange, stepAnchor, toEntries, entryDays, entriesByDay, layoutTimed, layoutAllDay, freeBlocks, todaySummary } from '../src/lib/calendar-layout.ts';
 import type { CalendarEventView, Task } from '../src/lib/types.ts';
 import type { MailItem } from '../src/lib/mail.ts';
 
@@ -58,6 +58,20 @@ test('a timed event crossing midnight touches both days, and one ending at midni
   assert.deepEqual(entryDays(late), ['2026-09-25', '2026-09-26']);
   const [toMidnight] = toEntries([event(iso(25, 22), iso(26, 0))], []);
   assert.deepEqual(entryDays(toMidnight), ['2026-09-25']);
+});
+
+test('entries are grouped under every shown day they touch, in their original order', () => {
+  const entries = toEntries([
+    event('2026-09-24', '2026-09-27', 'Trip'),
+    event(iso(25, 22), iso(26, 1), 'Late'),
+    event(iso(30, 9), iso(30, 10), 'Not shown'),
+  ], []);
+  const byDay = entriesByDay(entries, ['2026-09-25', '2026-09-26', '2026-09-27']);
+  assert.deepEqual([...byDay].map(([day, list]) => [day, list.map(entry => entry.title)]), [
+    ['2026-09-25', ['Trip', 'Late']],
+    ['2026-09-26', ['Trip', 'Late']],
+    ['2026-09-27', []],
+  ]);
 });
 
 test('a timed block is clipped to each day it crosses', () => {

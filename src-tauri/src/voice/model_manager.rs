@@ -69,6 +69,14 @@ impl Drop for DownloadGuard {
     }
 }
 
+/// Whole-percent progress, or None while it has not moved past `last`. The
+/// model arrives in thousands of small chunks, and each emit re-renders the
+/// window, so only a change in the percentage is worth reporting.
+fn progress_step(downloaded: u64, total: u64, last: u32) -> Option<u32> {
+    let progress = ((downloaded * 100) / total.max(1)).min(100) as u32;
+    (progress != last).then_some(progress)
+}
+
 async fn download_model(app_handle: JarvisAppHandle, force: bool) -> Result<PathBuf, String> {
     let _only_download = DownloadGuard::acquire().ok_or("The speech model is already downloading.")?;
     let path = model_path();
@@ -103,6 +111,7 @@ async fn download_model(app_handle: JarvisAppHandle, force: bool) -> Result<Path
 
         let total_bytes = response.content_length();
         let mut downloaded_bytes = 0u64;
+        let mut last_progress = 0u32;
         let mut digest = Sha256::new();
         let mut file = tokio::fs::File::create(&temp_path)
             .await
@@ -118,8 +127,10 @@ async fn download_model(app_handle: JarvisAppHandle, force: bool) -> Result<Path
             downloaded_bytes += chunk.len() as u64;
 
             if let Some(total_bytes) = total_bytes {
-                let progress = ((downloaded_bytes * 100) / total_bytes.max(1)).min(100) as u32;
-                engine.set_state_and_emit(VoiceState::ModelDownloading(progress));
+                if let Some(progress) = progress_step(downloaded_bytes, total_bytes, last_progress) {
+                    last_progress = progress;
+                    engine.set_state_and_emit(VoiceState::ModelDownloading(progress));
+                }
             }
         }
 
@@ -204,10 +215,25 @@ mod download_guard_tests {
 #[cfg(test)]
 mod tests {
     use super::{
-        hex_digest, model_file_is_usable, should_skip_download, verify_checksum,
+        hex_digest, model_file_is_usable, progress_step, should_skip_download, verify_checksum,
         verify_download_size, MIN_MODEL_BYTES, MODEL_SHA256,
     };
     use sha2::{Digest, Sha256};
+
+    #[test]
+    fn download_progress_is_emitted_once_per_percent() {
+        // 16 KB network chunks: about 9,000 of them for the 148 MB model.
+        let total = 147_951_465u64;
+        let (mut downloaded, mut last, mut emitted) = (0u64, 0u32, Vec::new());
+        while downloaded < total {
+            downloaded = (downloaded + 16_384).min(total);
+            if let Some(progress) = progress_step(downloaded, total, last) {
+                last = progress;
+                emitted.push(progress);
+            }
+        }
+        assert_eq!(emitted, (1..=100).collect::<Vec<_>>());
+    }
 
     #[test]
     fn a_full_length_wrong_body_is_still_rejected() {

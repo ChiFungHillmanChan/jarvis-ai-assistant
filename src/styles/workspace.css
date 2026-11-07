@@ -110,6 +110,8 @@
 .update-toast.is-error { border-color:rgba(255,100,100,0.5); }
 .update-toast-dot { flex-shrink:0; margin-top:5px; width:7px; height:7px; border-radius:50%; background:rgba(0,180,255,0.9); box-shadow:0 0 6px rgba(0,180,255,0.7); }
 .update-toast.is-error .update-toast-dot { background:rgba(255,120,120,0.9); box-shadow:0 0 6px rgba(255,120,120,0.7); }
+/* Pulse a few times to draw the eye, then stop: an endless animation keeps the window redrawing for as long as the toast stays up. */
+.update-toast-dot.animate-glow { animation-iteration-count:3; }
 .update-toast-body { display:flex; flex-direction:column; gap:5px; min-width:0; flex:1; }
 .update-toast-body strong { font-size:12.5px; font-weight:500; color:var(--text-primary); }
 .update-toast-action { display:inline-flex; align-items:center; gap:6px; align-self:flex-start; padding:4px 10px; border:1px solid rgba(0,180,255,0.5); border-radius:20px; background:rgba(0,180,255,0.14); color:rgba(0,180,255,0.95); font-family:var(--font-mono); font-size:11px; letter-spacing:0.4px; cursor:pointer; white-space:nowrap; }
@@ -198,6 +200,7 @@
 .assistant-header-actions { display:flex; margin-left:auto; gap:2px; }
 .assistant-messages { flex:1; overflow:auto; padding:24px; min-height:0; overflow-wrap:anywhere; }
 .assistant-full .assistant-messages { width:100%; max-width:870px; margin:0 auto; padding:28px 40px; }
+.assistant-earlier { display:block; margin:0 auto 18px; }
 .assistant-welcome { margin:7vh auto 30px; max-width:580px; }
 .assistant-welcome h1 { font-size:30px; font-weight:500; line-height:1.25; letter-spacing:-.8px; margin-bottom:18px; }
 .assistant-welcome p { color:var(--text-secondary); font-size:14px; line-height:1.7; }

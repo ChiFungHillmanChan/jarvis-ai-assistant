@@ -92,6 +92,13 @@ export function entryDays(entry: CalendarEntry): string[] {
 
 export const entriesOn = (entries: CalendarEntry[], day: string) => entries.filter(entry => entryDays(entry).includes(day));
 
+/** entriesOn for each of `days` at once, working out every entry's days only once. */
+export function entriesByDay(entries: CalendarEntry[], days: string[]): Map<string, CalendarEntry[]> {
+  const byDay = new Map(days.map(day => [day, [] as CalendarEntry[]]));
+  for (const entry of entries) for (const day of entryDays(entry)) byDay.get(day)?.push(entry);
+  return byDay;
+}
+
 /** Timed entries clipped to each visible day, with side-by-side columns for overlaps. */
 export function layoutTimed(entries: CalendarEntry[], days: string[]): TimedBlock[] {
   const blocks: TimedBlock[] = [];

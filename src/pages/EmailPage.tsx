@@ -32,7 +32,7 @@ export default function EmailPage({ onSetup }: { onSetup?: () => void }) {
   const [view, setView] = useWorkspaceValue<MailView | undefined>("mailView", undefined);
   const [query, setQuery] = useWorkspaceValue("mailSearch", "");
   const [offset, setOffset] = useWorkspaceValue("mailOffset", 0);
-  const [page, setPage] = useState<MailPage>({ messages: [], total: 0 });
+  const [page, setPage] = useState<MailPage>({ messages: [], total: 0, has_more: false });
   const [selected, setSelected] = useState<number[]>([]);
   const [targetGroup, setTargetGroup] = useState("");
   const [messageId, setMessageId] = useWorkspaceValue<number | null>("mailMessageId", null);
@@ -102,7 +102,7 @@ export default function EmailPage({ onSetup }: { onSetup?: () => void }) {
         if (!current) return;
         setPage(data);
         setSelected(ids => ids.filter(id => data.messages.some(m => m.id === id)));
-        if (offset > 0 && offset >= data.total) setOffset(0);
+        if (offset > 0 && !data.messages.length) setOffset(0);
       }).catch(e => { if (current) setError(text(`Could not load messages: ${String(e)}`, `未能載入郵件：${String(e)}`)); }).finally(() => { if (current) setLoading(false); });
     }, query ? 200 : 0);
     return () => { current = false; window.clearTimeout(timer); };
@@ -338,8 +338,8 @@ export default function EmailPage({ onSetup }: { onSetup?: () => void }) {
           </div>
           <footer className="mail-pagination">
             <label><input type="checkbox" checked={page.messages.length > 0 && selected.length === page.messages.length} disabled={!page.messages.length} onChange={e => setSelected(e.target.checked ? page.messages.map(item => item.id) : [])} />{text("Select page", "全選本頁")}</label>
-            <span>{page.total ? `${offset + 1}–${Math.min(offset + PAGE, page.total)} / ${page.total}` : "0"}</span>
-            <span><button disabled={offset === 0 || loading} onClick={() => setOffset(n => Math.max(0, n - PAGE))} aria-label={text("Previous page", "上一頁")}>‹</button><button disabled={offset + PAGE >= page.total || loading} onClick={() => setOffset(n => n + PAGE)} aria-label={text("Next page", "下一頁")}>›</button></span>
+            <span>{page.messages.length ? `${offset + 1}–${offset + page.messages.length}${page.total === null ? "" : ` / ${page.total}`}` : "0"}</span>
+            <span><button disabled={offset === 0 || loading} onClick={() => setOffset(n => Math.max(0, n - PAGE))} aria-label={text("Previous page", "上一頁")}>‹</button><button disabled={!page.has_more || loading} onClick={() => setOffset(n => n + PAGE)} aria-label={text("Next page", "下一頁")}>›</button></span>
           </footer>
         </>}
       </section>
