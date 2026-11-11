@@ -67,6 +67,13 @@
       ],
       "dialog": false,
       "pubkey": "dW50cnVzdGVkIGNvbW1lbnQ6IG1pbmlzaWduIHB1YmxpYyBrZXk6IEJENDc1MEE2RkFERjE0MTMKUldRVEZOLzZwbEJIdmJObzFNTnlxVlNxT2xGWU5ieUt0L2YrQURRN2VRaitsTS9ZUzJ3b0FpSWMK"
+    },
+    "deep-link": {
+      "desktop": {
+        "schemes": [
+          "jarvis"
+        ]
+      }
     }
   }
 }

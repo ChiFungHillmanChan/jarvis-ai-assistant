@@ -60,8 +60,18 @@ pub fn run() {
                 )
                 .build(),
         )
+        // jarvis://billing/return from the website's payment pages brings the
+        // app back after Stripe; see payments::return_link.
+        .plugin(tauri_plugin_deep_link::init())
         .setup(|app| {
             tool_approval::init(app.handle().clone());
+            {
+                use tauri_plugin_deep_link::DeepLinkExt;
+                let handle = app.handle().clone();
+                app.deep_link().on_open_url(move |event| {
+                    payments::return_link::open_urls(&handle, &event.urls());
+                });
+            }
             // A failure here is total -- no database, no app -- and in a
             // packaged .app the panic message goes to a stderr nobody reads, so
             // JARVIS just fails to launch with no window and no explanation.
