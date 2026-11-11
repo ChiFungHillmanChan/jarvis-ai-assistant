@@ -170,6 +170,27 @@ impl Transcriber {
     }
 }
 
+/// What the speaker said, without Whisper's notes about sound that is not
+/// speech: "[BLANK_AUDIO]" for silence, "(music)", "*outro music*". Left in,
+/// a note was saved as the user's message and answered by the AI.
+fn spoken_words(transcript: &str) -> String {
+    let mut words = String::new();
+    let mut note_ends_at = None;
+    for c in transcript.chars() {
+        match note_ends_at {
+            Some(end) if c == end => note_ends_at = None,
+            Some(_) => {}
+            None => match c {
+                '[' => note_ends_at = Some(']'),
+                '(' => note_ends_at = Some(')'),
+                '*' => note_ends_at = Some('*'),
+                _ => words.push(c),
+            },
+        }
+    }
+    words.split_whitespace().collect::<Vec<_>>().join(" ")
+}
+
 /// How hard local Whisper works on one pass.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct DecodeProfile {
@@ -273,7 +294,7 @@ impl LocalTranscriber {
             text.push(' ');
         }
 
-        let text = text.trim().to_string();
+        let text = spoken_words(&text);
         log::info!("Locally transcribed {} characters", text.chars().count());
         Ok(text)
     }
@@ -288,6 +309,39 @@ mod tests {
         assert_eq!(DecodeProfile::REQUEST, DecodeProfile { threads: None, audio_ctx: None, fallback: true, max_tokens: None });
         // audio_ctx must stay at 256 or more: at 128 the base model repeated itself in testing.
         assert_eq!(DecodeProfile::WAKE, DecodeProfile { threads: Some(2), audio_ctx: Some(256), fallback: false, max_tokens: Some(16) });
+    }
+
+    #[test]
+    fn whisper_notes_about_sound_are_not_the_speakers_words() {
+        for note in ["[BLANK_AUDIO]", "*outro music*", "(music)", "[ Silence ]", " [BLANK_AUDIO] [MUSIC] "] {
+            assert_eq!(spoken_words(note), "", "{note:?} is not something the speaker said");
+        }
+        assert_eq!(spoken_words("[MUSIC] what is on my calendar"), "what is on my calendar");
+        assert_eq!(spoken_words("我聽日下晝三點要同陳生開會"), "我聽日下晝三點要同陳生開會");
+        // A note cut off by the token cap still is not speech.
+        assert_eq!(spoken_words("hey jarvis [BLANK_AUD"), "hey jarvis");
+    }
+
+    /// Run by hand against the real model:
+    /// `JARVIS_WHISPER_MODEL=.../ggml-base.bin cargo test --release --lib
+    /// a_quiet_room_transcribes_to_nothing -- --ignored --nocapture`
+    #[test]
+    #[ignore]
+    fn a_quiet_room_transcribes_to_nothing() {
+        let model = std::env::var("JARVIS_WHISPER_MODEL").expect("JARVIS_WHISPER_MODEL");
+        let transcriber = LocalTranscriber::new(std::path::Path::new(&model)).unwrap();
+        // Hiss just above the level push-to-talk already discards as silence (RMS 0.001).
+        let mut seed = 12345u32;
+        let hiss: Vec<f32> = (0..16_000 * 3)
+            .map(|_| {
+                seed = seed.wrapping_mul(1664525).wrapping_add(1013904223);
+                ((seed >> 8) as f32 / 8388608.0 - 1.0) * 0.003
+            })
+            .collect();
+        for (language, prompt) in [(Some("en"), None), (Some("zh"), Some(CANTONESE_PROMPT)), (None, None)] {
+            let text = transcriber.transcribe_with(&hiss, language, prompt, DecodeProfile::REQUEST).unwrap();
+            assert_eq!(text, "", "{language:?}: three seconds of room hiss came back as {text:?}");
+        }
     }
 
     /// Run by hand against the real model and a 16 kHz mono clip of someone saying "Hey Jarvis":
