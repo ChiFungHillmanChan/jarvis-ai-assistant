@@ -520,6 +520,7 @@ pub fn run() {
             voice::commands::get_voice_state,
             voice::commands::toggle_mute,
             voice::commands::get_voice_settings,
+            voice::commands::get_voice_recording,
             voice::commands::set_voice_setting,
             voice::commands::list_tts_voices,
             voice::wake_commands::get_wake_word_status,

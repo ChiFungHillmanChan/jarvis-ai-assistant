@@ -147,6 +147,7 @@ export async function stopSpeaking(): Promise<void> { return invoke("stop_speaki
 export async function getVoiceState(): Promise<VoiceState> { return invoke("get_voice_state"); }
 export async function toggleMute(): Promise<boolean> { return invoke("toggle_mute"); }
 export async function getVoiceSettings(): Promise<VoiceSettings> { return invoke("get_voice_settings"); }
+export async function getVoiceRecording(conversationId: number): Promise<ArrayBuffer> { return invoke("get_voice_recording", { conversationId }); }
 export async function setVoiceSetting(key: string, value: string): Promise<void> { return invoke("set_voice_setting", { key, value }); }
 export async function listTtsVoices(): Promise<string[]> { return invoke("list_tts_voices"); }
 export async function getWakeWordStatus(): Promise<WakeWordStatus> { return invoke("get_wake_word_status"); }

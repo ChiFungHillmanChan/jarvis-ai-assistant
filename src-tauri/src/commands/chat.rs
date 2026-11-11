@@ -51,6 +51,9 @@ pub struct ChatMessage {
     pub role: String,
     pub content: String,
     pub created_at: Option<String>,
+    /// A voice request whose recording was kept and can be played back.
+    #[serde(default)]
+    pub has_recording: bool,
 }
 
 #[tauri::command]
@@ -210,6 +213,7 @@ async fn send_scoped(
                     role: "assistant".to_string(),
                     content: search_response,
                     created_at: None,
+                    has_recording: false,
                 });
             }
         }
@@ -341,6 +345,7 @@ async fn send_scoped(
         role: "assistant".to_string(),
         content: final_response,
         created_at: None,
+        has_recording: false,
     })
 }
 
@@ -350,6 +355,11 @@ async fn send_scoped(
 /// Messages the chosen AI must not be shown are left out (see
 /// `ai::mail_policy::withheld`). The message being saved is always sent.
 pub(crate) fn save_turn_and_load_history(db: &Database, session_id: &str, message: &str) -> Result<Vec<(String, String)>, String> {
+    save_turn(db, session_id, message).map(|(_, history)| history)
+}
+
+/// `save_turn_and_load_history`, with the id of the message it saved.
+pub(crate) fn save_turn(db: &Database, session_id: &str, message: &str) -> Result<(i64, Vec<(String, String)>), String> {
     // Before the lock below: this takes it too.
     let withheld = crate::ai::mail_policy::withheld_as_turn_begins(db);
     let conn = db.conn.lock().map_err(|e| e.to_string())?;
@@ -368,7 +378,7 @@ pub(crate) fn save_turn_and_load_history(db: &Database, session_id: &str, messag
         .collect::<Result<Vec<_>, _>>()
         .map_err(|e| e.to_string())?;
     messages.reverse();
-    Ok(messages)
+    Ok((saved, messages))
 }
 
 /// Up to ten of the session's messages that mention `topic`, newest first, as
@@ -443,7 +453,8 @@ fn clear_session(conn: &rusqlite::Connection, session_id: &str) -> Result<(), St
 /// key backwards for the most recent window and reverse it back into the
 /// oldest-first order the UI appends to.
 const CONVERSATION_WINDOW_QUERY: &str =
-    "SELECT id, role, content, created_at FROM conversations WHERE session_id = ?2 ORDER BY id DESC LIMIT ?1";
+    "SELECT id, role, content, created_at, EXISTS(SELECT 1 FROM voice_recordings WHERE conversation_id = conversations.id) \
+     FROM conversations WHERE session_id = ?2 ORDER BY id DESC LIMIT ?1";
 const DEFAULT_CONVERSATION_LIMIT: i64 = 200;
 const MAX_CONVERSATION_LIMIT: i64 = 1000;
 
@@ -477,6 +488,7 @@ fn history(conn: &rusqlite::Connection, session_id: &str, limit: Option<i64>) ->
                 role: row.get(1)?,
                 content: row.get(2)?,
                 created_at: row.get(3)?,
+                has_recording: row.get(4)?,
             })
         })
         .map_err(|e| e.to_string())?
@@ -490,6 +502,27 @@ fn history(conn: &rusqlite::Connection, session_id: &str, limit: Option<i64>) ->
 mod tests {
     use super::*;
     use rusqlite::Connection;
+
+    #[test]
+    fn a_saved_turn_reports_the_message_it_saved() {
+        let db = crate::db::test_database();
+        save_turn(&db, "legacy", "first").unwrap();
+        let (id, history) = save_turn(&db, "legacy", "what is on my calendar").unwrap();
+        let saved: String = db.conn.lock().unwrap().query_row("SELECT content FROM conversations WHERE id = ?1", [id], |r| r.get(0)).unwrap();
+        assert_eq!(saved, "what is on my calendar");
+        assert_eq!(history.len(), 2);
+    }
+
+    #[test]
+    fn history_marks_the_voice_requests_that_can_be_played_back() {
+        let db = crate::db::test_database();
+        let (spoken, _) = save_turn(&db, "legacy", "what is on my calendar").unwrap();
+        save_turn(&db, "legacy", "typed this one").unwrap();
+        assert!(crate::voice::recordings::keep(&db, spoken, &[0.1; 1600]));
+        let conn = db.conn.lock().unwrap();
+        let marks: Vec<(String, bool)> = history(&conn, "legacy", None).unwrap().into_iter().map(|m| (m.content, m.has_recording)).collect();
+        assert_eq!(marks, [("what is on my calendar".to_string(), true), ("typed this one".to_string(), false)]);
+    }
 
     #[test]
     fn chat_session_history_and_clear_are_isolated() {
@@ -515,6 +548,7 @@ mod tests {
         let conn = Connection::open_in_memory().unwrap();
         conn.execute_batch("CREATE TABLE conversations(id INTEGER PRIMARY KEY, role TEXT NOT NULL, content TEXT NOT NULL, created_at TEXT DEFAULT CURRENT_TIMESTAMP); INSERT INTO conversations(role,content) VALUES('user','Before migration');").unwrap();
         conn.execute_batch(include_str!("../../migrations/V24__chat_sessions.sql")).unwrap();
+        conn.execute_batch(include_str!("../../migrations/V32__voice_recordings.sql")).unwrap();
         let messages = history(&conn, "legacy", None).unwrap();
         assert_eq!(messages.len(),1);
         assert_eq!(messages[0].content,"Before migration");
@@ -583,6 +617,7 @@ mod tests {
                  created_at TEXT DEFAULT CURRENT_TIMESTAMP, session_id TEXT NOT NULL DEFAULT 'legacy');",
         )
         .unwrap();
+        conn.execute_batch(include_str!("../../migrations/V32__voice_recordings.sql")).unwrap();
         for i in 1..=10 {
             conn.execute(
                 "INSERT INTO conversations (role, content) VALUES ('user', ?1)",

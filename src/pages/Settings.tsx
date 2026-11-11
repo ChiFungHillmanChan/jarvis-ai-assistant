@@ -1117,6 +1117,11 @@ export default function Settings() {
               <input type="checkbox" checked={voiceSettings?.tts_enabled ?? true} onChange={(e) => { void setVoiceSetting("tts_enabled", String(e.target.checked)); setVoiceSettingsState((prev) => prev ? { ...prev, tts_enabled: e.target.checked } : prev); }} style={styles.radio} />
               <span style={styles.optionLabel}>{text('Enable text-to-speech', '啟用文字朗讀')}</span>
             </label>
+            <label style={styles.option}>
+              <input type="checkbox" checked={voiceSettings?.keep_recordings ?? true} onChange={(e) => { void setVoiceSetting("keep_voice_recordings", String(e.target.checked)); setVoiceSettingsState((prev) => prev ? { ...prev, keep_recordings: e.target.checked } : prev); }} style={styles.radio} />
+              <span style={styles.optionLabel}>{text('Keep recordings of my voice requests', '保存語音請求的錄音')}</span>
+            </label>
+            <div style={styles.hint}>{text('Lets you play a voice request back from the chat. Recordings stay in the encrypted database on this Mac and are deleted with their message. Turning this off deletes the recordings already kept.', '可在對話中重播語音請求。錄音只保存在此 Mac 的加密資料庫，並隨訊息一併刪除。關閉此選項會刪除已保存的錄音。')}</div>
             {ttsVoices.length > 0 && (
               <div style={{ marginTop: 8 }}>
                 <div style={{ color: "var(--text-secondary)", fontSize: 12, marginBottom: 4 }}>{text('TTS Voice', '朗讀聲線')}</div>

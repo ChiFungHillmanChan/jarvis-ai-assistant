@@ -4,6 +4,7 @@ pub mod cosyvoice;
 pub mod cosyvoice_download;
 pub mod minimax;
 pub mod model_manager;
+pub mod recordings;
 pub mod transcribe;
 pub mod tts;
 pub mod tts_router;

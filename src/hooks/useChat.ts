@@ -2,7 +2,7 @@ import { useState, useEffect, useCallback, useRef } from 'react';
 import { listen } from '@tauri-apps/api/event';
 import type { ChatMessage, ChatStep, ChatTokenPayload, ChatStatusPayload, ChatStatePayload } from '../lib/types';
 import { sendMessage, getConversations } from '../lib/commands';
-import { addStep, matchesRun, mergeHistory } from '../workspace/chatState';
+import { addStep, matchesRun, mergeHistory, spokenMessage } from '../workspace/chatState';
 interface SessionState { historyLoading: boolean; messages: ChatMessage[]; loading: boolean; error: string | null; currentStatus: string | null; currentDetail: string | null; streamingText: string }
 interface Scoped { session_id?: string; run_id?: string }
 const empty = (): SessionState => ({ historyLoading: true, messages: [], loading: false, error: null, currentStatus: null, currentDetail: null, streamingText: '' });
@@ -66,9 +66,9 @@ export function useChat() {
     const stateListener = listen<ChatStatePayload & Scoped>('chat-state', ({ payload }) => {
       if (matches(payload) && payload.state === 'idle') update(payload.session_id!, s => ({ ...s, currentStatus: null, currentDetail: null }));
     });
-    const voiceListener = listen<{ role: string; content: string } & Scoped>('chat-new-message', ({ payload }) => {
+    const voiceListener = listen<{ role: string; content: string; id?: number | null; has_recording?: boolean } & Scoped>('chat-new-message', ({ payload }) => {
       if (payload.session_id && payload.session_id !== 'legacy') return;
-      update('legacy', s => ({ ...s, messages: [...s.messages, { id: null, role: payload.role as ChatMessage['role'], content: payload.content, created_at: new Date().toISOString() }] }));
+      update('legacy', s => ({ ...s, messages: [...s.messages, spokenMessage(payload, new Date().toISOString())] }));
     });
     return () => { if (frame.current !== null) cancelAnimationFrame(frame.current); [tokenListener, statusListener, stateListener, voiceListener].forEach(p => { void p.then(fn => fn()).catch(() => {}); }); };
   }, [update]);

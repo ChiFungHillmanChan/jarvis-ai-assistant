@@ -152,13 +152,8 @@ pub async fn stop_listening(
     }
 
     // Save user message and notify chat panel
-    let messages = crate::commands::chat::save_turn_and_load_history(&db, "legacy", &text)?;
-    let _ = app_handle.emit(
-        "chat-new-message",
-        json!({
-            "role": "user", "content": text
-        }),
-    );
+    let (spoken, messages) = super::recordings::save_spoken_turn(&db, &text, &samples)?;
+    let _ = app_handle.emit("chat-new-message", spoken);
     let _ = app_handle.emit("chat-state", json!({"state": "thinking"}));
     let _ = app_handle.emit(
         "chat-status",
@@ -252,6 +247,14 @@ pub fn toggle_mute(engine: State<Arc<VoiceEngine>>) -> bool {
     engine.toggle_mute()
 }
 
+/// The kept recording of a voice request, as a WAV file for the chat to play.
+#[tauri::command]
+pub fn get_voice_recording(db: State<Arc<Database>>, conversation_id: i64) -> Result<tauri::ipc::Response, String> {
+    super::recordings::load(&db, conversation_id)?
+        .map(tauri::ipc::Response::new)
+        .ok_or_else(|| "這則訊息沒有保存錄音。".to_string())
+}
+
 #[tauri::command]
 pub fn get_voice_settings(db: State<Arc<Database>>) -> Result<VoiceSettings, String> {
     let conn = db.conn.lock().map_err(|e| e.to_string())?;
@@ -268,6 +271,7 @@ pub fn get_voice_settings(db: State<Arc<Database>>) -> Result<VoiceSettings, Str
         tts_voice: get("tts_voice", "Samantha"),
         tts_rate: get("tts_rate", "200").parse().unwrap_or(200),
         tts_enabled: get("tts_enabled", "true") == "true",
+        keep_recordings: get(super::recordings::KEEP_PREFERENCE, "true") != "false",
     })
 }
 
@@ -286,6 +290,7 @@ pub fn set_voice_setting(
     )
     .map_err(|e| e.to_string())?;
     drop(conn);
+    super::recordings::setting_changed(&db, &key, &value)?;
 
     // Sync in-memory TTS with the new setting
     match key.as_str() {
@@ -325,4 +330,5 @@ pub struct VoiceSettings {
     pub tts_voice: String,
     pub tts_rate: u32,
     pub tts_enabled: bool,
+    pub keep_recordings: bool,
 }

@@ -1,6 +1,4 @@
 use base64::Engine;
-use hound::{WavSpec, WavWriter};
-use std::io::Cursor;
 use std::path::Path;
 use std::sync::Arc;
 use whisper_rs::{FullParams, SamplingStrategy, WhisperContext, WhisperContextParameters};
@@ -66,7 +64,7 @@ impl Transcriber {
             return Ok(String::new());
         }
 
-        let wav_bytes = self.to_wav(audio_data)?;
+        let wav_bytes = super::recordings::wav(audio_data)?;
         let base64_audio =
             base64::engine::general_purpose::STANDARD.encode(&wav_bytes);
 
@@ -140,33 +138,6 @@ impl Transcriber {
 
         log::info!("Transcribed {} characters", text.chars().count());
         Ok(text)
-    }
-
-    fn to_wav(&self, audio_data: &[f32]) -> Result<Vec<u8>, String> {
-        let spec = WavSpec {
-            channels: 1,
-            sample_rate: 16000,
-            bits_per_sample: 16,
-            sample_format: hound::SampleFormat::Int,
-        };
-
-        let mut cursor = Cursor::new(Vec::new());
-        {
-            let mut writer = WavWriter::new(&mut cursor, spec)
-                .map_err(|e| format!("WAV writer error: {}", e))?;
-
-            for &sample in audio_data {
-                let s16 = (sample * 32767.0).clamp(-32768.0, 32767.0) as i16;
-                writer
-                    .write_sample(s16)
-                    .map_err(|e| format!("WAV write error: {}", e))?;
-            }
-            writer
-                .finalize()
-                .map_err(|e| format!("WAV finalize error: {}", e))?;
-        }
-
-        Ok(cursor.into_inner())
     }
 }
 
