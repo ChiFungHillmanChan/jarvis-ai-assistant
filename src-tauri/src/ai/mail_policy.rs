@@ -142,10 +142,29 @@ const WITHHELD_THROUGH: &str = "mail_withheld_through";
 /// everything saved up to that moment is withheld from the new AI; what is
 /// saved afterwards cannot quote an email, because that AI is never given
 /// one. Moving back to an allowed AI lifts the line. Every path that puts
-/// stored chat, memory or task titles into a prompt asks this first, and asks
-/// before it saves the turn's own message.
+/// stored chat, memory or task titles into a prompt asks this first.
+///
+/// The line is drawn by [`withheld_as_turn_begins`]. Until then everything
+/// saved so far is withheld, which covers what a turn still running at the
+/// move saves when it ends.
 pub fn withheld(db: &Database) -> Withheld {
+    line(db, false)
+}
+
+/// [`withheld`], for a chat turn that is about to save the user's message:
+/// after a move this draws the line under everything saved so far.
+pub fn withheld_as_turn_begins(db: &Database) -> Withheld {
+    line(db, true)
+}
+
+fn line(db: &Database, turn_begins: bool) -> Withheld {
     let allowed = check(db).is_ok();
+    // Gemini is what an install chats with until the user chooses otherwise.
+    let gemini_only = crate::commands::ai_choice::saved_chain(db)
+        .unwrap_or_default()
+        .iter()
+        .filter(|entry| entry.enabled)
+        .all(|entry| entry.provider_type == "gemini");
     // Fail closed: a database that cannot be read withholds everything.
     let everything = Withheld { conversations: i64::MAX, memories: i64::MAX, tasks: i64::MAX };
     let Ok(conn) = db.conn.lock() else { return everything };
@@ -169,13 +188,16 @@ pub fn withheld(db: &Database) -> Withheld {
         return Withheld::default();
     }
     // No record: a build from before this existed. If Google data is on this
-    // Mac, an allowed AI may have read it, so treat this as a move.
+    // Mac, an allowed AI may have read it, so treat this as a move -- unless
+    // the AI is Gemini without billing, refused email all along, and no other
+    // AI has answered here: then nothing saved came from an AI that read email.
     let was_allowed = match recorded.as_deref() {
         Some(value) => value == "true",
         None => conn
             .query_row(
-                "SELECT EXISTS(SELECT 1 FROM emails) OR EXISTS(SELECT 1 FROM mail_messages) OR EXISTS(SELECT 1 FROM calendar_events)",
-                [],
+                "SELECT (EXISTS(SELECT 1 FROM emails) OR EXISTS(SELECT 1 FROM mail_messages) OR EXISTS(SELECT 1 FROM calendar_events)) \
+                 AND (?1 = 0 OR EXISTS(SELECT 1 FROM inference_metrics WHERE provider <> 'gemini'))",
+                [gemini_only],
                 |row| row.get::<_, bool>(0),
             )
             .unwrap_or(true),
@@ -185,13 +207,12 @@ pub fn withheld(db: &Database) -> Withheld {
         let (Ok(conversations), Ok(memories), Ok(tasks)) = (newest("conversations"), newest("user_memory"), newest("tasks")) else {
             return everything;
         };
-        let line = Withheld { conversations, memories, tasks };
         // The line is saved before the record changes, so a failed write is
-        // tried again on the next request instead of losing the line.
-        if !set(WITHHELD_THROUGH, &format!("{conversations},{memories},{tasks}")) || !set(MAIL_AI_WAS_ALLOWED, "false") {
+        // tried again on the next turn instead of losing the line.
+        if turn_begins && (!set(WITHHELD_THROUGH, &format!("{conversations},{memories},{tasks}")) || !set(MAIL_AI_WAS_ALLOWED, "false")) {
             return everything;
         }
-        return line;
+        return Withheld { conversations, memories, tasks };
     }
     if recorded.is_none() {
         set(MAIL_AI_WAS_ALLOWED, "false");
@@ -345,7 +366,7 @@ mod tests {
         assert_eq!(withheld(&db), Withheld::default(), "an AI that may read email sees everything");
 
         use_ai(&db, "openai", KIMI);
-        let line = withheld(&db);
+        let line = withheld_as_turn_begins(&db);
         assert_eq!(line, Withheld { conversations: 1, memories: 1, tasks: 1 });
 
         // What is saved while Kimi is in use cannot quote an email, and the
@@ -360,14 +381,35 @@ mod tests {
         assert_eq!(withheld(&db), Withheld::default());
         save_a_turn(&db, "first");
         use_ai(&db, "openai", KIMI);
-        assert_eq!(withheld(&db).conversations, 1);
+        assert_eq!(withheld_as_turn_begins(&db).conversations, 1);
 
         use_ai(&db, "openai", None);
         assert_eq!(withheld(&db), Withheld::default());
         save_a_turn(&db, "second");
 
         use_ai(&db, "openai", KIMI);
-        assert_eq!(withheld(&db), Withheld { conversations: 2, memories: 2, tasks: 2 });
+        assert_eq!(withheld_as_turn_begins(&db), Withheld { conversations: 2, memories: 2, tasks: 2 });
+    }
+
+    /// The AI can be changed while a turn that read an email is still
+    /// running. What that turn saves when it ends is from before the move, so
+    /// the line is drawn when the next turn begins, not by whichever tool or
+    /// briefing happens to ask first.
+    #[test]
+    fn what_a_turn_still_running_at_the_move_saves_is_withheld_too() {
+        let db = db_with(&[("openai", None, None)], &[]);
+        assert_eq!(withheld(&db), Withheld::default());
+        save_a_turn(&db, "Kenny owes HK$12,000");
+        use_ai(&db, "openai", KIMI);
+
+        // The running turn lists tasks: everything saved so far is withheld.
+        assert_eq!(withheld(&db), Withheld { conversations: 1, memories: 1, tasks: 1 });
+        save_a_turn(&db, "As Kenny wrote, HK$12,000 is due");
+
+        let line = withheld_as_turn_begins(&db);
+        assert_eq!(line, Withheld { conversations: 2, memories: 2, tasks: 2 });
+        save_a_turn(&db, "Prefers short replies");
+        assert_eq!(withheld(&db), line);
     }
 
     /// An install that has only ever used an AI that may not read email has
@@ -377,18 +419,48 @@ mod tests {
     fn without_a_recorded_switch_only_an_install_holding_google_data_withholds() {
         let db = db_with(&[("openai", KIMI, None)], &[]);
         save_a_turn(&db, "no Google account was ever connected");
-        assert_eq!(withheld(&db), Withheld::default());
+        assert_eq!(withheld_as_turn_begins(&db), Withheld::default());
         save_a_turn(&db, "still nothing to withhold");
-        assert_eq!(withheld(&db), Withheld::default());
+        assert_eq!(withheld_as_turn_begins(&db), Withheld::default());
 
         let db = db_with(&[("openai", KIMI, None)], &[]);
         save_a_turn(&db, "saved while another AI could read email");
+        add_a_calendar_event(&db);
+        assert_eq!(withheld_as_turn_begins(&db), Withheld { conversations: 1, memories: 1, tasks: 1 });
+    }
+
+    fn add_a_calendar_event(db: &Database) {
         db.conn
             .lock()
             .unwrap()
             .execute("INSERT INTO calendar_events(google_id, summary, start_time, end_time) VALUES ('e1', 'Board', '2026-11-02T10:00:00Z', '2026-11-02T11:00:00Z')", [])
             .unwrap();
-        assert_eq!(withheld(&db), Withheld { conversations: 1, memories: 1, tasks: 1 });
+    }
+
+    /// Gemini without billing confirmed is what an install chats with until
+    /// the user chooses otherwise, and it has been refused email all along.
+    /// Updating must not hide that user's memory and chat from the AI that
+    /// wrote them. Only an answer from some other AI on record means an AI
+    /// that could read email was in use before.
+    #[test]
+    fn updating_on_gemini_without_billing_withholds_only_if_another_ai_answered_before() {
+        for chain in [&[][..], &[("gemini", None, None)][..]] {
+            let db = db_with(chain, &[]);
+            save_a_turn(&db, "Prefers short replies");
+            add_a_calendar_event(&db);
+            assert_eq!(withheld_as_turn_begins(&db), Withheld::default());
+            assert_eq!(withheld_as_turn_begins(&db), Withheld::default());
+
+            let db = db_with(chain, &[]);
+            save_a_turn(&db, "Kenny owes HK$12,000");
+            add_a_calendar_event(&db);
+            db.conn
+                .lock()
+                .unwrap()
+                .execute("INSERT INTO inference_metrics(ts, workload, model_id, input_tokens, output_tokens, latency_ms, provider) VALUES (1, 'volume', 'gpt-5', 1, 1, 1, 'openai')", [])
+                .unwrap();
+            assert_eq!(withheld_as_turn_begins(&db), Withheld { conversations: 1, memories: 1, tasks: 1 });
+        }
     }
 
     /// Ollama on this Mac forwards a "-cloud" model's prompt to ollama.com, so

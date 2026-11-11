@@ -647,8 +647,8 @@ fn execute_memory_tool(
             // wastes tokens on the very hot path.
             let existing: Option<i64> = conn
                 .query_row(
-                    "SELECT id FROM user_memory WHERE content = ?1 COLLATE NOCASE LIMIT 1",
-                    rusqlite::params![content],
+                    "SELECT id FROM user_memory WHERE content = ?1 COLLATE NOCASE AND id > ?2 LIMIT 1",
+                    rusqlite::params![content, withheld.memories],
                     |row| row.get(0),
                 )
                 .ok();
@@ -670,8 +670,8 @@ fn execute_memory_tool(
         "forget" => {
             if let Some(id) = args["id"].as_i64() {
                 match conn.execute(
-                    "DELETE FROM user_memory WHERE id = ?1",
-                    rusqlite::params![id],
+                    "DELETE FROM user_memory WHERE id = ?1 AND id > ?2",
+                    rusqlite::params![id, withheld.memories],
                 ) {
                     Ok(0) => format!("No memory entry with id {}.", id),
                     Ok(_) => format!("Forgot memory entry #{}.", id),
@@ -681,8 +681,8 @@ fn execute_memory_tool(
                 // An empty keyword is `LIKE '%%'`, which matches every row.
                 let pattern = format!("%{}%", keyword);
                 match conn.execute(
-                    "DELETE FROM user_memory WHERE content LIKE ?1",
-                    rusqlite::params![pattern],
+                    "DELETE FROM user_memory WHERE content LIKE ?1 AND id > ?2",
+                    rusqlite::params![pattern, withheld.memories],
                 ) {
                     Ok(0) => format!("No memory entry matched '{}'.", keyword),
                     Ok(n) => format!(
@@ -2043,22 +2043,11 @@ mod prompt_tests {
 mod memory_tests {
     use super::*;
     use crate::db::Database;
-    use rusqlite::Connection;
-    use std::sync::Mutex;
 
+    /// The real schema: the memory tools ask `mail_policy::withheld`, which
+    /// withholds everything from a database it cannot read.
     fn memory_db() -> Database {
-        let conn = Connection::open_in_memory().unwrap();
-        conn.execute_batch(
-            "CREATE TABLE user_memory (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                content TEXT NOT NULL,
-                category TEXT NOT NULL DEFAULT 'fact',
-                created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
-                updated_at DATETIME DEFAULT CURRENT_TIMESTAMP
-            );",
-        )
-        .unwrap();
-        Database { conn: Mutex::new(conn) }
+        crate::db::test_database()
     }
 
     fn count(db: &Database) -> i64 {
@@ -2176,21 +2165,20 @@ mod memory_tests {
 #[cfg(test)]
 mod outbound_approval_tests {
     use super::*;
-    use std::sync::{Arc, Mutex};
+    use std::sync::Arc;
 
     fn db() -> crate::db::Database {
-        let conn = rusqlite::Connection::open_in_memory().unwrap();
-        conn.execute_batch(
-            "CREATE TABLE user_memory (id INTEGER PRIMARY KEY AUTOINCREMENT, content TEXT NOT NULL,
-                 category TEXT NOT NULL DEFAULT 'fact', created_at DATETIME, updated_at DATETIME);
-             INSERT INTO user_memory (id, content) VALUES (7, 'Accountant is Kenny');
-             CREATE TABLE calendar_events (id INTEGER PRIMARY KEY AUTOINCREMENT, account_id TEXT NOT NULL DEFAULT '',
-                 google_id TEXT NOT NULL, summary TEXT NOT NULL, start_time TEXT NOT NULL, end_time TEXT NOT NULL);
-             INSERT INTO calendar_events (google_id, summary, start_time, end_time)
-                 VALUES ('evt1', 'Board meeting', '2026-11-02T10:00:00+08:00', '2026-11-02T11:00:00+08:00');",
-        )
-        .unwrap();
-        crate::db::Database { conn: Mutex::new(conn) }
+        let db = crate::db::test_database();
+        db.conn
+            .lock()
+            .unwrap()
+            .execute_batch(
+                "INSERT INTO user_memory (id, content) VALUES (7, 'Accountant is Kenny');
+                 INSERT INTO calendar_events (google_id, summary, start_time, end_time)
+                     VALUES ('evt1', 'Board meeting', '2026-11-02T10:00:00+08:00', '2026-11-02T11:00:00+08:00');",
+            )
+            .unwrap();
+        db
     }
 
     async fn run(name: &str, args: serde_json::Value, db: &crate::db::Database, ledger: &crate::ai::SideEffectLedger) -> String {
@@ -2951,8 +2939,9 @@ mod withheld_tests {
     use crate::ai::mail_policy::test_support::moved_to_kimi_after;
     use serde_json::json;
 
+    /// Moved to Kimi, and the first turn there has begun.
     fn db() -> crate::db::Database {
-        moved_to_kimi_after(|db| {
+        let db = moved_to_kimi_after(|db| {
             db.conn
                 .lock()
                 .unwrap()
@@ -2961,7 +2950,25 @@ mod withheld_tests {
                      INSERT INTO tasks(title) VALUES ('Pay Kenny HK$12,000');",
                 )
                 .unwrap();
-        })
+        });
+        crate::ai::mail_policy::withheld_as_turn_begins(&db);
+        db
+    }
+
+    /// A withheld memory is neither confirmed nor deleted for an AI that may
+    /// not see it: "Already remembered" and a count of deleted rows would
+    /// both tell it what the memory says.
+    #[test]
+    fn a_withheld_memory_cannot_be_matched_or_deleted_by_the_ai() {
+        let db = db();
+        let kept = |db: &crate::db::Database| db.conn.lock().unwrap().query_row("SELECT COUNT(*) FROM user_memory WHERE id = 1", [], |row| row.get::<_, i64>(0)).unwrap();
+        assert_eq!(execute_memory_tool("forget", &json!({ "keyword": "Kenny" }), &db), "No memory entry matched 'Kenny'.");
+        assert_eq!(execute_memory_tool("forget", &json!({ "id": 1 }), &db), "No memory entry with id 1.");
+        assert_eq!(kept(&db), 1);
+
+        let out = execute_memory_tool("remember", &json!({ "content": "Kenny owes HK$12,000" }), &db);
+        assert!(out.starts_with("Remembered"), "{out}");
+        assert!(execute_memory_tool("list_memories", &json!({}), &db).contains("Kenny owes"));
     }
 
     /// Memory is in every system prompt. A fact saved while an AI that could

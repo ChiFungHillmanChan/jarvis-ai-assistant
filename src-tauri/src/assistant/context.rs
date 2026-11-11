@@ -497,8 +497,8 @@ mod tests {
                 .execute("INSERT INTO tasks(title, deadline) VALUES ('Pay Kenny HK$12,000', date('now', 'localtime'))", [])
                 .unwrap();
         }));
-        // The first request after the move draws the line; this task is added after it.
-        DayContext::gather(&db).unwrap();
+        // The first turn after the move draws the line; this task is added after it.
+        crate::ai::mail_policy::withheld_as_turn_begins(&db);
         db.conn.lock().unwrap().execute("INSERT INTO tasks(title, deadline) VALUES ('Buy milk', date('now', 'localtime'))", []).unwrap();
         let context = DayContext::gather(&db).unwrap();
         let sent = format!("{}{}", context.inline_context(), context.to_prompt());

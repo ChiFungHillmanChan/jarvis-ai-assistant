@@ -348,21 +348,22 @@ async fn send_scoped(
 /// with it, oldest first.
 ///
 /// Messages the chosen AI must not be shown are left out (see
-/// `ai::mail_policy::withheld`). The line is read before the message is saved,
-/// so the message that follows a change of AI is itself always sent.
+/// `ai::mail_policy::withheld`). The message being saved is always sent.
 pub(crate) fn save_turn_and_load_history(db: &Database, session_id: &str, message: &str) -> Result<Vec<(String, String)>, String> {
-    let withheld = crate::ai::mail_policy::withheld(db);
+    // Before the lock below: this takes it too.
+    let withheld = crate::ai::mail_policy::withheld_as_turn_begins(db);
     let conn = db.conn.lock().map_err(|e| e.to_string())?;
     conn.execute(
         "INSERT INTO conversations (role, content, session_id) VALUES ('user', ?1, ?2)",
         rusqlite::params![message, session_id],
     )
     .map_err(|e| e.to_string())?;
+    let saved = conn.last_insert_rowid();
     let mut stmt = conn
-        .prepare("SELECT role, content FROM conversations WHERE session_id = ?1 AND id > ?2 ORDER BY id DESC LIMIT 20")
+        .prepare("SELECT role, content FROM conversations WHERE session_id = ?1 AND (id > ?2 OR id = ?3) ORDER BY id DESC LIMIT 20")
         .map_err(|e| e.to_string())?;
     let mut messages: Vec<(String, String)> = stmt
-        .query_map(rusqlite::params![session_id, withheld.conversations], |row| Ok((row.get(0)?, row.get(1)?)))
+        .query_map(rusqlite::params![session_id, withheld.conversations, saved], |row| Ok((row.get(0)?, row.get(1)?)))
         .map_err(|e| e.to_string())?
         .collect::<Result<Vec<_>, _>>()
         .map_err(|e| e.to_string())?;
@@ -648,5 +649,34 @@ mod tests {
 
         assert!(search_history(&db, "s1", "Kenny").unwrap().is_empty());
         assert_eq!(search_history(&db, "s1", "hello").unwrap().len(), 1);
+    }
+
+    /// The AI can be changed while a turn that read an email is still
+    /// running. Its reply is saved after the change and must not be replayed.
+    #[test]
+    fn the_reply_of_a_turn_still_running_when_the_ai_changed_is_not_replayed() {
+        let db = crate::ai::mail_policy::test_support::moved_to_kimi_after(|db| {
+            save_turn_and_load_history(db, "s1", "What did Kenny's email say?").unwrap();
+        });
+        // After the change the running turn lists tasks, then saves its reply.
+        crate::ai::mail_policy::withheld(&db);
+        persist_scoped_reply(&db.conn.lock().unwrap(), "Kenny asks for HK$12,000", "s1").unwrap();
+
+        let sent = save_turn_and_load_history(&db, "s1", "hello").unwrap();
+        assert_eq!(sent, vec![("user".to_string(), "hello".to_string())]);
+    }
+
+    /// When the line cannot be read everything saved is withheld, but the
+    /// message the user has just typed is still sent.
+    #[test]
+    fn a_line_that_cannot_be_read_still_sends_the_new_message() {
+        let db = crate::ai::mail_policy::test_support::moved_to_kimi_after(|db| {
+            save_turn_and_load_history(db, "s1", "What did Kenny's email say?").unwrap();
+        });
+        save_turn_and_load_history(&db, "s1", "hello").unwrap();
+        db.conn.lock().unwrap().execute("UPDATE user_preferences SET value = 'not a line' WHERE key = 'mail_withheld_through'", []).unwrap();
+
+        let sent = save_turn_and_load_history(&db, "s1", "and again").unwrap();
+        assert_eq!(sent, vec![("user".to_string(), "and again".to_string())]);
     }
 }
