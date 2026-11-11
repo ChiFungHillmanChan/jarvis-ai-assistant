@@ -12,4 +12,9 @@ How recordings are kept
 - With the wake word, if JARVIS mistakes a sound for its name and then hears speech, that audio (up to about 28 seconds) is kept together with its text.
 - Transcription is unchanged: when cloud speech recognition is in use, the audio is still sent to that service to be transcribed.
 
+Connecting Google
+- Connecting Google for the first time now asks only for Calendar access and your name and email address, not Gmail.
+- To let the Assistant search, read, draft or archive mail, choose Connect Gmail in Settings > Assistant Google and pick the same Google account.
+- If you have already connected Google, nothing changes and you do not need to sign in again.
+
 For Apple Silicon Macs; the app requires macOS 12 or later.
