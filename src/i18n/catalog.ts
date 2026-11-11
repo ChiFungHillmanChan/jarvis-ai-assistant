@@ -25,6 +25,14 @@ const messages = {
   gateOfflineTitle: ['Cannot confirm your plan', '未能確認你的方案'], gateOfflineBody: ['JARVIS could not reach its server and has no recent confirmation of your plan. Check your connection and try again.', 'JARVIS 未能連接伺服器，亦沒有近期的方案確認紀錄。請檢查網絡連線後再試。'],
   gateWaitingTitle: ['Finish checkout in your browser', '請在瀏覽器完成付款程序'], gateBack: ['Back', '返回'],
   planTrialEnds: ['Trial ends {date}', '試用期於 {date} 結束'], planRenews: ['Renews {date}', '將於 {date} 續期'], planEnds: ['Ends {date}', '將於 {date} 結束'],
+  googleGmailTitle: ['Gmail for the Assistant', '助手的 Gmail 存取'],
+  googleGmailOff: ['Gmail is not connected. The Assistant’s mail tools, inbox sync and daily briefing stay off until you connect it. Calendar works either way.', '尚未連接 Gmail。連接前，助手的郵件工具、收件匣同步及每日簡報均不會啟用；日曆不受影響。'],
+  googleGmailOn: ['Gmail is connected. The Assistant can search, read, draft and archive mail in this account. Disconnecting the main account removes this access.', '已連接 Gmail。助手可以搜尋、閱讀、起草及封存此帳戶的郵件。中斷主帳戶連接會一併移除此存取權限。'],
+  googleGmailHint: ['Google asks for Gmail access separately. Choose the same Google account as above.', 'Google 會另行要求 Gmail 存取權限。請選擇與上方相同的 Google 帳戶。'],
+  googleGmailConnect: ['Connect Gmail', '連接 Gmail'], googleGmailConnecting: ['Connecting Gmail…', '正在連接 Gmail…'],
+  googleGmailConnected: ['Gmail connected. The Assistant’s mail tools are on.', '已連接 Gmail，助手郵件工具已啟用。'],
+  googleGmailWrongAccount: ['That is not the main Google account, so Gmail was not connected. Choose the account shown above and try again.', '所選帳戶並非主 Google 帳戶，因此未有連接 Gmail。請選擇上方顯示的帳戶後重試。'],
+  googleGmailNotGranted: ['Google did not grant Gmail access, so the mail tools stay off. Try again and allow Gmail access on the Google page.', 'Google 未授予 Gmail 存取權限，郵件工具維持停用。請重試，並在 Google 頁面允許 Gmail 存取。'],
   updateReady: ['JARVIS {version} is ready', 'JARVIS {version} 已準備好'], restartToUpdate: ['Restart to update', '重新啟動以更新'], restartingUpdate: ['Restarting…', '正在重新啟動…'], updateFailed: ['Update failed', '更新失敗'], updateReopen: ['Quit and reopen JARVIS to finish updating', '請結束並重新開啟 JARVIS 以完成更新'], dismissUpdate: ['Hide until JARVIS next opens', '暫時隱藏，下次開啟 JARVIS 時再提示'],
 } as const;
 export type MessageKey = keyof typeof messages;

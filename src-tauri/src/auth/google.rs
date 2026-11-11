@@ -133,6 +133,55 @@ const REFRESH_KEYCHAIN_SERVICE: &str = "com.jarvis.google";
 const REFRESH_KEYCHAIN_ACCOUNT: &str = "refresh_token";
 const REFRESH_KEYCHAIN_MARKER: &str = "__keychain__";
 
+/// The restricted scope behind the Assistant's mail tools. It is requested
+/// only when the user turns those tools on (`google_connect_gmail`), never at
+/// the first connect, so the app can be verified for Calendar without it.
+pub const GMAIL_SCOPE: &str = "https://www.googleapis.com/auth/gmail.modify";
+
+/// user_preferences key for the scopes Google granted the main account,
+/// space-separated as Google lists them. Not a secret.
+const GRANTED_SCOPES_KEY: &str = "google_granted_scopes";
+
+/// What a grant stored before scopes were recorded covers: every earlier
+/// build asked for exactly these at first connect, so those users already
+/// consented to Gmail and keep it without a new consent screen.
+const LEGACY_GRANT_SCOPES: &[&str] = &[
+    GMAIL_SCOPE,
+    "https://www.googleapis.com/auth/calendar.events",
+    "https://www.googleapis.com/auth/userinfo.profile",
+];
+
+/// The granted scopes for a grant loaded at startup: the recorded list, or the
+/// old full grant when a linked account has none recorded.
+fn stored_scopes(recorded: Option<&str>, linked: bool) -> Vec<String> {
+    match recorded {
+        Some(list) => list.split_whitespace().map(str::to_string).collect(),
+        None if linked => LEGACY_GRANT_SCOPES.iter().map(|s| s.to_string()).collect(),
+        None => Vec::new(),
+    }
+}
+
+/// Authorization parameters for each sign-in. `add_to` is the main account
+/// when the Assistant asks for more scopes (Gmail): incremental authorization
+/// (`include_granted_scopes`) then returns a token that still covers Calendar,
+/// and `login_hint` preselects that account. The first connect does not
+/// include granted scopes, so its token holds exactly what it asked for. A
+/// mailbox's never does: on the main account it would be handed Calendar
+/// write and Gmail modify access instead of its read-only pair.
+fn sign_in_params(kind: SignIn, add_to: Option<&str>) -> Vec<(&'static str, String)> {
+    match kind {
+        SignIn::Assistant => {
+            let mut params = vec![("prompt", "consent".to_string())];
+            if let Some(account) = add_to {
+                params.push(("include_granted_scopes", "true".to_string()));
+                params.push(("login_hint", account.to_string()));
+            }
+            params
+        }
+        SignIn::Mailbox => vec![("prompt", "consent select_account".to_string())],
+    }
+}
+
 pub struct GoogleAuth {
     client_id: String,
     client_secret: String,
@@ -230,17 +279,23 @@ impl GoogleAuth {
 
     /// The Assistant's sign-in; `cancel_sign_in(SignIn::Assistant)` stops it.
     pub async fn start_auth_flow(&self, scopes: Vec<String>) -> Result<(), String> {
-        self.start_auth_flow_with_prompt(scopes, "consent", SignIn::Assistant).await
+        self.start_auth_flow_with_prompt(scopes, sign_in_params(SignIn::Assistant, None), SignIn::Assistant).await
+    }
+
+    /// The Assistant asking `account` for more scopes on top of its grant
+    /// (Google incremental authorization). Cancelled like `start_auth_flow`.
+    pub async fn start_incremental_auth_flow(&self, scopes: Vec<String>, account: &str) -> Result<(), String> {
+        self.start_auth_flow_with_prompt(scopes, sign_in_params(SignIn::Assistant, Some(account)), SignIn::Assistant).await
     }
 
     /// Separate mailbox grants need an explicit chooser without changing the
     /// existing Calendar/chat sign-in behavior. `cancel_sign_in(SignIn::Mailbox)`
     /// stops it.
     pub async fn start_auth_flow_with_account_selection(&self, scopes: Vec<String>) -> Result<(), String> {
-        self.start_auth_flow_with_prompt(scopes, "consent select_account", SignIn::Mailbox).await
+        self.start_auth_flow_with_prompt(scopes, sign_in_params(SignIn::Mailbox, None), SignIn::Mailbox).await
     }
 
-    async fn start_auth_flow_with_prompt(&self, scopes: Vec<String>, prompt: &str, kind: SignIn) -> Result<(), String> {
+    async fn start_auth_flow_with_prompt(&self, scopes: Vec<String>, params: Vec<(&'static str, String)>, kind: SignIn) -> Result<(), String> {
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
             .await.map_err(|e| format!("Failed to bind listener: {}", e))?;
         let port = listener.local_addr().map_err(|e| e.to_string())?.port();
@@ -253,7 +308,9 @@ impl GoogleAuth {
             auth_request = auth_request.add_scope(Scope::new(scope.clone()));
         }
         auth_request = auth_request.add_extra_param("access_type", "offline");
-        auth_request = auth_request.add_extra_param("prompt", prompt);
+        for (key, value) in params {
+            auth_request = auth_request.add_extra_param(key, value);
+        }
 
         let (auth_url, csrf_token) = auth_request.set_pkce_challenge(pkce_challenge).url();
         let expected_state = csrf_token.secret().clone();
@@ -456,6 +513,47 @@ impl GoogleAuth {
         self.is_authenticated() || self.has_refresh_token()
     }
 
+    /// Whether the user turned on Gmail for the Assistant. Every caller of the
+    /// Gmail API through this account checks it and skips quietly when it is
+    /// off; nothing here ever asks Google for Gmail in the background.
+    pub fn gmail_granted(&self) -> bool {
+        self.granted_scopes.lock().unwrap().iter().any(|scope| scope == GMAIL_SCOPE)
+    }
+
+    /// An empty session on the same OAuth client. The Gmail sign-in runs on
+    /// one so that choosing another account in the browser cannot replace
+    /// this session before the account is checked.
+    pub fn fresh_session(&self) -> GoogleAuth {
+        GoogleAuth {
+            client_id: self.client_id.clone(),
+            client_secret: self.client_secret.clone(),
+            ..GoogleAuth::new_empty()
+        }
+    }
+
+    /// Take over a confirmed sign-in from `fresh_session`. Google normally
+    /// returns a refresh token on consent; if it did not, the current one is
+    /// kept so the session still survives a restart.
+    pub fn adopt(&self, other: &GoogleAuth) {
+        *self.access_token.lock().unwrap() = other.access_token.lock().unwrap().clone();
+        *self.access_token_expiry.lock().unwrap() = *other.access_token_expiry.lock().unwrap();
+        if let Some(refresh) = other.refresh_token.lock().unwrap().clone() {
+            *self.refresh_token.lock().unwrap() = Some(refresh);
+        }
+        *self.granted_scopes.lock().unwrap() = other.granted_scopes.lock().unwrap().clone();
+        self.revoked.store(false, std::sync::atomic::Ordering::SeqCst);
+    }
+
+    /// Signed in with a live token and these scopes, without Google.
+    #[cfg(test)]
+    pub(crate) fn signed_in_for_tests(scopes: &[&str]) -> GoogleAuth {
+        let auth = GoogleAuth::new_empty();
+        *auth.refresh_token.lock().unwrap() = Some("1//test".to_string());
+        auth.store_access_token("test-token".to_string(), Some(std::time::Duration::from_secs(3600)));
+        *auth.granted_scopes.lock().unwrap() = scopes.iter().map(|s| s.to_string()).collect();
+        auth
+    }
+
     /// Linked, but Google no longer honours the grant: only a new sign-in
     /// fixes it. A refresh that failed for any other reason (offline, Google
     /// down) is not this.
@@ -493,6 +591,41 @@ impl GoogleAuth {
     }
 
     pub fn load_from_db(&self, db: &crate::db::Database) {
+        self.load_refresh_token(db);
+        self.load_granted_scopes(db);
+    }
+
+    /// Read the recorded scopes, or assume the old full grant for an account
+    /// linked before they were recorded. Call after the refresh token loads.
+    fn load_granted_scopes(&self, db: &crate::db::Database) {
+        let recorded: Option<String> = {
+            let conn = db.conn.lock().unwrap();
+            conn.query_row(
+                "SELECT value FROM user_preferences WHERE key = ?1",
+                [GRANTED_SCOPES_KEY],
+                |row| row.get::<_, String>(0),
+            )
+            .ok()
+        };
+        *self.granted_scopes.lock().unwrap() = stored_scopes(recorded.as_deref(), self.has_refresh_token());
+    }
+
+    /// Record the granted scopes. A failure is returned, not ignored: a grant
+    /// saved without its scopes would read as the old full grant, Gmail
+    /// included, on the next launch.
+    fn save_granted_scopes(&self, db: &crate::db::Database) -> Result<(), String> {
+        let scopes = self.granted_scopes.lock().unwrap().join(" ");
+        let conn = db.conn.lock().map_err(|e| e.to_string())?;
+        conn.execute(
+            "INSERT INTO user_preferences (key, value, updated_at) VALUES (?1, ?2, datetime('now'))
+             ON CONFLICT(key) DO UPDATE SET value = ?2, updated_at = datetime('now')",
+            rusqlite::params![GRANTED_SCOPES_KEY, scopes],
+        )
+        .map_err(|e| e.to_string())?;
+        Ok(())
+    }
+
+    fn load_refresh_token(&self, db: &crate::db::Database) {
         // Preferred source: the Keychain.
         if let Ok(token) = KeychainStore::get(REFRESH_KEYCHAIN_SERVICE, REFRESH_KEYCHAIN_ACCOUNT) {
             if !token.is_empty() {
@@ -545,6 +678,9 @@ impl GoogleAuth {
             log::warn!("Google sign-in returned no refresh token; this session will not survive a restart");
             return Ok(());
         };
+        // Before the token: a token stored without its scopes would load as
+        // the old full grant.
+        self.save_granted_scopes(db)?;
         if let Err(e) = KeychainStore::put(REFRESH_KEYCHAIN_SERVICE, REFRESH_KEYCHAIN_ACCOUNT, &token) {
             log::error!("Could not save the Google refresh token to the Keychain: {}", e);
             return Err(e);
@@ -589,8 +725,8 @@ impl GoogleAuth {
         let conn = db.conn.lock().map_err(|e| e.to_string())?;
         conn.execute(
             "DELETE FROM user_preferences WHERE key IN \
-             ('google_refresh_token', 'user_name', 'google_account_email', 'cached_briefing', 'last_briefing_date')",
-            [],
+             ('google_refresh_token', 'user_name', 'google_account_email', 'cached_briefing', 'last_briefing_date', ?1)",
+            [GRANTED_SCOPES_KEY],
         )
         .map_err(|e| e.to_string())?;
         Ok(())
@@ -731,6 +867,117 @@ mod tests {
 
         auth.store_access_token("fresh".to_string(), Some(std::time::Duration::from_secs(3600)));
         assert!(!auth.needs_reconnect(), "a live token is still usable");
+    }
+
+    fn with_scopes(scopes: &[&str]) -> GoogleAuth {
+        let auth = GoogleAuth::new_empty();
+        *auth.granted_scopes.lock().unwrap() = scopes.iter().map(|s| s.to_string()).collect();
+        auth
+    }
+
+    /// Gmail is the restricted scope the Assistant now asks for only when the
+    /// user turns on its mail tools. gmail.readonly, which a Mail mailbox on
+    /// the same account can add to Google's record, does not cover drafts or
+    /// archiving, so it does not count.
+    #[test]
+    fn only_the_gmail_modify_grant_turns_gmail_on() {
+        let calendar = "https://www.googleapis.com/auth/calendar.events";
+        assert!(!with_scopes(&[]).gmail_granted());
+        assert!(!with_scopes(&[calendar]).gmail_granted());
+        assert!(!with_scopes(&[calendar, "https://www.googleapis.com/auth/gmail.readonly"]).gmail_granted());
+        assert!(with_scopes(&[calendar, GMAIL_SCOPE]).gmail_granted());
+    }
+
+    /// Every build before this one asked for Gmail at first connect, so a
+    /// stored grant with no recorded scopes already includes it: those users
+    /// keep their mail tools without a new consent screen.
+    #[test]
+    fn a_grant_stored_before_scopes_were_recorded_is_the_old_full_grant() {
+        assert!(stored_scopes(None, true).iter().any(|s| s == GMAIL_SCOPE));
+        assert!(stored_scopes(None, false).is_empty(), "nothing is linked: nothing is granted");
+        assert_eq!(
+            stored_scopes(Some("https://www.googleapis.com/auth/calendar.events https://www.googleapis.com/auth/userinfo.profile"), true),
+            vec!["https://www.googleapis.com/auth/calendar.events", "https://www.googleapis.com/auth/userinfo.profile"],
+            "a recorded list is taken as it is, Gmail or not"
+        );
+    }
+
+    #[test]
+    fn granted_scopes_survive_a_restart_and_a_legacy_grant_keeps_gmail() {
+        let db = crate::db::test_database();
+        let legacy = GoogleAuth::new_empty();
+        *legacy.refresh_token.lock().unwrap() = Some("1//legacy".to_string());
+        legacy.load_granted_scopes(&db);
+        assert!(legacy.gmail_granted(), "no recorded scopes: the old grant, Gmail included");
+
+        let calendar_only = with_scopes(&[
+            "https://www.googleapis.com/auth/calendar.events",
+            "https://www.googleapis.com/auth/userinfo.profile",
+        ]);
+        calendar_only.save_granted_scopes(&db).unwrap();
+        let restarted = GoogleAuth::new_empty();
+        *restarted.refresh_token.lock().unwrap() = Some("1//new".to_string());
+        restarted.load_granted_scopes(&db);
+        assert!(!restarted.gmail_granted(), "a Calendar-only grant must not read as Gmail after a restart");
+        assert_eq!(*restarted.granted_scopes.lock().unwrap(), *calendar_only.granted_scopes.lock().unwrap());
+    }
+
+    /// Disconnect and switch account must not leave the old grant's scopes
+    /// behind for the next account to inherit.
+    #[tokio::test]
+    async fn disconnect_forgets_the_granted_scopes() {
+        let db = crate::db::test_database();
+        let auth = with_scopes(&[GMAIL_SCOPE]);
+        auth.save_granted_scopes(&db).unwrap();
+        // revoke = false: nothing is sent to Google. The memory Keychain has
+        // no item under this service, so its delete finds nothing.
+        auth.disconnect(&db, false).await.unwrap();
+        assert!(!auth.gmail_granted());
+        let rows: i64 = db.conn.lock().unwrap()
+            .query_row("SELECT COUNT(*) FROM user_preferences WHERE key = ?1", [GRANTED_SCOPES_KEY], |r| r.get(0))
+            .unwrap();
+        assert_eq!(rows, 0);
+    }
+
+    /// Incremental authorization: asking for Gmail later returns a token that
+    /// still covers Calendar. The first connect does not include granted
+    /// scopes, so its token holds only what it asked for. A mailbox sign-in
+    /// must not either, or a mailbox on the main account would be handed
+    /// Calendar write and Gmail modify access instead of its read-only pair.
+    #[test]
+    fn only_adding_gmail_includes_granted_scopes() {
+        let adding = sign_in_params(SignIn::Assistant, Some("me@example.com"));
+        assert!(adding.contains(&("include_granted_scopes", "true".to_string())));
+        assert!(adding.contains(&("prompt", "consent".to_string())));
+        assert!(adding.contains(&("login_hint", "me@example.com".to_string())));
+
+        let first = sign_in_params(SignIn::Assistant, None);
+        assert_eq!(first, vec![("prompt", "consent".to_string())]);
+
+        let mailbox = sign_in_params(SignIn::Mailbox, None);
+        assert!(mailbox.contains(&("prompt", "consent select_account".to_string())));
+        assert!(!mailbox.iter().any(|(k, _)| *k == "include_granted_scopes"));
+    }
+
+    /// The Gmail sign-in runs on a separate session and replaces the main one
+    /// only once its account is confirmed.
+    #[test]
+    fn adopting_a_confirmed_sign_in_keeps_the_old_refresh_token_if_none_came_back() {
+        let main = with_scopes(&["https://www.googleapis.com/auth/calendar.events"]);
+        *main.refresh_token.lock().unwrap() = Some("1//calendar".to_string());
+        let upgrade = main.fresh_session();
+        assert!(upgrade.granted_scopes.lock().unwrap().is_empty(), "a fresh session shares only the OAuth client");
+        *upgrade.granted_scopes.lock().unwrap() = vec![GMAIL_SCOPE.to_string()];
+        upgrade.store_access_token("gmail-token".to_string(), Some(std::time::Duration::from_secs(3600)));
+
+        main.adopt(&upgrade);
+        assert!(main.gmail_granted());
+        assert_eq!(main.live_access_token(), Some("gmail-token".to_string()));
+        assert_eq!(main.refresh_token.lock().unwrap().as_deref(), Some("1//calendar"));
+
+        *upgrade.refresh_token.lock().unwrap() = Some("1//combined".to_string());
+        main.adopt(&upgrade);
+        assert_eq!(main.refresh_token.lock().unwrap().as_deref(), Some("1//combined"));
     }
 
     #[test]

@@ -35,9 +35,15 @@ pub fn get_emails(db: State<Arc<Database>>, limit: Option<u32>) -> Result<Vec<Em
     Ok(emails)
 }
 
+/// What the Assistant's mail commands return while Gmail is off for it.
+const GMAIL_NOT_CONNECTED: &str = "Gmail is not connected for the Assistant. Choose Connect Gmail in Settings > Assistant Google.";
+
 #[tauri::command]
 pub async fn sync_emails(db: State<'_, Arc<Database>>, auth: State<'_, Arc<GoogleAuth>>) -> Result<String, String> {
     let token = auth.ensure_access_token().await?;
+    if !auth.gmail_granted() {
+        return Err(GMAIL_NOT_CONNECTED.to_string());
+    }
     // The detailed form, because `save_to_db` reconciles the local mirror
     // against the batch and must not archive mail that a failed detail fetch
     // merely dropped from it.
@@ -91,6 +97,9 @@ pub async fn archive_email(
     gmail_id: String,
 ) -> Result<(), String> {
     let token = auth.ensure_access_token().await?;
+    if !auth.gmail_granted() {
+        return Err(GMAIL_NOT_CONNECTED.to_string());
+    }
     gmail::archive_message(&token, &gmail_id).await?;
 
     // Mirror the archive locally, otherwise the message stays on screen and

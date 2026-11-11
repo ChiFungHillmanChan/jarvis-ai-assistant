@@ -104,10 +104,17 @@ async fn main_token(auth: &Arc<GoogleAuth>) -> Result<Option<String>, String> {
     }
 }
 
+/// What a Gmail job reports while the user has not turned on Gmail for the
+/// Assistant: a completed run, not a failure on every tick.
+const GMAIL_NOT_CONNECTED_SKIP: &str = "Skipped: Gmail not connected";
+
 pub(crate) async fn run_email_sync(db: &Arc<Database>, auth: &Arc<GoogleAuth>) -> Result<String, String> {
     let Some(token) = main_token(auth).await? else {
         return Ok("Skipped: not authenticated".to_string());
     };
+    if !auth.gmail_granted() {
+        return Ok(GMAIL_NOT_CONNECTED_SKIP.to_string());
+    }
     crate::mail::additional::remember_main_email(db, &token).await;
     // The detailed form: `save_to_db` reconciles the local mirror against the
     // batch, and a batch missing messages to failed detail fetches must not
@@ -481,6 +488,9 @@ async fn run_auto_archive(db: &Arc<Database>, auth: &Arc<GoogleAuth>) -> Result<
     let Some(mut token) = main_token(auth).await? else {
         return Ok("Skipped: not authenticated".to_string());
     };
+    if !auth.gmail_granted() {
+        return Ok(GMAIL_NOT_CONNECTED_SKIP.to_string());
+    }
 
     // Get active rules (senders to auto-archive)
     let active_senders: Vec<String> = {
@@ -562,6 +572,17 @@ async fn run_auto_archive(db: &Arc<Database>, auth: &Arc<GoogleAuth>) -> Result<
 mod tests {
     use super::*;
     use rusqlite::Connection;
+
+    /// A Calendar-only grant is the normal state now that Gmail is opt-in.
+    /// The Gmail jobs skip it as a completed run: no Gmail call, no failed run
+    /// on the Cron page every five minutes, no consent prompt.
+    #[tokio::test]
+    async fn gmail_jobs_skip_quietly_without_the_gmail_grant() {
+        let db = Arc::new(crate::db::test_database());
+        let calendar_only = Arc::new(GoogleAuth::signed_in_for_tests(&["https://www.googleapis.com/auth/calendar.events"]));
+        assert_eq!(run_email_sync(&db, &calendar_only).await, Ok(GMAIL_NOT_CONNECTED_SKIP.to_string()));
+        assert_eq!(run_auto_archive(&db, &calendar_only).await, Ok(GMAIL_NOT_CONNECTED_SKIP.to_string()));
+    }
 
     /// While the database is not encrypted the jobs that save Gmail or
     /// Calendar content are skipped, not failed every few minutes.
