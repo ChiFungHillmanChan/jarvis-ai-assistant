@@ -118,6 +118,96 @@ fn gemini(db: &Database) -> Result<(), Blocked> {
     }
 }
 
+/// Chat messages, memories and tasks the chosen AI must not be shown: the
+/// highest withheld row id in each table, 0 when nothing is withheld.
+#[derive(Debug, Clone, Copy, PartialEq, Default)]
+pub struct Withheld {
+    pub conversations: i64,
+    pub memories: i64,
+    pub tasks: i64,
+}
+
+/// user_preferences: "true" or "false", whether the chosen AI could receive
+/// email the last time `withheld` looked.
+const MAIL_AI_WAS_ALLOWED: &str = "mail_ai_was_allowed";
+/// user_preferences: the line drawn at the last move to an AI that may not
+/// receive email, as "conversations,memories,tasks" row ids.
+const WITHHELD_THROUGH: &str = "mail_withheld_through";
+
+/// What the chosen AI must not be shown.
+///
+/// A reply that quoted an email, a memory saved from it and a task made from
+/// it are Gmail content too, and all three are replayed into later prompts.
+/// When the user moves from an AI that may receive email to one that may not,
+/// everything saved up to that moment is withheld from the new AI; what is
+/// saved afterwards cannot quote an email, because that AI is never given
+/// one. Moving back to an allowed AI lifts the line. Every path that puts
+/// stored chat, memory or task titles into a prompt asks this first, and asks
+/// before it saves the turn's own message.
+pub fn withheld(db: &Database) -> Withheld {
+    let allowed = check(db).is_ok();
+    // Fail closed: a database that cannot be read withholds everything.
+    let everything = Withheld { conversations: i64::MAX, memories: i64::MAX, tasks: i64::MAX };
+    let Ok(conn) = db.conn.lock() else { return everything };
+    let pref = |key: &str| {
+        conn.query_row("SELECT value FROM user_preferences WHERE key = ?1", [key], |row| row.get::<_, String>(0)).ok()
+    };
+    let set = |key: &str, value: &str| {
+        conn.execute(
+            "INSERT INTO user_preferences (key, value) VALUES (?1, ?2) \
+             ON CONFLICT(key) DO UPDATE SET value = ?2, updated_at = datetime('now')",
+            [key, value],
+        )
+        .is_ok()
+    };
+    let recorded = pref(MAIL_AI_WAS_ALLOWED);
+    if allowed {
+        if recorded.as_deref() != Some("true") {
+            let _ = conn.execute("DELETE FROM user_preferences WHERE key = ?1", [WITHHELD_THROUGH]);
+            set(MAIL_AI_WAS_ALLOWED, "true");
+        }
+        return Withheld::default();
+    }
+    // No record: a build from before this existed. If Google data is on this
+    // Mac, an allowed AI may have read it, so treat this as a move.
+    let was_allowed = match recorded.as_deref() {
+        Some(value) => value == "true",
+        None => conn
+            .query_row(
+                "SELECT EXISTS(SELECT 1 FROM emails) OR EXISTS(SELECT 1 FROM mail_messages) OR EXISTS(SELECT 1 FROM calendar_events)",
+                [],
+                |row| row.get::<_, bool>(0),
+            )
+            .unwrap_or(true),
+    };
+    if was_allowed {
+        let newest = |table: &str| conn.query_row(&format!("SELECT COALESCE(MAX(id), 0) FROM {table}"), [], |row| row.get::<_, i64>(0));
+        let (Ok(conversations), Ok(memories), Ok(tasks)) = (newest("conversations"), newest("user_memory"), newest("tasks")) else {
+            return everything;
+        };
+        let line = Withheld { conversations, memories, tasks };
+        // The line is saved before the record changes, so a failed write is
+        // tried again on the next request instead of losing the line.
+        if !set(WITHHELD_THROUGH, &format!("{conversations},{memories},{tasks}")) || !set(MAIL_AI_WAS_ALLOWED, "false") {
+            return everything;
+        }
+        return line;
+    }
+    if recorded.is_none() {
+        set(MAIL_AI_WAS_ALLOWED, "false");
+    }
+    match pref(WITHHELD_THROUGH) {
+        None => Withheld::default(),
+        Some(saved) => {
+            let ids: Vec<i64> = saved.split(',').filter_map(|id| id.parse().ok()).collect();
+            match ids[..] {
+                [conversations, memories, tasks] => Withheld { conversations, memories, tasks },
+                _ => everything,
+            }
+        }
+    }
+}
+
 /// Ollama names its cloud models "<name>:cloud" or "<name>:<size>-cloud" and
 /// forwards their prompts to ollama.com.
 pub fn is_ollama_cloud_model(model: &str) -> bool {
@@ -140,8 +230,39 @@ fn local_on_this_mac(db: &Database, endpoint_id: Option<&str>) -> Result<(), Blo
     }
 }
 
+/// For tests of the paths that ask `withheld`: choose the one AI in use.
+#[cfg(test)]
+pub(crate) mod test_support {
+    use crate::db::Database;
+
+    /// An OpenAI-compatible service that may not receive email.
+    pub const KIMI: Option<&str> = Some("https://api.moonshot.ai/v1");
+
+    pub fn use_ai(db: &Database, provider: &str, base_url: Option<&str>) {
+        let conn = db.conn.lock().unwrap();
+        conn.execute("DELETE FROM provider_chain", []).unwrap();
+        conn.execute(
+            "INSERT INTO provider_chain(position, provider_type, endpoint_id, model_id, enabled, base_url) VALUES (0, ?1, NULL, NULL, 1, ?2)",
+            rusqlite::params![provider, base_url],
+        )
+        .unwrap();
+    }
+
+    /// A database where OpenAI has been in use and the user has just moved to
+    /// Kimi. Call `before` while OpenAI is still the chosen AI.
+    pub fn moved_to_kimi_after(before: impl FnOnce(&Database)) -> Database {
+        let db = crate::db::test_database();
+        use_ai(&db, "openai", None);
+        super::withheld(&db);
+        before(&db);
+        use_ai(&db, "openai", KIMI);
+        db
+    }
+}
+
 #[cfg(test)]
 mod tests {
+    use super::test_support::{use_ai, KIMI};
     use super::*;
 
     fn db_with(chain: &[(&str, Option<&str>, Option<&str>)], prefs: &[(&str, &str)]) -> Database {
@@ -198,6 +319,76 @@ mod tests {
         assert!(check(&db_with(&[("openai", None, None), ("openai", Some("https://dashscope.aliyuncs.com/compatible-mode/v1"), None)], &[])).is_err());
         // No saved choice means the old Gemini default.
         assert_eq!(check(&db_with(&[], &[])), Err(Blocked::GeminiBillingUnconfirmed));
+    }
+
+    /// One chat message, one memory and one task, as a turn that read an
+    /// email leaves behind.
+    fn save_a_turn(db: &Database, text: &str) {
+        db.conn
+            .lock()
+            .unwrap()
+            .execute_batch(&format!(
+                "INSERT INTO conversations(role, content) VALUES ('assistant', '{text}');
+                 INSERT INTO user_memory(content) VALUES ('{text}');
+                 INSERT INTO tasks(title) VALUES ('{text}');"
+            ))
+            .unwrap();
+    }
+
+    /// A reply that quoted an email, a memory saved from it and a task made
+    /// from it are replayed to whichever AI is chosen later. Moving to an AI
+    /// that may not receive email draws a line under everything saved so far.
+    #[test]
+    fn switching_to_an_ai_that_may_not_read_email_withholds_what_was_saved_before() {
+        let db = db_with(&[("openai", None, None)], &[]);
+        save_a_turn(&db, "Kenny owes HK$12,000");
+        assert_eq!(withheld(&db), Withheld::default(), "an AI that may read email sees everything");
+
+        use_ai(&db, "openai", KIMI);
+        let line = withheld(&db);
+        assert_eq!(line, Withheld { conversations: 1, memories: 1, tasks: 1 });
+
+        // What is saved while Kimi is in use cannot quote an email, and the
+        // line stays where it was drawn.
+        save_a_turn(&db, "Prefers short replies");
+        assert_eq!(withheld(&db), line);
+    }
+
+    #[test]
+    fn going_back_to_an_allowed_ai_shows_everything_and_the_next_switch_draws_a_new_line() {
+        let db = db_with(&[("openai", None, None)], &[]);
+        assert_eq!(withheld(&db), Withheld::default());
+        save_a_turn(&db, "first");
+        use_ai(&db, "openai", KIMI);
+        assert_eq!(withheld(&db).conversations, 1);
+
+        use_ai(&db, "openai", None);
+        assert_eq!(withheld(&db), Withheld::default());
+        save_a_turn(&db, "second");
+
+        use_ai(&db, "openai", KIMI);
+        assert_eq!(withheld(&db), Withheld { conversations: 2, memories: 2, tasks: 2 });
+    }
+
+    /// An install that has only ever used an AI that may not read email has
+    /// nothing to withhold. One updating from a build without this record is
+    /// treated as coming from an allowed AI when Google data is on the Mac.
+    #[test]
+    fn without_a_recorded_switch_only_an_install_holding_google_data_withholds() {
+        let db = db_with(&[("openai", KIMI, None)], &[]);
+        save_a_turn(&db, "no Google account was ever connected");
+        assert_eq!(withheld(&db), Withheld::default());
+        save_a_turn(&db, "still nothing to withhold");
+        assert_eq!(withheld(&db), Withheld::default());
+
+        let db = db_with(&[("openai", KIMI, None)], &[]);
+        save_a_turn(&db, "saved while another AI could read email");
+        db.conn
+            .lock()
+            .unwrap()
+            .execute("INSERT INTO calendar_events(google_id, summary, start_time, end_time) VALUES ('e1', 'Board', '2026-11-02T10:00:00Z', '2026-11-02T11:00:00Z')", [])
+            .unwrap();
+        assert_eq!(withheld(&db), Withheld { conversations: 1, memories: 1, tasks: 1 });
     }
 
     /// Ollama on this Mac forwards a "-cloud" model's prompt to ollama.com, so

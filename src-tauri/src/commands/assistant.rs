@@ -163,23 +163,7 @@ pub async fn search_conversations(
     let session_id = crate::chat_session::identity(session_id, "legacy")?;
     let _guard = crate::chat_session::FOREGROUND.try_lock().map_err(|_| "另一個助理任務進行中，請等完成後再試。".to_string())?;
     // Search conversations for relevant messages
-    let results = {
-        let conn = db.conn.lock().map_err(|e| e.to_string())?;
-        let mut stmt = conn.prepare(
-            "SELECT role, content, created_at FROM conversations
-             WHERE content LIKE ?1 AND session_id = ?2
-             ORDER BY created_at DESC LIMIT 10"
-        ).map_err(|e| e.to_string())?;
-        let pattern = format!("%{}%", query);
-        let msgs: Vec<(String, String, Option<String>)> = stmt
-            .query_map(rusqlite::params![pattern, session_id], |row| {
-                Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?, row.get::<_, Option<String>>(2)?))
-            })
-            .map_err(|e| e.to_string())?
-            .collect::<Result<Vec<_>, _>>()
-            .map_err(|e| e.to_string())?;
-        msgs
-    };
+    let results = crate::commands::chat::search_history(&db, &session_id, &query)?;
 
     if results.is_empty() {
         return Ok(format!("No conversations found matching '{}'.", query));

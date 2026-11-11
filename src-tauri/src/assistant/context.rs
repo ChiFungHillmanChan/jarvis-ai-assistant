@@ -52,7 +52,8 @@ fn todays_events_query() -> String {
 /// local: today's tasks are not counted as due today, yesterday's are.
 const OVERDUE_TASKS_QUERY: &str = "SELECT COUNT(*) FROM tasks WHERE status != 'completed' AND deadline IS NOT NULL AND deadline < date('now', 'localtime')";
 const DUE_TODAY_QUERY: &str = "SELECT COUNT(*) FROM tasks WHERE status != 'completed' AND deadline = date('now', 'localtime')";
-const URGENT_TASKS_QUERY: &str = "SELECT title, deadline FROM tasks WHERE status != 'completed' AND deadline IS NOT NULL AND deadline <= date('now', 'localtime', '+3 days') ORDER BY deadline ASC LIMIT 5";
+/// ?1 is the newest task the chosen AI must not be shown (ai::mail_policy::withheld).
+const URGENT_TASKS_QUERY: &str = "SELECT title, deadline FROM tasks WHERE status != 'completed' AND deadline IS NOT NULL AND deadline <= date('now', 'localtime', '+3 days') AND id > ?1 ORDER BY deadline ASC LIMIT 5";
 
 impl DayContext {
     pub fn gather(db: &Arc<Database>) -> Result<Self, String> {
@@ -64,6 +65,10 @@ impl DayContext {
             _ => "Good evening",
         };
 
+        // A task made from an email carries its words in the title. Read
+        // before the lock below: `withheld` takes it too.
+        let withheld = crate::ai::mail_policy::withheld(db);
+
         // Gather all data in one short lock to minimize mutex contention
         let (pending_count, overdue_count, due_today, urgent_tasks, todays_events, unread, important_senders, open_prs, assigned_issues, has_synced_email, has_synced_calendar) = {
             let conn = db.conn.lock().map_err(|e| e.to_string())?;
@@ -74,7 +79,7 @@ impl DayContext {
 
             let urgent_tasks = {
                 let mut stmt = conn.prepare(URGENT_TASKS_QUERY).map_err(|e| e.to_string())?;
-                let tasks: Vec<String> = stmt.query_map([], |row| {
+                let tasks: Vec<String> = stmt.query_map([withheld.tasks], |row| {
                     let title: String = row.get(0)?;
                     let deadline: String = row.get(1)?;
                     Ok(format!("- {} (due {})", title, deadline))
@@ -421,7 +426,7 @@ mod tests {
 
         let mut stmt = conn.prepare(&pin(URGENT_TASKS_QUERY)).unwrap();
         let urgent: Vec<String> = stmt
-            .query_map([], |r| r.get::<_, String>(0))
+            .query_map([0], |r| r.get::<_, String>(0))
             .unwrap()
             .map(|r| r.unwrap())
             .collect();
@@ -479,5 +484,25 @@ mod tests {
         db.conn.lock().unwrap().execute("UPDATE provider_chain SET base_url = NULL", []).unwrap();
         let allowed = DayContext::gather(&db).unwrap();
         assert!(allowed.calendar_summary.contains("Term sheet call") && allowed.calendar_summary.contains("Cyberport"), "{}", allowed.calendar_summary);
+    }
+
+    /// A task made from an email carries the email's words in its title. The
+    /// count stays, as it does for unread mail.
+    #[test]
+    fn task_titles_saved_before_a_move_to_an_ai_that_may_not_read_email_are_left_out() {
+        let db = Arc::new(crate::ai::mail_policy::test_support::moved_to_kimi_after(|db| {
+            db.conn
+                .lock()
+                .unwrap()
+                .execute("INSERT INTO tasks(title, deadline) VALUES ('Pay Kenny HK$12,000', date('now', 'localtime'))", [])
+                .unwrap();
+        }));
+        // The first request after the move draws the line; this task is added after it.
+        DayContext::gather(&db).unwrap();
+        db.conn.lock().unwrap().execute("INSERT INTO tasks(title, deadline) VALUES ('Buy milk', date('now', 'localtime'))", []).unwrap();
+        let context = DayContext::gather(&db).unwrap();
+        let sent = format!("{}{}", context.inline_context(), context.to_prompt());
+        assert!(sent.contains("2 pending tasks.") && sent.contains("Buy milk"), "{sent}");
+        assert!(!sent.contains("Kenny"), "{sent}");
     }
 }

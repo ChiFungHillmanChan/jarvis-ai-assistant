@@ -111,32 +111,7 @@ async fn send_scoped(
 
     let (history, context_messages) = tokio::task::spawn_blocking(
         move || -> Result<(Vec<(String, String)>, Vec<(String, String)>), String> {
-            // Insert user message
-            {
-                let conn = db_arc.conn.lock().map_err(|e| e.to_string())?;
-                conn.execute(
-                    "INSERT INTO conversations (role, content, session_id) VALUES ('user', ?1, ?2)",
-                    rusqlite::params![msg_clone, history_session],
-                )
-                .map_err(|e| e.to_string())?;
-            }
-
-            // Fetch conversation history
-            let history = {
-                let conn = db_arc.conn.lock().map_err(|e| e.to_string())?;
-                let mut stmt = conn
-                    .prepare("SELECT role, content FROM conversations WHERE session_id = ?1 ORDER BY id DESC LIMIT 20")
-                    .map_err(|e| e.to_string())?;
-                let mut msgs: Vec<(String, String)> = stmt
-                    .query_map([&history_session], |row| {
-                        Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
-                    })
-                    .map_err(|e| e.to_string())?
-                    .collect::<Result<Vec<_>, _>>()
-                    .map_err(|e| e.to_string())?;
-                msgs.reverse();
-                msgs
-            };
+            let history = save_turn_and_load_history(&db_arc, &history_session, &msg_clone)?;
 
             // Only add context for questions about personal data (saves tokens)
             let needs_context = needs_personal_context(&msg_lower, &msg_clone);
@@ -182,22 +157,10 @@ async fn send_scoped(
             let db_arc2 = db.clone();
             let search_session = session_id.clone();
             let results: Vec<String> = tokio::task::spawn_blocking(move || -> Result<Vec<String>, String> {
-                let conn = db_arc2.conn.lock().map_err(|e| e.to_string())?;
-                let mut stmt = conn.prepare(
-                    "SELECT role, content, created_at FROM conversations WHERE content LIKE ?1 AND session_id = ?2 ORDER BY created_at DESC LIMIT 10"
-                ).map_err(|e| e.to_string())?;
-                let pattern = format!("%{}%", topic);
-                let collected = stmt
-                    .query_map(rusqlite::params![pattern, search_session], |row| {
-                        let role: String = row.get(0)?;
-                        let content: String = row.get(1)?;
-                        let date: Option<String> = row.get(2)?;
-                        Ok(format!("[{} - {}]: {}", date.unwrap_or_default(), role, crate::util::truncate_bytes(&content, 100)))
-                    })
-                    .map_err(|e| e.to_string())?
-                    .collect::<Result<Vec<_>, _>>()
-                    .map_err(|e| e.to_string())?;
-                Ok(collected)
+                Ok(search_history(&db_arc2, &search_session, &topic)?
+                    .into_iter()
+                    .map(|(role, content, date)| format!("[{} - {}]: {}", date.unwrap_or_default(), role, crate::util::truncate_bytes(&content, 100)))
+                    .collect())
             }).await.map_err(|e| e.to_string())??;
 
             if !results.is_empty() {
@@ -379,6 +342,49 @@ async fn send_scoped(
         content: final_response,
         created_at: None,
     })
+}
+
+/// Save the user's message and return the session's recent messages to send
+/// with it, oldest first.
+///
+/// Messages the chosen AI must not be shown are left out (see
+/// `ai::mail_policy::withheld`). The line is read before the message is saved,
+/// so the message that follows a change of AI is itself always sent.
+pub(crate) fn save_turn_and_load_history(db: &Database, session_id: &str, message: &str) -> Result<Vec<(String, String)>, String> {
+    let withheld = crate::ai::mail_policy::withheld(db);
+    let conn = db.conn.lock().map_err(|e| e.to_string())?;
+    conn.execute(
+        "INSERT INTO conversations (role, content, session_id) VALUES ('user', ?1, ?2)",
+        rusqlite::params![message, session_id],
+    )
+    .map_err(|e| e.to_string())?;
+    let mut stmt = conn
+        .prepare("SELECT role, content FROM conversations WHERE session_id = ?1 AND id > ?2 ORDER BY id DESC LIMIT 20")
+        .map_err(|e| e.to_string())?;
+    let mut messages: Vec<(String, String)> = stmt
+        .query_map(rusqlite::params![session_id, withheld.conversations], |row| Ok((row.get(0)?, row.get(1)?)))
+        .map_err(|e| e.to_string())?
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(|e| e.to_string())?;
+    messages.reverse();
+    Ok(messages)
+}
+
+/// Up to ten of the session's messages that mention `topic`, newest first, as
+/// (role, content, created_at). The matches go to the chosen AI to summarise,
+/// so messages it must not be shown are left out, as in the history above.
+pub(crate) fn search_history(db: &Database, session_id: &str, topic: &str) -> Result<Vec<(String, String, Option<String>)>, String> {
+    let withheld = crate::ai::mail_policy::withheld(db);
+    let conn = db.conn.lock().map_err(|e| e.to_string())?;
+    let mut stmt = conn
+        .prepare("SELECT role, content, created_at FROM conversations WHERE content LIKE ?1 AND session_id = ?2 AND id > ?3 ORDER BY created_at DESC LIMIT 10")
+        .map_err(|e| e.to_string())?;
+    let found = stmt
+        .query_map(rusqlite::params![format!("%{topic}%"), session_id, withheld.conversations], |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)))
+        .map_err(|e| e.to_string())?
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(|e| e.to_string())?;
+    Ok(found)
 }
 
 fn persist_scoped_reply(conn: &rusqlite::Connection, content: &str, session: &str) -> rusqlite::Result<()> {
@@ -622,5 +628,25 @@ mod tests {
             .map(|r| r.unwrap())
             .collect();
         assert_eq!(rows, vec![("assistant".to_string(), "hello".to_string())]);
+    }
+
+    /// A reply that quoted an email is replayed with every later message of
+    /// the session. After a move to an AI that may not read email, the turn
+    /// sends the new message and nothing saved before the move.
+    #[test]
+    fn a_turn_after_moving_to_an_ai_that_may_not_read_email_replays_nothing_saved_before() {
+        let contents = |history: Vec<(String, String)>| history.into_iter().map(|(_, content)| content).collect::<Vec<_>>();
+        let db = crate::ai::mail_policy::test_support::moved_to_kimi_after(|db| {
+            let sent = save_turn_and_load_history(db, "s1", "What did Kenny's email say?").unwrap();
+            assert_eq!(sent.len(), 1);
+            persist_scoped_reply(&db.conn.lock().unwrap(), "Kenny asks for HK$12,000", "s1").unwrap();
+        });
+
+        assert_eq!(contents(save_turn_and_load_history(&db, "s1", "hello").unwrap()), ["hello"]);
+        persist_scoped_reply(&db.conn.lock().unwrap(), "Hi", "s1").unwrap();
+        assert_eq!(contents(save_turn_and_load_history(&db, "s1", "and again").unwrap()), ["hello", "Hi", "and again"]);
+
+        assert!(search_history(&db, "s1", "Kenny").unwrap().is_empty());
+        assert_eq!(search_history(&db, "s1", "hello").unwrap().len(), 1);
     }
 }

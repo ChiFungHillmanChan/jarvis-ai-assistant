@@ -623,6 +623,8 @@ fn execute_memory_tool(
     // decides. A refusal on such turns also refused the user's own requests --
     // any message mentioning a meeting pulls in [CONTEXT] -- after they had
     // already clicked Allow.
+    // Read before the lock below: `withheld` takes it too.
+    let withheld = crate::ai::mail_policy::withheld(db);
     let conn = match db.conn.lock() {
         Ok(c) => c,
         Err(e) => return format!("Memory error: {}", e),
@@ -696,13 +698,13 @@ fn execute_memory_tool(
         }
         "list_memories" => {
             let mut stmt = match conn
-                .prepare("SELECT id, category, content FROM user_memory ORDER BY category, id")
+                .prepare("SELECT id, category, content FROM user_memory WHERE id > ?1 ORDER BY category, id")
             {
                 Ok(s) => s,
                 Err(e) => return format!("Memory error: {}", e),
             };
             let rows: Vec<(i64, String, String)> =
-                match stmt.query_map([], |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?))) {
+                match stmt.query_map([withheld.memories], |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?))) {
                     Ok(r) => r.filter_map(|x| x.ok()).collect(),
                     Err(e) => return format!("Memory error: {}", e),
                 };
@@ -879,15 +881,18 @@ fn execute_local_data_tool(
             Ok(lines.join("\n"))
         }
         "list_tasks" => {
+            // A task made from an email is not shown to an AI that may not
+            // read email (ai::mail_policy::withheld).
+            let withheld = crate::ai::mail_policy::withheld(db);
             let conn = db.conn.lock().map_err(|e| e.to_string())?;
             let mut stmt = conn
                 .prepare(
-                    "SELECT id, title, deadline, priority, status FROM tasks WHERE (?1 OR status != 'completed') \
+                    "SELECT id, title, deadline, priority, status FROM tasks WHERE (?1 OR status != 'completed') AND id > ?2 \
                      ORDER BY status = 'completed', deadline IS NULL, deadline, priority DESC, id LIMIT 50",
                 )
                 .map_err(|e| e.to_string())?;
             let lines: Vec<String> = stmt
-                .query_map([args["include_completed"].as_bool().unwrap_or(false)], |r| {
+                .query_map(rusqlite::params![args["include_completed"].as_bool().unwrap_or(false), withheld.tasks], |r| {
                     Ok(format!(
                         "ID: {} | {} | Deadline: {} | Priority: {} | Status: {}",
                         r.get::<_, i64>(0)?,
@@ -1623,17 +1628,20 @@ where
     }
 }
 
+/// The memory block of the system prompt. Memories the chosen AI must not be
+/// shown are left out (ai::mail_policy::withheld).
 fn load_memory_block(db: &crate::db::Database) -> String {
+    let withheld = crate::ai::mail_policy::withheld(db);
     let conn = match db.conn.lock() {
         Ok(c) => c,
         Err(_) => return String::new(),
     };
     let mut stmt =
-        match conn.prepare("SELECT category, content FROM user_memory ORDER BY category, id") {
+        match conn.prepare("SELECT category, content FROM user_memory WHERE id > ?1 ORDER BY category, id") {
             Ok(s) => s,
             Err(_) => return String::new(),
         };
-    let rows = match stmt.query_map([], |row| {
+    let rows = match stmt.query_map([withheld.memories], |row| {
         Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
     }) {
         Ok(r) => r,
@@ -2934,5 +2942,50 @@ mod step_tests {
         for tool in get_tool_definitions() {
             assert!(!tool_voice_narration(&tool.name, "yue").is_ascii(), "{} has no Chinese line", tool.name);
         }
+    }
+}
+
+#[cfg(test)]
+mod withheld_tests {
+    use super::*;
+    use crate::ai::mail_policy::test_support::moved_to_kimi_after;
+    use serde_json::json;
+
+    fn db() -> crate::db::Database {
+        moved_to_kimi_after(|db| {
+            db.conn
+                .lock()
+                .unwrap()
+                .execute_batch(
+                    "INSERT INTO user_memory(content) VALUES ('Kenny owes HK$12,000');
+                     INSERT INTO tasks(title) VALUES ('Pay Kenny HK$12,000');",
+                )
+                .unwrap();
+        })
+    }
+
+    /// Memory is in every system prompt. A fact saved while an AI that could
+    /// read email was in use may quote that email.
+    #[test]
+    fn memories_saved_before_the_move_stay_out_of_the_prompt_and_the_memory_list() {
+        let db = db();
+        assert_eq!(load_memory_block(&db), "");
+        assert_eq!(execute_memory_tool("list_memories", &json!({}), &db), "No memories stored yet.");
+
+        execute_memory_tool("remember", &json!({ "content": "Prefers short replies" }), &db);
+        for sent in [load_memory_block(&db), execute_memory_tool("list_memories", &json!({}), &db)] {
+            assert!(sent.contains("Prefers short replies") && !sent.contains("Kenny"), "{sent}");
+        }
+    }
+
+    #[test]
+    fn tasks_saved_before_the_move_are_not_listed() {
+        let db = db();
+        let listed = execute_local_data_tool("list_tasks", &json!({}), &db).unwrap();
+        assert!(!listed.contains("Kenny"), "{listed}");
+
+        db.conn.lock().unwrap().execute("INSERT INTO tasks(title) VALUES ('Buy milk')", []).unwrap();
+        let listed = execute_local_data_tool("list_tasks", &json!({}), &db).unwrap();
+        assert!(listed.contains("Buy milk") && !listed.contains("Kenny"), "{listed}");
     }
 }
