@@ -1,5 +1,6 @@
-use crate::auth::google::GoogleAuth;
+use crate::auth::google::{GoogleAuth, GMAIL_SCOPE};
 use crate::db::Database;
+use crate::integrations::gmail;
 use crate::mail::{additional, models::MailAccount, store};
 use serde::Serialize;
 use std::sync::Arc;
@@ -10,22 +11,56 @@ use tauri::State;
 /// result instead of treating it as success.
 pub const ALREADY_CONNECTED: &str = "Already connected to Google";
 
-/// Scopes requested at OAuth.
+/// Returned by `google_connect_gmail` when the account chosen in the browser
+/// is not the main account. Stable so the UI can explain it in the user's
+/// language; mirrored in src/lib/google-gmail.ts.
+pub const GMAIL_WRONG_ACCOUNT: &str = "Gmail must be connected on the main Google account";
+
+/// Returned by `google_connect_gmail` when the consent screen came back
+/// without Gmail. Mirrored in src/lib/google-gmail.ts.
+pub const GMAIL_NOT_GRANTED: &str = "Google did not grant Gmail access";
+
+/// Scopes requested at the first connect. No Gmail scope: Gmail is
+/// restricted and needs a CASA assessment, while these let the app be
+/// verified for the sensitive Calendar scope alone. Gmail is asked for later,
+/// only when the user turns on the Assistant's mail tools (`gmail_scopes`).
 ///
-/// gmail.modify is a superset of gmail.readonly, and both are restricted
-/// scopes. Requesting only modify halves the restricted-scope surface the
-/// Google OAuth verification / CASA assessment has to cover.
-///
-/// userinfo.profile is not decoration: `store_profile_name` reads the userinfo
+/// userinfo.profile is not decoration: `store_profile` reads the userinfo
 /// endpoint, and a token without this scope is rejected there. Without it
 /// user_name is never written and `util::display_name` greets every user as
 /// "there" for the life of the install.
+///
+/// userinfo.email (non-sensitive) gives that same call the account's address.
+/// Before Gmail became optional the address came from Gmail's profile; it
+/// decides whether disconnecting revokes a grant a Mail mailbox shares.
 const REQUESTED_SCOPES: &[&str] = &[
-    "https://www.googleapis.com/auth/gmail.modify",
     // Events on the primary calendar are all JARVIS reads or writes.
     "https://www.googleapis.com/auth/calendar.events",
     "https://www.googleapis.com/auth/userinfo.profile",
+    "https://www.googleapis.com/auth/userinfo.email",
 ];
+
+/// Scopes for turning Gmail on: the first connect's, plus Gmail. Requested
+/// together with include_granted_scopes, so the new token keeps Calendar.
+fn gmail_scopes() -> Vec<String> {
+    REQUESTED_SCOPES
+        .iter()
+        .chain([&GMAIL_SCOPE])
+        .map(|s| s.to_string())
+        .collect()
+}
+
+/// What `google_connect` asks for. A first connect, or a switch to another
+/// account, never asks for Gmail. Repairing a grant Google stopped honouring
+/// (weekly while the app is in Testing) asks again for what that grant had,
+/// so a reconnect does not turn the user's mail tools off.
+fn connect_scopes(had_gmail: bool) -> Vec<String> {
+    if had_gmail {
+        gmail_scopes()
+    } else {
+        REQUESTED_SCOPES.iter().map(|s| s.to_string()).collect()
+    }
+}
 
 /// What `google_connect` should do for a given (linked, force) pair.
 #[derive(Debug, PartialEq, Eq)]
@@ -69,8 +104,9 @@ pub async fn google_connect(
         ConnectPlan::Fresh => {}
     }
 
-    auth.start_auth_flow(REQUESTED_SCOPES.iter().map(|s| s.to_string()).collect())
-        .await?;
+    // After Relink the old grant's scopes are gone; after Fresh from a dead
+    // grant they are still what the user had.
+    auth.start_auth_flow(connect_scopes(auth.gmail_granted())).await?;
     // A Keychain write that fails silently leaves the user looking connected
     // now and signed out on the next launch. Say so instead.
     auth.save_to_db(&db).map_err(|e| {
@@ -84,14 +120,18 @@ pub async fn google_connect(
     // rather than whoever built the app. Best-effort: a failure here must not
     // fail an otherwise successful connection.
     if let Ok(token) = auth.ensure_access_token().await {
-        if let Err(e) = store_profile_name(&token, &db).await {
-            log::warn!("Could not read Google profile name: {}", e);
-        }
         // This may be a different account from the last one; learn it afresh.
         if let Ok(conn) = db.conn.lock() {
             let _ = conn.execute("DELETE FROM user_preferences WHERE key = ?1", [additional::MAIN_EMAIL_KEY]);
         }
-        additional::remember_main_email(&db, &token).await;
+        if let Err(e) = store_profile(&token, &db).await {
+            log::warn!("Could not read Google profile name: {}", e);
+        }
+        // Gmail's profile is the fallback for the address, and only with
+        // Gmail granted: asking without it is a refused call on every connect.
+        if auth.gmail_granted() {
+            additional::remember_main_email(&db, &token).await;
+        }
     }
     // Nothing used to sync on connect: the first mail and events arrived with
     // the scheduler's five-minute tick, and until then the injected [CONTEXT]
@@ -118,8 +158,74 @@ pub fn google_cancel_connect() {
     crate::auth::google::cancel_sign_in(crate::auth::google::SignIn::Assistant);
 }
 
-/// Fetch the signed-in user's given name and persist it as `user_name`.
-async fn store_profile_name(access_token: &str, db: &Arc<Database>) -> Result<(), String> {
+/// Turn on the Assistant's mail tools for the main account: ask Google for
+/// Gmail on top of the grant the user already gave. The sign-in runs on a
+/// separate session and is adopted only when it is the main account and Gmail
+/// was granted, so a wrong click in the browser changes nothing.
+#[tauri::command]
+pub async fn google_connect_gmail(
+    auth: State<'_, Arc<GoogleAuth>>,
+    db: State<'_, Arc<Database>>,
+) -> Result<String, String> {
+    if !auth.is_linked() {
+        return Err("Connect Google first, then connect Gmail.".to_string());
+    }
+    // The main account's address, recorded at connect or read again now. It
+    // is required: without it a different account chosen in the browser
+    // could not be told apart, and would silently become the main account.
+    let main = match additional::main_email(&db) {
+        Some(email) => Some(email),
+        None => match auth.ensure_access_token().await {
+            Ok(token) => userinfo(&token).await.ok().as_ref().and_then(profile_email),
+            Err(_) => None,
+        },
+    }
+    .ok_or("Could not confirm the main Google account. Check your connection and try again.")?;
+    let upgrade = auth.fresh_session();
+    upgrade.start_incremental_auth_flow(gmail_scopes(), &main).await?;
+    let token = upgrade.ensure_access_token().await?;
+    let email = match userinfo(&token).await.ok().as_ref().and_then(profile_email) {
+        Some(email) => Some(email),
+        // userinfo did not answer: Gmail's profile, if Gmail was granted.
+        None if upgrade.gmail_granted() => gmail::profile_email(&token).await.ok(),
+        None => None,
+    }
+    .ok_or("Could not confirm which Google account was chosen. Please try again.")?;
+    if !main.eq_ignore_ascii_case(&email) {
+        // JARVIS keeps no token for that account. Revoke what it just granted,
+        // unless a Mail mailbox is on that account: Google revokes per app and
+        // account, and that would sign the mailbox out.
+        if !shares_grant(&connected_mailboxes(&db), Some(&email)) {
+            let grant = upgrade.refresh_token.lock().unwrap().clone().unwrap_or(token);
+            if let Err(e) = crate::auth::google::revoke_grant(&grant).await {
+                log::warn!("{}", e);
+            }
+        }
+        return Err(GMAIL_WRONG_ACCOUNT.to_string());
+    }
+    if !upgrade.gmail_granted() {
+        return Err(GMAIL_NOT_GRANTED.to_string());
+    }
+    auth.adopt(&upgrade);
+    auth.save_to_db(&db).map_err(|e| {
+        format!(
+            "Gmail is connected, but the credential could not be saved to your Keychain ({}). \
+             You will have to connect again next launch.",
+            e
+        )
+    })?;
+    additional::remember_main_email(&db, &token).await;
+    let sync_auth = auth.inner().clone();
+    let sync_db = db.inner().clone();
+    tauri::async_runtime::spawn(async move {
+        if let Err(e) = crate::scheduler::jobs::run_email_sync(&sync_db, &sync_auth).await {
+            log::warn!("First email sync after connecting Gmail failed: {}", e);
+        }
+    });
+    Ok("Gmail connected".to_string())
+}
+
+async fn userinfo(access_token: &str) -> Result<serde_json::Value, String> {
     let resp = crate::util::http_client()
         .get("https://www.googleapis.com/oauth2/v2/userinfo")
         .bearer_auth(access_token)
@@ -129,7 +235,33 @@ async fn store_profile_name(access_token: &str, db: &Arc<Database>) -> Result<()
     if !resp.status().is_success() {
         return Err(format!("userinfo HTTP {}", resp.status()));
     }
-    let body: serde_json::Value = resp.json().await.map_err(|e| e.to_string())?;
+    resp.json().await.map_err(|e| e.to_string())
+}
+
+/// The address in a userinfo response; present only with userinfo.email.
+fn profile_email(body: &serde_json::Value) -> Option<String> {
+    body.get("email")
+        .and_then(|v| v.as_str())
+        .map(|email| email.trim().to_lowercase())
+        .filter(|email| !email.is_empty())
+}
+
+/// Fetch the signed-in user's profile and persist the given name as
+/// `user_name` and, when granted, the address as the main account's.
+async fn store_profile(access_token: &str, db: &Arc<Database>) -> Result<(), String> {
+    save_profile(db, &userinfo(access_token).await?)
+}
+
+fn save_profile(db: &Database, body: &serde_json::Value) -> Result<(), String> {
+    if let Some(email) = profile_email(body) {
+        let conn = db.conn.lock().map_err(|e| e.to_string())?;
+        conn.execute(
+            "INSERT INTO user_preferences (key, value, updated_at) VALUES (?1, ?2, datetime('now'))
+             ON CONFLICT(key) DO UPDATE SET value = ?2, updated_at = datetime('now')",
+            rusqlite::params![additional::MAIN_EMAIL_KEY, email],
+        )
+        .map_err(|e| e.to_string())?;
+    }
     let name = body
         .get("given_name")
         .or_else(|| body.get("name"))
@@ -181,23 +313,29 @@ async fn unlink(auth: &GoogleAuth, db: &Database) -> Result<(), String> {
 /// revokes per app and account, so revoking the main grant would sign that
 /// mailbox out too (mail::sync::revoke_unless_shared is the other direction).
 async fn mailbox_shares_grant(auth: &GoogleAuth, db: &Database) -> bool {
-    let mailboxes: Vec<String> = store::list_accounts(db)
-        .unwrap_or_default()
-        .into_iter()
-        .filter(|a| a.connected)
-        .map(|a| a.email)
-        .collect();
+    let mailboxes = connected_mailboxes(db);
     if mailboxes.is_empty() {
         return false;
     }
     let main = match additional::main_email(db) {
         Some(email) => Some(email),
-        None => match auth.ensure_access_token().await {
-            Ok(token) => crate::integrations::gmail::profile_email(&token).await.ok(),
+        // Gmail's profile only answers a grant that includes Gmail.
+        None if auth.gmail_granted() => match auth.ensure_access_token().await {
+            Ok(token) => gmail::profile_email(&token).await.ok(),
             Err(_) => None,
         },
+        None => None,
     };
     shares_grant(&mailboxes, main.as_deref())
+}
+
+fn connected_mailboxes(db: &Database) -> Vec<String> {
+    store::list_accounts(db)
+        .unwrap_or_default()
+        .into_iter()
+        .filter(|a| a.connected)
+        .map(|a| a.email)
+        .collect()
 }
 
 /// Unconfirmed (offline, say) counts as shared: keeping a grant JARVIS no
@@ -247,6 +385,9 @@ pub struct MainGoogleAccount {
     state: &'static str,
     name: Option<String>,
     email: Option<String>,
+    /// Whether the Assistant's mail tools are on; Settings offers Connect
+    /// Gmail while they are off.
+    gmail: bool,
 }
 
 /// The main account and the additional ones, for Settings > Google.
@@ -264,7 +405,7 @@ pub async fn google_accounts(
     db: State<'_, Arc<Database>>,
 ) -> Result<GoogleAccounts, String> {
     let state = main_state(&auth).await;
-    if state == "connected" {
+    if state == "connected" && auth.gmail_granted() {
         if let Ok(token) = auth.ensure_access_token().await {
             additional::remember_main_email(&db, &token).await;
         }
@@ -281,14 +422,64 @@ pub async fn google_accounts(
         .filter(|a| email.as_deref().is_none_or(|main| !main.eq_ignore_ascii_case(&a.email)))
         .collect();
     Ok(GoogleAccounts {
-        main: MainGoogleAccount { state, name: name.filter(|_| state != "not_connected"), email },
+        main: MainGoogleAccount {
+            state,
+            name: name.filter(|_| state != "not_connected"),
+            email,
+            gmail: state != "not_connected" && auth.gmail_granted(),
+        },
         others,
     })
 }
 
 #[cfg(test)]
 mod tests {
-    use super::{connect_plan, shares_grant, ConnectPlan, REQUESTED_SCOPES};
+    use super::{connect_plan, connect_scopes, gmail_scopes, mailbox_shares_grant, save_profile, shares_grant, ConnectPlan, REQUESTED_SCOPES};
+    use crate::auth::google::{GoogleAuth, GMAIL_SCOPE};
+
+    /// Google OAuth verification, stage 1: the first connect is reviewed for
+    /// the sensitive Calendar scope only. Any Gmail scope here is restricted
+    /// and needs the CASA assessment, so none may appear.
+    #[test]
+    fn first_connect_asks_for_no_gmail_scope() {
+        assert!(
+            !REQUESTED_SCOPES.iter().any(|scope| scope.contains("gmail") || scope.contains("mail.google.com")),
+            "first connect must not ask for Gmail: {:?}",
+            REQUESTED_SCOPES
+        );
+        // Non-sensitive: the address that tells a Mail mailbox on this same
+        // account apart from another account, now that Gmail's profile is not
+        // available to every user.
+        assert!(REQUESTED_SCOPES.contains(&"https://www.googleapis.com/auth/userinfo.email"));
+    }
+
+    /// Turning Gmail on asks for it on top of everything the first connect
+    /// granted, so the new token still covers Calendar and the profile.
+    #[test]
+    fn connecting_gmail_keeps_the_first_connect_scopes() {
+        let scopes = gmail_scopes();
+        assert!(scopes.iter().any(|s| s == GMAIL_SCOPE));
+        for base in REQUESTED_SCOPES {
+            assert!(scopes.iter().any(|s| s == base), "{base} would be dropped");
+        }
+    }
+
+    /// Without Gmail, the main address comes from the userinfo call. It must
+    /// still decide revocation: a mailbox on another account does not hold
+    /// the main grant back, a mailbox on the same account does.
+    #[tokio::test]
+    async fn the_userinfo_address_decides_whether_disconnect_revokes() {
+        let db = crate::db::test_database();
+        save_profile(&db, &serde_json::json!({"given_name": "Alex", "email": "Me@Example.com"})).unwrap();
+        crate::mail::store::upsert_account(&db, "work", "work@example.com", true).unwrap();
+        // Calendar only: nothing may fall back to Gmail's profile.
+        let calendar_only = GoogleAuth::new_empty();
+        assert!(!mailbox_shares_grant(&calendar_only, &db).await, "another account's mailbox: revoke");
+
+        crate::mail::store::upsert_account(&db, "me", "me@example.com", true).unwrap();
+        assert!(mailbox_shares_grant(&calendar_only, &db).await, "the main account's own mailbox: keep");
+        assert_eq!(crate::util::display_name(&db), "Alex");
+    }
 
     /// Disconnecting the Assistant's Google used to revoke the grant a Mail
     /// mailbox on the same account also depends on.
@@ -319,6 +510,21 @@ mod tests {
         // events on the primary calendar.
         assert!(REQUESTED_SCOPES.contains(&"https://www.googleapis.com/auth/calendar.events"));
         assert!(!REQUESTED_SCOPES.contains(&"https://www.googleapis.com/auth/calendar"));
+    }
+
+    /// Only a reconnect of a grant that already had Gmail asks for it again.
+    /// A first connect (nothing granted) and a switch (unlink clears the old
+    /// grant's scopes first) both ask for Calendar only.
+    #[tokio::test]
+    async fn only_a_reconnect_of_a_gmail_grant_asks_for_gmail_again() {
+        let has_gmail = |scopes: &[String]| scopes.iter().any(|s| s.contains("gmail"));
+        assert!(!has_gmail(&connect_scopes(GoogleAuth::new_empty().gmail_granted())), "first connect");
+        assert_eq!(connect_scopes(true), gmail_scopes(), "reconnect after Gmail was on");
+
+        let db = crate::db::test_database();
+        let switching = GoogleAuth::signed_in_for_tests(&[GMAIL_SCOPE]);
+        switching.disconnect(&db, false).await.unwrap();
+        assert!(!has_gmail(&connect_scopes(switching.gmail_granted())), "switch account");
     }
 
     #[test]

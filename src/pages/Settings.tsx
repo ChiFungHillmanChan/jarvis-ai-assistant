@@ -4,6 +4,7 @@ import {
   getSettings,
   updateSetting,
   googleConnect,
+  googleConnectGmail,
   googleCancelConnect,
   googleAccounts,
   googleDisconnect,
@@ -46,6 +47,7 @@ import { listen } from "@tauri-apps/api/event";
 import { invoke } from "@tauri-apps/api/core";
 import type { AccountStatus, VoiceSettings, WakeWordStatus, VoiceState, LocalEndpoint, LocalModel, ProviderChainEntry, EndpointHealth, StorageUsage, StorageScope } from "../lib/types";
 import { GOOGLE_ALREADY_CONNECTED } from "../lib/types";
+import { gmailConnectErrorKey, offersConnectGmail } from "../lib/google-gmail";
 import { useVoiceState } from "../hooks/useVoiceState";
 import { useUiLocale } from "../i18n";
 import IntegrationConnection from "../components/IntegrationConnection";
@@ -103,6 +105,7 @@ export default function Settings() {
   const [loadError, setLoadError] = useState(false);
   const [google, setGoogle] = useState<GoogleAccounts | null>(null);
   const [connecting, setConnecting] = useState(false);
+  const [connectingGmail, setConnectingGmail] = useState(false);
   const googleCancelled = useRef(false);
   const [disconnecting, setDisconnecting] = useState(false);
   const [googleError, setGoogleError] = useState<string | null>(null);
@@ -538,6 +541,27 @@ export default function Settings() {
     }
   }
 
+  // Gmail is opt-in: the first connect is Calendar only. This asks Google for
+  // Gmail on the same account; the backend keeps the session unchanged if
+  // another account is chosen or Gmail is not allowed.
+  async function handleConnectGmail() {
+    setConnectingGmail(true);
+    googleCancelled.current = false;
+    setGoogleError(null);
+    setGoogleNotice(null);
+    try {
+      await googleConnectGmail();
+      setGoogleNotice(t('googleGmailConnected'));
+    } catch (e) {
+      const key = gmailConnectErrorKey(e);
+      if (googleCancelled.current) setGoogleNotice(text("Google sign-in cancelled.", "已取消 Google 登入。"));
+      else setGoogleError(key ? t(key) : String(e));
+    } finally {
+      await refreshGoogle();
+      setConnectingGmail(false);
+    }
+  }
+
   // Closing the browser tab tells JARVIS nothing; this stops the wait.
   function cancelGoogleConnect() {
     googleCancelled.current = true;
@@ -931,21 +955,21 @@ export default function Settings() {
                 <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
                   {google.main.state === "reconnect" && <button
                     onClick={() => { void handleGoogleConnect(false); }}
-                    disabled={connecting || disconnecting}
+                    disabled={connecting || connectingGmail || disconnecting}
                     style={{ ...styles.actionBtn, borderColor: "var(--cyan)" }}
                   >
                     {connecting ? text('Connecting…', '正在連接…') : text('Reconnect', '重新連接')}
                   </button>}
                   <button
                     onClick={() => { void handleGoogleConnect(true); }}
-                    disabled={connecting || disconnecting}
+                    disabled={connecting || connectingGmail || disconnecting}
                     style={styles.actionBtn}
                   >
                     {connecting && google.main.state !== "reconnect" ? text('Opening…', '正在開啟…') : text('Switch account', '切換帳戶')}
                   </button>
                   <button
                     onClick={() => { void handleGoogleDisconnect(); }}
-                    disabled={connecting || disconnecting}
+                    disabled={connecting || connectingGmail || disconnecting}
                     style={{ ...styles.actionBtn, borderColor: "var(--accent-urgent)", color: "var(--accent-urgent)" }}
                   >
                     {disconnecting ? text('Disconnecting…', '正在中斷連接…') : text('Disconnect', '斷開')}
@@ -955,6 +979,27 @@ export default function Settings() {
                 <div style={{ ...styles.hint, marginTop: 8, marginBottom: 0 }}>
                   {text("Disconnecting removes this account's Assistant mail cache, Calendar events and briefings. Local copies in the Mail workspace and other accounts are kept.", "中斷連接會刪除此帳戶的助手郵件快取、日曆活動及簡報；郵件工作區的本機副本及其他帳戶會保留。")}
                 </div>
+                {google.main.state === "connected" && (
+                  <>
+                    <h3 style={{ margin: "18px 0 8px", fontSize: 15 }}>{t('googleGmailTitle')}</h3>
+                    <div style={{ ...styles.hint, marginBottom: 10 }}>{google.main.gmail ? t('googleGmailOn') : t('googleGmailOff')}</div>
+                    {offersConnectGmail(google.main) && (
+                      <>
+                        <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
+                          <button
+                            onClick={() => { void handleConnectGmail(); }}
+                            disabled={connecting || connectingGmail || disconnecting}
+                            style={{ ...styles.actionBtn, borderColor: "var(--cyan)" }}
+                          >
+                            {connectingGmail ? t('googleGmailConnecting') : t('googleGmailConnect')}
+                          </button>
+                          {connectingGmail && <button onClick={cancelGoogleConnect} style={styles.actionBtn}>{text('Cancel', '取消')}</button>}
+                        </div>
+                        <div style={{ ...styles.hint, marginTop: 8, marginBottom: 0 }}>{t('googleGmailHint')}</div>
+                      </>
+                    )}
+                  </>
+                )}
               </>
             ) : (
               <div style={{ display: "flex", gap: 8 }}>
@@ -964,7 +1009,7 @@ export default function Settings() {
                 {connecting && <button onClick={cancelGoogleConnect} style={styles.actionBtn}>{text('Cancel', '取消')}</button>}
               </div>
             )}
-            {connecting && <div style={{ ...styles.hint, marginTop: 8, marginBottom: 0 }}>{text('Finish signing in in your browser. If you closed the Google tab, choose Cancel.', '請在瀏覽器完成登入。如已關閉 Google 登入分頁，請按「取消」。')}</div>}
+            {(connecting || connectingGmail) && <div style={{ ...styles.hint, marginTop: 8, marginBottom: 0 }}>{text('Finish signing in in your browser. If you closed the Google tab, choose Cancel.', '請在瀏覽器完成登入。如已關閉 Google 登入分頁，請按「取消」。')}</div>}
             {googleNotice && <div style={{ ...styles.hint, marginTop: 10, marginBottom: 0 }}>{googleNotice}</div>}
             {googleError && <div style={styles.errorText}>{googleError}</div>}
             {google && <OtherGoogleAccounts accounts={google.others} canAdd={google.main.state === "connected"} onChanged={refreshGoogle} />}

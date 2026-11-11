@@ -248,13 +248,15 @@ async fn revoke_unless_shared(db: &Database, main: &GoogleAuth, account_id: &str
     if main.is_linked() {
         let main_email = match super::additional::main_email(db) {
             Some(email) => Some(email),
-            None => match main.ensure_access_token().await {
+            // Gmail's profile only answers a main grant that includes Gmail.
+            None if main.gmail_granted() => match main.ensure_access_token().await {
                 Ok(token) => gmail_get::<Profile>("profile", &token, &[])
                     .await
                     .ok()
                     .map(|p| p.email_address),
                 Err(_) => None,
             },
+            None => None,
         };
         match main_email {
             Some(email) if !email.eq_ignore_ascii_case(&account.email) => {}
@@ -946,6 +948,28 @@ mod tests {
         // Repeated disconnect is valid even when its credential is already gone.
         disconnect(&db, &state, &main, &a).await.unwrap();
         KeychainStore::delete(KEYCHAIN_SERVICE, &b).unwrap();
+    }
+
+    /// Gmail is optional for the Assistant now, so its address may come from
+    /// the userinfo call alone. That still decides whether disconnecting a
+    /// mailbox revokes its grant.
+    #[tokio::test]
+    async fn a_calendar_only_main_account_still_decides_mailbox_revocation() {
+        let (db, a, b) = two_accounts();
+        let (kept, revoked) = (uuid::Uuid::new_v4().to_string(), uuid::Uuid::new_v4().to_string());
+        KeychainStore::put(KEYCHAIN_SERVICE, &a, &kept).unwrap();
+        KeychainStore::put(KEYCHAIN_SERVICE, &b, &revoked).unwrap();
+        db.conn.lock().unwrap().execute(
+            "INSERT INTO user_preferences (key, value) VALUES (?1, 'first@example.com')",
+            [super::super::additional::MAIN_EMAIL_KEY],
+        ).unwrap();
+        let main = GoogleAuth::signed_in_for_tests(&["https://www.googleapis.com/auth/calendar.events"]);
+        let state = MailSyncState::new();
+        disconnect(&db, &state, &main, &a).await.unwrap();
+        disconnect(&db, &state, &main, &b).await.unwrap();
+        let sent = crate::auth::google::REVOKED_IN_TESTS.lock().unwrap().clone();
+        assert!(!sent.contains(&kept), "the main account's own mailbox shares its grant");
+        assert!(sent.contains(&revoked), "another account's mailbox is revoked");
     }
 
     #[tokio::test]

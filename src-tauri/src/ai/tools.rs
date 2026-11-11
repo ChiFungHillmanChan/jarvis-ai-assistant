@@ -914,6 +914,11 @@ fn execute_local_data_tool(
     }
 }
 
+/// What the main account's mail tools return while the user has not turned
+/// on Gmail for the Assistant. The model is told how the user turns it on,
+/// not to keep trying: nothing here starts a sign-in.
+pub(crate) const GMAIL_TOOLS_OFF: &str = "Gmail is not connected for the Assistant, so mail in the main Google account cannot be searched, read, drafted or archived. Tell the user they can turn this on with Connect Gmail in Settings > Assistant Google. Do not retry for the main account unless the user says they connected it.";
+
 async fn execute_gmail_tool(
     name: &str,
     args: &serde_json::Value,
@@ -1419,6 +1424,12 @@ async fn execute_tool_inner(
         }
     }
 
+    // Main-account-only mail tools, checked before the approval card so the
+    // user is never asked to allow an archive that cannot run.
+    if matches!(name, "draft_email" | "archive_email") && !google_auth.gmail_granted() {
+        return GMAIL_TOOLS_OFF.to_string();
+    }
+
     // A crafted email can ask the model to change the user's data: these wait
     // for the user's click (see tool_approval).
     if crate::tool_approval::NEEDS_APPROVAL.contains(&name)
@@ -1501,6 +1512,11 @@ async fn execute_tool_inner(
                     Ok(t) => t,
                     Err(msg) => return msg,
                 };
+                // Additional accounts use their own read-only grants and are
+                // still searched below.
+                if !google_auth.gmail_granted() {
+                    return GMAIL_TOOLS_OFF.to_string();
+                }
                 match execute_gmail_tool(name, &args, &token).await {
                     Ok(r) => r,
                     Err(e) if e.contains("UNAUTHORIZED") => match refresh_google_token(google_auth).await {
@@ -2744,6 +2760,25 @@ mod local_data_tests {
             let out = run(tool, serde_json::json!({}), &db).await;
             assert!(out.starts_with("Email and calendar content is not shared with Kimi"), "{tool}: {out}");
             assert!(!out.contains("Gold Badge"), "{tool} leaked mail content");
+        }
+    }
+
+    /// Calendar only, Gmail never turned on: the main account's mail tools
+    /// say how to turn Gmail on instead of calling Gmail and failing. Archive
+    /// says so before the approval card, so nobody is asked to allow an
+    /// action that cannot run.
+    #[tokio::test]
+    async fn main_mail_tools_point_to_connect_gmail_without_the_gmail_grant() {
+        let db = mail_db();
+        let calendar_only = Arc::new(crate::auth::google::GoogleAuth::signed_in_for_tests(&["https://www.googleapis.com/auth/calendar.events"]));
+        for (tool, args) in [
+            ("search_emails", serde_json::json!({"query": "invoice"})),
+            ("read_email", serde_json::json!({"email_id": "g1"})),
+            ("draft_email", serde_json::json!({"to": "sam@example.com", "subject": "Hi", "body": "Hello"})),
+            ("archive_email", serde_json::json!({"email_id": "g1"})),
+        ] {
+            let out = execute_tool(tool, &args.to_string(), &db, &calendar_only, &crate::ai::SideEffectLedger::new()).await;
+            assert!(out.starts_with(GMAIL_TOOLS_OFF), "{tool}: {out}");
         }
     }
 

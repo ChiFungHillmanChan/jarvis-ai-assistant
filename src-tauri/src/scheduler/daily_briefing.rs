@@ -109,6 +109,11 @@ pub async fn run_briefing(
             return Ok(());
         }
     };
+    // The briefing reads the inbox; Calendar alone is not enough.
+    if !auth.gmail_granted() {
+        log::info!("[daily_briefing] Gmail is not connected for the Assistant, skipping");
+        return Ok(());
+    }
 
     // Fetch up to 50 inbox messages.
     let messages = match gmail::fetch_inbox(&access_token, 50).await {
