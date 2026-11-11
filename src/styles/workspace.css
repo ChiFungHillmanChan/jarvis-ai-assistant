@@ -214,6 +214,8 @@
 .assistant-message { padding:12px 0 24px; }
 .assistant-message.user { background:var(--surface-solid); border:1px solid var(--border-primary); border-radius:8px; padding:15px 18px; margin:8px 0 22px; }
 .message-author { font-size:11px; color:var(--text-muted); margin-bottom:8px; }
+.voice-replay { display:inline-flex; align-items:center; gap:4px; margin-left:10px; padding:1px 8px; font-size:11px; color:var(--text-muted); background:none; border:1px solid var(--border-primary); border-radius:999px; cursor:pointer; }
+.voice-replay:hover, .voice-replay.is-playing { color:var(--text-primary); }
 .assistant-progress { display:flex; align-items:center; gap:8px; color:var(--text-muted); font-size:12px; padding:10px 0; }
 .assistant-steps { margin-top:10px; font-size:12px; color:var(--text-muted); }
 .assistant-steps summary { cursor:pointer; width:max-content; }

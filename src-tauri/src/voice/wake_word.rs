@@ -423,12 +423,8 @@ async fn handle_wake_word_detection(
     }
 
     // Show transcribed text in chat and signal AI is thinking
-    let _ = app_handle.emit(
-        "chat-new-message",
-        json!({
-            "role": "user", "content": &user_text
-        }),
-    );
+    let (spoken, messages) = super::recordings::save_spoken_turn(&db, &user_text, &command_audio)?;
+    let _ = app_handle.emit("chat-new-message", spoken);
     let _ = app_handle.emit("chat-state", json!({"state": "thinking"}));
     let _ = app_handle.emit(
         "chat-status",
@@ -438,7 +434,6 @@ async fn handle_wake_word_detection(
         }),
     );
 
-    let messages = crate::commands::chat::save_turn_and_load_history(&db, "legacy", &user_text)?;
 
     // Create streaming TTS -- speaks sentences as AI tokens arrive
     voice_engine.set_state_and_emit(VoiceState::WakeWordSpeaking);

@@ -14,6 +14,8 @@ export interface ChatMessage {
   role: "user" | "assistant";
   content: string;
   created_at: string | null;
+  /** A voice request whose recording was kept and can be played back. */
+  has_recording?: boolean;
   /** What JARVIS did for this reply. Kept for this app session only, never saved. */
   steps?: ChatStep[];
 }
@@ -206,6 +208,7 @@ export interface VoiceSettings {
   tts_voice: string;
   tts_rate: number;
   tts_enabled: boolean;
+  keep_recordings: boolean;
 }
 
 export interface WakeWordStatus {
