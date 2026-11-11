@@ -152,14 +152,7 @@ pub async fn stop_listening(
     }
 
     // Save user message and notify chat panel
-    {
-        let conn = db.conn.lock().map_err(|e| e.to_string())?;
-        conn.execute(
-            "INSERT INTO conversations (role, content) VALUES ('user', ?1)",
-            rusqlite::params![text],
-        )
-        .map_err(|e| e.to_string())?;
-    }
+    let messages = crate::commands::chat::save_turn_and_load_history(&db, "legacy", &text)?;
     let _ = app_handle.emit(
         "chat-new-message",
         json!({
@@ -174,23 +167,6 @@ pub async fn stop_listening(
             "phase": "thinking"
         }),
     );
-
-    // Get AI response
-    let messages = {
-        let conn = db.conn.lock().map_err(|e| e.to_string())?;
-        let mut stmt = conn
-            .prepare("SELECT role, content FROM conversations WHERE session_id = 'legacy' ORDER BY id DESC LIMIT 20")
-            .map_err(|e| e.to_string())?;
-        let mut msgs: Vec<(String, String)> = stmt
-            .query_map([], |row| {
-                Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
-            })
-            .map_err(|e| e.to_string())?
-            .collect::<Result<Vec<_>, _>>()
-            .map_err(|e| e.to_string())?;
-        msgs.reverse();
-        msgs
-    };
 
     // Mute capture before AI call -- streaming TTS will speak during processing
     engine

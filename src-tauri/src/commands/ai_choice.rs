@@ -289,15 +289,7 @@ pub async fn list_ai_models(provider: String, base_url: Option<String>, api_key:
                 .await
                 .map_err(|_| "未偵測到 Ollama。請先開啟 Ollama App。".to_string())?;
             let body: serde_json::Value = response.json().await.map_err(|_| "Ollama 回覆格式無效。".to_string())?;
-            let mut models: Vec<String> = body
-                .get("models")
-                .and_then(|m| m.as_array())
-                .into_iter()
-                .flatten()
-                .filter_map(|m| m.get("name").and_then(|n| n.as_str()).map(str::to_string))
-                .collect();
-            models.sort();
-            Ok(models)
+            Ok(crate::ai::local::ollama::models_on_this_mac(&body))
         }
         _ => Err("這個 AI 不需要選擇模型。".into()),
     }

@@ -414,6 +414,7 @@ const INBOX_WINDOW_QUERY: &str =
     "SELECT gmail_id FROM emails WHERE is_archived = 0 AND datetime(received_at) >= datetime(?1)";
 
 pub fn save_to_db(db: &crate::db::Database, fetched: &InboxFetch) -> Result<(), String> {
+    crate::db::require_encrypted_for_google_data()?;
     let mut conn = db.conn.lock().map_err(|e| e.to_string())?;
     // One transaction: the upsert and the reconciliation below are one view of
     // the inbox, and a half-applied one archives mail that is still there.
@@ -1291,6 +1292,16 @@ mod sync_tests {
     use super::*;
     use rusqlite::Connection;
     use std::sync::Mutex;
+
+    /// The Gmail mirror is not written to a database that is not encrypted.
+    #[test]
+    fn the_inbox_mirror_is_not_saved_while_the_database_is_stored_unencrypted() {
+        let db = emails_db();
+        let nothing = InboxFetch { messages: Vec::new(), warning: None };
+        let saved = crate::db::TEST_STORED_UNENCRYPTED.sync_scope(true, || save_to_db(&db, &nothing));
+        assert_eq!(saved, Err(crate::db::UNENCRYPTED_SYNC_PAUSED.to_string()));
+        assert_eq!(save_to_db(&db, &nothing), Ok(()));
+    }
 
     fn emails_db() -> crate::db::Database {
         let conn = Connection::open_in_memory().unwrap();

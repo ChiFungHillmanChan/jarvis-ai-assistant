@@ -25,7 +25,7 @@ const messages = {
   gateOfflineTitle: ['Cannot confirm your plan', '未能確認你的方案'], gateOfflineBody: ['JARVIS could not reach its server and has no recent confirmation of your plan. Check your connection and try again.', 'JARVIS 未能連接伺服器，亦沒有近期的方案確認紀錄。請檢查網絡連線後再試。'],
   gateWaitingTitle: ['Finish checkout in your browser', '請在瀏覽器完成付款程序'], gateBack: ['Back', '返回'],
   planTrialEnds: ['Trial ends {date}', '試用期於 {date} 結束'], planRenews: ['Renews {date}', '將於 {date} 續期'], planEnds: ['Ends {date}', '將於 {date} 結束'],
-  updateAvailable: ['New version {version}', '有新版本 {version}'], downloadLatest: ['Download latest version', '下載最新版本'], updating: ['Updating {percent}%', '更新中 {percent}%'], updateFailed: ['Update failed', '更新失敗'], dismissUpdate: ['Dismiss until the next check', '暫時關閉，下次檢查再提示'],
+  updateReady: ['JARVIS {version} is ready', 'JARVIS {version} 已準備好'], restartToUpdate: ['Restart to update', '重新啟動以更新'], restartingUpdate: ['Restarting…', '正在重新啟動…'], updateFailed: ['Update failed', '更新失敗'], updateReopen: ['Quit and reopen JARVIS to finish updating', '請結束並重新開啟 JARVIS 以完成更新'], dismissUpdate: ['Hide until JARVIS next opens', '暫時隱藏，下次開啟 JARVIS 時再提示'],
 } as const;
 export type MessageKey = keyof typeof messages;
 export const catalog = {

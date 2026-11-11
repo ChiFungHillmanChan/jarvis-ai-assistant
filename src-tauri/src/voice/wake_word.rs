@@ -438,8 +438,7 @@ async fn handle_wake_word_detection(
         }),
     );
 
-    save_message(&db, "user", &user_text)?;
-    let messages = load_recent_messages(&db)?;
+    let messages = crate::commands::chat::save_turn_and_load_history(&db, "legacy", &user_text)?;
 
     // Create streaming TTS -- speaks sentences as AI tokens arrive
     voice_engine.set_state_and_emit(VoiceState::WakeWordSpeaking);
@@ -614,32 +613,6 @@ fn show_main_window(app_handle: &JarvisAppHandle) {
             let _ = window.set_focus();
         }
     }
-}
-
-fn save_message(db: &Database, role: &str, content: &str) -> Result<(), String> {
-    let conn = db.conn.lock().map_err(|e| e.to_string())?;
-    conn.execute(
-        "INSERT INTO conversations (role, content) VALUES (?1, ?2)",
-        rusqlite::params![role, content],
-    )
-    .map_err(|e| e.to_string())?;
-    Ok(())
-}
-
-fn load_recent_messages(db: &Database) -> Result<Vec<(String, String)>, String> {
-    let conn = db.conn.lock().map_err(|e| e.to_string())?;
-    let mut stmt = conn
-        .prepare("SELECT role, content FROM conversations WHERE session_id = 'legacy' ORDER BY id DESC LIMIT 20")
-        .map_err(|e| e.to_string())?;
-    let mut messages = stmt
-        .query_map([], |row| {
-            Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
-        })
-        .map_err(|e| e.to_string())?
-        .collect::<Result<Vec<_>, _>>()
-        .map_err(|e| e.to_string())?;
-    messages.reverse();
-    Ok(messages)
 }
 
 /// Sub-frames quieter than this are never transcribed, whatever the tracked

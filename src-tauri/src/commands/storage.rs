@@ -238,6 +238,13 @@ pub fn sweep_on_startup(db: &Database) {
     }
 }
 
+/// Whether this launch opened the database without encryption, for the notice
+/// in the app (src/components/UnencryptedNotice.tsx).
+#[tauri::command]
+pub fn database_unencrypted() -> bool {
+    crate::db::stored_unencrypted()
+}
+
 #[tauri::command]
 pub fn get_storage_usage(db: State<Arc<Database>>) -> Result<StorageUsage, String> {
     let data_dir = jarvis_data_dir(&db)?;

@@ -623,6 +623,8 @@ fn execute_memory_tool(
     // decides. A refusal on such turns also refused the user's own requests --
     // any message mentioning a meeting pulls in [CONTEXT] -- after they had
     // already clicked Allow.
+    // Read before the lock below: `withheld` takes it too.
+    let withheld = crate::ai::mail_policy::withheld(db);
     let conn = match db.conn.lock() {
         Ok(c) => c,
         Err(e) => return format!("Memory error: {}", e),
@@ -645,8 +647,8 @@ fn execute_memory_tool(
             // wastes tokens on the very hot path.
             let existing: Option<i64> = conn
                 .query_row(
-                    "SELECT id FROM user_memory WHERE content = ?1 COLLATE NOCASE LIMIT 1",
-                    rusqlite::params![content],
+                    "SELECT id FROM user_memory WHERE content = ?1 COLLATE NOCASE AND id > ?2 LIMIT 1",
+                    rusqlite::params![content, withheld.memories],
                     |row| row.get(0),
                 )
                 .ok();
@@ -668,8 +670,8 @@ fn execute_memory_tool(
         "forget" => {
             if let Some(id) = args["id"].as_i64() {
                 match conn.execute(
-                    "DELETE FROM user_memory WHERE id = ?1",
-                    rusqlite::params![id],
+                    "DELETE FROM user_memory WHERE id = ?1 AND id > ?2",
+                    rusqlite::params![id, withheld.memories],
                 ) {
                     Ok(0) => format!("No memory entry with id {}.", id),
                     Ok(_) => format!("Forgot memory entry #{}.", id),
@@ -679,8 +681,8 @@ fn execute_memory_tool(
                 // An empty keyword is `LIKE '%%'`, which matches every row.
                 let pattern = format!("%{}%", keyword);
                 match conn.execute(
-                    "DELETE FROM user_memory WHERE content LIKE ?1",
-                    rusqlite::params![pattern],
+                    "DELETE FROM user_memory WHERE content LIKE ?1 AND id > ?2",
+                    rusqlite::params![pattern, withheld.memories],
                 ) {
                     Ok(0) => format!("No memory entry matched '{}'.", keyword),
                     Ok(n) => format!(
@@ -696,13 +698,13 @@ fn execute_memory_tool(
         }
         "list_memories" => {
             let mut stmt = match conn
-                .prepare("SELECT id, category, content FROM user_memory ORDER BY category, id")
+                .prepare("SELECT id, category, content FROM user_memory WHERE id > ?1 ORDER BY category, id")
             {
                 Ok(s) => s,
                 Err(e) => return format!("Memory error: {}", e),
             };
             let rows: Vec<(i64, String, String)> =
-                match stmt.query_map([], |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?))) {
+                match stmt.query_map([withheld.memories], |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?))) {
                     Ok(r) => r.filter_map(|x| x.ok()).collect(),
                     Err(e) => return format!("Memory error: {}", e),
                 };
@@ -879,15 +881,18 @@ fn execute_local_data_tool(
             Ok(lines.join("\n"))
         }
         "list_tasks" => {
+            // A task made from an email is not shown to an AI that may not
+            // read email (ai::mail_policy::withheld).
+            let withheld = crate::ai::mail_policy::withheld(db);
             let conn = db.conn.lock().map_err(|e| e.to_string())?;
             let mut stmt = conn
                 .prepare(
-                    "SELECT id, title, deadline, priority, status FROM tasks WHERE (?1 OR status != 'completed') \
+                    "SELECT id, title, deadline, priority, status FROM tasks WHERE (?1 OR status != 'completed') AND id > ?2 \
                      ORDER BY status = 'completed', deadline IS NULL, deadline, priority DESC, id LIMIT 50",
                 )
                 .map_err(|e| e.to_string())?;
             let lines: Vec<String> = stmt
-                .query_map([args["include_completed"].as_bool().unwrap_or(false)], |r| {
+                .query_map(rusqlite::params![args["include_completed"].as_bool().unwrap_or(false), withheld.tasks], |r| {
                     Ok(format!(
                         "ID: {} | {} | Deadline: {} | Priority: {} | Status: {}",
                         r.get::<_, i64>(0)?,
@@ -1380,6 +1385,8 @@ fn approval_detail(name: &str, args: &serde_json::Value, db: &crate::db::Databas
             None => lookup("SELECT '\u{201c}' || content || '\u{201d}' FROM user_memory WHERE id = ?1", &id("id")),
         },
         "create_notion_page" => args["title"].as_str().map(|title| format!("\u{201c}{title}\u{201d}")),
+        "open_file" => args["path"].as_str().map(str::to_string),
+        "open_app" => args["name"].as_str().map(str::to_string),
         "create_github_issue" => Some(format!(
             "\u{201c}{}\u{201d} {}",
             args["title"].as_str().unwrap_or(""),
@@ -1621,17 +1628,20 @@ where
     }
 }
 
+/// The memory block of the system prompt. Memories the chosen AI must not be
+/// shown are left out (ai::mail_policy::withheld).
 fn load_memory_block(db: &crate::db::Database) -> String {
+    let withheld = crate::ai::mail_policy::withheld(db);
     let conn = match db.conn.lock() {
         Ok(c) => c,
         Err(_) => return String::new(),
     };
     let mut stmt =
-        match conn.prepare("SELECT category, content FROM user_memory ORDER BY category, id") {
+        match conn.prepare("SELECT category, content FROM user_memory WHERE id > ?1 ORDER BY category, id") {
             Ok(s) => s,
             Err(_) => return String::new(),
         };
-    let rows = match stmt.query_map([], |row| {
+    let rows = match stmt.query_map([withheld.memories], |row| {
         Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
     }) {
         Ok(r) => r,
@@ -2033,22 +2043,11 @@ mod prompt_tests {
 mod memory_tests {
     use super::*;
     use crate::db::Database;
-    use rusqlite::Connection;
-    use std::sync::Mutex;
 
+    /// The real schema: the memory tools ask `mail_policy::withheld`, which
+    /// withholds everything from a database it cannot read.
     fn memory_db() -> Database {
-        let conn = Connection::open_in_memory().unwrap();
-        conn.execute_batch(
-            "CREATE TABLE user_memory (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                content TEXT NOT NULL,
-                category TEXT NOT NULL DEFAULT 'fact',
-                created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
-                updated_at DATETIME DEFAULT CURRENT_TIMESTAMP
-            );",
-        )
-        .unwrap();
-        Database { conn: Mutex::new(conn) }
+        crate::db::test_database()
     }
 
     fn count(db: &Database) -> i64 {
@@ -2166,21 +2165,20 @@ mod memory_tests {
 #[cfg(test)]
 mod outbound_approval_tests {
     use super::*;
-    use std::sync::{Arc, Mutex};
+    use std::sync::Arc;
 
     fn db() -> crate::db::Database {
-        let conn = rusqlite::Connection::open_in_memory().unwrap();
-        conn.execute_batch(
-            "CREATE TABLE user_memory (id INTEGER PRIMARY KEY AUTOINCREMENT, content TEXT NOT NULL,
-                 category TEXT NOT NULL DEFAULT 'fact', created_at DATETIME, updated_at DATETIME);
-             INSERT INTO user_memory (id, content) VALUES (7, 'Accountant is Kenny');
-             CREATE TABLE calendar_events (id INTEGER PRIMARY KEY AUTOINCREMENT, account_id TEXT NOT NULL DEFAULT '',
-                 google_id TEXT NOT NULL, summary TEXT NOT NULL, start_time TEXT NOT NULL, end_time TEXT NOT NULL);
-             INSERT INTO calendar_events (google_id, summary, start_time, end_time)
-                 VALUES ('evt1', 'Board meeting', '2026-11-02T10:00:00+08:00', '2026-11-02T11:00:00+08:00');",
-        )
-        .unwrap();
-        crate::db::Database { conn: Mutex::new(conn) }
+        let db = crate::db::test_database();
+        db.conn
+            .lock()
+            .unwrap()
+            .execute_batch(
+                "INSERT INTO user_memory (id, content) VALUES (7, 'Accountant is Kenny');
+                 INSERT INTO calendar_events (google_id, summary, start_time, end_time)
+                     VALUES ('evt1', 'Board meeting', '2026-11-02T10:00:00+08:00', '2026-11-02T11:00:00+08:00');",
+            )
+            .unwrap();
+        db
     }
 
     async fn run(name: &str, args: serde_json::Value, db: &crate::db::Database, ledger: &crate::ai::SideEffectLedger) -> String {
@@ -2214,6 +2212,24 @@ mod outbound_approval_tests {
             assert!(out.starts_with(&format!("The user did not allow {tool}")), "{tool}: {out}");
         }
         assert_eq!(memories(&db), 1, "a declined forget leaves memory alone");
+    }
+
+    /// `open` runs whatever is at the path: a .command or .app already on disk
+    /// executes. A crafted email can name one, so after an untrusted read the
+    /// user sees the path or app first.
+    #[tokio::test]
+    async fn after_an_email_was_read_opening_a_file_or_app_waits_for_a_click() {
+        let db = db();
+        for (tool, args) in [
+            ("open_file", serde_json::json!({"path": "/nonexistent/jarvis-test/run.command"})),
+            ("open_app", serde_json::json!({"name": "NoSuchJarvisTestApp"})),
+        ] {
+            let out = crate::tool_approval::TEST_ANSWER.scope(false, run(tool, args.clone(), &db, &after_email())).await;
+            assert!(out.starts_with(&format!("The user did not allow {tool}")), "{tool}: {out}");
+            // The user asking, with nothing outside read, needs no card.
+            let out = run(tool, args, &db, &crate::ai::SideEffectLedger::new()).await;
+            assert!(!out.starts_with("The user did not allow"), "{tool} on a clean turn: {out}");
+        }
     }
 
     /// When the user asked and nothing outside has been read, no card. Own
@@ -2250,6 +2266,8 @@ mod outbound_approval_tests {
             "\u{201c}Inbox\u{201d} acme/app"
         );
         assert_eq!(detail("create_notion_page", serde_json::json!({"title": "Inbox"})), "\u{201c}Inbox\u{201d}");
+        assert_eq!(detail("open_file", serde_json::json!({"path": "~/Downloads/run.command"})), "~/Downloads/run.command");
+        assert_eq!(detail("open_app", serde_json::json!({"name": "Terminal"})), "Terminal");
     }
 }
 
@@ -2912,5 +2930,69 @@ mod step_tests {
         for tool in get_tool_definitions() {
             assert!(!tool_voice_narration(&tool.name, "yue").is_ascii(), "{} has no Chinese line", tool.name);
         }
+    }
+}
+
+#[cfg(test)]
+mod withheld_tests {
+    use super::*;
+    use crate::ai::mail_policy::test_support::moved_to_kimi_after;
+    use serde_json::json;
+
+    /// Moved to Kimi, and the first turn there has begun.
+    fn db() -> crate::db::Database {
+        let db = moved_to_kimi_after(|db| {
+            db.conn
+                .lock()
+                .unwrap()
+                .execute_batch(
+                    "INSERT INTO user_memory(content) VALUES ('Kenny owes HK$12,000');
+                     INSERT INTO tasks(title) VALUES ('Pay Kenny HK$12,000');",
+                )
+                .unwrap();
+        });
+        crate::ai::mail_policy::withheld_as_turn_begins(&db);
+        db
+    }
+
+    /// A withheld memory is neither confirmed nor deleted for an AI that may
+    /// not see it: "Already remembered" and a count of deleted rows would
+    /// both tell it what the memory says.
+    #[test]
+    fn a_withheld_memory_cannot_be_matched_or_deleted_by_the_ai() {
+        let db = db();
+        let kept = |db: &crate::db::Database| db.conn.lock().unwrap().query_row("SELECT COUNT(*) FROM user_memory WHERE id = 1", [], |row| row.get::<_, i64>(0)).unwrap();
+        assert_eq!(execute_memory_tool("forget", &json!({ "keyword": "Kenny" }), &db), "No memory entry matched 'Kenny'.");
+        assert_eq!(execute_memory_tool("forget", &json!({ "id": 1 }), &db), "No memory entry with id 1.");
+        assert_eq!(kept(&db), 1);
+
+        let out = execute_memory_tool("remember", &json!({ "content": "Kenny owes HK$12,000" }), &db);
+        assert!(out.starts_with("Remembered"), "{out}");
+        assert!(execute_memory_tool("list_memories", &json!({}), &db).contains("Kenny owes"));
+    }
+
+    /// Memory is in every system prompt. A fact saved while an AI that could
+    /// read email was in use may quote that email.
+    #[test]
+    fn memories_saved_before_the_move_stay_out_of_the_prompt_and_the_memory_list() {
+        let db = db();
+        assert_eq!(load_memory_block(&db), "");
+        assert_eq!(execute_memory_tool("list_memories", &json!({}), &db), "No memories stored yet.");
+
+        execute_memory_tool("remember", &json!({ "content": "Prefers short replies" }), &db);
+        for sent in [load_memory_block(&db), execute_memory_tool("list_memories", &json!({}), &db)] {
+            assert!(sent.contains("Prefers short replies") && !sent.contains("Kenny"), "{sent}");
+        }
+    }
+
+    #[test]
+    fn tasks_saved_before_the_move_are_not_listed() {
+        let db = db();
+        let listed = execute_local_data_tool("list_tasks", &json!({}), &db).unwrap();
+        assert!(!listed.contains("Kenny"), "{listed}");
+
+        db.conn.lock().unwrap().execute("INSERT INTO tasks(title) VALUES ('Buy milk')", []).unwrap();
+        let listed = execute_local_data_tool("list_tasks", &json!({}), &db).unwrap();
+        assert!(listed.contains("Buy milk") && !listed.contains("Kenny"), "{listed}");
     }
 }
