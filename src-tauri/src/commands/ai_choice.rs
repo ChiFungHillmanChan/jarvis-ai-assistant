@@ -244,24 +244,6 @@ async fn fetch_models(name: &str, request: reqwest::RequestBuilder, list: &str, 
         .collect())
 }
 
-/// The models in Ollama's /api/tags reply that run on this Mac, by name.
-/// Ollama also lists cloud models there; it forwards their prompts to
-/// ollama.com, so they are not offered as a local choice.
-fn ollama_local_models(tags: &serde_json::Value) -> Vec<String> {
-    let remote = |model: &serde_json::Value, field: &str| model.get(field).and_then(|v| v.as_str()).is_some_and(|v| !v.trim().is_empty());
-    let mut models: Vec<String> = tags
-        .get("models")
-        .and_then(|m| m.as_array())
-        .into_iter()
-        .flatten()
-        .filter(|m| !remote(m, "remote_model") && !remote(m, "remote_host"))
-        .filter_map(|m| m.get("name").and_then(|n| n.as_str()).map(str::to_string))
-        .filter(|name| !crate::ai::mail_policy::is_ollama_cloud_model(name))
-        .collect();
-    models.sort();
-    models
-}
-
 /// Models the chosen service offers, read live from the provider so new
 /// models appear without an app update: OpenAI, Gemini, Claude, an
 /// OpenAI-compatible service, or the models installed in Ollama.
@@ -307,7 +289,7 @@ pub async fn list_ai_models(provider: String, base_url: Option<String>, api_key:
                 .await
                 .map_err(|_| "未偵測到 Ollama。請先開啟 Ollama App。".to_string())?;
             let body: serde_json::Value = response.json().await.map_err(|_| "Ollama 回覆格式無效。".to_string())?;
-            Ok(ollama_local_models(&body))
+            Ok(crate::ai::local::ollama::models_on_this_mac(&body))
         }
         _ => Err("這個 AI 不需要選擇模型。".into()),
     }
@@ -316,23 +298,6 @@ pub async fn list_ai_models(provider: String, base_url: Option<String>, api_key:
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    /// The Ollama choice in setup means a model on this Mac. A cloud model is
-    /// listed by Ollama next to the local ones; it is told apart by its name
-    /// or by the remote fields Ollama reports for it.
-    #[test]
-    fn the_ollama_list_offers_only_models_that_run_on_this_mac() {
-        let tags = serde_json::json!({ "models": [
-            { "name": "qwen3:8b" },
-            { "name": "gpt-oss:120b-cloud", "remote_model": "gpt-oss:120b", "remote_host": "https://ollama.com:443" },
-            { "name": "glm-4.6:cloud" },
-            { "name": "private-assistant:latest", "remote_host": "https://ollama.com:443" },
-            { "name": "alias:latest", "remote_model": "gpt-oss:120b" },
-            { "name": "llama3.2:latest", "remote_model": "", "remote_host": " " },
-        ]});
-        assert_eq!(ollama_local_models(&tags), ["llama3.2:latest", "qwen3:8b"]);
-        assert!(ollama_local_models(&serde_json::json!({})).is_empty());
-    }
 
     fn choice(provider: &str, base_url: Option<&str>, model: Option<&str>) -> AiChoice {
         AiChoice { provider: provider.into(), api_key: None, base_url: base_url.map(Into::into), model: model.map(Into::into) }
