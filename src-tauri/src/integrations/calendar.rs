@@ -273,6 +273,7 @@ pub fn save_to_db(
     time_max: &str,
     account_id: &str,
 ) -> Result<(), String> {
+    crate::db::require_encrypted_for_google_data()?;
     let events = &fetched.events;
     let mut conn = db.conn.lock().map_err(|e| e.to_string())?;
     let tx = conn.transaction().map_err(|e| e.to_string())?;
@@ -354,6 +355,16 @@ mod sync_tests {
     // one hanging over its edge.
     const TIME_MIN: &str = "2026-09-04T00:00:00Z";
     const TIME_MAX: &str = "2026-09-11T10:00:00Z";
+
+    /// Calendar titles, attendees and locations are not written to a database
+    /// that is not encrypted, like mail.
+    #[test]
+    fn events_are_not_saved_while_the_database_is_stored_unencrypted() {
+        let db = events_db();
+        let saved = crate::db::TEST_STORED_UNENCRYPTED.sync_scope(true, || save_to_db(&db, &complete(vec![]), TIME_MIN, TIME_MAX, MAIN_ACCOUNT));
+        assert_eq!(saved, Err(crate::db::UNENCRYPTED_SYNC_PAUSED.to_string()));
+        assert_eq!(save_to_db(&db, &complete(vec![]), TIME_MIN, TIME_MAX, MAIN_ACCOUNT), Ok(()));
+    }
 
     fn events_db() -> crate::db::Database {
         crate::db::test_database()

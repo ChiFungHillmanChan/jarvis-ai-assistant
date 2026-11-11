@@ -19,9 +19,9 @@ pub struct Database {
     pub conn: Mutex<Connection>,
 }
 
-/// What mail sync reports while the database on disk is not encrypted.
+/// What mail and calendar sync report while the database on disk is not encrypted.
 pub const UNENCRYPTED_SYNC_PAUSED: &str =
-    "此 Mac 上的 JARVIS 資料庫未能加密，郵件同步已暫停。請重新啟動 JARVIS，並在 macOS 要求存取鑰匙圈時選擇「允許」。";
+    "此 Mac 上的 JARVIS 資料庫未能加密，郵件及日曆同步已暫停。請重新啟動 JARVIS，並在 macOS 要求存取鑰匙圈時選擇「允許」。";
 
 static STORED_UNENCRYPTED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
 
@@ -41,8 +41,8 @@ pub fn stored_unencrypted() -> bool {
     STORED_UNENCRYPTED.load(std::sync::atomic::Ordering::Relaxed)
 }
 
-/// Mail is not written to a database that is not encrypted.
-pub fn require_encrypted_for_mail() -> Result<(), String> {
+/// Gmail and Calendar content is not written to a database that is not encrypted.
+pub fn require_encrypted_for_google_data() -> Result<(), String> {
     if stored_unencrypted() {
         Err(UNENCRYPTED_SYNC_PAUSED.to_string())
     } else {

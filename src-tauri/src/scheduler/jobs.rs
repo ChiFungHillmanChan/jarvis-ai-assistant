@@ -65,6 +65,7 @@ pub async fn run_job(db: &Arc<Database>, auth: &Arc<GoogleAuth>, action_type: &s
     }
 
     let result = match action_type {
+        job if waits_for_an_encrypted_database(job) => Ok("Skipped: the database is not encrypted".to_string()),
         "email_sync" => run_email_sync(db, auth).await,
         "mail_workspace_sync" => run_mail_workspace_sync(db).await,
         "calendar_sync" => run_calendar_sync(db, auth).await,
@@ -194,6 +195,12 @@ pub(crate) async fn run_calendar_sync(db: &Arc<Database>, auth: &Arc<GoogleAuth>
         summary.push_str(&format!("; {}", problems.join(" ")));
     }
     Ok(summary)
+}
+
+/// The jobs that save Gmail or Calendar content. They are skipped, not run to
+/// fail, while the database is not encrypted (see `db::stored_unencrypted`).
+fn waits_for_an_encrypted_database(action_type: &str) -> bool {
+    matches!(action_type, "email_sync" | "mail_workspace_sync" | "calendar_sync") && crate::db::stored_unencrypted()
 }
 
 async fn sync_main_calendar(db: &Arc<Database>, auth: &Arc<GoogleAuth>, time_min: &str, time_max: &str) -> Result<String, String> {
@@ -555,6 +562,16 @@ async fn run_auto_archive(db: &Arc<Database>, auth: &Arc<GoogleAuth>) -> Result<
 mod tests {
     use super::*;
     use rusqlite::Connection;
+
+    /// While the database is not encrypted the jobs that save Gmail or
+    /// Calendar content are skipped, not failed every few minutes.
+    #[test]
+    fn google_sync_jobs_wait_while_the_database_is_stored_unencrypted() {
+        let waits = |job: &str| crate::db::TEST_STORED_UNENCRYPTED.sync_scope(true, || waits_for_an_encrypted_database(job));
+        assert!(waits("email_sync") && waits("mail_workspace_sync") && waits("calendar_sync"));
+        assert!(!waits("deadline_monitor") && !waits("notion_sync"));
+        assert!(!waits_for_an_encrypted_database("calendar_sync"));
+    }
 
     /// The reminder window must compare instants, not raw text. Before the fix
     /// the upper bound was unsatisfiable for every timed event, so the

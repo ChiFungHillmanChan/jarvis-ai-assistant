@@ -414,7 +414,7 @@ const INBOX_WINDOW_QUERY: &str =
     "SELECT gmail_id FROM emails WHERE is_archived = 0 AND datetime(received_at) >= datetime(?1)";
 
 pub fn save_to_db(db: &crate::db::Database, fetched: &InboxFetch) -> Result<(), String> {
-    crate::db::require_encrypted_for_mail()?;
+    crate::db::require_encrypted_for_google_data()?;
     let mut conn = db.conn.lock().map_err(|e| e.to_string())?;
     // One transaction: the upsert and the reconciliation below are one view of
     // the inbox, and a half-applied one archives mail that is still there.

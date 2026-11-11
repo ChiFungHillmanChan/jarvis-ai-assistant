@@ -394,7 +394,7 @@ async fn sync_locked(
     older: bool,
     restart: bool,
 ) -> Result<MailSyncResult, String> {
-    crate::db::require_encrypted_for_mail()?;
+    crate::db::require_encrypted_for_google_data()?;
     let account = store::get_account(db, account_id)?;
     if !account.connected {
         return Err("此信箱已斷開，請先重新連接。".to_string());
