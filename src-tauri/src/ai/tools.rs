@@ -1380,6 +1380,8 @@ fn approval_detail(name: &str, args: &serde_json::Value, db: &crate::db::Databas
             None => lookup("SELECT '\u{201c}' || content || '\u{201d}' FROM user_memory WHERE id = ?1", &id("id")),
         },
         "create_notion_page" => args["title"].as_str().map(|title| format!("\u{201c}{title}\u{201d}")),
+        "open_file" => args["path"].as_str().map(str::to_string),
+        "open_app" => args["name"].as_str().map(str::to_string),
         "create_github_issue" => Some(format!(
             "\u{201c}{}\u{201d} {}",
             args["title"].as_str().unwrap_or(""),
@@ -2216,6 +2218,24 @@ mod outbound_approval_tests {
         assert_eq!(memories(&db), 1, "a declined forget leaves memory alone");
     }
 
+    /// `open` runs whatever is at the path: a .command or .app already on disk
+    /// executes. A crafted email can name one, so after an untrusted read the
+    /// user sees the path or app first.
+    #[tokio::test]
+    async fn after_an_email_was_read_opening_a_file_or_app_waits_for_a_click() {
+        let db = db();
+        for (tool, args) in [
+            ("open_file", serde_json::json!({"path": "/nonexistent/jarvis-test/run.command"})),
+            ("open_app", serde_json::json!({"name": "NoSuchJarvisTestApp"})),
+        ] {
+            let out = crate::tool_approval::TEST_ANSWER.scope(false, run(tool, args.clone(), &db, &after_email())).await;
+            assert!(out.starts_with(&format!("The user did not allow {tool}")), "{tool}: {out}");
+            // The user asking, with nothing outside read, needs no card.
+            let out = run(tool, args, &db, &crate::ai::SideEffectLedger::new()).await;
+            assert!(!out.starts_with("The user did not allow"), "{tool} on a clean turn: {out}");
+        }
+    }
+
     /// When the user asked and nothing outside has been read, no card. Own
     /// calendar entries and Gmail drafts never need one: the event has no
     /// attendees and the draft is sent by hand.
@@ -2250,6 +2270,8 @@ mod outbound_approval_tests {
             "\u{201c}Inbox\u{201d} acme/app"
         );
         assert_eq!(detail("create_notion_page", serde_json::json!({"title": "Inbox"})), "\u{201c}Inbox\u{201d}");
+        assert_eq!(detail("open_file", serde_json::json!({"path": "~/Downloads/run.command"})), "~/Downloads/run.command");
+        assert_eq!(detail("open_app", serde_json::json!({"name": "Terminal"})), "Terminal");
     }
 }
 

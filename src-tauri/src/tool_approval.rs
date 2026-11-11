@@ -23,8 +23,10 @@ pub const NEEDS_APPROVAL: &[&str] = &["remember", "archive_email", "delete_event
 /// they wait for the user too. `create_event` (the user's own calendar, no
 /// attendees) and `draft_email` (the user sends the draft by hand) stay off:
 /// asking before every one would tax the commonest requests for no protection.
+/// `open_file` and `open_app` hand a model-chosen path or name to macOS `open`,
+/// which runs a .command or .app already on disk, so they wait as well.
 pub const NEEDS_APPROVAL_AFTER_UNTRUSTED_READ: &[&str] =
-    &["update_event", "create_notion_page", "create_github_issue", "forget"];
+    &["update_event", "create_notion_page", "create_github_issue", "forget", "open_file", "open_app"];
 
 const WAIT: Duration = Duration::from_secs(120);
 
