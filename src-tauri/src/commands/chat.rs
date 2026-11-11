@@ -360,6 +360,17 @@ pub(crate) fn save_turn_and_load_history(db: &Database, session_id: &str, messag
 
 /// `save_turn_and_load_history`, with the id of the message it saved.
 pub(crate) fn save_turn(db: &Database, session_id: &str, message: &str) -> Result<(i64, Vec<(String, String)>), String> {
+    save_turn_with(db, session_id, message, |_, _| {})
+}
+
+/// `save_turn`, running `also_save` on the saved message's id while the
+/// database is still held, so what it writes is never seen missing.
+pub(crate) fn save_turn_with(
+    db: &Database,
+    session_id: &str,
+    message: &str,
+    also_save: impl FnOnce(&rusqlite::Connection, i64),
+) -> Result<(i64, Vec<(String, String)>), String> {
     // Before the lock below: this takes it too.
     let withheld = crate::ai::mail_policy::withheld_as_turn_begins(db);
     let conn = db.conn.lock().map_err(|e| e.to_string())?;
@@ -369,6 +380,7 @@ pub(crate) fn save_turn(db: &Database, session_id: &str, message: &str) -> Resul
     )
     .map_err(|e| e.to_string())?;
     let saved = conn.last_insert_rowid();
+    also_save(&conn, saved);
     let mut stmt = conn
         .prepare("SELECT role, content FROM conversations WHERE session_id = ?1 AND (id > ?2 OR id = ?3) ORDER BY id DESC LIMIT 20")
         .map_err(|e| e.to_string())?;
@@ -513,12 +525,26 @@ mod tests {
         assert_eq!(history.len(), 2);
     }
 
+    /// A recording is saved with its message: a history read landing between
+    /// the two would show the message as one that cannot be played back.
+    #[test]
+    fn what_is_saved_with_a_turn_is_saved_before_anyone_else_can_read_the_database() {
+        let db = crate::db::test_database();
+        let mut seen = None;
+        let (id, _) = save_turn_with(&db, "legacy", "what is on my calendar", |conn, id| {
+            assert!(db.conn.try_lock().is_err(), "the database must still be held");
+            seen = conn.query_row("SELECT content FROM conversations WHERE id = ?1", [id], |r| r.get::<_, String>(0)).ok();
+        })
+        .unwrap();
+        assert!(id > 0);
+        assert_eq!(seen.as_deref(), Some("what is on my calendar"));
+    }
+
     #[test]
     fn history_marks_the_voice_requests_that_can_be_played_back() {
         let db = crate::db::test_database();
-        let (spoken, _) = save_turn(&db, "legacy", "what is on my calendar").unwrap();
+        crate::voice::recordings::save_spoken_turn(&db, "what is on my calendar", &[0.1; 1600]).unwrap();
         save_turn(&db, "legacy", "typed this one").unwrap();
-        assert!(crate::voice::recordings::keep(&db, spoken, &[0.1; 1600]));
         let conn = db.conn.lock().unwrap();
         let marks: Vec<(String, bool)> = history(&conn, "legacy", None).unwrap().into_iter().map(|m| (m.content, m.has_recording)).collect();
         assert_eq!(marks, [("what is on my calendar".to_string(), true), ("typed this one".to_string(), false)]);

@@ -29,3 +29,87 @@ test('a live voice event without a recording is shown as an ordinary message', (
   assert.deepEqual(shown, { id: null, role: 'assistant', content: 'You have two meetings.', created_at: '2026-11-11T12:00:00.000Z', has_recording: false });
   assert.equal(replayableId(shown), null);
 });
+
+// --- playing one back -------------------------------------------------------
+
+import { createReplay } from '../src/lib/voice-replay.ts';
+
+function deferred<T>() {
+  let resolve!: (value: T) => void, reject!: (reason: unknown) => void;
+  const promise = new Promise<T>((res, rej) => { resolve = res; reject = rej; });
+  return { promise, resolve, reject };
+}
+const settle = () => new Promise(resolve => setImmediate(resolve));
+
+function harness() {
+  const load = deferred<ArrayBuffer>();
+  const decode = deferred<unknown>();
+  const states: string[] = [];
+  const audio = { made: 0, closed: 0, started: 0, ended: () => {} };
+  const replay = createReplay(
+    () => load.promise,
+    () => {
+      audio.made++;
+      return {
+        decode: () => decode.promise,
+        play: (_buffer: unknown, onEnded: () => void) => { audio.started++; audio.ended = onEnded; },
+        close: () => { audio.closed++; },
+      };
+    },
+    state => states.push(state),
+  );
+  return { load, decode, states, audio, replay };
+}
+
+test('a recording plays, and the button goes back when it ends', async () => {
+  const h = harness();
+  void h.replay.toggle();
+  h.load.resolve(new ArrayBuffer(8)); await settle();
+  h.decode.resolve({}); await settle();
+  assert.equal(h.audio.started, 1);
+  assert.equal(h.states.at(-1), 'playing');
+  h.audio.ended();
+  assert.equal(h.states.at(-1), 'idle');
+  assert.equal(h.audio.closed, 1, 'the audio device is released when playback ends');
+});
+
+test('pressing the button while it plays stops it', async () => {
+  const h = harness();
+  void h.replay.toggle();
+  h.load.resolve(new ArrayBuffer(8)); await settle();
+  h.decode.resolve({}); await settle();
+  void h.replay.toggle();
+  assert.equal(h.states.at(-1), 'idle');
+  assert.equal(h.audio.closed, 1);
+  h.audio.ended();
+  assert.equal(h.audio.closed, 1, 'the end of a stopped recording changes nothing');
+});
+
+test('pressing again while it is still being prepared cancels it', async () => {
+  const h = harness();
+  void h.replay.toggle();
+  h.load.resolve(new ArrayBuffer(8)); await settle();
+  void h.replay.toggle();
+  h.decode.resolve({}); await settle();
+  assert.equal(h.audio.started, 0, 'a cancelled recording must not start');
+  assert.ok(!h.states.includes('playing'), 'the button must not say Stop with nothing playing');
+  assert.equal(h.audio.closed, 1);
+});
+
+test('leaving the chat before the recording arrives plays nothing', async () => {
+  const h = harness();
+  void h.replay.toggle();
+  h.replay.stop();
+  h.load.resolve(new ArrayBuffer(8)); await settle();
+  assert.equal(h.audio.made, 0);
+  assert.equal(h.audio.started, 0);
+});
+
+test('a recording that cannot be fetched or decoded says so and can be retried', async () => {
+  const h = harness();
+  void h.replay.toggle();
+  h.load.reject(new Error('gone')); await settle();
+  assert.equal(h.states.at(-1), 'failed');
+  void h.replay.toggle();
+  assert.equal(h.states.at(-1), 'idle', 'a retry clears the failure');
+});
