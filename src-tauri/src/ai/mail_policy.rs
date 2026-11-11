@@ -2,7 +2,8 @@
 //!
 //! Google's Limited Use rules for Gmail data forbid transferring it to be used
 //! to train AI models. OpenAI, Anthropic and Amazon Bedrock do not train on API
-//! traffic by default, and a model on this Mac keeps email local. Gemini's
+//! traffic by default, and a model on this Mac keeps email local (an Ollama
+//! cloud model does not run on this Mac and is refused). Gemini's
 //! unpaid tier may use submitted content to improve Google's models (outside
 //! the EEA, Switzerland and the UK), so Gemini needs the user's confirmation
 //! that billing is on. Kimi, Qwen and other services have not been checked and
@@ -90,6 +91,7 @@ fn allowed(db: &Database, entry: &ProviderChainEntry) -> Result<(), Blocked> {
         ("openai", Some(base)) if compat::host(base) == "api.openai.com" => Ok(()),
         ("openai", Some(base)) => Err(Blocked::NotAllowed(compat::label(base))),
         ("gemini", _) => gemini(db),
+        ("local", _) if entry.model_id.as_deref().is_some_and(is_ollama_cloud_model) => Err(Blocked::NotAllowed("Ollama Cloud".into())),
         ("local", _) => local_on_this_mac(db, entry.endpoint_id.as_deref()),
         (other, _) => Err(Blocked::NotAllowed(other.to_string())),
     }
@@ -114,6 +116,13 @@ fn gemini(db: &Database) -> Result<(), Blocked> {
     } else {
         Err(Blocked::GeminiBillingUnconfirmed)
     }
+}
+
+/// Ollama names its cloud models "<name>:cloud" or "<name>:<size>-cloud" and
+/// forwards their prompts to ollama.com.
+pub fn is_ollama_cloud_model(model: &str) -> bool {
+    let name = model.trim().to_ascii_lowercase();
+    name.ends_with(":cloud") || name.ends_with("-cloud")
 }
 
 /// A local model keeps email on this Mac; a "local" endpoint pointing at
@@ -189,5 +198,22 @@ mod tests {
         assert!(check(&db_with(&[("openai", None, None), ("openai", Some("https://dashscope.aliyuncs.com/compatible-mode/v1"), None)], &[])).is_err());
         // No saved choice means the old Gemini default.
         assert_eq!(check(&db_with(&[], &[])), Err(Blocked::GeminiBillingUnconfirmed));
+    }
+
+    /// Ollama on this Mac forwards a "-cloud" model's prompt to ollama.com, so
+    /// the loopback endpoint alone does not keep email on the Mac.
+    #[test]
+    fn an_ollama_cloud_model_is_not_a_model_on_this_mac() {
+        let with_model = |model: &str| {
+            let db = db_with(&[("local", None, Some("mac"))], &[]);
+            db.conn.lock().unwrap().execute("UPDATE provider_chain SET model_id = ?1", [model]).unwrap();
+            db
+        };
+        for model in ["gpt-oss:120b-cloud", "qwen3-coder:480b-cloud", "glm-4.6:cloud", "GPT-OSS:20B-CLOUD"] {
+            assert_eq!(check(&with_model(model)), Err(Blocked::NotAllowed("Ollama Cloud".into())), "{model}");
+        }
+        for model in ["qwen3:8b", "cloudy-day:latest", "llama3.2"] {
+            assert_eq!(check(&with_model(model)), Ok(()), "{model}");
+        }
     }
 }
