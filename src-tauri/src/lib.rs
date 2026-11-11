@@ -581,6 +581,7 @@ pub fn run() {
             commands::scheduler::trigger_daily_briefing,
             commands::voice_setup::enable_offline_voice,
             commands::voice_setup::check_cosyvoice_binary,
+            commands::storage::database_unencrypted,
             commands::storage::get_storage_usage,
             commands::storage::run_storage_sweep,
             commands::storage::purge_storage,

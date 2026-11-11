@@ -19,6 +19,37 @@ pub struct Database {
     pub conn: Mutex<Connection>,
 }
 
+/// What mail sync reports while the database on disk is not encrypted.
+pub const UNENCRYPTED_SYNC_PAUSED: &str =
+    "此 Mac 上的 JARVIS 資料庫未能加密，郵件同步已暫停。請重新啟動 JARVIS，並在 macOS 要求存取鑰匙圈時選擇「允許」。";
+
+static STORED_UNENCRYPTED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+#[cfg(test)]
+tokio::task_local! {
+    /// Tests say how the database was opened, without a real one on disk.
+    pub static TEST_STORED_UNENCRYPTED: bool;
+}
+
+/// True when this launch opened the database without encryption because its
+/// key could not be created or read (see `encryption::open`).
+pub fn stored_unencrypted() -> bool {
+    #[cfg(test)]
+    if let Ok(unencrypted) = TEST_STORED_UNENCRYPTED.try_with(|unencrypted| *unencrypted) {
+        return unencrypted;
+    }
+    STORED_UNENCRYPTED.load(std::sync::atomic::Ordering::Relaxed)
+}
+
+/// Mail is not written to a database that is not encrypted.
+pub fn require_encrypted_for_mail() -> Result<(), String> {
+    if stored_unencrypted() {
+        Err(UNENCRYPTED_SYNC_PAUSED.to_string())
+    } else {
+        Ok(())
+    }
+}
+
 #[cfg(test)]
 pub(crate) fn test_database() -> Database {
     let mut conn = Connection::open_in_memory().unwrap();
@@ -85,7 +116,11 @@ impl Database {
             std::fs::create_dir_all(parent)?;
         }
         #[cfg(not(feature = "native-qa"))]
-        let mut conn = encryption::open(&db_path)?;
+        let mut conn = {
+            let (conn, encrypted) = encryption::open(&db_path)?;
+            STORED_UNENCRYPTED.store(!encrypted, std::sync::atomic::Ordering::Relaxed);
+            conn
+        };
         // Native QA runs on a throwaway folder with an in-memory Keychain, so a
         // key would not survive a relaunch; its data is synthetic.
         #[cfg(feature = "native-qa")]
@@ -156,23 +191,31 @@ pub(crate) mod encryption {
     /// cannot get a key, it opens unencrypted and the next launch tries again.
     /// Only an encrypted database whose key is gone is a hard failure, because
     /// its contents are unreadable without that key.
-    pub fn open(path: &Path) -> Result<Connection> {
+    ///
+    /// The flag is whether the database is encrypted on disk.
+    pub fn open(path: &Path) -> Result<(Connection, bool)> {
+        open_with(path, key)
+    }
+
+    /// `open` with the Keychain lookup passed in: `key(create)` returns the
+    /// key, generating it first when `create` allows.
+    fn open_with(path: &Path, key: impl Fn(bool) -> Result<String>) -> Result<(Connection, bool)> {
         settle_interrupted_conversion(path)?;
         if is_plaintext(path)? {
             match key(true).and_then(|key| encrypt_in_place(path, &key).map(|_| key)) {
-                Ok(key) => return open_with_key(path, &key),
+                Ok(key) => return Ok((open_with_key(path, &key)?, true)),
                 Err(e) => {
                     log::error!("Database encryption failed; opening it unencrypted: {e}");
-                    return Ok(Connection::open(path)?);
+                    return Ok((Connection::open(path)?, false));
                 }
             }
         }
         let is_new = !path.exists() || std::fs::metadata(path)?.len() == 0;
         match key(is_new) {
-            Ok(key) => open_with_key(path, &key),
+            Ok(key) => Ok((open_with_key(path, &key)?, true)),
             Err(e) if is_new => {
                 log::error!("No database key; creating the database unencrypted: {e}");
-                Ok(Connection::open(path)?)
+                Ok((Connection::open(path)?, false))
             }
             Err(e) => Err(format!(
                 "The database is encrypted, but its key could not be read from the Keychain ({e})."
@@ -445,6 +488,24 @@ pub(crate) mod encryption {
             std::fs::remove_dir_all(dir).unwrap();
         }
 
+        /// A locked or refused Keychain must not lock anyone out of JARVIS,
+        /// but the app has to know the data on disk is unprotected.
+        #[test]
+        fn a_database_opened_without_a_key_is_reported_as_unencrypted() {
+            let no_key = |_create: bool| -> Result<String> { Err("User interaction is not allowed.".into()) };
+            let fresh = temp_db();
+            assert!(!open_with(&fresh, no_key).unwrap().1, "a new database with no key");
+            let old = temp_db();
+            Connection::open(&old).unwrap().execute_batch("CREATE TABLE mail(body TEXT);").unwrap();
+            assert!(!open_with(&old, no_key).unwrap().1, "an old database that could not be converted");
+            assert!(is_plaintext(&old).unwrap());
+            let keyed = temp_db();
+            assert!(open(&keyed).unwrap().1, "a database opened with its key");
+            for p in [&fresh, &old, &keyed] {
+                std::fs::remove_dir_all(p.parent().unwrap()).unwrap();
+            }
+        }
+
         #[test]
         fn open_encrypts_old_databases_and_reopens_them_with_the_stored_key() {
             let path = temp_db();
@@ -454,13 +515,13 @@ pub(crate) mod encryption {
             }
             drop(open(&path).unwrap());
             assert!(!is_plaintext(&path).unwrap(), "first launch converts it");
-            let conn = open(&path).unwrap();
+            let (conn, _) = open(&path).unwrap();
             let body: String = conn.query_row("SELECT body FROM mail", [], |row| row.get(0)).unwrap();
             assert_eq!(body, "kept");
             drop(conn);
 
             let fresh = temp_db();
-            drop(open(&fresh).unwrap().execute_batch("CREATE TABLE t(x)"));
+            drop(open(&fresh).unwrap().0.execute_batch("CREATE TABLE t(x)"));
             assert!(!is_plaintext(&fresh).unwrap(), "a new database starts encrypted");
             for p in [&path, &fresh] {
                 std::fs::remove_dir_all(p.parent().unwrap()).unwrap();

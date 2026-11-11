@@ -394,6 +394,7 @@ async fn sync_locked(
     older: bool,
     restart: bool,
 ) -> Result<MailSyncResult, String> {
+    crate::db::require_encrypted_for_mail()?;
     let account = store::get_account(db, account_id)?;
     if !account.connected {
         return Err("此信箱已斷開，請先重新連接。".to_string());
@@ -872,6 +873,16 @@ fn advance_cursor(older: bool, has_cursor: bool, restart: bool, failures: usize)
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// If the Keychain refused the database key, the database is plain
+    /// SQLite on disk. Mail is not downloaded into it.
+    #[tokio::test]
+    async fn sync_is_paused_while_the_database_is_stored_unencrypted() {
+        let (db, a, _) = two_accounts();
+        let state = MailSyncState::new();
+        let error = crate::db::TEST_STORED_UNENCRYPTED.scope(true, sync_account(&db, &state, &a, false)).await.err();
+        assert_eq!(error.as_deref(), Some(crate::db::UNENCRYPTED_SYNC_PAUSED));
+    }
 
     fn two_accounts() -> (Database, String, String) {
         let db = crate::db::test_database();
