@@ -111,6 +111,19 @@ export class PaymentStack extends cdk.Stack {
     stripeSecrets.grantRead(portalFn);
     props.userMetaTable.grantReadData(portalFn);
 
+    // Only these three functions may read the Stripe key and signing secret.
+    // Anyone else, administrators included, must first change this policy,
+    // and CloudTrail records that change.
+    const readLock = stripeSecrets.addToResourcePolicy(new iam.PolicyStatement({
+      effect: iam.Effect.DENY,
+      principals: [new iam.AnyPrincipal()],
+      actions: ['secretsmanager:GetSecretValue'],
+      resources: ['*'],
+      conditions: { ArnNotEquals: { 'aws:PrincipalArn': [webhookFn, checkoutFn, portalFn].map(fn => fn.role!.roleArn) } },
+    }));
+    // Secrets Manager refuses any later policy that would open the secret to other accounts.
+    ((readLock.policyDependable as sm.ResourcePolicy).node.defaultChild as sm.CfnResourcePolicy).blockPublicPolicy = true;
+
     const meFn = new nodejs.NodejsFunction(this, 'MeFn', {
       functionName: `jarvis-${props.envName}-me`,
       runtime: lambda.Runtime.NODEJS_24_X,
