@@ -50,6 +50,11 @@ async function createAttempt(stripe: Stripe, userId: string, customer: string, r
     success_url: `https://${appDomain}/${row.checkoutLocale || 'en'}/payment/success?session_id={CHECKOUT_SESSION_ID}`,
     cancel_url: `https://${appDomain}/${row.checkoutLocale || 'en'}/payment/cancel`,
     automatic_tax: { enabled: false },
+    // An account can default Checkout to Managed Payments (Stripe as the
+    // seller), which rejects automatic_tax: false. JARVIS sells directly.
+    // Attempts written before this was sent replay without it. The installed
+    // SDK's types predate the parameter.
+    ...(row.checkoutSelfBilled ? ({ managed_payments: { enabled: false } } as object) : {}),
     // A code checkout applies the discount itself and asks for a card only if
     // something is due; Stripe rejects allow_promotion_codes alongside discounts.
     ...(promotionCode
@@ -63,7 +68,7 @@ function attemptTrialDays(row: Record<string, any>): number {
   return typeof row.checkoutTrialDays === 'number' && row.checkoutTrialDays > 0 ? row.checkoutTrialDays : 0;
 }
 
-const ATTEMPT_FIELDS = 'checkoutAttemptId, checkoutAttemptAt, checkoutTier, checkoutPriceId, checkoutLocale, checkoutStripeLocale, checkoutTrialDays, checkoutPromotionCodeId, checkoutSessionId';
+const ATTEMPT_FIELDS = 'checkoutAttemptId, checkoutAttemptAt, checkoutTier, checkoutPriceId, checkoutLocale, checkoutStripeLocale, checkoutTrialDays, checkoutPromotionCodeId, checkoutSelfBilled, checkoutSessionId';
 
 async function activePromotionCode(stripe: Stripe, code: string) {
   const page = await stripe.promotionCodes.list({ code, active: true, limit: 1 });
@@ -168,8 +173,8 @@ export async function handler(event: APIGatewayProxyEventV2WithJWTAuthorizer): P
       const codeSet = promotionCode ? ', checkoutPromotionCodeId = :promotionCode' : '';
       const codeRemove = promotionCode ? '' : ', checkoutPromotionCodeId';
       await updateUser(userId,
-        `SET checkoutAttemptId = :attempt, checkoutAttemptAt = :at, checkoutTier = :tier, checkoutPriceId = :price, checkoutLocale = :locale, checkoutStripeLocale = :locale, checkoutTrialDays = :trialDays${codeSet} REMOVE checkoutSessionId${codeRemove}`,
-        { ':attempt': randomUUID(), ':at': Date.now(), ':tier': tier, ':price': configuredPrices[tier], ':locale': readLocale(event.body, event.isBase64Encoded), ':trialDays': trialDays, ...(promotionCode ? { ':promotionCode': promotionCode.id } : {}) }, owner);
+        `SET checkoutAttemptId = :attempt, checkoutAttemptAt = :at, checkoutTier = :tier, checkoutPriceId = :price, checkoutLocale = :locale, checkoutStripeLocale = :locale, checkoutTrialDays = :trialDays, checkoutSelfBilled = :selfBilled${codeSet} REMOVE checkoutSessionId${codeRemove}`,
+        { ':attempt': randomUUID(), ':at': Date.now(), ':tier': tier, ':price': configuredPrices[tier], ':locale': readLocale(event.body, event.isBase64Encoded), ':trialDays': trialDays, ':selfBilled': true, ...(promotionCode ? { ':promotionCode': promotionCode.id } : {}) }, owner);
       row = await userRow(userId);
       const session = await createOrRejectCode(stripe, userId, customer, row, owner);
       await updateUser(userId, 'SET checkoutSessionId = :session', { ':session': session.id }, owner);

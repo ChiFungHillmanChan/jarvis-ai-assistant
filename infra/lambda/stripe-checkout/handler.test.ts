@@ -109,6 +109,19 @@ test('an ambiguous new checkout keeps its original Stripe locale when the app la
   assert.equal(h.sessions.size,1);
 });
 
+// A Stripe account can default Checkout to Managed Payments, where Stripe is
+// the seller; such an account rejects automatic_tax: false. JARVIS sells directly.
+test('a new checkout declines Stripe Managed Payments, and its retry sends the same request', async () => {
+  const h=createHarness();const handler=h.handler('stripe-checkout');
+  const first=JSON.parse((await handler(h.request('pro'))).body);
+  const created=h.calls.find(c=>c.kind==='checkout.create');
+  assert.deepEqual(created.input.managed_payments,{enabled:false});
+  h.rows.get('user_fixture').checkoutSessionId=undefined;
+  const retry=JSON.parse((await handler(h.request('pro'))).body);
+  assert.equal(retry.session_id,first.session_id);
+  assert.deepEqual(h.calls.filter(c=>c.kind==='checkout.create').at(-1).input,created.input);
+});
+
 test('a legacy ambiguous checkout recovers without adding a locale to its existing idempotency key', async () => {
   const h=createHarness();h.seedSubscription('canceled');
   const input={
