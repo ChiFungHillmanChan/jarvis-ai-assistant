@@ -1,14 +1,25 @@
-JARVIS v0.5.6
+JARVIS v0.5.7
 
-This update gives your mail and calendar more protection and adds "Delete all JARVIS data on this Mac".
+This update fixes several privacy and security issues, improves in-app updates and makes the interface smoother.
 
 Privacy and security
-- When JARVIS has read content written by someone else, such as an email or a web page, while answering a request, it asks you to click before it changes a calendar event, creates a Notion page, opens a GitHub issue or deletes a memory. Instructions hidden in an email cannot trigger these on their own.
-- Before a link from an AI reply or a page opens, JARVIS shows the full address and site name and opens it only after you confirm.
-- Google Calendar event titles and locations follow the same rule as Gmail content: an AI that may not receive your email content is told only how many meetings you have today.
+- When JARVIS has read content written by someone else, such as an email or a web page, while answering a request, it now also asks you to click before it opens a file or an app.
+- Ollama cloud models (names ending in :cloud or -cloud) send content to ollama.com, so they no longer count as a model running on this Mac: they are left out of the local model list and are not sent your mail or calendar content.
+- After you switch to an AI that may not receive your email content, chats, memories and tasks saved before the switch are no longer sent to that AI. They return when you switch back to an AI that may receive email content.
+- If JARVIS cannot get its database key from the macOS Keychain, the database is stored unencrypted. JARVIS now shows a notice and pauses mail and calendar sync until you restart it and allow Keychain access.
+- Updated the libraries used for encrypted network connections.
 
-Storage
-- New: Settings > Storage > Delete all JARVIS data on this Mac. It revokes JARVIS's Google access, then deletes the copies of your mail and calendar, chat history, memory, settings, the models JARVIS downloaded, backups, and every API key and sign-in saved in the Keychain, and restarts JARVIS as a fresh install. You type DELETE to confirm; it cannot be undone.
-- Nothing in Gmail, Google Calendar, Notion or GitHub is deleted, and your JARVIS account stays open. Ollama and its models are not touched.
+Updates
+- A new version now downloads in the background and asks you to restart only once it is ready. A download that times out or fails is retried, and the notice no longer stays on "Updating".
+
+Fixes
+- "Remember" is no longer refused because of ordinary wording.
+- Local speech recognition set to Cantonese no longer produces garbled English.
+- Mail group analysis handled by the AI you chose is no longer labelled "Local Ollama".
+- Step 2 of setup asks whether to sort new mail with AI.
+
+Performance
+- Tables and links stay visible while a reply streams in; a long chat opens with the latest 40 messages first.
+- Mail search, the calendar month view, Settings and the 3D scene on Home are smoother.
 
 For Apple Silicon Macs; the app requires macOS 12 or later.
