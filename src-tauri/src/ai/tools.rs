@@ -763,12 +763,21 @@ fn date_arg(args: &serde_json::Value, key: &str) -> Result<Option<String>, Strin
 }
 
 /// create_task's deadline: a plain date, because the scheduler compares it
-/// with date('now'). A time part ("2026-11-01T15:00") is dropped, since a
-/// task carries a date only; anything else is refused so the model retries.
+/// with date('now') as a string. A time part after a full date
+/// ("2026-11-01T15:00") is dropped, since a task carries a date only; the date
+/// is stored zero-padded; anything else is refused so the model retries.
 fn task_deadline(args: &serde_json::Value) -> Result<Option<String>, String> {
     let raw = args["deadline"].as_str().unwrap_or("").trim();
-    let date = raw.split(['T', ' ']).next().unwrap_or("");
-    date_arg(&json!({ "deadline": date }), "deadline")
+    if raw.is_empty() {
+        return Ok(None);
+    }
+    let date = match (raw.get(..10), raw.get(10..)) {
+        (Some(head), Some(rest)) if rest.is_empty() || rest.starts_with(['T', ' ']) => head,
+        _ => raw,
+    };
+    chrono::NaiveDate::parse_from_str(date, "%Y-%m-%d")
+        .map(|d| Some(d.format("%Y-%m-%d").to_string()))
+        .map_err(|_| "deadline must be a date in YYYY-MM-DD format.".to_string())
 }
 
 /// JARVIS's own synced data: the follow-ups, triage and tasks the Mail,
@@ -3053,6 +3062,25 @@ mod local_data_tests {
         assert_eq!(deadlines, vec![Some("2026-11-01".to_string())], "the refused task must not be saved");
         run("create_task", serde_json::json!({"title": "No date"}), &db).await;
         assert_eq!(db.conn.lock().unwrap().query_row("SELECT COUNT(*) FROM tasks WHERE deadline IS NULL", [], |r| r.get::<_, i64>(0)).unwrap(), 1);
+    }
+
+    /// Only a time part after a full date is dropped: cutting at the first
+    /// "T" turned "Tomorrow" into no deadline at all. A date the scheduler's
+    /// string comparison would miss ("2026-11-1") is stored zero-padded.
+    #[tokio::test]
+    async fn create_task_refuses_words_and_pads_short_dates() {
+        let db = crate::db::test_database();
+        for word in ["Tomorrow", "Today", "Thursday", "TBD"] {
+            let refused = run("create_task", serde_json::json!({"title": "Call Mary", "deadline": word}), &db).await;
+            assert!(refused.contains("YYYY-MM-DD"), "{word}: {refused}");
+        }
+        assert_eq!(db.conn.lock().unwrap().query_row("SELECT COUNT(*) FROM tasks", [], |r| r.get::<_, i64>(0)).unwrap(), 0);
+        for (given, stored) in [("2026-11-1", "2026-11-01"), ("2026-11-02 15:00", "2026-11-02")] {
+            let saved = run("create_task", serde_json::json!({"title": given, "deadline": given}), &db).await;
+            assert!(saved.contains(stored), "{saved}");
+            let deadline: String = db.conn.lock().unwrap().query_row("SELECT deadline FROM tasks WHERE title = ?1", [given], |r| r.get(0)).unwrap();
+            assert_eq!(deadline, stored);
+        }
     }
 
     /// render_status asked for its own round after every action: one more

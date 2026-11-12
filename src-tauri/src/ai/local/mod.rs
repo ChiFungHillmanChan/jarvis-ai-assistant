@@ -396,6 +396,17 @@ pub async fn send_local(
         // Handle prompt-injected tool calls (parse from text response)
         if matches!(effective_cap, ToolCapability::PromptInjected) && tool_map.is_empty() {
             let full_text = text_parts.join("");
+            if final_round {
+                if let Some(reply) = last_round_reply(&full_text, &tools::read_language_pref(db)) {
+                    let _ = app_handle.emit("chat-token", json!({"token": "", "done": true}));
+                    record_local_inference(
+                        db, workload, model,
+                        total_prompt_tokens, total_completion_tokens,
+                        &started_at,
+                    );
+                    return Ok(reply);
+                }
+            }
             let (parsed_calls, response_text) = parse_tool_calls_from_response(&full_text);
 
             if let Some(calls) = parsed_calls {
@@ -607,6 +618,16 @@ pub async fn send_local(
     Ok(tools::tool_limit_fallback(&tools::read_language_pref(db)).into())
 }
 
+/// The reply when the last round's text asks for tools: none are run, as on
+/// the native path (a tool run there was followed by "ran out of steps", and
+/// the user's retry repeated it). Plain text around the call is kept. None
+/// when the text asks for no tool.
+fn last_round_reply(full_text: &str, language: &str) -> Option<String> {
+    let (calls, text) = parse_tool_calls_from_response(full_text);
+    calls.filter(|calls| !calls.is_empty())?;
+    Some(if text.trim().is_empty() { tools::tool_limit_fallback(language).to_string() } else { text })
+}
+
 /// Record a completed local turn. Local models are free (models::usd_cost_micro
 /// returns None) and the row is stored at 0 with its tokens -- but the turn
 /// still counts, which is what the cost dashboard's local share is measured
@@ -631,6 +652,17 @@ fn record_local_inference(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The last round runs no tools, as on the native path: a tool run there
+    /// was followed by "ran out of steps", and the user's retry repeated it.
+    #[test]
+    fn the_last_round_answers_instead_of_running_an_injected_tool() {
+        let call = r#"{"tool_calls":[{"name":"create_task","arguments":{"title":"Call Mary"}}]}"#;
+        let reply = last_round_reply(call, "en").expect("a tool call on the last round is answered, not run");
+        assert_eq!(reply, tools::tool_limit_fallback("en"));
+        assert!(!reply.contains("create_task"), "{reply}");
+        assert_eq!(last_round_reply("You have two meetings today.", "en"), None, "plain text goes the usual way");
+    }
 
     #[test]
     fn sse_chunk_parses_usage_and_tolerates_its_absence() {
