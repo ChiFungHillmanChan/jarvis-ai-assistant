@@ -120,7 +120,7 @@ impl AwsCredsRepo {
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
     use rusqlite::Connection;
     use std::sync::Mutex;
@@ -132,7 +132,7 @@ mod tests {
     /// Under `cfg(test)` the keychain backend is a process-global map, and every
     /// test here writes the same (service, account) entry and then clears it.
     /// Without this, two of them running concurrently delete each other's secret.
-    static KEYCHAIN_GUARD: Mutex<()> = Mutex::new(());
+    pub(crate) static KEYCHAIN_GUARD: Mutex<()> = Mutex::new(());
 
     fn fresh_conn() -> Connection {
         // In-memory, not a temp file: this fixture exercises no file-backed

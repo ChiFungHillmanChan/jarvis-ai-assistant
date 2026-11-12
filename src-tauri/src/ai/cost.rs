@@ -374,6 +374,14 @@ pub(crate) mod tests {
         pub price_unknown: bool,
     }
 
+    /// (cache read, cache write) of each row, in order.
+    pub(crate) fn cache_tokens(db: &crate::db::Database) -> Vec<(i64, i64)> {
+        let conn = db.conn.lock().unwrap();
+        let mut stmt = conn.prepare("SELECT cache_read_tokens, cache_write_tokens FROM inference_metrics ORDER BY rowid").unwrap();
+        let rows = stmt.query_map([], |r| Ok((r.get(0)?, r.get(1)?))).unwrap();
+        rows.map(|r| r.unwrap()).collect()
+    }
+
     pub(crate) fn usage_rows(db: &crate::db::Database) -> Vec<UsageRow> {
         let conn = db.conn.lock().unwrap();
         let mut stmt = conn

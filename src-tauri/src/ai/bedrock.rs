@@ -33,12 +33,43 @@ async fn client_for(creds: &AwsCredentials) -> aws_sdk_bedrockruntime::Client {
         None,
         "jarvis-aws-creds",
     );
-    let cfg = aws_config::defaults(BehaviorVersion::latest())
+    let loader = aws_config::defaults(BehaviorVersion::latest())
         .region(region)
-        .credentials_provider(provider)
-        .load()
-        .await;
+        .credentials_provider(provider);
+    #[cfg(test)]
+    let loader = match tests::LOOPBACK.with(|endpoint| endpoint.borrow().clone()) {
+        Some(endpoint) => loader.endpoint_url(endpoint),
+        None => loader,
+    };
+    let cfg = loader.load().await;
     aws_sdk_bedrockruntime::Client::new(&cfg)
+}
+
+/// The interface language, which the frontend saves as
+/// `user_preferences.ui_locale` (the scheduler's task alerts read the same
+/// key). Anything but "zh-HK" is English, as there. The Bedrock errors a user
+/// can see are written in it.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub(crate) enum UiLanguage {
+    En,
+    ZhHk,
+}
+
+impl UiLanguage {
+    /// Locks the database briefly: never call it while holding the lock.
+    pub(crate) fn read(db: &crate::db::Database) -> Self {
+        let saved = db.conn.lock().ok().and_then(|conn| {
+            conn.query_row("SELECT value FROM user_preferences WHERE key = 'ui_locale'", [], |r| r.get::<_, String>(0)).ok()
+        });
+        if saved.as_deref() == Some("zh-HK") { UiLanguage::ZhHk } else { UiLanguage::En }
+    }
+
+    pub(crate) fn pick(self, en: impl Into<String>, zh: impl Into<String>) -> String {
+        match self {
+            UiLanguage::En => en.into(),
+            UiLanguage::ZhHk => zh.into(),
+        }
+    }
 }
 
 /// One-shot helper used by mail analysis and the integration test below.
@@ -94,7 +125,7 @@ pub(crate) struct PlainRequest {
     pub inference: InferenceConfiguration,
 }
 
-pub(crate) fn plain_request(system: &str, user: &str, json: bool, max_tokens: u32) -> Result<PlainRequest, String> {
+pub(crate) fn plain_request(system: &str, user: &str, json: bool, max_tokens: u32, language: UiLanguage) -> Result<PlainRequest, String> {
     let system = match (system.trim().is_empty(), json) {
         (true, false) => None,
         (true, true) => Some(JSON_INSTRUCTION.to_string()),
@@ -105,7 +136,7 @@ pub(crate) fn plain_request(system: &str, user: &str, json: bool, max_tokens: u3
         .role(ConversationRole::User)
         .content(ContentBlock::Text(user.to_string()))
         .build()
-        .map_err(|_| "未能建立 Bedrock 請求。".to_string())?;
+        .map_err(|_| language.pick("Could not build the Bedrock request.", "未能建立 Bedrock 請求。"))?;
     Ok(PlainRequest {
         system: system.map(SystemContentBlock::Text).into_iter().collect(),
         messages: vec![message],
@@ -117,6 +148,7 @@ pub(crate) async fn converse_plain(
     creds: &AwsCredentials,
     model_id: &str,
     request: PlainRequest,
+    language: UiLanguage,
 ) -> Result<aws_sdk_bedrockruntime::operation::converse::ConverseOutput, String> {
     let client = client_for(creds).await;
     client
@@ -130,7 +162,7 @@ pub(crate) async fn converse_plain(
         .map_err(|err| {
             let code = err.as_service_error().map(|e| aws_sdk_bedrockruntime::error::ProvideErrorMetadata::code(e).unwrap_or_default());
             log::warn!("Bedrock completion failed: {}", failure_kind(&err, code));
-            plain_error(code)
+            plain_error(code, language)
         })
 }
 
@@ -154,29 +186,71 @@ fn failure_kind<E, R>(err: &aws_sdk_bedrockruntime::error::SdkError<E, R>, code:
 /// code is used, never the SDK's text: a validation message can quote the
 /// request. `code` is the service's error code, or None when the request
 /// never reached AWS.
-fn plain_error(code: Option<&str>) -> String {
+fn plain_error(code: Option<&str>, language: UiLanguage) -> String {
     match code {
-        Some("AccessDeniedException" | "UnrecognizedClientException" | "InvalidSignatureException" | "ExpiredTokenException") => {
-            "Bedrock 拒絕了 AWS 憑證或模型存取權限，請在設定中檢查後重試。".into()
-        }
-        Some("ResourceNotFoundException") => "Bedrock 找不到所選模型，請檢查模型 ID 及區域。".into(),
-        Some("ThrottlingException" | "ServiceQuotaExceededException") => "Bedrock 暫時限速或額度不足，請稍後重試。".into(),
-        Some("ValidationException") => "Bedrock 不接受這個請求，請檢查所選模型及區域。".into(),
-        Some(_) => "Bedrock 暫時未能回覆，請稍後重試。".into(),
-        None => "未能連接 AWS Bedrock，請檢查網絡及 AWS 憑證。".into(),
+        Some("AccessDeniedException" | "UnrecognizedClientException" | "InvalidSignatureException" | "ExpiredTokenException") => language.pick(
+            "Bedrock refused the AWS credentials or access to the model. Check them in Settings and try again.",
+            "Bedrock 拒絕了 AWS 憑證或模型存取權限，請在設定中檢查後重試。",
+        ),
+        Some("ResourceNotFoundException") => language.pick(
+            "Bedrock could not find the chosen model. Check the model ID and the region.",
+            "Bedrock 找不到所選模型，請檢查模型 ID 及區域。",
+        ),
+        Some("ThrottlingException" | "ServiceQuotaExceededException") => language.pick(
+            "Bedrock is limiting requests or your quota is used up. Try again later.",
+            "Bedrock 暫時限速或額度不足，請稍後重試。",
+        ),
+        Some("ValidationException") => language.pick(
+            "Bedrock did not accept this request. Check the chosen model and the region.",
+            "Bedrock 不接受這個請求，請檢查所選模型及區域。",
+        ),
+        Some(_) => language.pick("Bedrock could not answer just now. Try again later.", "Bedrock 暫時未能回覆，請稍後重試。"),
+        None => language.pick(
+            "Could not reach AWS Bedrock. Check your network and your AWS credentials.",
+            "未能連接 AWS Bedrock，請檢查網絡及 AWS 憑證。",
+        ),
     }
 }
 
-/// The reply of a plain request and its usage: (text, input tokens
-/// including cache, output tokens, cache-read tokens).
-pub(crate) fn plain_result(output: &aws_sdk_bedrockruntime::operation::converse::ConverseOutput) -> (String, i64, i64, i64) {
+/// The text of a plain request's reply, and the usage AWS returned with it
+/// (None when the reply carried none).
+pub(crate) fn plain_result(output: &aws_sdk_bedrockruntime::operation::converse::ConverseOutput) -> (String, Option<StoredUsage>) {
     let text = match output.output() {
         Some(aws_sdk_bedrockruntime::types::ConverseOutput::Message(message)) => collect_text(message).join(""),
         _ => String::new(),
     };
-    match output.usage() {
-        Some(usage) => (text, inclusive_input(usage), usage.output_tokens() as i64, usage.cache_read_input_tokens().unwrap_or(0) as i64),
-        None => (text, 0, 0, 0),
+    (text, output.usage().and_then(StoredUsage::from_aws))
+}
+
+/// What is stored for one Bedrock request, all taken from the usage AWS
+/// returned for that request and nothing estimated. `output`, `cache_read`
+/// and `cache_write` are AWS's outputTokens, cacheReadInputTokens and
+/// cacheWriteInputTokens as they are. `input` counts every input token of
+/// the request, as the usage table does for every provider: AWS's
+/// inputTokens leaves the cache out, so `input` is inputTokens + cacheRead +
+/// cacheWrite, and AWS's own inputTokens is `input - cache_read -
+/// cache_write`.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub(crate) struct StoredUsage {
+    pub input: i64,
+    pub output: i64,
+    pub cache_read: i64,
+    pub cache_write: i64,
+}
+
+impl StoredUsage {
+    /// None when the reply carried no usage. The SDK fills a usage block
+    /// missing from a reply with zeros, and a request AWS bills always has
+    /// input tokens, so all zeros means AWS sent no figures: nothing is
+    /// stored rather than an invented row.
+    pub(crate) fn from_aws(usage: &TokenUsage) -> Option<Self> {
+        let stored = StoredUsage {
+            input: inclusive_input(usage),
+            output: usage.output_tokens() as i64,
+            cache_read: usage.cache_read_input_tokens().unwrap_or(0) as i64,
+            cache_write: usage.cache_write_input_tokens().unwrap_or(0) as i64,
+        };
+        (stored.input != 0 || stored.output != 0 || usage.total_tokens() != 0).then_some(stored)
     }
 }
 
@@ -210,34 +284,20 @@ pub async fn send(
         .temperature(0.2)
         .build();
 
+    let turn = ChatTurn {
+        client: &client,
+        model_id,
+        system: &system_blocks,
+        tools: &tool_config,
+        inference: &inference_config,
+        db,
+        workload,
+    };
+
     let max_iterations = 5;
     for round in 0..max_iterations {
         let final_round = round + 1 == max_iterations;
-        let start = std::time::Instant::now();
-        let response = client
-            .converse()
-            .model_id(model_id)
-            .set_messages(Some(bedrock_messages.clone()))
-            .set_system(Some(system_blocks.clone()))
-            .tool_config(tool_config.clone())
-            .inference_config(inference_config.clone())
-            .send()
-            .await
-            .map_err(converse_error)?;
-        let latency_ms = start.elapsed().as_millis() as i64;
-
-        let output_message = match response.output() {
-            Some(aws_sdk_bedrockruntime::types::ConverseOutput::Message(message)) => {
-                Some(message.clone())
-            }
-            _ => None,
-        };
-        let tool_uses = output_message.as_ref().map(collect_tool_uses).unwrap_or_default();
-        note_tools_to_run(tool_uses.len(), final_round);
-
-        if let Some(usage) = response.usage() {
-            record_metrics(db, workload, model_id, usage, latency_ms).await;
-        }
+        let (response, output_message, tool_uses) = converse_round(&turn, &bedrock_messages, final_round).await?;
 
         let Some(output_message) = output_message else {
             return Err("Bedrock returned no message output".into());
@@ -345,6 +405,64 @@ pub async fn send(
     // The last round always returns above.
     let _ = app_handle.emit("chat-token", json!({"token": "", "done": true}));
     Ok(tools::tool_limit_fallback(&tools::read_language_pref(db)).into())
+}
+
+/// What every request of one chat turn shares.
+struct ChatTurn<'a> {
+    client: &'a aws_sdk_bedrockruntime::Client,
+    /// The id the requests are sent with, and the one their rows are stored
+    /// against.
+    model_id: &'a str,
+    system: &'a [SystemContentBlock],
+    tools: &'a ToolConfiguration,
+    inference: &'a InferenceConfiguration,
+    db: &'a crate::db::Database,
+    workload: crate::ai::Workload,
+}
+
+/// One request of a chat turn, and its usage row: the figures AWS returned
+/// for this request, stored against the model id it was sent with. A request
+/// that fails stores nothing, and neither does a reply without usage. The
+/// tool calls are noted first, so a request asking for a tool that will run
+/// is stored as tools.
+async fn converse_round(
+    turn: &ChatTurn<'_>,
+    messages: &[Message],
+    final_round: bool,
+) -> Result<
+    (
+        aws_sdk_bedrockruntime::operation::converse::ConverseOutput,
+        Option<Message>,
+        Vec<aws_sdk_bedrockruntime::types::ToolUseBlock>,
+    ),
+    Box<dyn std::error::Error + Send + Sync>,
+> {
+    let start = std::time::Instant::now();
+    let response = turn
+        .client
+        .converse()
+        .model_id(turn.model_id)
+        .set_messages(Some(messages.to_vec()))
+        .set_system(Some(turn.system.to_vec()))
+        .tool_config(turn.tools.clone())
+        .inference_config(turn.inference.clone())
+        .send()
+        .await
+        .map_err(converse_error)?;
+    let latency_ms = start.elapsed().as_millis() as i64;
+
+    let output_message = match response.output() {
+        Some(aws_sdk_bedrockruntime::types::ConverseOutput::Message(message)) => Some(message.clone()),
+        _ => None,
+    };
+    let tool_uses = output_message.as_ref().map(collect_tool_uses).unwrap_or_default();
+    note_tools_to_run(tool_uses.len(), final_round);
+
+    match response.usage() {
+        Some(usage) => record_metrics(turn.db, turn.workload, turn.model_id, usage, latency_ms).await,
+        None => log::warn!("Bedrock reply carried no usage figures; no usage row stored"),
+    }
+    Ok((response, output_message, tool_uses))
 }
 
 /// Sent with the tool results before the last allowed round.
@@ -499,18 +617,20 @@ async fn record_metrics(
     usage: &TokenUsage,
     latency_ms: i64,
 ) {
-    let cache_read = usage.cache_read_input_tokens().unwrap_or(0) as i64;
-    let cache_write = usage.cache_write_input_tokens().unwrap_or(0) as i64;
+    let Some(stored) = StoredUsage::from_aws(usage) else {
+        log::warn!("Bedrock reply carried no usage figures; no usage row stored");
+        return;
+    };
     crate::ai::cost::record_inference(
         db,
         "bedrock",
         crate::ai::cost::current_feature(),
         workload,
         model_id,
-        inclusive_input(usage),
-        usage.output_tokens() as i64,
-        cache_read,
-        cache_write,
+        stored.input,
+        stored.output,
+        stored.cache_read,
+        stored.cache_write,
         latency_ms,
     );
 }
@@ -572,8 +692,189 @@ fn document_to_json(document: &Document) -> serde_json::Value {
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
+
+    thread_local! {
+        /// Where a test's Bedrock client sends its requests instead of AWS.
+        /// Tokio tests run on one thread, so the client built inside the
+        /// test reads the value set by `aws_loopback`.
+        pub(crate) static LOOPBACK: std::cell::RefCell<Option<String>> = const { std::cell::RefCell::new(None) };
+    }
+
+    /// The request a loopback server received: its request line and body.
+    pub(crate) struct Received {
+        pub path: String,
+        pub body: String,
+    }
+
+    /// A one-request stand-in for the Bedrock endpoint, which this test's
+    /// clients are pointed at. `error_type` makes it fail the way AWS does,
+    /// with that error code. The model id travels in the path, percent
+    /// encoded; `path` is decoded.
+    pub(crate) async fn aws_loopback(status: u16, error_type: Option<&str>, body: serde_json::Value) -> tokio::task::JoinHandle<Received> {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        let listener = tokio::net::TcpListener::bind((std::net::Ipv4Addr::LOCALHOST, 0)).await.unwrap();
+        let endpoint = format!("http://127.0.0.1:{}", listener.local_addr().unwrap().port());
+        LOOPBACK.with(|slot| *slot.borrow_mut() = Some(endpoint));
+        let error_header = error_type.map(|code| format!("x-amzn-ErrorType: {code}\r\n")).unwrap_or_default();
+        tokio::spawn(async move {
+            let (mut stream, _) = listener.accept().await.unwrap();
+            LOOPBACK.with(|slot| *slot.borrow_mut() = None);
+            let mut request = Vec::new();
+            let mut buffer = [0; 8192];
+            let (head_end, length) = loop {
+                let count = stream.read(&mut buffer).await.unwrap();
+                request.extend_from_slice(&buffer[..count]);
+                let text = String::from_utf8_lossy(&request).to_string();
+                if let Some(end) = text.find("\r\n\r\n") {
+                    let length = text[..end].lines().find_map(|line| line.to_lowercase().strip_prefix("content-length:").map(|n| n.trim().parse::<usize>().unwrap())).unwrap_or(0);
+                    if request.len() >= end + 4 + length || count == 0 {
+                        break (end, length);
+                    }
+                }
+                assert!(count > 0, "the request ended early");
+            };
+            let body = body.to_string();
+            let reason = if status == 200 { "OK" } else { "Error" };
+            let reply = format!("HTTP/1.1 {status} {reason}\r\nContent-Type: application/json\r\n{error_header}Content-Length: {}\r\nConnection: close\r\n\r\n{body}", body.len());
+            stream.write_all(reply.as_bytes()).await.unwrap();
+            let text = String::from_utf8_lossy(&request).to_string();
+            let line = text.lines().next().unwrap_or_default().to_string();
+            Received {
+                path: line.split(' ').nth(1).unwrap_or_default().replace("%3A", ":").replace("%3a", ":"),
+                body: text[head_end + 4..(head_end + 4 + length).min(text.len())].to_string(),
+            }
+        })
+    }
+
+    /// A Converse reply as AWS sends it over the wire, with every usage
+    /// figure set and different from the others.
+    pub(crate) fn converse_json(text: &str) -> serde_json::Value {
+        json!({
+            "output": {"message": {"role": "assistant", "content": [{"text": text}]}},
+            "stopReason": "end_turn",
+            "usage": {"inputTokens": 120, "outputTokens": 45, "totalTokens": 1_365, "cacheReadInputTokens": 800, "cacheWriteInputTokens": 400},
+            "metrics": {"latencyMs": 7}
+        })
+    }
+
+    pub(crate) fn fixture_creds(region: &str) -> AwsCredentials {
+        AwsCredentials {
+            access_key_id: "AKIAFIXTURENOTREAL".into(),
+            secret_access_key: "fixture-secret-not-real".into(),
+            region: region.into(),
+            inference_profile: crate::aws::credentials::inference_profile_for_region(region).into(),
+        }
+    }
+
+    /// One chat request, sent to a stand-in for AWS: the row holds the four
+    /// figures AWS returned, against the model id that went out in the
+    /// request.
+    #[tokio::test]
+    async fn a_chat_request_stores_the_usage_aws_returned_for_the_model_it_sent() {
+        let server = aws_loopback(200, None, converse_json("Done.")).await;
+        let db = crate::ai::cost::tests::temp_metrics_db("");
+        let client = client_for(&fixture_creds("ap-southeast-1")).await;
+        let tools = build_tool_config().unwrap();
+        let system = build_system_blocks("rules".into(), "today".into()).unwrap();
+        let inference = InferenceConfiguration::builder().max_tokens(64).build();
+        let turn = ChatTurn { client: &client, model_id: "apac.anthropic.claude-haiku-4-5-20251001-v1:0", system: &system, tools: &tools, inference: &inference, db: &db, workload: crate::ai::Workload::Tools };
+        let messages = build_messages(vec![("user".into(), "hi".into())]).unwrap();
+        let (_, message, tool_uses) = crate::ai::cost::with_feature(crate::ai::cost::Feature::Chat, converse_round(&turn, &messages, false)).await.unwrap();
+        assert!(message.is_some() && tool_uses.is_empty());
+
+        let received = server.await.unwrap();
+        assert_eq!(received.path, "/model/apac.anthropic.claude-haiku-4-5-20251001-v1:0/converse");
+        let rows = crate::ai::cost::tests::usage_rows(&db);
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].model_id, "apac.anthropic.claude-haiku-4-5-20251001-v1:0", "stored against the id that was sent");
+        assert_eq!((rows[0].provider.as_str(), rows[0].feature.as_str()), ("bedrock", "chat"));
+        // inputTokens 120 + cacheRead 800 + cacheWrite 400; the rest as AWS sent them.
+        assert_eq!((rows[0].input_tokens, rows[0].output_tokens), (1_320, 45));
+        assert_eq!(crate::ai::cost::tests::cache_tokens(&db), vec![(800, 400)]);
+    }
+
+    /// A chat request AWS refuses stores nothing: there is no usage to store.
+    #[tokio::test]
+    async fn a_failed_chat_request_stores_nothing() {
+        let server = aws_loopback(400, Some("ValidationException"), json!({"message": "PRIVATE-MAIL-CANARY"})).await;
+        let db = crate::ai::cost::tests::temp_metrics_db("");
+        let client = client_for(&fixture_creds("ap-southeast-1")).await;
+        let tools = build_tool_config().unwrap();
+        let system = build_system_blocks("rules".into(), "today".into()).unwrap();
+        let inference = InferenceConfiguration::builder().max_tokens(64).build();
+        let turn = ChatTurn { client: &client, model_id: "global.anthropic.claude-sonnet-4-6", system: &system, tools: &tools, inference: &inference, db: &db, workload: crate::ai::Workload::Tools };
+        let messages = build_messages(vec![("user".into(), "hi".into())]).unwrap();
+        assert!(converse_round(&turn, &messages, false).await.is_err());
+        server.await.unwrap();
+        assert!(crate::ai::cost::tests::usage_rows(&db).is_empty());
+    }
+
+    /// A reply without usage figures stores nothing rather than a row of
+    /// zeros.
+    #[tokio::test]
+    async fn a_chat_reply_without_usage_stores_nothing() {
+        let mut reply = converse_json("Done.");
+        reply.as_object_mut().unwrap().remove("usage");
+        let server = aws_loopback(200, None, reply).await;
+        let db = crate::ai::cost::tests::temp_metrics_db("");
+        let client = client_for(&fixture_creds("us-east-1")).await;
+        let tools = build_tool_config().unwrap();
+        let system = build_system_blocks("rules".into(), "today".into()).unwrap();
+        let inference = InferenceConfiguration::builder().max_tokens(64).build();
+        let turn = ChatTurn { client: &client, model_id: "us.amazon.nova-pro-v1:0", system: &system, tools: &tools, inference: &inference, db: &db, workload: crate::ai::Workload::Tools };
+        let messages = build_messages(vec![("user".into(), "hi".into())]).unwrap();
+        // Whether the SDK accepts a reply without usage or calls it
+        // malformed, no row is stored for it.
+        let _ = converse_round(&turn, &messages, false).await;
+        server.await.unwrap();
+        assert!(crate::ai::cost::tests::usage_rows(&db).is_empty());
+    }
+
+    /// The four stored figures are AWS's, and AWS's own inputTokens can be
+    /// read back from them.
+    #[test]
+    fn stored_usage_is_the_figures_aws_returned() {
+        let usage = TokenUsage::builder().input_tokens(120).output_tokens(45).total_tokens(1_365).cache_read_input_tokens(800).cache_write_input_tokens(400).build().unwrap();
+        let stored = StoredUsage::from_aws(&usage).unwrap();
+        assert_eq!(stored, StoredUsage { input: 1_320, output: 45, cache_read: 800, cache_write: 400 });
+        assert_eq!(stored.input - stored.cache_read - stored.cache_write, 120);
+        let plain = TokenUsage::builder().input_tokens(9).output_tokens(2).total_tokens(11).build().unwrap();
+        assert_eq!(StoredUsage::from_aws(&plain), Some(StoredUsage { input: 9, output: 2, cache_read: 0, cache_write: 0 }));
+        // What the SDK hands back when the reply had no usage block.
+        let filled = TokenUsage::builder().input_tokens(0).output_tokens(0).total_tokens(0).build().unwrap();
+        assert_eq!(StoredUsage::from_aws(&filled), None);
+    }
+
+    /// Every Bedrock error a user can see is in the interface language.
+    #[test]
+    fn bedrock_errors_follow_the_interface_language() {
+        let codes = [Some("AccessDeniedException"), Some("ResourceNotFoundException"), Some("ThrottlingException"), Some("ValidationException"), Some("InternalServerException"), None];
+        for code in codes {
+            let english = plain_error(code, UiLanguage::En);
+            let chinese = plain_error(code, UiLanguage::ZhHk);
+            assert!(english.is_ascii(), "{code:?}: {english}");
+            assert!(!chinese.is_ascii(), "{code:?}: {chinese}");
+        }
+        assert_eq!(plain_error(Some("ValidationException"), UiLanguage::En), "Bedrock did not accept this request. Check the chosen model and the region.");
+        assert_eq!(plain_error(Some("ValidationException"), UiLanguage::ZhHk), "Bedrock 不接受這個請求，請檢查所選模型及區域。");
+    }
+
+    /// The language is the one the frontend saved; anything else is English.
+    #[test]
+    fn the_interface_language_is_read_from_ui_locale() {
+        let db = crate::db::test_database();
+        assert_eq!(UiLanguage::read(&db), UiLanguage::En, "nothing saved");
+        let save = |value: &str| db.conn.lock().unwrap().execute("INSERT OR REPLACE INTO user_preferences (key, value) VALUES ('ui_locale', ?1)", [value]).unwrap();
+        save("zh-HK");
+        assert_eq!(UiLanguage::read(&db), UiLanguage::ZhHk);
+        save("en");
+        assert_eq!(UiLanguage::read(&db), UiLanguage::En);
+        // The assistant's reply language is a different preference.
+        db.conn.lock().unwrap().execute("INSERT OR REPLACE INTO user_preferences (key, value) VALUES ('language', 'yue')", []).unwrap();
+        assert_eq!(UiLanguage::read(&db), UiLanguage::En);
+    }
 
     /// Sonnet 4.6, a cache hit: inputTokens 2,400, cacheRead 6,400, 250 out
     /// = $0.0072 + $0.00192 + $0.00375. Subtracting the cache from inputTokens

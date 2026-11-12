@@ -37,6 +37,12 @@ pub struct Completion {
     pub output_tokens: i64,
     /// Read from the provider's cache, billed at its cached rate.
     pub cached_tokens: i64,
+    /// Written to the provider's cache; only Bedrock reports it. Included in
+    /// `input_tokens`.
+    pub cache_write_tokens: i64,
+    /// The reply carried no usage figures (only Bedrock can tell), so no row
+    /// is stored for it rather than one of zeros.
+    pub usage_missing: bool,
     /// From models::usd_cost_micro; None for a local model, which is free,
     /// and for a cloud model without a price.
     pub cost_micro: Option<i64>,
@@ -65,24 +71,47 @@ pub async fn complete(router: &AiRouter, db: &Database, request: Request<'_>) ->
 }
 
 /// Store the completion, then check it. The row comes first because the
-/// provider bills a reply whatever it says, as mail analysis does.
+/// provider bills a reply whatever it says, as mail analysis does: an empty
+/// Bedrock reply, or one that is not the JSON asked for, is stored and then
+/// rejected.
 fn store_then_check(db: &Database, entry: &ProviderChainEntry, request: &Request<'_>, mut done: Completion, latency_ms: i64) -> Result<Completion, String> {
     let provider = super::cost::provider_id(&entry.provider_type, entry.base_url.as_deref());
-    record(db, &provider, request.feature, &mut done, latency_ms);
-    // Bedrock has no JSON mode: the object was asked for in words
-    // (bedrock::JSON_INSTRUCTION), so the reply must be checked for one,
-    // without code fences or prose around it.
-    if entry.provider_type == "bedrock" && request.json {
-        done.text = json_object_text(&done.text).ok_or_else(|| format!("Bedrock（{}）回覆的不是有效 JSON，請重試或改用其他模型。", done.model))?;
+    if done.usage_missing {
+        // Nothing to store: AWS sent no figures, and none are made up. What
+        // the request cost is not known.
+        log::warn!("{provider} reply carried no usage figures; no usage row stored");
+        done.price_unknown = true;
+    } else {
+        record(db, &provider, request.feature, &mut done, latency_ms);
+    }
+    if entry.provider_type == "bedrock" {
+        let language = super::bedrock::UiLanguage::read(db);
+        if done.text.trim().is_empty() {
+            return Err(language.pick(
+                format!("Bedrock ({}) returned no answer. Try again, or choose another model.", done.model),
+                format!("Bedrock（{}）沒有回覆內容，請重試或改用其他模型。", done.model),
+            ));
+        }
+        // Bedrock has no JSON mode: the object was asked for in words
+        // (bedrock::JSON_INSTRUCTION), so the reply must be checked for one,
+        // without code fences or prose around it.
+        if request.json {
+            done.text = json_object_text(&done.text).ok_or_else(|| {
+                language.pick(
+                    format!("Bedrock ({}) did not reply with valid JSON. Try again, or choose another model.", done.model),
+                    format!("Bedrock（{}）回覆的不是有效 JSON，請重試或改用其他模型。", done.model),
+                )
+            })?;
+        }
     }
     Ok(done)
 }
 
 /// Price the completion and store it as one Volume row.
 fn record(db: &Database, provider: &str, feature: Feature, done: &mut Completion, latency_ms: i64) {
-    done.cost_micro = super::models::usd_cost_micro(provider, &done.model, done.input_tokens, done.output_tokens, done.cached_tokens, 0);
+    done.cost_micro = super::models::usd_cost_micro(provider, &done.model, done.input_tokens, done.output_tokens, done.cached_tokens, done.cache_write_tokens);
     done.price_unknown = !super::models::price_known(provider, &done.model);
-    super::cost::record_inference(db, provider, feature, Workload::Volume, &done.model, done.input_tokens, done.output_tokens, done.cached_tokens, 0, latency_ms);
+    super::cost::record_inference(db, provider, feature, Workload::Volume, &done.model, done.input_tokens, done.output_tokens, done.cached_tokens, done.cache_write_tokens, latency_ms);
 }
 
 async fn complete_one(router: &AiRouter, db: &Database, entry: &ProviderChainEntry, request: &Request<'_>) -> Result<Completion, String> {
@@ -158,14 +187,18 @@ async fn complete_one(router: &AiRouter, db: &Database, entry: &ProviderChainEnt
             claude_result(&value, model)
         }
         "bedrock" => {
-            let creds = crate::aws::credentials::load_from(db)?.ok_or("尚未設定 AWS 憑證，請在設定中加入後重試。")?;
+            let language = super::bedrock::UiLanguage::read(db);
+            let creds = crate::aws::credentials::load_from(db)?.ok_or_else(|| {
+                language.pick("AWS credentials are not set up. Add them in Settings and try again.", "尚未設定 AWS 憑證，請在設定中加入後重試。")
+            })?;
             // The chain row's model, pointed at the inference profile of the
             // saved region (load_from derives it from the region; chat reads
-            // the stored profile, and the two agree).
+            // the stored profile, and the two agree). This id is the one sent
+            // and the one its row is stored against.
             let model = super::apply_inference_profile(&super::bedrock_model(entry), &creds.inference_profile);
-            let plain = super::bedrock::plain_request(request.system, request.user, request.json, request.max_tokens)?;
-            let output = super::bedrock::converse_plain(&creds, &model, plain).await?;
-            bedrock_result(&output, model)
+            let plain = super::bedrock::plain_request(request.system, request.user, request.json, request.max_tokens, language)?;
+            let output = super::bedrock::converse_plain(&creds, &model, plain, language).await?;
+            Ok(bedrock_result(&output, model))
         }
         other => Err(format!("{other} 暫不支援這項功能，請在設定中改用其他 AI。")),
     }
@@ -213,15 +246,25 @@ fn claude_result(value: &Value, model: String) -> Result<Completion, String> {
     done(text, "Claude".into(), model, value.pointer("/usage/input_tokens"), value.pointer("/usage/output_tokens"))
 }
 
-/// The reply as Bedrock wrote it. A JSON request is checked after the row is
-/// stored (`store_then_check`).
-fn bedrock_result(output: &aws_sdk_bedrockruntime::operation::converse::ConverseOutput, model: String) -> Result<Completion, String> {
-    let (text, input_tokens, output_tokens, cached_tokens) = super::bedrock::plain_result(output);
-    let mut done = done(text, "Bedrock".into(), model, None, None)?;
-    done.input_tokens = input_tokens;
-    done.output_tokens = output_tokens;
-    done.cached_tokens = cached_tokens;
-    Ok(done)
+/// The reply as Bedrock wrote it, with the usage AWS returned for it. An
+/// empty reply and a JSON request are checked after the row is stored
+/// (`store_then_check`).
+fn bedrock_result(output: &aws_sdk_bedrockruntime::operation::converse::ConverseOutput, model: String) -> Completion {
+    let (text, usage) = super::bedrock::plain_result(output);
+    let usage_missing = usage.is_none();
+    let usage = usage.unwrap_or_default();
+    Completion {
+        text,
+        provider: "Bedrock".into(),
+        model,
+        input_tokens: usage.input,
+        output_tokens: usage.output,
+        cached_tokens: usage.cache_read,
+        cache_write_tokens: usage.cache_write,
+        usage_missing,
+        cost_micro: None,
+        price_unknown: false,
+    }
 }
 
 /// The JSON object in a reply, without code fences or prose around it.
@@ -280,6 +323,8 @@ fn done(text: String, provider: String, model: String, input: Option<&Value>, ou
         input_tokens: input.and_then(Value::as_i64).unwrap_or(0),
         output_tokens: output.and_then(Value::as_i64).unwrap_or(0),
         cached_tokens: 0,
+        cache_write_tokens: 0,
+        usage_missing: false,
         cost_micro: None,
         price_unknown: false,
     })
@@ -441,7 +486,7 @@ pub(crate) mod tests {
     #[test]
     fn a_bedrock_json_request_asks_for_one_object() {
         use aws_sdk_bedrockruntime::types::{ContentBlock, ConversationRole, SystemContentBlock};
-        let request = super::super::bedrock::plain_request("Sort this email.", "From: a@example.com", true, 2_048).unwrap();
+        let request = super::super::bedrock::plain_request("Sort this email.", "From: a@example.com", true, 2_048, super::super::bedrock::UiLanguage::En).unwrap();
         assert_eq!(request.system.len(), 1);
         let SystemContentBlock::Text(system) = &request.system[0] else { panic!("a text system block") };
         assert_eq!(system, &format!("Sort this email.\n\n{}", super::super::bedrock::JSON_INSTRUCTION));
@@ -450,9 +495,9 @@ pub(crate) mod tests {
         assert_eq!(request.messages[0].content(), &[ContentBlock::Text("From: a@example.com".into())]);
         assert_eq!(request.inference.max_tokens(), Some(2_048));
 
-        let plain = super::super::bedrock::plain_request("", "hi", false, 10).unwrap();
+        let plain = super::super::bedrock::plain_request("", "hi", false, 10, super::super::bedrock::UiLanguage::En).unwrap();
         assert!(plain.system.is_empty(), "no empty system block");
-        let json_only = super::super::bedrock::plain_request("", "hi", true, 10).unwrap();
+        let json_only = super::super::bedrock::plain_request("", "hi", true, 10, super::super::bedrock::UiLanguage::En).unwrap();
         assert_eq!(json_only.system, vec![SystemContentBlock::Text(super::super::bedrock::JSON_INSTRUCTION.into())]);
     }
 
@@ -474,17 +519,18 @@ pub(crate) mod tests {
 
     #[test]
     fn a_bedrock_reply_carries_its_text_and_usage() {
-        let done = bedrock_result(&converse_reply("```json\n{\"category\": \"action\"}\n```"), "us.amazon.nova-pro-v1:0".into()).unwrap();
+        let done = bedrock_result(&converse_reply("```json\n{\"category\": \"action\"}\n```"), "us.amazon.nova-pro-v1:0".into());
         assert_eq!(done.text, "```json\n{\"category\": \"action\"}\n```", "checked later, after the row is stored");
         // inputTokens leaves the cache read out; the row counts it in.
-        assert_eq!((done.input_tokens, done.output_tokens, done.cached_tokens), (1_000, 40, 300));
+        assert_eq!((done.input_tokens, done.output_tokens, done.cached_tokens, done.cache_write_tokens), (1_000, 40, 300, 0));
+        assert!(!done.usage_missing);
         assert_eq!(done.provider, "Bedrock");
     }
 
     #[test]
     fn a_bedrock_json_reply_is_one_object_without_fences() {
         let db = crate::ai::cost::tests::temp_metrics_db("");
-        let done = bedrock_result(&converse_reply("```json\n{\"category\": \"action\"}\n```"), "us.amazon.nova-pro-v1:0".into()).unwrap();
+        let done = bedrock_result(&converse_reply("```json\n{\"category\": \"action\"}\n```"), "us.amazon.nova-pro-v1:0".into());
         let done = store_then_check(&db, &bedrock_entry(), &sort_request(true), done, 1).unwrap();
         assert_eq!(done.text, r#"{"category":"action"}"#);
         assert_eq!(crate::ai::cost::tests::usage_rows(&db).len(), 1);
@@ -495,16 +541,16 @@ pub(crate) mod tests {
     #[test]
     fn a_bedrock_reply_that_is_not_json_is_stored_then_rejected() {
         let db = crate::ai::cost::tests::temp_metrics_db("");
-        let prose = bedrock_result(&converse_reply("The email asks for a reply."), "us.amazon.nova-pro-v1:0".into()).unwrap();
+        let prose = bedrock_result(&converse_reply("The email asks for a reply."), "us.amazon.nova-pro-v1:0".into());
         let error = store_then_check(&db, &bedrock_entry(), &sort_request(true), prose, 1).unwrap_err();
-        assert_eq!(error, "Bedrock（us.amazon.nova-pro-v1:0）回覆的不是有效 JSON，請重試或改用其他模型。");
+        assert_eq!(error, "Bedrock (us.amazon.nova-pro-v1:0) did not reply with valid JSON. Try again, or choose another model.");
         let rows = crate::ai::cost::tests::usage_rows(&db);
         assert_eq!(rows.len(), 1, "the billed reply is stored");
         assert_eq!((rows[0].provider.as_str(), rows[0].feature.as_str(), rows[0].input_tokens, rows[0].output_tokens), ("bedrock", "mail_sort", 1_000, 40));
 
-        let array = bedrock_result(&converse_reply("[1, 2]"), "m".into()).unwrap();
+        let array = bedrock_result(&converse_reply("[1, 2]"), "m".into());
         assert!(store_then_check(&db, &bedrock_entry(), &sort_request(true), array, 1).is_err(), "an array is not the object asked for");
-        let plain = bedrock_result(&converse_reply("The email asks for a reply."), "m".into()).unwrap();
+        let plain = bedrock_result(&converse_reply("The email asks for a reply."), "m".into());
         assert_eq!(store_then_check(&db, &bedrock_entry(), &sort_request(false), plain, 1).unwrap().text, "The email asks for a reply.");
     }
 
@@ -516,8 +562,97 @@ pub(crate) mod tests {
         let mut router = AiRouter::new("gemini_primary");
         router.set_provider_chain(vec![ProviderChainEntry { position: 0, provider_type: "bedrock".into(), endpoint_id: None, model_id: None, enabled: true, base_url: None }]);
         let error = complete(&router, &db, sort_request(true)).await.unwrap_err();
-        assert!(error.contains("AWS 憑證"), "{error}");
-        assert!(!error.contains("暫不支援"), "{error}");
+        assert_eq!(error, "AWS credentials are not set up. Add them in Settings and try again.");
+        db.conn.lock().unwrap().execute("INSERT OR REPLACE INTO user_preferences (key, value) VALUES ('ui_locale', 'zh-HK')", []).unwrap();
+        let error = complete(&router, &db, sort_request(true)).await.unwrap_err();
+        assert_eq!(error, "尚未設定 AWS 憑證，請在設定中加入後重試。");
+    }
+
+    /// The new Bedrock messages of a completion are in the interface
+    /// language: the not-JSON one here, the empty-reply one below, the rest
+    /// in bedrock.rs.
+    #[test]
+    fn bedrock_completion_errors_follow_the_interface_language() {
+        let db = crate::db::test_database();
+        db.conn.lock().unwrap().execute("INSERT OR REPLACE INTO user_preferences (key, value) VALUES ('ui_locale', 'zh-HK')", []).unwrap();
+        let prose = bedrock_result(&converse_reply("The email asks for a reply."), "us.amazon.nova-pro-v1:0".into());
+        let error = store_then_check(&db, &bedrock_entry(), &sort_request(true), prose, 1).unwrap_err();
+        assert_eq!(error, "Bedrock（us.amazon.nova-pro-v1:0）回覆的不是有效 JSON，請重試或改用其他模型。");
+        let empty = bedrock_result(&converse_reply(""), "us.amazon.nova-pro-v1:0".into());
+        let error = store_then_check(&db, &bedrock_entry(), &sort_request(false), empty, 1).unwrap_err();
+        assert_eq!(error, "Bedrock（us.amazon.nova-pro-v1:0）沒有回覆內容，請重試或改用其他模型。");
+        assert_eq!(crate::ai::cost::tests::usage_rows(&db).len(), 2, "both billed replies are stored");
+    }
+
+    /// AWS bills an empty reply, so it is stored before it is rejected.
+    #[test]
+    fn an_empty_bedrock_reply_is_stored_then_rejected() {
+        let db = crate::ai::cost::tests::temp_metrics_db("");
+        let empty = bedrock_result(&converse_reply("  "), "apac.amazon.nova-micro-v1:0".into());
+        let error = store_then_check(&db, &bedrock_entry(), &sort_request(false), empty, 1).unwrap_err();
+        assert_eq!(error, "Bedrock (apac.amazon.nova-micro-v1:0) returned no answer. Try again, or choose another model.");
+        let rows = crate::ai::cost::tests::usage_rows(&db);
+        assert_eq!(rows.len(), 1);
+        assert_eq!((rows[0].model_id.as_str(), rows[0].input_tokens, rows[0].output_tokens), ("apac.amazon.nova-micro-v1:0", 1_000, 40));
+    }
+
+    /// A reply without usage figures is not stored as a row of zeros, and
+    /// its cost is unknown.
+    #[test]
+    fn a_bedrock_reply_without_usage_stores_nothing() {
+        use aws_sdk_bedrockruntime::types::{ContentBlock, ConversationRole, ConverseOutput as Output, Message, StopReason};
+        let output = aws_sdk_bedrockruntime::operation::converse::ConverseOutput::builder()
+            .output(Output::Message(Message::builder().role(ConversationRole::Assistant).content(ContentBlock::Text("OK".into())).build().unwrap()))
+            .stop_reason(StopReason::EndTurn)
+            .build()
+            .unwrap();
+        let db = crate::ai::cost::tests::temp_metrics_db("");
+        let done = bedrock_result(&output, "us.amazon.nova-pro-v1:0".into());
+        assert!(done.usage_missing);
+        let done = store_then_check(&db, &bedrock_entry(), &sort_request(false), done, 1).unwrap();
+        assert_eq!((done.text.as_str(), done.cost_micro, done.price_unknown), ("OK", None, true));
+        assert!(crate::ai::cost::tests::usage_rows(&db).is_empty());
+    }
+
+    /// A Bedrock completion goes out to a stand-in for AWS. The model id the
+    /// user typed carries the US geography and the credentials were saved for
+    /// Singapore, so the request goes out as the APAC profile, and the row is
+    /// stored against that id with the four figures AWS returned, including
+    /// the cache write.
+    #[test]
+    fn a_bedrock_completion_stores_the_usage_aws_returned_for_the_model_it_sent() {
+        let _keychain = crate::aws::credentials::tests::KEYCHAIN_GUARD.lock().unwrap_or_else(|e| e.into_inner());
+        let runtime = tokio::runtime::Builder::new_current_thread().enable_all().build().unwrap();
+        runtime.block_on(async {
+            let db = std::sync::Arc::new(crate::db::test_database());
+            let creds = crate::ai::bedrock::tests::fixture_creds("ap-southeast-1");
+            crate::aws::credentials::AwsCredsRepo::new(db.clone()).save(&creds).await.unwrap();
+            let mut router = AiRouter::new("gemini_primary");
+            router.set_provider_chain(vec![ProviderChainEntry { position: 0, provider_type: "bedrock".into(), endpoint_id: None, model_id: Some("us.anthropic.claude-haiku-4-5-20251001-v1:0".into()), enabled: true, base_url: None }]);
+
+            let server = crate::ai::bedrock::tests::aws_loopback(200, None, crate::ai::bedrock::tests::converse_json("{\"category\": \"action\"}")).await;
+            let done = complete(&router, &db, sort_request(true)).await.unwrap();
+            let received = server.await.unwrap();
+            assert_eq!(received.path, "/model/apac.anthropic.claude-haiku-4-5-20251001-v1:0/converse");
+            assert!(received.body.contains(super::super::bedrock::JSON_INSTRUCTION), "a JSON request asks for one object");
+            assert_eq!(done.text, r#"{"category":"action"}"#);
+            assert_eq!(done.model, "apac.anthropic.claude-haiku-4-5-20251001-v1:0");
+
+            let rows = crate::ai::cost::tests::usage_rows(&db);
+            assert_eq!(rows.len(), 1);
+            assert_eq!((rows[0].provider.as_str(), rows[0].feature.as_str(), rows[0].model_id.as_str()), ("bedrock", "mail_sort", "apac.anthropic.claude-haiku-4-5-20251001-v1:0"));
+            assert_eq!((rows[0].input_tokens, rows[0].output_tokens), (1_320, 45));
+            assert_eq!(crate::ai::cost::tests::cache_tokens(&db), vec![(800, 400)]);
+
+            // A request AWS refuses stores nothing, and says why in the
+            // interface language.
+            let server = crate::ai::bedrock::tests::aws_loopback(403, Some("AccessDeniedException"), json!({"message": "PRIVATE-MAIL-CANARY"})).await;
+            let error = complete(&router, &db, sort_request(true)).await.unwrap_err();
+            server.await.unwrap();
+            assert_eq!(error, "Bedrock refused the AWS credentials or access to the model. Check them in Settings and try again.");
+            assert_eq!(crate::ai::cost::tests::usage_rows(&db).len(), 1, "nothing stored for the refused request");
+        });
+        let _ = crate::security::keychain::KeychainStore::delete("com.jarvis.aws", "secret_access_key");
     }
 
     /// One loopback HTTP reply, for a request that would go to a service.
