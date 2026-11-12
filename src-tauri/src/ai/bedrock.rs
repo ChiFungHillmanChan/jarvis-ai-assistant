@@ -128,14 +128,32 @@ pub(crate) async fn converse_plain(
         .send()
         .await
         .map_err(|err| {
-            log::warn!("{}", converse_error(&err));
-            plain_error(err.as_service_error().map(|e| aws_sdk_bedrockruntime::error::ProvideErrorMetadata::code(e).unwrap_or_default()))
+            let code = err.as_service_error().map(|e| aws_sdk_bedrockruntime::error::ProvideErrorMetadata::code(e).unwrap_or_default());
+            log::warn!("Bedrock completion failed: {}", failure_kind(&err, code));
+            plain_error(code)
         })
 }
 
-/// What a failed plain request means, in the user's terms. The SDK error is
-/// logged, never shown: a validation message can quote the request. `code` is
-/// the service's error code, or None when the request never reached AWS.
+/// What is logged when a plain request fails: the service's error code, or
+/// the kind of failure when there is none. Never the SDK's text, which can
+/// quote the request, and the request is mail.
+fn failure_kind<E, R>(err: &aws_sdk_bedrockruntime::error::SdkError<E, R>, code: Option<&str>) -> String {
+    use aws_sdk_bedrockruntime::error::SdkError;
+    match (err, code) {
+        (_, Some(code)) if !code.is_empty() => format!("code {code}"),
+        (SdkError::ServiceError(_), _) => "service error without a code".into(),
+        (SdkError::TimeoutError(_), _) => "timed out".into(),
+        (SdkError::DispatchFailure(_), _) => "could not connect".into(),
+        (SdkError::ResponseError(_), _) => "unreadable response".into(),
+        (SdkError::ConstructionFailure(_), _) => "request not built".into(),
+        _ => "other failure".into(),
+    }
+}
+
+/// What a failed plain request means, in the user's terms. Only the error
+/// code is used, never the SDK's text: a validation message can quote the
+/// request. `code` is the service's error code, or None when the request
+/// never reached AWS.
 fn plain_error(code: Option<&str>) -> String {
     match code {
         Some("AccessDeniedException" | "UnrecognizedClientException" | "InvalidSignatureException" | "ExpiredTokenException") => {
@@ -567,6 +585,18 @@ mod tests {
         record_metrics(&db, crate::ai::Workload::Tools, "global.anthropic.claude-sonnet-4-6", &usage, 1).await;
         let (input, micro): (i64, i64) = db.conn.lock().unwrap().query_row("SELECT input_tokens, usd_cost_micro FROM inference_metrics", [], |r| Ok((r.get(0)?, r.get(1)?))).unwrap();
         assert_eq!((input, micro), (8_800, 12_870));
+    }
+
+    /// The log line for a failed completion names the code or the kind of
+    /// failure, never the SDK's text, which can quote the mail.
+    #[test]
+    fn a_failed_completion_logs_the_code_not_the_message() {
+        use aws_sdk_bedrockruntime::error::SdkError;
+        let timeout = SdkError::<(), ()>::timeout_error("PRIVATE-MAIL-CANARY");
+        assert_eq!(failure_kind(&timeout, None), "timed out");
+        assert_eq!(failure_kind(&SdkError::<(), ()>::construction_failure("PRIVATE-MAIL-CANARY"), None), "request not built");
+        assert_eq!(failure_kind(&timeout, Some("ValidationException")), "code ValidationException");
+        assert!(!failure_kind(&timeout, Some("")).contains("PRIVATE"));
     }
 
     fn usage() -> TokenUsage {

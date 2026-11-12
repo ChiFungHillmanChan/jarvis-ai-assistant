@@ -159,8 +159,9 @@ async fn complete_one(router: &AiRouter, db: &Database, entry: &ProviderChainEnt
         }
         "bedrock" => {
             let creds = crate::aws::credentials::load_from(db)?.ok_or("尚未設定 AWS 憑證，請在設定中加入後重試。")?;
-            // The chain row's model, pointed at the geography the credentials
-            // were saved for, as in chat.
+            // The chain row's model, pointed at the inference profile of the
+            // saved region (load_from derives it from the region; chat reads
+            // the stored profile, and the two agree).
             let model = super::apply_inference_profile(&super::bedrock_model(entry), &creds.inference_profile);
             let plain = super::bedrock::plain_request(request.system, request.user, request.json, request.max_tokens)?;
             let output = super::bedrock::converse_plain(&creds, &model, plain).await?;
