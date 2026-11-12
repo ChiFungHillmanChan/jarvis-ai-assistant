@@ -10,8 +10,11 @@ pub struct ProviderBreakdown {
     /// None for a local provider: it is free, so the tokens are the spend.
     /// For a cloud provider, the turns with an unknown price are left out.
     pub usd_cost: Option<f64>,
+    /// Includes the cache figures below, as stored for every provider.
     pub input_tokens: i64,
     pub output_tokens: i64,
+    pub cache_read_tokens: i64,
+    pub cache_write_tokens: i64,
     /// Turns whose model has no price (ai/models.rs).
     pub price_unknown_turns: i64,
 }
@@ -23,8 +26,11 @@ pub struct ExpensiveTurn {
     pub model_id: String,
     pub workload: String,
     pub feature: String,
+    /// Includes the cache figures below, as stored for every provider.
     pub input_tokens: i64,
     pub output_tokens: i64,
+    pub cache_read_tokens: i64,
+    pub cache_write_tokens: i64,
     /// None for a local provider, and when the price is unknown.
     pub usd_cost: Option<f64>,
     pub price_unknown: bool,
@@ -76,7 +82,8 @@ fn stats_since(conn: &rusqlite::Connection, cutoff: i64) -> Result<CostStats, St
             .prepare(
                 "SELECT provider, COUNT(*), COALESCE(SUM(usd_cost_micro), 0),
                         COALESCE(SUM(input_tokens), 0), COALESCE(SUM(output_tokens), 0),
-                        COALESCE(SUM(price_unknown), 0)
+                        COALESCE(SUM(price_unknown), 0),
+                        COALESCE(SUM(cache_read_tokens), 0), COALESCE(SUM(cache_write_tokens), 0)
                  FROM inference_metrics WHERE ts >= ?1
                  GROUP BY provider
                  ORDER BY COALESCE(SUM(usd_cost_micro), 0) DESC",
@@ -92,6 +99,8 @@ fn stats_since(conn: &rusqlite::Connection, cutoff: i64) -> Result<CostStats, St
                     turns: r.get(1)?,
                     input_tokens: r.get(3)?,
                     output_tokens: r.get(4)?,
+                    cache_read_tokens: r.get(6)?,
+                    cache_write_tokens: r.get(7)?,
                     price_unknown_turns: r.get(5)?,
                 })
             })
@@ -108,7 +117,8 @@ fn stats_since(conn: &rusqlite::Connection, cutoff: i64) -> Result<CostStats, St
         let mut stmt = conn
             .prepare(
                 "SELECT ts, provider, model_id, workload, input_tokens, output_tokens,
-                        usd_cost_micro, latency_ms, feature, price_unknown
+                        usd_cost_micro, latency_ms, feature, price_unknown,
+                        COALESCE(cache_read_tokens, 0), COALESCE(cache_write_tokens, 0)
                  FROM inference_metrics WHERE ts >= ?1
                  ORDER BY usd_cost_micro DESC
                  LIMIT 5",
@@ -128,6 +138,8 @@ fn stats_since(conn: &rusqlite::Connection, cutoff: i64) -> Result<CostStats, St
                     feature: r.get(8)?,
                     input_tokens: r.get(4)?,
                     output_tokens: r.get(5)?,
+                    cache_read_tokens: r.get(10)?,
+                    cache_write_tokens: r.get(11)?,
                     price_unknown: r.get(9)?,
                     latency_ms: r.get(7)?,
                 })
@@ -168,7 +180,9 @@ pub struct BlendedCost {
     pub total_usd: f64,
     /// Days with usage whose price is known.
     pub active_days: i64,
-    pub implied_monthly_usd: f64,
+    /// total_usd over active_days: what a day of use cost, on average. It is
+    /// not a forecast of a bill.
+    pub usd_per_active_day: f64,
     /// Requests with no price. They are left out of the figures above, which
     /// are therefore low by what these cost; the panel says so.
     pub price_unknown_turns: i64,
@@ -190,14 +204,14 @@ fn blended_since(db: &crate::db::Database, since: i64) -> Result<BlendedCost, St
     Ok(BlendedCost {
         total_usd,
         active_days: blended.active_days,
-        implied_monthly_usd: implied_monthly_usd(total_usd, blended.active_days),
+        usd_per_active_day: usd_per_active_day(total_usd, blended.active_days),
         price_unknown_turns: blended.price_unknown_turns,
     })
 }
 
-fn implied_monthly_usd(total_usd: f64, active_days: i64) -> f64 {
+fn usd_per_active_day(total_usd: f64, active_days: i64) -> f64 {
     if active_days > 0 {
-        total_usd / active_days as f64 * 30.0
+        total_usd / active_days as f64
     } else {
         0.0
     }
@@ -254,18 +268,56 @@ mod tests {
             ))
             .unwrap();
         let blended = blended_since(&db, now - 60).unwrap();
-        assert_eq!((blended.total_usd, blended.active_days, blended.implied_monthly_usd, blended.price_unknown_turns), (0.0, 0, 0.0, 2));
+        assert_eq!((blended.total_usd, blended.active_days, blended.usd_per_active_day, blended.price_unknown_turns), (0.0, 0, 0.0, 2));
     }
 
     #[test]
-    fn implied_monthly_zero_days_is_zero_not_nan() {
-        assert_eq!(implied_monthly_usd(0.0, 0), 0.0);
-        assert_eq!(implied_monthly_usd(5.0, 0), 0.0);
+    fn per_active_day_with_zero_days_is_zero_not_nan() {
+        assert_eq!(usd_per_active_day(0.0, 0), 0.0);
+        assert_eq!(usd_per_active_day(5.0, 0), 0.0);
     }
 
+    /// US$1.50 spent over 3 days of use is US$0.50 a day of use, whatever the
+    /// window: the figure is not scaled up to a month.
     #[test]
-    fn implied_monthly_scales_daily_average_to_30_days() {
-        // 1.75 USD over 2 active days -> 0.875/day -> 26.25/mo
-        assert!((implied_monthly_usd(1.75, 2) - 26.25).abs() < 1e-9);
+    fn spend_per_day_of_use_is_the_total_over_the_days_with_usage() {
+        assert!((usd_per_active_day(1.5, 3) - 0.5).abs() < 1e-9);
+        let db = crate::db::test_database();
+        let now = chrono::Utc::now().timestamp();
+        db.conn
+            .lock()
+            .unwrap()
+            .execute_batch(&format!(
+                "INSERT INTO inference_metrics (ts, workload, model_id, input_tokens, output_tokens, latency_ms, provider, usd_cost_micro, feature, price_unknown) VALUES
+                    ({now}, 'tools', 'gpt-6-luna', 1000, 10, 5, 'openai', 1000000, 'chat', 0),
+                    ({}, 'tools', 'gpt-6-luna', 1000, 10, 5, 'openai', 500000, 'chat', 0);",
+                now - 86_400
+            ))
+            .unwrap();
+        let blended = blended_since(&db, now - 30 * 86_400).unwrap();
+        assert_eq!((blended.total_usd, blended.active_days, blended.usd_per_active_day), (1.5, 2, 0.75));
+    }
+
+    /// The panel shows input without the cache, as AWS reports inputTokens,
+    /// so the cache figures are handed over with each row and each provider.
+    #[test]
+    fn the_cache_figures_reach_the_panel() {
+        let db = crate::db::test_database();
+        let now = chrono::Utc::now().timestamp();
+        {
+            let conn = db.conn.lock().unwrap();
+            conn.execute_batch(&format!(
+                "INSERT INTO inference_metrics (ts, workload, model_id, input_tokens, output_tokens, cache_read_tokens, cache_write_tokens, latency_ms, provider, usd_cost_micro, feature, price_unknown) VALUES
+                    ({now}, 'tools', 'apac.anthropic.claude-haiku-4-5-20251001-v1:0', 1320, 45, 800, 400, 5, 'bedrock', 900, 'chat', 0),
+                    ({now}, 'tools', 'apac.anthropic.claude-haiku-4-5-20251001-v1:0', 9, 2, 0, 0, 5, 'bedrock', 100, 'chat', 0);"
+            ))
+            .unwrap();
+        }
+        let conn = db.conn.lock().unwrap();
+        let stats = stats_since(&conn, now - 60).unwrap();
+        let bedrock = &stats.by_provider_30d[0];
+        assert_eq!((bedrock.input_tokens, bedrock.output_tokens, bedrock.cache_read_tokens, bedrock.cache_write_tokens), (1_329, 47, 800, 400));
+        let top = &stats.top_expensive_30d[0];
+        assert_eq!((top.input_tokens, top.output_tokens, top.cache_read_tokens, top.cache_write_tokens), (1_320, 45, 800, 400));
     }
 }

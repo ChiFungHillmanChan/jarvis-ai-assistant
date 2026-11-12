@@ -1,17 +1,23 @@
 import { memo } from "react";
 import { useTauriCommand } from "../hooks/useTauriCommand";
 import { useUiLocale } from "../i18n";
-import { formatUsd, monthlyLine, usageHeadline, type BlendedCost, type CostStats } from "../lib/usage";
+import { expensiveRequests, formatUsd, perDayLine, tokenFigures, unpricedNote, usageHeadline, type BlendedCost, type CostStats } from "../lib/usage";
+
+/** The window both commands are asked for, and the header names. */
+const WINDOW_DAYS = 30;
 
 /**
- * Usage recorded on this Mac over the last 30 days: one row per request,
- * written by the backend as each request is answered (ai/cost.rs). Money is
- * shown only where the price is known; see lib/usage.ts.
+ * Usage recorded on this Mac over the last 30 days, from the rows the backend
+ * writes as each reply arrives (ai/cost.rs). One row is one chat turn on
+ * Gemini, Claude, OpenAI-compatible services and local models, but one
+ * request on Bedrock, where a tool turn is several rows; single completions
+ * are one row per request everywhere (lib/usage.ts CostStats). "Requests"
+ * counts rows. Money is shown only where the price is known.
  */
 export default memo(function CostPanel() {
   const { text } = useUiLocale();
   const { data, error, loading } = useTauriCommand<CostStats>("get_cost_stats");
-  const { data: blended, error: blendedError } = useTauriCommand<BlendedCost>("get_blended_cost", { days: 30 });
+  const { data: blended, error: blendedError } = useTauriCommand<BlendedCost>("get_blended_cost", { days: WINDOW_DAYS });
   const header = <div style={styles.header}>{text("Last 30 days", "最近 30 日")}</div>;
 
   if (loading) {
@@ -25,6 +31,9 @@ export default memo(function CostPanel() {
   }
 
   const headline = usageHeadline(data, text);
+  const perDay = blended ? perDayLine(blended, WINDOW_DAYS, text) : null;
+  const unpriced = unpricedNote(data, text);
+  const expensive = expensiveRequests(data);
   return (
     <div style={styles.container}>
       {header}
@@ -35,18 +44,11 @@ export default memo(function CostPanel() {
         <Kpi label={text("Local model share", "本機模型佔比")} value={`${data.local_share_pct.toFixed(0)}%`} />
       </div>
 
-      {blended && <div style={styles.note}>{monthlyLine(blended, text)}</div>}
+      {perDay && <div style={styles.note}>{perDay}</div>}
       {!blended && blendedError && (
-        <div style={styles.note}>{text(`Monthly rate unavailable (${blendedError})`, `未能計算每月費用（${blendedError}）`)}</div>
+        <div style={styles.note}>{text(`Cost per day of use unavailable (${blendedError})`, `未能計算每個使用日的費用（${blendedError}）`)}</div>
       )}
-      {data.price_unknown_turns_30d > 0 && (
-        <div style={styles.note}>
-          {text(
-            `${data.price_unknown_turns_30d} requests with price unknown, not in the total`,
-            `${data.price_unknown_turns_30d} 次請求價格未知，未計入總額`,
-          )}
-        </div>
-      )}
+      {unpriced && <div style={styles.note}>{unpriced}</div>}
 
       <div style={styles.subheader}>{text("By provider", "按供應商")}</div>
       <div style={styles.list}>
@@ -55,23 +57,23 @@ export default memo(function CostPanel() {
             <span style={styles.name}>{p.provider}</span>
             <span style={styles.muted}>{p.turns}</span>
             <span style={styles.amount}>
-              {p.usd_cost === null ? `${(p.input_tokens + p.output_tokens).toLocaleString()} tokens` : p.price_unknown_turns === p.turns ? text("price unknown", "價格未知") : formatUsd(p.usd_cost)}
+              {p.usd_cost === null ? tokenFigures(p, text) : p.price_unknown_turns === p.turns ? text("price unknown", "價格未知") : formatUsd(p.usd_cost)}
               {p.usd_cost !== null && p.price_unknown_turns > 0 && p.price_unknown_turns < p.turns ? text(" + price unknown", " + 價格未知") : ""}
             </span>
           </div>
         ))}
       </div>
 
-      {data.top_expensive_30d.length > 0 && (
+      {expensive.length > 0 && (
         <>
           <div style={styles.subheader}>{text("Most expensive requests", "費用最高的請求")}</div>
           <div style={styles.list}>
-            {data.top_expensive_30d.map((t, i) => (
+            {expensive.map((t, i) => (
               <div key={i} style={styles.row}>
                 {/* The whole id: for Bedrock, the prefix says which profile was sent. */}
                 <span style={styles.model} title={t.model_id}>{t.model_id}</span>
-                <span style={styles.muted}>{t.input_tokens}+{t.output_tokens}</span>
-                <span style={styles.amount}>{t.price_unknown ? text("price unknown", "價格未知") : t.usd_cost === null ? text("free", "免費") : formatUsd(t.usd_cost)}</span>
+                <span style={styles.muted}>{tokenFigures(t, text)}</span>
+                <span style={styles.amount}>{formatUsd(t.usd_cost ?? 0)}</span>
               </div>
             ))}
           </div>
