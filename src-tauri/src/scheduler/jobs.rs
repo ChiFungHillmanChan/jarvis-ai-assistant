@@ -403,6 +403,22 @@ fn alerts_to_notify<'a>(previous: Option<&str>, current: &'a [String]) -> Vec<&'
     current.iter().map(String::as_str).filter(|line| !seen.contains(line)).collect()
 }
 
+/// The "meeting in progress" lines of the check.
+///
+/// If they cannot be worked out, the check goes on without them: the failed
+/// runs alert and the mail reminders come after this in the check, and the
+/// task alerts gathered before it are only sent at its end. An error here
+/// used to end the whole check and take all of those with it.
+fn meetings_in_progress_lines(db: &Database, zh: bool) -> Vec<String> {
+    match missed_meetings_in_progress(db) {
+        Ok(meetings) => meetings.iter().map(|meeting| meeting_in_progress_line(zh, meeting, &chrono::Local)).collect(),
+        Err(e) => {
+            log::warn!("Proactive check: the meeting-in-progress notice was skipped: {}", e);
+            Vec::new()
+        }
+    }
+}
+
 async fn run_proactive_check(db: &Arc<Database>) -> Result<String, String> {
     // Each query acquires and releases the lock independently to avoid blocking
     // other jobs and UI commands during the check.
@@ -461,9 +477,7 @@ async fn run_proactive_check(db: &Arc<Database>) -> Result<String, String> {
     // A meeting whose alert window passed with nobody checking (the Mac was
     // asleep, or JARVIS was closed) gets one notice while it is still going
     // on. Nothing for a meeting that has already ended.
-    for meeting in missed_meetings_in_progress(db)? {
-        alerts.push(meeting_in_progress_line(zh, &meeting, &chrono::Local));
-    }
+    alerts.extend(meetings_in_progress_lines(db, zh));
 
     let failed: i64 = {
         let conn = db.conn.lock().map_err(|e| e.to_string())?;
@@ -818,6 +832,30 @@ mod tests {
             .query_row("SELECT value FROM user_preferences WHERE key = 'meeting_alerts_seen'", [], |r| r.get(0))
             .unwrap();
         assert_eq!(seen.lines().count(), 2, "the running meeting and the one whose alert window is open: {seen}");
+    }
+
+    /// A calendar the notice cannot read costs the check its meeting lines
+    /// and nothing else: the task alerts, the failed-runs alert and the mail
+    /// reminders of the same check still go out.
+    #[test]
+    fn a_meeting_notice_that_cannot_be_worked_out_is_left_out_of_the_check() {
+        let db = crate::db::test_database();
+        let at = |minutes: i64| (chrono::Utc::now() + chrono::TimeDelta::minutes(minutes)).to_rfc3339();
+        db.conn
+            .lock()
+            .unwrap()
+            .execute(
+                "INSERT INTO calendar_events (google_id, summary, start_time, end_time) VALUES ('running', 'Mentor sync', ?1, ?2)",
+                rusqlite::params![at(-5), at(55)],
+            )
+            .unwrap();
+        let lines = meetings_in_progress_lines(&db, false);
+        assert_eq!(lines.len(), 1);
+        assert!(lines[0].starts_with("Meeting in progress: Mentor sync"), "{}", lines[0]);
+
+        db.conn.lock().unwrap().execute_batch("DROP TABLE calendar_events").unwrap();
+        assert!(missed_meetings_in_progress(&db).is_err(), "the notice itself cannot be worked out");
+        assert!(meetings_in_progress_lines(&db, false).is_empty(), "left out, and the check goes on");
     }
 
     fn cron_runs_db() -> Connection {
