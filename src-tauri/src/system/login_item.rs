@@ -7,6 +7,7 @@
 
 use crate::db::Database;
 use rusqlite::OptionalExtension;
+use std::path::Path;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 
@@ -17,8 +18,24 @@ use std::sync::Arc;
 /// on: by then `default_applied` is true for good. Someone who finished
 /// onboarding in an earlier version gets it on the first launch after
 /// updating, the same way.
-pub fn should_apply_default(onboarding_complete: bool, default_applied: bool) -> bool {
-    onboarding_complete && !default_applied
+///
+/// And only for an app that is running from where it is installed (see
+/// `installed_in_applications`). Until it is, the default stays unapplied, so
+/// the first launch from the Applications folder applies it.
+pub fn should_apply_default(onboarding_complete: bool, default_applied: bool, installed: bool) -> bool {
+    onboarding_complete && !default_applied && installed
+}
+
+/// Whether the running executable is inside `/Applications` or the user's own
+/// `~/Applications`.
+///
+/// A login item points at the executable that registered it. JARVIS opened
+/// straight from its disk image runs from `/Volumes/...`, and a quarantined
+/// copy opened from Downloads runs from a random, read-only path that macOS
+/// makes up for that one launch (app translocation). A login item made then
+/// points at something that is gone by the next login.
+pub fn installed_in_applications(executable: &Path, home: Option<&Path>) -> bool {
+    executable.starts_with("/Applications") || home.is_some_and(|home| executable.starts_with(home.join("Applications")))
 }
 
 /// The Mac's login item for this app.
@@ -29,6 +46,13 @@ pub trait LoginItem: Send + Sync {
     /// login item.
     fn default_applied_key(&self) -> &'static str {
         "open_at_login_default_applied"
+    }
+    /// Whether the app is running from where it is installed, so that a login
+    /// item made now still points at it at the next login. Only the default
+    /// asks; the switch in Settings is the user's own choice wherever the app
+    /// is running from.
+    fn installed(&self) -> bool {
+        true
     }
 }
 
@@ -50,6 +74,10 @@ impl LoginItem for SystemLoginItem {
         let manager = self.0.autolaunch();
         let changed = if enabled { manager.enable() } else { manager.disable() };
         changed.map_err(|e| e.to_string())
+    }
+
+    fn installed(&self) -> bool {
+        std::env::current_exe().is_ok_and(|executable| installed_in_applications(&executable, dirs::home_dir().as_deref()))
     }
 }
 
@@ -119,7 +147,7 @@ pub fn apply_default(db: &Database, login_item: &dyn LoginItem) -> Result<bool, 
         let conn = db.conn.lock().map_err(|e| e.to_string())?;
         (preference_is_true(&conn, "onboarding_complete")?, preference_is_true(&conn, login_item.default_applied_key())?)
     };
-    if !should_apply_default(onboarding_complete, default_applied) {
+    if !should_apply_default(onboarding_complete, default_applied, login_item.installed()) {
         return Ok(false);
     }
     login_item.set_enabled(true)?;
@@ -165,10 +193,82 @@ mod tests {
 
     #[test]
     fn the_default_is_due_once_after_onboarding() {
-        assert!(!should_apply_default(false, false), "not before onboarding finishes");
-        assert!(should_apply_default(true, false), "once it has");
-        assert!(!should_apply_default(true, true), "never a second time");
-        assert!(!should_apply_default(false, true));
+        assert!(!should_apply_default(false, false, true), "not before onboarding finishes");
+        assert!(should_apply_default(true, false, true), "once it has");
+        assert!(!should_apply_default(true, true, true), "never a second time");
+        assert!(!should_apply_default(false, true, true));
+        assert!(!should_apply_default(true, false, false), "not while the app is running from somewhere it will not stay");
+    }
+
+    #[test]
+    fn only_an_app_in_an_applications_folder_counts_as_installed() {
+        let home = Path::new("/Users/someone");
+        let installed = |executable: &str| installed_in_applications(Path::new(executable), Some(home));
+        assert!(installed("/Applications/JARVIS.app/Contents/MacOS/jarvis"));
+        assert!(installed("/Users/someone/Applications/JARVIS.app/Contents/MacOS/jarvis"));
+        assert!(installed("/Applications/Tools/JARVIS.app/Contents/MacOS/jarvis"), "a folder inside Applications");
+
+        assert!(!installed("/Volumes/JARVIS/JARVIS.app/Contents/MacOS/jarvis"), "opened from the disk image");
+        assert!(
+            !installed("/private/var/folders/zz/abc123/T/AppTranslocation/6B1C0C6E-0000-4000-8000-1234567890AB/d/JARVIS.app/Contents/MacOS/jarvis"),
+            "translocated by macOS"
+        );
+        assert!(!installed("/Users/someone/Downloads/JARVIS.app/Contents/MacOS/jarvis"));
+        assert!(!installed("/Users/someone/Desktop/Applications/JARVIS.app/Contents/MacOS/jarvis"), "not just any folder with that name");
+        assert!(!installed("/ApplicationsOld/JARVIS.app/Contents/MacOS/jarvis"), "whole path components, not a prefix of the text");
+        assert!(!installed("/Users/someone-else/Applications/JARVIS.app/Contents/MacOS/jarvis"), "another user's folder");
+        assert!(
+            !installed_in_applications(Path::new("/Users/someone/Applications/JARVIS.app/Contents/MacOS/jarvis"), None),
+            "no home folder known"
+        );
+    }
+
+    /// A login item that says where the app is running from.
+    struct LoginItemAt {
+        item: MemoryLoginItem,
+        installed: AtomicBool,
+    }
+
+    impl LoginItem for LoginItemAt {
+        fn is_enabled(&self) -> Result<bool, String> {
+            self.item.is_enabled()
+        }
+        fn set_enabled(&self, enabled: bool) -> Result<(), String> {
+            self.item.set_enabled(enabled)
+        }
+        fn installed(&self) -> bool {
+            self.installed.load(Ordering::SeqCst)
+        }
+    }
+
+    /// First opened from the disk image, later from the Applications folder:
+    /// the default waits for the second, and the switch in Settings works in
+    /// both.
+    #[test]
+    fn the_default_waits_until_the_app_is_installed() {
+        let db = crate::db::test_database();
+        finish_onboarding(&db);
+        let item = LoginItemAt { item: MemoryLoginItem::default(), installed: AtomicBool::new(false) };
+
+        for _ in 0..2 {
+            assert!(!apply_default(&db, &item).unwrap(), "running from the disk image");
+        }
+        assert!(!item.is_enabled().unwrap(), "no login item pointing at the disk image");
+
+        item.installed.store(true, Ordering::SeqCst);
+        assert!(apply_default(&db, &item).unwrap(), "the first launch from Applications");
+        assert!(item.is_enabled().unwrap());
+        assert!(!apply_default(&db, &item).unwrap(), "once only");
+
+        // The user's own choice is theirs wherever the app runs from, and it
+        // settles the default for good.
+        let db = crate::db::test_database();
+        finish_onboarding(&db);
+        let item = LoginItemAt { item: MemoryLoginItem::default(), installed: AtomicBool::new(false) };
+        assert!(set_by_user(&db, &item, true).unwrap(), "turned on in Settings while running from the disk image");
+        assert!(!set_by_user(&db, &item, false).unwrap());
+        item.installed.store(true, Ordering::SeqCst);
+        assert!(!apply_default(&db, &item).unwrap(), "the default does not turn it back on");
     }
 
     #[test]

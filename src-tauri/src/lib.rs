@@ -40,11 +40,17 @@ pub fn run() {
     }
     env_logger::init();
 
-    tauri::Builder::default()
-        .plugin(tauri_plugin_autostart::init(
-            tauri_plugin_autostart::MacosLauncher::LaunchAgent,
-            None,
-        ))
+    let builder = tauri::Builder::default();
+    // Open at login. Registered only in the build that uses it: the released
+    // app (system/login_item.rs). A development or QA build keeps the setting
+    // in memory, and without the plugin nothing in it can write a LaunchAgent
+    // that would start that build at every login.
+    #[cfg(not(any(debug_assertions, feature = "native-qa")))]
+    let builder = builder.plugin(tauri_plugin_autostart::init(
+        tauri_plugin_autostart::MacosLauncher::LaunchAgent,
+        None,
+    ));
+    builder
         .plugin(tauri_plugin_updater::Builder::new().build())
         .plugin(tauri_plugin_process::init())
         .plugin(tauri_plugin_global_shortcut::Builder::new().build())
