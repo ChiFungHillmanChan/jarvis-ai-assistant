@@ -72,6 +72,26 @@ fn bedrock_model(entry: &ProviderChainEntry) -> String {
     entry.model_id.clone().filter(|m| !m.trim().is_empty()).unwrap_or_else(bedrock::default_model)
 }
 
+/// The Bedrock model id typed in Settings, as it is saved: trimmed, and None
+/// (the default model) when empty. Both forms the Bedrock console shows are
+/// kept as typed: a model id (`anthropic.claude-haiku-4-5-20251001-v1:0`) or
+/// an inference profile id (`us.`, `eu.`, `apac.` or `global.` in front).
+/// When a request is sent, a `us.`, `eu.` or `apac.` prefix is pointed at
+/// the saved region (`apply_inference_profile`), as for every saved id.
+pub(crate) fn bedrock_model_to_save(typed: Option<&str>, language: bedrock::UiLanguage) -> Result<Option<String>, String> {
+    let Some(model) = typed.map(str::trim).filter(|m| !m.is_empty()) else {
+        return Ok(None);
+    };
+    // AWS takes up to 2,048 characters, none of them spaces.
+    if model.len() > 2048 || model.chars().any(|c| c.is_whitespace() || c.is_control()) {
+        return Err(language.pick(
+            "This is not a Bedrock model ID. Copy the model ID or inference profile ID from the Bedrock console.",
+            "這不是 Bedrock 模型 ID，請從 Bedrock 主控台複製模型 ID 或推論設定檔 ID。",
+        ));
+    }
+    Ok(Some(model.to_string()))
+}
+
 /// Keychain service holding the provider API keys the user pastes in
 /// onboarding or Settings.
 pub const KEY_SERVICE: &str = "com.jarvis.ai";
@@ -1168,6 +1188,25 @@ mod tests {
     /// The model saved in the chain is the one Bedrock runs; the V13
     /// workload_routing rows (Nova Micro, Haiku 4.5, Sonnet 4.6) no longer
     /// replace it.
+    #[test]
+    fn a_typed_bedrock_model_id_is_saved_trimmed_and_sent_for_the_saved_region() {
+        use super::bedrock::UiLanguage::En;
+        assert_eq!(bedrock_model_to_save(Some("  anthropic.claude-haiku-4-5-20251001-v1:0\n"), En), Ok(Some("anthropic.claude-haiku-4-5-20251001-v1:0".into())));
+        assert_eq!(bedrock_model_to_save(Some("   "), En), Ok(None), "empty is the default model");
+        assert_eq!(bedrock_model_to_save(None, En), Ok(None));
+        assert!(bedrock_model_to_save(Some("claude haiku"), En).is_err());
+        assert!(bedrock_model_to_save(Some(&"a".repeat(2_049)), En).is_err());
+        let arn = "arn:aws:bedrock:ap-southeast-1:123456789012:application-inference-profile/abc123";
+        assert_eq!(bedrock_model_to_save(Some(arn), En), Ok(Some(arn.into())));
+
+        // What goes out for each, with credentials saved for Singapore.
+        let sent = |typed: &str| apply_inference_profile(&bedrock_model(&bedrock_entry(bedrock_model_to_save(Some(typed), En).unwrap().as_deref())), "apac");
+        assert_eq!(sent("anthropic.claude-haiku-4-5-20251001-v1:0"), "anthropic.claude-haiku-4-5-20251001-v1:0", "a bare model id as typed");
+        assert_eq!(sent("us.anthropic.claude-haiku-4-5-20251001-v1:0"), "apac.anthropic.claude-haiku-4-5-20251001-v1:0", "a profile id follows the saved region");
+        assert_eq!(sent("global.anthropic.claude-sonnet-4-6"), "global.anthropic.claude-sonnet-4-6");
+        assert_eq!(sent(arn), arn);
+    }
+
     #[test]
     fn bedrock_runs_the_model_saved_in_the_chain() {
         assert_eq!(bedrock_model(&bedrock_entry(Some("amazon.nova-pro-v1:0"))), "amazon.nova-pro-v1:0");

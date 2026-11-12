@@ -431,6 +431,12 @@ pub async fn update_provider_chain(
     router: State<'_, Mutex<AiRouter>>,
     mut chain: Vec<ProviderChainEntry>,
 ) -> Result<(), String> {
+    // A Bedrock row's model id is saved as typed in Settings, trimmed; empty
+    // means the default model.
+    let language = crate::ai::bedrock::UiLanguage::read(&db);
+    for entry in chain.iter_mut().filter(|entry| entry.provider_type == "bedrock") {
+        entry.model_id = crate::ai::bedrock_model_to_save(entry.model_id.as_deref(), language)?;
+    }
     // A base URL is where the key and messages go: only on OpenAI-compatible
     // rows, and only a normalised https (or this Mac) address.
     for entry in &mut chain {

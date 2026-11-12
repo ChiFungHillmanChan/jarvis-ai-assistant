@@ -480,6 +480,20 @@ export default function Settings() {
     }
   }
 
+  // The backend saves the id trimmed, or the default model when empty, and
+  // refuses one that cannot be a Bedrock id; the list is read back so the row
+  // shows what was saved.
+  async function handleSetBedrockModel(index: number, model: string) {
+    const updated = chain.map((c, i) => i === index ? { ...c, model_id: model || undefined } : c);
+    try {
+      await updateProviderChain(updated);
+      setChain(await getProviderChain());
+      setLlmError(null);
+    } catch (e) {
+      setLlmError(String(e));
+    }
+  }
+
   async function handleToggleChainEntry(index: number) {
     const updated = chain.map((c, i) => i === index ? { ...c, enabled: !c.enabled } : c);
     setChain(updated);
@@ -794,7 +808,8 @@ export default function Settings() {
                 ? `Bedrock (${entry.model_id || text("default", "預設")})`
                 : entry.provider_type;
               return (
-                <div key={i} className="settings-chain-row">
+                <div key={i}>
+                <div className="settings-chain-row">
                   <span style={{ color: "var(--text-muted)", fontSize: 12, fontFamily: "var(--font-mono)", width: 16 }}>{i + 1}.</span>
                   <span style={{ color: entry.enabled ? "var(--text-primary)" : "var(--text-secondary)", fontSize: 13, minWidth: 0, overflowWrap: "anywhere" }}>{label}</span>
                   <button aria-label={`${text("Move", "上移")} ${label}`} onClick={() => handleMoveChainEntry(i, "up")} disabled={i === 0} style={{ ...styles.saveBtn, fontSize: 12, padding: "1px 5px" }}>↑</button>
@@ -803,6 +818,10 @@ export default function Settings() {
                     <input type="checkbox" aria-label={`${text("Enable", "啟用")} ${label}`} checked={entry.enabled} onChange={() => handleToggleChainEntry(i)} style={styles.radio} />
                   </label>
                   <button aria-label={`${text("Remove from priority", "從優先次序移除")} ${label}`} onClick={() => handleRemoveFromChain(i)} style={{ ...styles.saveBtn, fontSize: 12, padding: "1px 5px", borderColor: "var(--accent-urgent)", color: "var(--accent-urgent)" }}>{text('Remove', '移除')}</button>
+                </div>
+                {entry.provider_type === "bedrock" && (
+                  <BedrockModelField saved={entry.model_id ?? ""} fallback={models?.defaults.bedrock ?? ""} onSave={(model) => handleSetBedrockModel(i, model)} />
+                )}
                 </div>
               );
             })}
@@ -816,7 +835,7 @@ export default function Settings() {
               <button disabled={!models} onClick={() => models && handleAddToChain("gemini", undefined, models.defaults.gemini_flash)} style={styles.saveBtn}>+ Gemini Flash</button>
               <button onClick={() => handleAddToChain("claude")} style={styles.saveBtn}>+ Claude</button>
               <button onClick={() => handleAddToChain("openai")} style={styles.saveBtn}>+ OpenAI</button>
-              <button disabled={!models} onClick={() => models && handleAddToChain("bedrock", undefined, models.defaults.bedrock)} style={styles.saveBtn}>+ Bedrock Claude</button>
+              <button disabled={!models} onClick={() => models && handleAddToChain("bedrock", undefined, models.defaults.bedrock)} style={styles.saveBtn}>+ Bedrock</button>
             </div>
           </div>
 
@@ -1496,6 +1515,41 @@ export default function Settings() {
 
 /// Decimal units, matching what Finder reports, so a user comparing the panel
 /// against Get Info sees the same number.
+/**
+ * The model a Bedrock row runs. Either id the Bedrock console shows can be
+ * typed: a model id, or an inference profile id. Requests and their usage
+ * rows use the id that is sent (ai/mod.rs apply_inference_profile).
+ */
+function BedrockModelField({ saved, fallback, onSave }: { saved: string; fallback: string; onSave: (model: string) => Promise<void> }) {
+  const { text } = useUiLocale();
+  const [draft, setDraft] = useState(saved);
+  const [busy, setBusy] = useState(false);
+  useEffect(() => { setDraft(saved); }, [saved]);
+  const changed = draft.trim() !== saved;
+  async function save() {
+    setBusy(true);
+    try { await onSave(draft.trim()); } finally { setBusy(false); }
+  }
+  return (
+    <div className="settings-bedrock-model">
+      <label>
+        <span>{text("Bedrock model ID", "Bedrock 模型 ID")}</span>
+        <input value={draft} placeholder={fallback} spellCheck={false} autoCapitalize="off" autoCorrect="off" disabled={busy}
+          onChange={(e) => setDraft(e.target.value)}
+          onKeyDown={(e) => { if (e.key === "Enter" && changed && !busy) void save(); }}
+          style={{ ...styles.tokenInput, fontFamily: "var(--font-mono)" }} />
+      </label>
+      <button disabled={!changed || busy} onClick={() => void save()} style={styles.saveBtn}>{text("Save model", "儲存模型")}</button>
+      <p className="settings-help">
+        {text(
+          `A model ID or an inference profile ID from the Bedrock console. A us., eu. or apac. profile is sent for the region of your saved AWS credentials; other IDs are sent as typed. Leave it empty for ${fallback || "the default model"}. Usage is recorded against the ID that is sent.`,
+          `可輸入 Bedrock 主控台的模型 ID 或推論設定檔 ID。us.、eu. 或 apac. 開頭的設定檔會按已儲存 AWS 憑證的地區發送，其他 ID 按輸入內容發送。留空即使用 ${fallback || "預設模型"}。用量按實際發送的 ID 記錄。`,
+        )}
+      </p>
+    </div>
+  );
+}
+
 function formatBytes(bytes: number): string {
   if (!Number.isFinite(bytes) || bytes <= 0) return "0 MB";
   const units = ["B", "KB", "MB", "GB", "TB"];
