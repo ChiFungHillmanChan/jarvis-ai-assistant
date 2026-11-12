@@ -2,6 +2,7 @@ import { useEffect, useState } from "react";
 import { getDailyBriefingSettings, getKeepAwake, getOpenAtLogin, setDailyBriefingSettings, setKeepAwake, setOpenAtLogin } from "../lib/commands";
 import type { DailyBriefingSettings, KeepAwakeView } from "../lib/types";
 import { useUiLocale } from "../i18n";
+import { schedulerText } from "../lib/cron-runs";
 
 /**
  * Settings > Background: open at login, keep awake on mains power, and the
@@ -9,7 +10,7 @@ import { useUiLocale } from "../i18n";
  * after a change, never just what was clicked.
  */
 export default function BackgroundSettings() {
-  const { t } = useUiLocale();
+  const { t, text } = useUiLocale();
   const [openAtLogin, setOpenAtLoginState] = useState<boolean | null>(null);
   const [keepAwake, setKeepAwakeState] = useState<KeepAwakeView | null>(null);
   const [briefing, setBriefing] = useState<DailyBriefingSettings | null>(null);
@@ -30,7 +31,7 @@ export default function BackgroundSettings() {
   async function change<T>(action: () => Promise<T>, apply: (value: T) => void) {
     if (busy) return;
     setBusy(true); setError(null);
-    try { apply(await action()); } catch (e) { setError(String(e)); } finally { setBusy(false); }
+    try { apply(await action()); } catch (e) { setError(schedulerText(String(e), text)); } finally { setBusy(false); }
   }
   const saveBriefing = (next: { enabled?: boolean; time?: string; voice?: boolean }) => {
     if (!briefing) return;
@@ -80,7 +81,9 @@ export default function BackgroundSettings() {
           onChange={e => saveBriefing({ voice: e.target.checked })} />
         <span style={styles.optionLabel}>{t("dailyBriefingVoice")}</span>
       </label>
-      {briefing?.voice && !briefing.speech_enabled && <p role="status" style={styles.hint}>{t("dailyBriefingSpeechOff")}</p>}
+      {briefing?.voice && !briefing.speech_enabled
+        ? <p role="status" style={styles.hint}>{t("dailyBriefingSpeechOff")}</p>
+        : <p style={styles.hint}>{t("dailyBriefingNeedsSpeech")}</p>}
       <p style={styles.hint}>{t("dailyBriefingVoiceHint")}</p>
     </div>
   </>;

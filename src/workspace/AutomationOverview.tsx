@@ -3,7 +3,7 @@ import { listen } from '@tauri-apps/api/event';
 import { ArrowUpRight, Check, Clock3, Ear, Mic, Pause, Play, RefreshCw, MessageSquare } from 'lucide-react';
 import JarvisScene from '../components/3d/JarvisScene';
 import { disableWakeWord, downloadModel, enableWakeWord, getCronJobs, getCronRuns, getDailyBriefing, getTasks, getWakeWordStatus, setCronJobStatus, updateTask } from '../lib/commands';
-import { cronRunNote, cronStatusLabel } from '../lib/cron-runs';
+import { cronRunNote, cronStatusLabel, schedulerText } from '../lib/cron-runs';
 import { canSwitchListening, setAlwaysListening, voiceStateKind } from '../lib/always-listening';
 import { showToast } from '../components/Toast';
 import { followUps, localDate } from '../lib/follow-ups';
@@ -58,7 +58,7 @@ export default function AutomationOverview({ activity, onVoice, listening, voice
     let mounted = true;
     const read = () => { void getDailyBriefing().then(next => { if (mounted) setBrief(next); }).catch(() => {}); };
     read();
-    const off = listen<DailyBrief>('daily-briefing-updated', event => { if (mounted) setBrief(event.payload); });
+    const off = listen<DailyBrief | null>('daily-briefing-updated', event => { if (mounted) setBrief(event.payload); });
     const visible = () => { if (!document.hidden) read(); };
     document.addEventListener('visibilitychange', visible);
     return () => { mounted = false; document.removeEventListener('visibilitychange', visible); void off.then(fn => fn()).catch(() => {}); };
@@ -108,7 +108,7 @@ export default function AutomationOverview({ activity, onVoice, listening, voice
       {due.map(task => <div className="automation-job" key={task.id}><div className="automation-job-main"><span className="automation-job-name">{task.title}</span><span className={`run-state ${task.deadline! < today ? 'failed' : ''}`}>{dueLabel(task.deadline!)}</span></div><button className="icon-button" aria-label={text(`Mark ${task.title} as done`, `將「${task.title}」標為完成`)} disabled={completing !== null} onClick={() => void complete(task)}><Check size={15} /></button></div>)}</section>}
       <div className="section-heading"><h2>{text('Enabled routines', '已啟用的排程')}</h2><span>{enabled.length}</span></div>
       <div className="automation-joblist">{loading ? <p className="workspace-empty">{text('Loading your routines…', '正在載入排程…')}</p> : !enabled.length ? <div className="workspace-empty"><p>{text('No routines enabled.', '目前沒有已啟用的排程。')}</p><button className="text-button" onClick={() => open('cron')}>{jobs.length ? text('Manage routines', '管理排程') : text('Create an automation', '建立自動排程')}<ArrowUpRight size={14} /></button></div> : enabled.map(job => { const run = runs[job.id]; return <div className={`automation-job ${selected === job.id ? 'is-selected' : ''}`} key={job.id}><button className="automation-job-main" onClick={() => setSelected(job.id)}><span className="automation-job-name">{job.name}</span><span className={`run-state ${run?.status === 'failed' ? 'failed' : ''}`}>{job.status === 'paused' ? text('Paused', '已暫停') : run?.status === 'running' ? text('Running', '執行中') : text('Enabled', '已啟用')}</span><small>{run?.status === 'failed' ? text('Last run failed · Review result', '上次執行失敗 · 請核對結果') : job.next_run ? `${text("Next", "下次")} ${when(job.next_run)}` : `${text("Last", "上次")} ${when(job.last_run)}`}</small></button><button className="icon-button" aria-label={`${job.status === 'active' ? text('Pause', '暫停') : text('Resume', '恢復')} ${job.name}`} disabled={busy !== null} onClick={() => void toggle(job)}>{job.status === 'active' ? <Pause size={15} /> : <Play size={15} />}</button></div>; })}</div>
-      {selectedRun && <section className="automation-result"><div className="section-heading"><h2>{text('Last result', '最近結果')}</h2><span>{cronStatusLabel(selectedRun.status, text)}</span></div><small>{when(selectedRun.started_at)}</small><div><MessageRenderer content={cronRunNote(selectedRun, text) || selectedRun.error || selectedRun.result || (selectedRun.status === 'running' ? text('This routine is still running.', '此排程仍在執行中。') : text('No text output for this run.', '本次執行沒有文字結果。'))} /></div><button className="text-button" onClick={() => { writeValue('tool:cron', 'selectedJobId', selected); open('cron'); }}>{text("View run history", "查看執行紀錄")}<ArrowUpRight size={14} /></button></section>}
+      {selectedRun && <section className="automation-result"><div className="section-heading"><h2>{text('Last result', '最近結果')}</h2><span>{cronStatusLabel(selectedRun.status, text)}</span></div><small>{when(selectedRun.started_at)}</small><div><MessageRenderer content={cronRunNote(selectedRun, text) || schedulerText(selectedRun.error || selectedRun.result || '', text) || (selectedRun.status === 'running' ? text('This routine is still running.', '此排程仍在執行中。') : text('No text output for this run.', '本次執行沒有文字結果。'))} /></div><button className="text-button" onClick={() => { writeValue('tool:cron', 'selectedJobId', selected); open('cron'); }}>{text("View run history", "查看執行紀錄")}<ArrowUpRight size={14} /></button></section>}
       {!selectedRun && enabled.length > 0 && <p className="automation-hint">{text('Select a routine to see its latest result. Your tools stay available while routines run.', '選取排程查看最近結果。排程執行期間，你仍可使用其他工具。')}</p>}
     </aside></div>
   </div>;
