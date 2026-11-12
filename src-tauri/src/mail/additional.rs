@@ -99,13 +99,9 @@ pub async fn event_lines(db: &Database, time_min: &str, time_max: &str) -> Vec<S
         match events {
             Ok(events) => lines.extend(events.iter().map(|e| {
                 format!(
-                    "Account: {} | ID: {} | {} | {} - {} | Location: {}",
+                    "Account: {} | {}",
                     account.email,
-                    e.id,
-                    e.summary,
-                    e.start_time,
-                    e.end_time,
-                    e.location.as_deref().unwrap_or("none"),
+                    crate::ai::tools::event_line(e, &chrono::Local),
                 )
             })),
             Err(e) => lines.push(format!("Account: {} | Calendar unavailable: {}", account.email, e)),
