@@ -53,7 +53,12 @@ pub struct SystemClock {
 
 impl SystemClock {
     pub fn new() -> Self {
-        SystemClock { started: std::time::Instant::now() }
+        // One starting point for the whole process, so awake time read through
+        // one SystemClock can be compared with awake time read through
+        // another. The daily briefing compares its own readings with the one
+        // the engine took when it started the run.
+        static STARTED: std::sync::OnceLock<std::time::Instant> = std::sync::OnceLock::new();
+        SystemClock { started: *STARTED.get_or_init(std::time::Instant::now) }
     }
 }
 
@@ -91,6 +96,27 @@ pub fn wall_clock_jumped(wall: TimeDelta, awake: Duration) -> bool {
     (wall.num_milliseconds() - awake_millis).abs() > WAKE_GAP_MILLIS
 }
 
+/// The Mac's two clocks, read together.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct Reading {
+    /// Wall-clock time. Keeps counting while the Mac sleeps.
+    pub wall: DateTime<Utc>,
+    /// Time spent awake since a fixed point. Stands still while the Mac sleeps.
+    pub awake: Duration,
+}
+
+impl Reading {
+    pub fn of(clock: &impl Clock) -> Reading {
+        Reading { wall: clock.now(), awake: clock.awake() }
+    }
+
+    /// Whether the Mac slept, or its clock was changed, between `earlier` and
+    /// this reading.
+    pub fn jumped_since(&self, earlier: Reading) -> bool {
+        wall_clock_jumped(self.wall - earlier.wall, self.awake.saturating_sub(earlier.awake))
+    }
+}
+
 /// Does the work of one run. The engine does the bookkeeping around it.
 #[async_trait::async_trait]
 pub trait JobRunner: Send + Sync {
@@ -109,6 +135,13 @@ pub struct Run {
     pub slot: Option<Slot>,
     started_wall: DateTime<Utc>,
     started_awake: Duration,
+}
+
+impl Run {
+    /// The clocks when the engine started this run.
+    pub fn started(&self) -> Reading {
+        Reading { wall: self.started_wall, awake: self.started_awake }
+    }
 }
 
 struct Job {
@@ -537,7 +570,7 @@ impl<C: Clock> Engine<C> {
 
         let now = self.clock.now();
         let awake = self.clock.awake();
-        let slept = wall_clock_jumped(now - run.started_wall, awake.saturating_sub(run.started_awake));
+        let slept = Reading { wall: now, awake }.jumped_since(run.started());
         let status = classify_outcome(outcome.is_ok(), slept, network_class(&run.action_type), self.reachability.online());
         match &outcome {
             Ok(message) => log::info!("Job {} completed: {}", run.job_id, message),

@@ -736,10 +736,16 @@ impl GoogleAuth {
             log::warn!("Keychain delete during disconnect: {}", e);
         }
 
+        // The last two are the scheduled daily briefing's
+        // (scheduler/scheduled_briefing.rs): the brief on the Automation page
+        // is drawn from this account's meetings and mail, and the record of
+        // the day it counted against goes with it, so an account connected
+        // afterwards gets its own briefing today.
         let conn = db.conn.lock().map_err(|e| e.to_string())?;
         conn.execute(
             "DELETE FROM user_preferences WHERE key IN \
-             ('google_refresh_token', 'user_name', 'google_account_email', 'cached_briefing', 'last_briefing_date', ?1)",
+             ('google_refresh_token', 'user_name', 'google_account_email', 'cached_briefing', 'last_briefing_date', \
+              'daily_briefing_today', 'daily_briefing_last_date', ?1)",
             [GRANTED_SCOPES_KEY],
         )
         .map_err(|e| e.to_string())?;
@@ -969,6 +975,35 @@ mod tests {
             .query_row("SELECT COUNT(*) FROM user_preferences WHERE key = ?1", [GRANTED_SCOPES_KEY], |r| r.get(0))
             .unwrap();
         assert_eq!(rows, 0);
+    }
+
+    /// The brief on the Automation page lists the disconnected account's
+    /// meetings and mail. It goes with the account, and so does the record
+    /// that today's briefing has been shown.
+    #[tokio::test]
+    async fn disconnect_forgets_the_daily_brief_drawn_from_the_account() {
+        use crate::scheduler::scheduled_briefing::{todays_brief, LAST_DATE_KEY, TODAY_KEY};
+        let db = crate::db::test_database();
+        let brief = serde_json::json!({
+            "date": "2026-11-12", "shown_at": "2026-11-12T08:30:01+08:00", "trigger": "scheduled",
+            "local": "Meetings: 1 today\n  09:30\u{3000}Board call", "summary": "One meeting, with the board.",
+            "summary_pending": false, "summary_error": null,
+        });
+        {
+            let conn = db.conn.lock().unwrap();
+            for (key, value) in [(TODAY_KEY, brief.to_string()), (LAST_DATE_KEY, "2026-11-12".to_string())] {
+                conn.execute("INSERT INTO user_preferences (key, value) VALUES (?1, ?2)", [key, value.as_str()]).unwrap();
+            }
+        }
+        assert!(todays_brief(&db, "2026-11-12").unwrap().is_some(), "the brief is on the page before the disconnect");
+
+        with_scopes(&[]).disconnect(&db, false).await.unwrap();
+
+        assert_eq!(todays_brief(&db, "2026-11-12").unwrap(), None);
+        let left: i64 = db.conn.lock().unwrap()
+            .query_row("SELECT COUNT(*) FROM user_preferences WHERE key IN (?1, ?2)", [TODAY_KEY, LAST_DATE_KEY], |r| r.get(0))
+            .unwrap();
+        assert_eq!(left, 0, "a newly connected account gets a briefing today");
     }
 
     /// Incremental authorization: asking for Gmail later returns a token that

@@ -8,16 +8,19 @@
 //! voice.
 //!
 //! It is spoken only on the live, on-time run, with the Mac awake and the
-//! screen unlocked. A briefing that runs late for any reason (sleep, JARVIS
-//! closed, a crash) is shown once and never spoken. At most one briefing a
-//! day comes from the schedule.
+//! screen unlocked. That is decided again immediately before the speech
+//! starts and asked all the way through it, so a Mac that sleeps or is locked
+//! while the AI summary is awaited, or part way through the speech, falls
+//! silent. A briefing that runs late for any reason (sleep, JARVIS closed, a
+//! crash) is shown once and never spoken. At most one briefing a day comes
+//! from the schedule.
 
-use super::engine::{format_baseline, write_status};
+use super::engine::{format_baseline, write_status, Reading, SystemClock};
 use super::network::{Reachability, SystemReachability};
-use super::slots::{parse_schedule, Trigger};
+use super::slots::{parse_schedule, Trigger, CLOCK_SET_BACK_TOLERANCE_SECS};
 use crate::auth::google::GoogleAuth;
 use crate::db::Database;
-use chrono::{DateTime, Datelike, FixedOffset, Utc};
+use chrono::{DateTime, Datelike, FixedOffset, NaiveDateTime, TimeDelta, Utc};
 use rusqlite::{params, Connection, OptionalExtension};
 use serde::{Deserialize, Serialize};
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -31,12 +34,18 @@ pub const DEFAULT_TIME: &str = "08:30";
 pub const CHANGED_EVENT: &str = "daily-briefing-updated";
 
 const VOICE_KEY: &str = "daily_briefing_voice";
-const LAST_DATE_KEY: &str = "daily_briefing_last_date";
-const TODAY_KEY: &str = "daily_briefing_today";
+/// The local day the schedule's last briefing counted against. Its
+/// `updated_at` is when it was written, by the clock the briefing ran under.
+pub(crate) const LAST_DATE_KEY: &str = "daily_briefing_last_date";
+pub(crate) const TODAY_KEY: &str = "daily_briefing_today";
 
 /// How long the on-time run waits for the AI summary before speaking the
 /// local text instead. The summary still replaces the text when it arrives.
+#[cfg(not(test))]
 const SUMMARY_WAIT_BEFORE_SPEAKING: Duration = Duration::from_secs(20);
+/// Short in the tests, so the slow-summary path can be walked in real time.
+#[cfg(test)]
+const SUMMARY_WAIT_BEFORE_SPEAKING: Duration = Duration::from_millis(50);
 
 /// After a summary attempt that ended offline, the next one waits this long,
 /// however quickly reachability turns positive again.
@@ -47,6 +56,15 @@ const SUMMARY_RETRY_PAUSE: Duration = Duration::from_secs(60);
 pub struct Screen {
     pub locked: bool,
     pub display_asleep: bool,
+}
+
+/// One run of the briefing, as the scheduler started it.
+#[derive(Clone, Copy, Debug)]
+pub struct Occasion {
+    pub trigger: Trigger,
+    /// The Mac's clocks when the scheduler started the run. The voice belongs
+    /// to that moment: a sleep or a clock change between it and now ends it.
+    pub started: Reading,
 }
 
 /// Whether this run of the briefing is spoken aloud.
@@ -320,41 +338,165 @@ pub trait BriefingHost: Send + Sync {
     /// request yet, and an AI step started then would fail for no real reason.
     fn network_ready(&self) -> bool;
     fn screen(&self) -> Screen;
+    /// The Mac's clocks now.
+    fn clocks(&self) -> Reading;
     /// Ask the AI for the day's summary. Needs the network.
     async fn summarise(&self) -> Result<String, String>;
     async fn notify(&self, title: &str, body: &str);
-    async fn speak(&self, text: &str);
+    /// Speak `text`. `may_go_on` is asked before every sentence and all the
+    /// while one is being spoken; once it says no, the sentence is cut and
+    /// nothing more is spoken.
+    async fn speak(&self, text: &str, may_go_on: &(dyn Fn() -> bool + Send + Sync));
     /// The brief changed: redraw it in the window.
     fn changed(&self, brief: &Brief);
 }
 
-/// Record how the AI step ended. Returns what the run reports.
-fn apply_summary(db: &Database, host: &dyn BriefingHost, brief: &mut Brief, outcome: Result<String, String>) -> Result<String, String> {
-    let report = match outcome {
+/// What a run reports when the schedule already showed a briefing today.
+///
+/// Everything a run reports is written in English and stored as written. The
+/// run history puts these sentences into the interface language when it shows
+/// them (`schedulerText` in src/lib/cron-runs.ts), so a change of wording here
+/// needs the same change there; a frontend test holds the two together.
+const ALREADY_SHOWN: &str = "Already shown today";
+
+/// How the AI step of a brief ended.
+#[derive(Debug, PartialEq)]
+enum SummaryStep {
+    Added,
+    /// Still owed: there was no network. Added when it returns.
+    OwedOffline,
+    /// Still owed: the Mac slept before the answer came, and the connection
+    /// died with the sleep. Added afterwards, like an offline one.
+    OwedAfterSleep,
+    Failed(String),
+    /// The brief was replaced, or removed with the account it was drawn from,
+    /// while the AI was working. The answer belongs to nothing.
+    Gone,
+}
+
+impl SummaryStep {
+    /// What the run reports.
+    fn report(&self) -> String {
+        match self {
+            SummaryStep::Added => "Briefing shown; AI summary added".to_string(),
+            SummaryStep::OwedOffline => {
+                "Briefing shown from what is saved on this Mac; the AI summary follows when the network returns".to_string()
+            }
+            SummaryStep::OwedAfterSleep => {
+                "Briefing shown from what is saved on this Mac; the Mac went to sleep before the AI summary arrived, so it is added afterwards"
+                    .to_string()
+            }
+            SummaryStep::Failed(error) => format!("Briefing shown from what is saved on this Mac; the AI summary failed: {}", error),
+            SummaryStep::Gone => "Briefing shown; it was replaced or removed before the AI summary arrived".to_string(),
+        }
+    }
+}
+
+/// Record how the AI step ended. `since` is the clocks when the step, or the
+/// run it is part of, began.
+fn apply_summary(
+    db: &Database,
+    host: &dyn BriefingHost,
+    brief: &mut Brief,
+    outcome: Result<String, String>,
+    since: Reading,
+) -> Result<SummaryStep, String> {
+    let step = match outcome {
         Ok(summary) => {
             brief.summary = Some(summary);
             brief.summary_pending = false;
             brief.summary_error = None;
-            "Briefing shown; AI summary added".to_string()
+            SummaryStep::Added
+        }
+        // The Mac slept under the request. Nothing failed: still owed.
+        Err(_) if host.clocks().jumped_since(since) => {
+            brief.summary_pending = true;
+            SummaryStep::OwedAfterSleep
         }
         // Offline when it failed: still owed, and added when the network is back.
         Err(_) if !host.online() => {
             brief.summary_pending = true;
-            "Briefing shown from what is saved on this Mac; the AI summary follows when the network returns".to_string()
+            SummaryStep::OwedOffline
         }
         Err(error) => {
             brief.summary_pending = false;
             brief.summary_error = Some(error.clone());
-            format!("Briefing shown from what is saved on this Mac; the AI summary failed: {}", error)
+            SummaryStep::Failed(error)
         }
     };
-    save(&*db.conn.lock().map_err(|e| e.to_string())?, brief)?;
+    {
+        let conn = db.conn.lock().map_err(|e| e.to_string())?;
+        // Saving it now would put back a brief that is no longer there: one
+        // drawn from a Google account that has since been disconnected, or
+        // one a newer brief has replaced.
+        if load(&conn)?.is_none_or(|stored| stored.shown_at != brief.shown_at) {
+            return Ok(SummaryStep::Gone);
+        }
+        save(&conn, brief)?;
+    }
     host.changed(brief);
-    Ok(report)
+    Ok(step)
+}
+
+/// The local day the schedule's last briefing counted against.
+fn shown_date(conn: &Connection, now: DateTime<Utc>) -> Result<Option<String>, String> {
+    forget_what_was_shown_ahead_of(conn, now)?;
+    preference(conn, LAST_DATE_KEY)
+}
+
+fn set_shown_date(conn: &Connection, date: &str, now: DateTime<Utc>) -> Result<(), String> {
+    conn.execute(
+        "INSERT INTO user_preferences (key, value, updated_at) VALUES (?1, ?2, ?3) \
+         ON CONFLICT(key) DO UPDATE SET value = ?2, updated_at = ?3",
+        params![LAST_DATE_KEY, date, now.format("%Y-%m-%d %H:%M:%S").to_string()],
+    )
+    .map_err(|e| e.to_string())?;
+    Ok(())
+}
+
+/// Remove the stored brief and the "shown today" record if they were written
+/// later than now. Returns whether anything was removed.
+///
+/// Either was then written while the Mac's clock was ahead, and the clock has
+/// since been put right. Left alone, the record would block the briefing on
+/// the real day of that date, and the brief would be shown on that day as
+/// today's. The scheduler treats its own records the same way
+/// (`slots::written_ahead_of`), so the briefing job runs again at its next
+/// real time and finds nothing in its way.
+///
+/// Checked at launch, after every wake or clock change, and at the start of
+/// every run. A change made and outlived while JARVIS was not running leaves
+/// nothing to tell it by.
+pub fn forget_what_was_shown_ahead_of(conn: &Connection, now: DateTime<Utc>) -> Result<bool, String> {
+    let limit = now + TimeDelta::seconds(CLOCK_SET_BACK_TOLERANCE_SECS);
+    let date_written: Option<String> = conn
+        .query_row("SELECT updated_at FROM user_preferences WHERE key = ?1", [LAST_DATE_KEY], |row| row.get(0))
+        .optional()
+        .map_err(|e| e.to_string())?;
+    let date_ahead = date_written
+        .and_then(|text| NaiveDateTime::parse_from_str(&text, "%Y-%m-%d %H:%M:%S").ok())
+        .is_some_and(|written| written.and_utc() > limit);
+    let brief_ahead = load(conn)?
+        .and_then(|brief| DateTime::parse_from_rfc3339(&brief.shown_at).ok())
+        .is_some_and(|shown| shown.to_utc() > limit);
+    for (ahead, key) in [(date_ahead, LAST_DATE_KEY), (brief_ahead, TODAY_KEY)] {
+        if ahead {
+            conn.execute("DELETE FROM user_preferences WHERE key = ?1", [key]).map_err(|e| e.to_string())?;
+        }
+    }
+    Ok(date_ahead || brief_ahead)
+}
+
+/// Speak, if that is allowed at this moment.
+async fn speak_if_allowed(host: &dyn BriefingHost, text: &str, may_speak: &(dyn Fn() -> bool + Send + Sync)) {
+    if may_speak() {
+        host.speak(text, may_speak).await;
+    }
 }
 
 /// One run of the briefing job.
-pub async fn run_with(db: &Database, host: &dyn BriefingHost, trigger: Trigger, now: DateTime<FixedOffset>) -> Result<String, String> {
+pub async fn run_with(db: &Database, host: &dyn BriefingHost, occasion: Occasion, now: DateTime<FixedOffset>) -> Result<String, String> {
+    let trigger = occasion.trigger;
     let today = now.format("%Y-%m-%d").to_string();
     let (zh, voice_on, last_date) = {
         let conn = db.conn.lock().map_err(|e| e.to_string())?;
@@ -363,12 +505,12 @@ pub async fn run_with(db: &Database, host: &dyn BriefingHost, trigger: Trigger, 
         // someone who turned speech off everywhere is not spoken to at 08:30.
         let voice_on = preference(&conn, VOICE_KEY)?.as_deref() != Some("false")
             && preference(&conn, "tts_enabled")?.as_deref() != Some("false");
-        (zh, voice_on, preference(&conn, LAST_DATE_KEY)?)
+        (zh, voice_on, shown_date(&conn, now.to_utc())?)
     };
     // At most one briefing a day from the schedule. A briefing the user asks
     // for by hand is always shown, and does not use up the day's scheduled one.
     if trigger != Trigger::Manual && last_date.as_deref() == Some(today.as_str()) {
-        return Ok("Already shown today".to_string());
+        return Ok(ALREADY_SHOWN.to_string());
     }
 
     // Shown at once, from local data, before anything that can wait.
@@ -386,7 +528,7 @@ pub async fn run_with(db: &Database, host: &dyn BriefingHost, trigger: Trigger, 
         let conn = db.conn.lock().map_err(|e| e.to_string())?;
         save(&conn, &brief)?;
         if trigger != Trigger::Manual {
-            set_preference(&conn, LAST_DATE_KEY, &today)?;
+            set_shown_date(&conn, &today, now.to_utc())?;
         }
     }
     host.changed(&brief);
@@ -394,48 +536,62 @@ pub async fn run_with(db: &Database, host: &dyn BriefingHost, trigger: Trigger, 
         host.notify(if zh { "JARVIS 每日簡報" } else { "JARVIS daily briefing" }, &local.headline(zh)).await;
     }
 
-    let speak = should_speak(trigger, voice_on, host.screen());
+    // The voice is for someone at the Mac at the briefing's time. Whether
+    // that still holds is not decided once, here: the AI summary can take
+    // twenty seconds, and a Mac can be closed in that time and opened hours
+    // later somewhere else. It is asked afresh immediately before anything is
+    // spoken, and again all the way through the speech. The screen is read
+    // each time, and so are the clocks: wall-clock time that awake time did
+    // not cover since the run started is a sleep (or a changed clock), the
+    // same comparison the scheduler makes.
+    let may_speak = || should_speak(trigger, voice_on, host.screen()) && !host.clocks().jumped_since(occasion.started);
+
     if !host.network_ready() {
-        if speak {
-            host.speak(&brief.local).await;
-        }
-        return Ok("Briefing shown from what is saved on this Mac; the AI summary follows when the network returns".to_string());
+        speak_if_allowed(host, &brief.local, &may_speak).await;
+        return Ok(SummaryStep::OwedOffline.report());
     }
 
     let mut summarise = host.summarise();
     match tokio::time::timeout(SUMMARY_WAIT_BEFORE_SPEAKING, &mut summarise).await {
         Ok(outcome) => {
-            let report = apply_summary(db, host, &mut brief, outcome)?;
-            if speak {
-                host.speak(brief.summary.as_deref().unwrap_or(&brief.local)).await;
+            let step = apply_summary(db, host, &mut brief, outcome, occasion.started)?;
+            if step != SummaryStep::Gone {
+                speak_if_allowed(host, brief.summary.as_deref().unwrap_or(&brief.local), &may_speak).await;
             }
-            Ok(report)
+            Ok(step.report())
         }
         // The summary is slow. Speak the local text now and let the summary
         // replace the brief in place when it comes.
         Err(_) => {
-            let spoken = async {
-                if speak {
-                    host.speak(&brief.local).await;
-                }
-            };
+            let spoken = speak_if_allowed(host, &brief.local, &may_speak);
             let (_, outcome) = tokio::join!(spoken, &mut summarise);
-            apply_summary(db, host, &mut brief, outcome)
+            Ok(apply_summary(db, host, &mut brief, outcome, occasion.started)?.report())
         }
     }
 }
 
 /// Add the AI summary a briefing is still owed, in place: no notification and
-/// no voice. Returns whether the summary is still owed afterwards.
+/// no voice. Returns whether a summary is still owed afterwards.
 pub async fn complete_pending_with(db: &Database, host: &dyn BriefingHost, today: &str) -> Result<bool, String> {
     let brief = load(&*db.conn.lock().map_err(|e| e.to_string())?)?;
     // Yesterday's brief is no longer on the page; its summary is not owed.
     let Some(mut brief) = brief.filter(|brief| brief.date == today && brief.summary_pending) else {
         return Ok(false);
     };
+    let since = host.clocks();
     let outcome = host.summarise().await;
-    apply_summary(db, host, &mut brief, outcome)?;
-    Ok(brief.summary_pending)
+    apply_summary(db, host, &mut brief, outcome, since)?;
+    // Read back, not taken from `brief`: the brief on the page may be a newer
+    // one by now, with a summary of its own still owed.
+    Ok(todays_brief(db, today)?.is_some_and(|brief| brief.summary_pending))
+}
+
+/// Tell the window there is no brief any more.
+pub fn announce_removed(app: &tauri::AppHandle) {
+    use tauri::Emitter;
+    if let Err(e) = app.emit(CHANGED_EVENT, Option::<Brief>::None) {
+        log::warn!("Daily briefing could not update the window: {}", e);
+    }
 }
 
 /// The briefing settings as the Settings page shows them.
@@ -532,6 +688,8 @@ pub struct BriefingService {
     /// A summary is being fetched for it now.
     busy: AtomicBool,
     retry_at: Mutex<Option<Instant>>,
+    /// The clocks at the last tick, to tell a launch, a wake or a clock change.
+    last_tick: Mutex<Option<Reading>>,
 }
 
 impl BriefingService {
@@ -547,11 +705,12 @@ impl BriefingService {
             pending: AtomicBool::new(pending),
             busy: AtomicBool::new(false),
             retry_at: Mutex::new(None),
+            last_tick: Mutex::new(None),
         }
     }
 
-    pub async fn run(&self, trigger: Trigger) -> Result<String, String> {
-        let report = run_with(&self.db, self, trigger, chrono::Local::now().fixed_offset()).await;
+    pub async fn run(&self, occasion: Occasion) -> Result<String, String> {
+        let report = run_with(&self.db, self, occasion, chrono::Local::now().fixed_offset()).await;
         let today = chrono::Local::now().format("%Y-%m-%d").to_string();
         let owed = todays_brief(&self.db, &today).ok().flatten().is_some_and(|brief| brief.summary_pending);
         self.pending.store(owed, Ordering::SeqCst);
@@ -562,6 +721,7 @@ impl BriefingService {
     /// settled. Fetches an owed summary once it is.
     pub fn on_tick(self: &Arc<Self>, online: bool) {
         self.network_ready.store(online, Ordering::SeqCst);
+        self.after_a_clock_change();
         if !online || !self.pending.load(Ordering::SeqCst) {
             return;
         }
@@ -589,6 +749,31 @@ impl BriefingService {
             service.pending.store(still_owed, Ordering::SeqCst);
             service.busy.store(false, Ordering::SeqCst);
         });
+    }
+}
+
+impl BriefingService {
+    /// At launch, and after every wake or clock change: a brief and a "shown
+    /// today" record written under a clock that was ahead of this one must not
+    /// stand.
+    fn after_a_clock_change(&self) {
+        let now = self.clocks();
+        let changed = match self.last_tick.lock() {
+            Ok(mut last) => last.replace(now).is_none_or(|earlier| now.jumped_since(earlier)),
+            Err(_) => false,
+        };
+        if !changed {
+            return;
+        }
+        let removed = self.db.conn.lock().map_err(|e| e.to_string()).and_then(|conn| forget_what_was_shown_ahead_of(&conn, now.wall));
+        match removed {
+            Ok(true) => {
+                log::warn!("Daily briefing: a brief dated later than now was removed; the clock was set back");
+                announce_removed(&self.app);
+            }
+            Ok(false) => {}
+            Err(e) => log::warn!("Daily briefing: could not check the stored brief after a clock change: {}", e),
+        }
     }
 }
 
@@ -624,6 +809,10 @@ impl BriefingHost for BriefingService {
         Screen { locked: crate::system::screen::screen_locked(), display_asleep: crate::system::screen::display_asleep() }
     }
 
+    fn clocks(&self) -> Reading {
+        Reading::of(&SystemClock::new())
+    }
+
     async fn summarise(&self) -> Result<String, String> {
         let router = when_managed(&self.app, |router: &Mutex<crate::ai::AiRouter>| router.lock().map(|router| router.clone()).map_err(|e| e.to_string()))
             .await
@@ -639,7 +828,7 @@ impl BriefingHost for BriefingService {
         }
     }
 
-    async fn speak(&self, text: &str) {
+    async fn speak(&self, text: &str, may_go_on: &(dyn Fn() -> bool + Send + Sync)) {
         // The app's one TextToSpeech, so the stop control reaches it and the
         // saved voice and rate apply.
         let tts = when_managed(&self.app, |voice: &Arc<crate::voice::VoiceEngine>| voice.tts.lock().ok().map(|tts| tts.clone())).await.flatten();
@@ -647,7 +836,10 @@ impl BriefingHost for BriefingService {
             log::warn!("Daily briefing voice unavailable");
             return;
         };
-        if let Err(e) = tts.speak(text).await {
+        // It can be a while before this utterance has its turn (the state
+        // above, another speaker). `speak_while` asks again once it has, and
+        // from then on until the last sentence.
+        if let Err(e) = tts.speak_while(text, may_go_on).await {
             log::warn!("Daily briefing voice failed: {}", e);
         }
     }
@@ -759,13 +951,23 @@ mod tests {
         assert_eq!(brief.unread, None, "no mail has ever been synced");
     }
 
+    /// Something that happens to the Mac part way through a run.
+    type Event = Box<dyn FnOnce(&FakeHost) + Send>;
+
     /// A host that records what the briefing did to the outside world.
     struct FakeHost {
         online: AtomicBool,
         /// The network is reported up but has only just come back.
         settling: AtomicBool,
-        screen: Screen,
+        screen: Mutex<Screen>,
+        clocks: Mutex<Reading>,
         summary: Mutex<Result<String, String>>,
+        /// How long the AI takes to answer.
+        summary_takes: Mutex<Duration>,
+        /// What happens to the Mac while the AI summary is awaited.
+        while_summarising: Mutex<Option<Event>>,
+        /// What happens to the Mac once the first sentence has been spoken.
+        after_the_first_sentence: Mutex<Option<Event>>,
         asked_for_summary: Mutex<u32>,
         notifications: Mutex<Vec<String>>,
         spoken: Mutex<Vec<String>>,
@@ -777,8 +979,12 @@ mod tests {
             FakeHost {
                 online: AtomicBool::new(online),
                 settling: AtomicBool::new(false),
-                screen: AWAKE_AND_UNLOCKED,
+                screen: Mutex::new(AWAKE_AND_UNLOCKED),
+                clocks: Mutex::new(started()),
                 summary: Mutex::new(Ok("You have one meeting and two things due.".to_string())),
+                summary_takes: Mutex::new(Duration::ZERO),
+                while_summarising: Mutex::new(None),
+                after_the_first_sentence: Mutex::new(None),
                 asked_for_summary: Mutex::new(0),
                 notifications: Mutex::new(Vec::new()),
                 spoken: Mutex::new(Vec::new()),
@@ -789,6 +995,24 @@ mod tests {
         fn last_shown(&self) -> Brief {
             self.shown.lock().unwrap().last().unwrap().clone()
         }
+
+        /// The Mac sleeps: the wall clock moves on and awake time does not.
+        fn sleep(&self, secs: i64) {
+            self.clocks.lock().unwrap().wall += TimeDelta::seconds(secs);
+        }
+
+        fn lock_screen(&self) {
+            self.screen.lock().unwrap().locked = true;
+        }
+    }
+
+    /// The clocks when the scheduler started the run under test.
+    fn started() -> Reading {
+        Reading { wall: hk(MORNING).to_utc(), awake: Duration::from_secs(3_600) }
+    }
+
+    fn on(trigger: Trigger) -> Occasion {
+        Occasion { trigger, started: started() }
     }
 
     #[async_trait::async_trait]
@@ -802,11 +1026,23 @@ mod tests {
         }
 
         fn screen(&self) -> Screen {
-            self.screen
+            *self.screen.lock().unwrap()
+        }
+
+        fn clocks(&self) -> Reading {
+            *self.clocks.lock().unwrap()
         }
 
         async fn summarise(&self) -> Result<String, String> {
             *self.asked_for_summary.lock().unwrap() += 1;
+            let event = self.while_summarising.lock().unwrap().take();
+            if let Some(event) = event {
+                event(self);
+            }
+            let takes = *self.summary_takes.lock().unwrap();
+            if !takes.is_zero() {
+                tokio::time::sleep(takes).await;
+            }
             self.summary.lock().unwrap().clone()
         }
 
@@ -814,8 +1050,23 @@ mod tests {
             self.notifications.lock().unwrap().push(body.to_string());
         }
 
-        async fn speak(&self, text: &str) {
-            self.spoken.lock().unwrap().push(text.to_string());
+        /// Sentence by sentence, as the real voice does. What is recorded is
+        /// what was actually said of the utterance.
+        async fn speak(&self, text: &str, may_go_on: &(dyn Fn() -> bool + Send + Sync)) {
+            let mut said = String::new();
+            for sentence in text.split_inclusive(". ") {
+                if !may_go_on() {
+                    break;
+                }
+                said.push_str(sentence);
+                let event = self.after_the_first_sentence.lock().unwrap().take();
+                if let Some(event) = event {
+                    event(self);
+                }
+            }
+            if !said.is_empty() {
+                self.spoken.lock().unwrap().push(said);
+            }
         }
 
         fn changed(&self, brief: &Brief) {
@@ -829,7 +1080,7 @@ mod tests {
     async fn the_on_time_briefing_is_shown_summarised_and_spoken() {
         let db = crate::db::test_database();
         let host = FakeHost::new(true);
-        let report = run_with(&db, &host, Trigger::Scheduled, hk(MORNING)).await.unwrap();
+        let report = run_with(&db, &host, on(Trigger::Scheduled), hk(MORNING)).await.unwrap();
         assert_eq!(report, "Briefing shown; AI summary added");
 
         let shown = host.shown.lock().unwrap().clone();
@@ -849,7 +1100,7 @@ mod tests {
         for trigger in [Trigger::CatchUp, Trigger::RetryInterrupted] {
             let db = crate::db::test_database();
             let host = FakeHost::new(true);
-            run_with(&db, &host, trigger, hk("2026-11-12T08:35:00+08:00")).await.unwrap();
+            run_with(&db, &host, on(trigger), hk("2026-11-12T08:35:00+08:00")).await.unwrap();
             assert_eq!(host.notifications.lock().unwrap().len(), 1, "{trigger:?}: shown once");
             assert!(host.spoken.lock().unwrap().is_empty(), "{trigger:?}: never spoken");
             assert_eq!(host.last_shown().trigger, trigger.as_str());
@@ -859,9 +1110,9 @@ mod tests {
     #[tokio::test]
     async fn an_on_time_briefing_is_silent_with_the_screen_locked_or_voice_off() {
         let db = crate::db::test_database();
-        let mut host = FakeHost::new(true);
-        host.screen = Screen { locked: true, display_asleep: false };
-        run_with(&db, &host, Trigger::Scheduled, hk(MORNING)).await.unwrap();
+        let host = FakeHost::new(true);
+        host.lock_screen();
+        run_with(&db, &host, on(Trigger::Scheduled), hk(MORNING)).await.unwrap();
         assert!(host.spoken.lock().unwrap().is_empty(), "locked");
         assert_eq!(host.notifications.lock().unwrap().len(), 1, "it is still shown");
 
@@ -869,7 +1120,7 @@ mod tests {
             let db = crate::db::test_database();
             set_preference(&db.conn.lock().unwrap(), key, "false").unwrap();
             let host = FakeHost::new(true);
-            run_with(&db, &host, Trigger::Scheduled, hk(MORNING)).await.unwrap();
+            run_with(&db, &host, on(Trigger::Scheduled), hk(MORNING)).await.unwrap();
             assert!(host.spoken.lock().unwrap().is_empty(), "{label}");
         }
     }
@@ -881,7 +1132,7 @@ mod tests {
     async fn an_offline_briefing_is_completed_in_place_when_the_network_returns() {
         let db = crate::db::test_database();
         let host = FakeHost::new(false);
-        let report = run_with(&db, &host, Trigger::Scheduled, hk(MORNING)).await.unwrap();
+        let report = run_with(&db, &host, on(Trigger::Scheduled), hk(MORNING)).await.unwrap();
         assert!(report.contains("follows when the network returns"), "{report}");
         assert_eq!(*host.asked_for_summary.lock().unwrap(), 0, "no AI call into a dead network");
         assert!(host.last_shown().summary_pending);
@@ -914,7 +1165,7 @@ mod tests {
         let db = crate::db::test_database();
         let host = FakeHost::new(true);
         host.settling.store(true, Ordering::SeqCst);
-        run_with(&db, &host, Trigger::CatchUp, hk("2026-11-12T08:35:00+08:00")).await.unwrap();
+        run_with(&db, &host, on(Trigger::CatchUp), hk("2026-11-12T08:35:00+08:00")).await.unwrap();
         assert_eq!(*host.asked_for_summary.lock().unwrap(), 0, "no AI call yet");
         let brief = host.last_shown();
         assert!(brief.summary_pending && brief.summary_error.is_none(), "owed, not failed");
@@ -930,7 +1181,7 @@ mod tests {
     async fn a_summary_owed_from_yesterday_is_dropped() {
         let db = crate::db::test_database();
         let host = FakeHost::new(false);
-        run_with(&db, &host, Trigger::CatchUp, hk(MORNING)).await.unwrap();
+        run_with(&db, &host, on(Trigger::CatchUp), hk(MORNING)).await.unwrap();
         host.online.store(true, Ordering::SeqCst);
         assert!(!complete_pending_with(&db, &host, "2026-11-13").await.unwrap());
         assert_eq!(*host.asked_for_summary.lock().unwrap(), 0);
@@ -944,7 +1195,7 @@ mod tests {
         let db = crate::db::test_database();
         let host = FakeHost::new(true);
         *host.summary.lock().unwrap() = Err("No AI provider is set up".to_string());
-        let report = run_with(&db, &host, Trigger::Scheduled, hk(MORNING)).await.unwrap();
+        let report = run_with(&db, &host, on(Trigger::Scheduled), hk(MORNING)).await.unwrap();
         assert!(report.ends_with("the AI summary failed: No AI provider is set up"), "{report}");
         let brief = host.last_shown();
         assert!(!brief.summary_pending && brief.summary.is_none());
@@ -956,15 +1207,15 @@ mod tests {
     async fn the_schedule_gives_at_most_one_briefing_a_day() {
         let db = crate::db::test_database();
         let host = FakeHost::new(true);
-        run_with(&db, &host, Trigger::Scheduled, hk(MORNING)).await.unwrap();
+        run_with(&db, &host, on(Trigger::Scheduled), hk(MORNING)).await.unwrap();
         // The time is moved later the same morning and comes round again.
-        let again = run_with(&db, &host, Trigger::Scheduled, hk("2026-11-12T10:00:00+08:00")).await.unwrap();
+        let again = run_with(&db, &host, on(Trigger::Scheduled), hk("2026-11-12T10:00:00+08:00")).await.unwrap();
         assert_eq!(again, "Already shown today");
         assert_eq!(host.notifications.lock().unwrap().len(), 1);
         assert_eq!(host.spoken.lock().unwrap().len(), 1);
 
         // The next local day is a new briefing.
-        run_with(&db, &host, Trigger::Scheduled, hk("2026-11-13T08:30:00+08:00")).await.unwrap();
+        run_with(&db, &host, on(Trigger::Scheduled), hk("2026-11-13T08:30:00+08:00")).await.unwrap();
         assert_eq!(host.notifications.lock().unwrap().len(), 2);
     }
 
@@ -974,18 +1225,190 @@ mod tests {
     async fn a_briefing_asked_for_by_hand_does_not_use_up_the_scheduled_one() {
         let db = crate::db::test_database();
         let host = FakeHost::new(true);
-        run_with(&db, &host, Trigger::Manual, hk("2026-11-12T07:00:00+08:00")).await.unwrap();
+        run_with(&db, &host, on(Trigger::Manual), hk("2026-11-12T07:00:00+08:00")).await.unwrap();
         assert!(host.notifications.lock().unwrap().is_empty());
         assert!(host.spoken.lock().unwrap().is_empty());
         assert_eq!(host.last_shown().trigger, "manual");
 
-        run_with(&db, &host, Trigger::Scheduled, hk(MORNING)).await.unwrap();
+        run_with(&db, &host, on(Trigger::Scheduled), hk(MORNING)).await.unwrap();
         assert_eq!(host.notifications.lock().unwrap().len(), 1);
         assert_eq!(host.spoken.lock().unwrap().len(), 1);
 
         // And by hand again afterwards.
-        run_with(&db, &host, Trigger::Manual, hk("2026-11-12T12:00:00+08:00")).await.unwrap();
+        run_with(&db, &host, on(Trigger::Manual), hk("2026-11-12T12:00:00+08:00")).await.unwrap();
         assert_eq!(host.last_shown().trigger, "manual");
+    }
+
+    const THREE_SENTENCES: &str = "One meeting at ten. Two things are due today. Nothing is overdue.";
+
+    /// The run starts on time and unlocked, and the lid is closed while the
+    /// AI summary is awaited. When the Mac is opened again, an hour and a half
+    /// later and somewhere else, nothing is read aloud; and the summary that
+    /// died with the sleep is owed, not failed.
+    #[tokio::test]
+    async fn a_briefing_whose_summary_wait_was_slept_through_is_not_spoken() {
+        let db = crate::db::test_database();
+        let host = FakeHost::new(true);
+        *host.summary.lock().unwrap() = Err("connection lost".to_string());
+        *host.while_summarising.lock().unwrap() = Some(Box::new(|host| host.sleep(90 * 60)));
+
+        let report = run_with(&db, &host, on(Trigger::Scheduled), hk(MORNING)).await.unwrap();
+        assert!(host.spoken.lock().unwrap().is_empty(), "not after a wake");
+        assert!(report.contains("went to sleep before the AI summary arrived"), "{report}");
+        assert_eq!(host.notifications.lock().unwrap().len(), 1, "it was still shown, on time");
+        let brief = host.last_shown();
+        assert!(brief.summary_pending && brief.summary_error.is_none(), "owed, not failed");
+
+        // The summary is added in place afterwards, in silence.
+        *host.summary.lock().unwrap() = Ok("One meeting today.".to_string());
+        assert!(!complete_pending_with(&db, &host, "2026-11-12").await.unwrap());
+        assert_eq!(host.last_shown().summary.as_deref(), Some("One meeting today."));
+        assert!(host.spoken.lock().unwrap().is_empty());
+        assert_eq!(host.notifications.lock().unwrap().len(), 1);
+    }
+
+    /// The same sleep, with a summary that did arrive: added in place, and
+    /// still not spoken.
+    #[tokio::test]
+    async fn a_summary_that_arrives_after_a_sleep_is_shown_but_not_spoken() {
+        let db = crate::db::test_database();
+        let host = FakeHost::new(true);
+        *host.while_summarising.lock().unwrap() = Some(Box::new(|host| host.sleep(90 * 60)));
+        let report = run_with(&db, &host, on(Trigger::Scheduled), hk(MORNING)).await.unwrap();
+        assert_eq!(report, "Briefing shown; AI summary added");
+        assert_eq!(host.shown.lock().unwrap().len(), 2, "shown, then the summary in place");
+        assert!(host.last_shown().summary.is_some());
+        assert!(host.spoken.lock().unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    async fn a_screen_locked_while_the_summary_is_awaited_silences_the_briefing() {
+        let db = crate::db::test_database();
+        let host = FakeHost::new(true);
+        *host.while_summarising.lock().unwrap() = Some(Box::new(|host| host.lock_screen()));
+        run_with(&db, &host, on(Trigger::Scheduled), hk(MORNING)).await.unwrap();
+        assert!(host.spoken.lock().unwrap().is_empty(), "the screen is read again before speaking");
+        assert_eq!(host.shown.lock().unwrap().len(), 2, "only the voice changes");
+        assert_eq!(host.last_shown().summary.as_deref(), Some("You have one meeting and two things due."));
+        assert_eq!(host.notifications.lock().unwrap().len(), 1);
+    }
+
+    /// Once the speech has started, a sleep or a lock stops the rest of it.
+    #[tokio::test]
+    async fn a_sleep_or_a_lock_part_way_through_the_speech_stops_the_rest() {
+        let events: [(&str, Event); 2] = [
+            ("sleep", Box::new(|host: &FakeHost| host.sleep(90 * 60))),
+            ("lock", Box::new(|host: &FakeHost| host.lock_screen())),
+        ];
+        for (what, event) in events {
+            let db = crate::db::test_database();
+            let host = FakeHost::new(true);
+            *host.summary.lock().unwrap() = Ok(THREE_SENTENCES.to_string());
+            *host.after_the_first_sentence.lock().unwrap() = Some(event);
+            run_with(&db, &host, on(Trigger::Scheduled), hk(MORNING)).await.unwrap();
+            assert_eq!(*host.spoken.lock().unwrap(), ["One meeting at ten. "], "{what}: the second and third sentences are not spoken");
+            assert_eq!(host.last_shown().summary.as_deref(), Some(THREE_SENTENCES), "{what}: the brief on the page is whole");
+        }
+
+        // Nothing happens: all three are spoken.
+        let db = crate::db::test_database();
+        let host = FakeHost::new(true);
+        *host.summary.lock().unwrap() = Ok(THREE_SENTENCES.to_string());
+        run_with(&db, &host, on(Trigger::Scheduled), hk(MORNING)).await.unwrap();
+        assert_eq!(*host.spoken.lock().unwrap(), [THREE_SENTENCES]);
+    }
+
+    /// A summary slower than the wait: the local text is spoken at the end of
+    /// the wait and the summary replaces the brief in place when it comes.
+    /// The same second look applies at the end of the wait.
+    #[tokio::test]
+    async fn a_slow_summary_leaves_the_local_text_to_be_spoken_if_that_is_still_allowed() {
+        let slow = SUMMARY_WAIT_BEFORE_SPEAKING * 4;
+
+        let db = crate::db::test_database();
+        let host = FakeHost::new(true);
+        *host.summary_takes.lock().unwrap() = slow;
+        let report = run_with(&db, &host, on(Trigger::Scheduled), hk(MORNING)).await.unwrap();
+        assert_eq!(report, "Briefing shown; AI summary added");
+        assert_eq!(host.spoken.lock().unwrap().len(), 1);
+        assert!(host.spoken.lock().unwrap()[0].starts_with("Thursday 12 November"), "the local text, not the summary");
+        assert!(host.last_shown().summary.is_some(), "the summary still replaces it in place");
+
+        // The Mac sleeps during the wait.
+        let db = crate::db::test_database();
+        let host = FakeHost::new(true);
+        *host.summary_takes.lock().unwrap() = slow;
+        *host.while_summarising.lock().unwrap() = Some(Box::new(|host| host.sleep(90 * 60)));
+        run_with(&db, &host, on(Trigger::Scheduled), hk(MORNING)).await.unwrap();
+        assert!(host.spoken.lock().unwrap().is_empty());
+        assert!(host.last_shown().summary.is_some());
+    }
+
+    /// The clock is two days ahead by mistake when a briefing is shown, and
+    /// is then put right. The briefing shown "on the 14th" must not stand in
+    /// for the one on the real 14th.
+    #[tokio::test]
+    async fn a_briefing_shown_under_a_clock_that_was_ahead_does_not_block_the_real_day() {
+        let db = crate::db::test_database();
+        let host = FakeHost::new(true);
+        run_with(&db, &host, on(Trigger::CatchUp), hk("2026-11-14T10:00:00+08:00")).await.unwrap();
+        assert!(todays_brief(&db, "2026-11-14").unwrap().is_some());
+
+        // It is really the 12th. JARVIS notices when the clock is put right,
+        // or at its next launch.
+        let really = hk("2026-11-12T10:05:00+08:00").to_utc();
+        assert!(forget_what_was_shown_ahead_of(&db.conn.lock().unwrap(), really).unwrap());
+        assert_eq!(todays_brief(&db, "2026-11-14").unwrap(), None, "not kept to be shown as the 14th's brief");
+        assert_eq!(preference(&db.conn.lock().unwrap(), LAST_DATE_KEY).unwrap(), None);
+        assert!(!forget_what_was_shown_ahead_of(&db.conn.lock().unwrap(), really).unwrap(), "nothing left to remove");
+
+        // The real 14th, opened later in the day than the wrong briefing was
+        // written. Comparing times at this point alone would not tell.
+        let report = run_with(&db, &host, on(Trigger::CatchUp), hk("2026-11-14T11:00:00+08:00")).await.unwrap();
+        assert_ne!(report, ALREADY_SHOWN);
+        assert_eq!(host.notifications.lock().unwrap().len(), 2);
+    }
+
+    /// Nobody was watching when the clock was put right, and the real day's
+    /// briefing comes round: the run itself drops a record dated later than
+    /// now. A record written earlier the same day is honest and still counts.
+    #[tokio::test]
+    async fn a_run_drops_a_shown_today_record_written_later_than_now() {
+        let db = crate::db::test_database();
+        let host = FakeHost::new(true);
+        run_with(&db, &host, on(Trigger::CatchUp), hk("2026-11-14T10:00:00+08:00")).await.unwrap();
+
+        let report = run_with(&db, &host, on(Trigger::Scheduled), hk("2026-11-14T08:30:01+08:00")).await.unwrap();
+        assert_ne!(report, ALREADY_SHOWN, "the record is from 10:00 on a day that has only reached 08:30");
+        assert_eq!(host.notifications.lock().unwrap().len(), 2);
+
+        let later = hk("2026-11-14T09:00:00+08:00");
+        assert!(!forget_what_was_shown_ahead_of(&db.conn.lock().unwrap(), later.to_utc()).unwrap(), "an honest record stays");
+        assert_eq!(run_with(&db, &host, on(Trigger::Scheduled), later).await.unwrap(), ALREADY_SHOWN);
+        assert_eq!(host.notifications.lock().unwrap().len(), 2);
+    }
+
+    /// The Google account the brief was drawn from is disconnected while its
+    /// AI summary is on the way. The answer must not put the brief back.
+    #[tokio::test]
+    async fn a_summary_that_arrives_after_the_brief_was_removed_does_not_put_it_back() {
+        let db = Arc::new(crate::db::test_database());
+        let host = FakeHost::new(false);
+        run_with(&db, &host, on(Trigger::Scheduled), hk(MORNING)).await.unwrap();
+        host.online.store(true, Ordering::SeqCst);
+        let drawn = host.shown.lock().unwrap().len();
+
+        let disconnected = Arc::clone(&db);
+        *host.while_summarising.lock().unwrap() = Some(Box::new(move |_| {
+            let conn = disconnected.conn.lock().unwrap();
+            conn.execute("DELETE FROM user_preferences WHERE key IN (?1, ?2)", [TODAY_KEY, LAST_DATE_KEY]).unwrap();
+        }));
+        assert!(!complete_pending_with(&db, &host, "2026-11-12").await.unwrap(), "nothing is owed for a brief that is gone");
+        assert_eq!(todays_brief(&db, "2026-11-12").unwrap(), None);
+        assert_eq!(host.shown.lock().unwrap().len(), drawn, "and the window is not told to draw it again");
+
+        assert!(!complete_pending_with(&db, &host, "2026-11-12").await.unwrap());
+        assert_eq!(*host.asked_for_summary.lock().unwrap(), 1, "no second AI call for it");
     }
 
     fn briefing_row(db: &Database) -> (String, String, String) {
