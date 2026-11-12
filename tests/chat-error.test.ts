@@ -24,6 +24,17 @@ test('an empty Gemini reply after a completed action says the action was kept', 
   assert.equal(chatErrorText(error, en).detail, error);
 });
 
+test('a later provider that fails after an action is not reported as an empty Gemini reply', () => {
+  // Gemini returned nothing and ran no tool, so the router moved on; Claude
+  // ran a tool and then failed. The router's string holds both errors.
+  const error = 'Stopped after 1 completed action(s) so they are not repeated: gemini (gemini-3.7-flash): Gemini (gemini-3.7-flash) returned no text (finish_reason=STOP); claude (claude-sonnet-4-6): Claude API error 500';
+  assert.deepEqual(chatErrorText(error, en), { message: error, detail: null });
+  assert.deepEqual(chatErrorText(error, zh), { message: error, detail: null });
+  // The other way round, Gemini's empty reply is the last error and decides.
+  const geminiLast = 'Stopped after 1 completed action(s) so they are not repeated: claude (claude-sonnet-4-6): Claude API error 500; gemini (gemini-3.7-flash): Gemini (gemini-3.7-flash) returned no text (finish_reason=STOP)';
+  assert.match(chatErrorText(geminiLast, en).message, /^Gemini returned an empty answer\. The actions already completed were kept/);
+});
+
 test('another failure after a completed action is shown as the router wrote it', () => {
   const error = 'Stopped after 2 completed action(s) so they are not repeated: claude (claude-sonnet-4-6): Claude API error 500';
   assert.deepEqual(chatErrorText(error, en), { message: error, detail: null });
