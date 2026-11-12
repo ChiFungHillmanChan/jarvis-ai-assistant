@@ -209,7 +209,15 @@ mod tests {
         finish_onboarding(&db);
         let item = MemoryLoginItem::default();
         assert!(apply_default(&db, &item).unwrap(), "first launch after the update");
+        assert!(item.is_enabled().unwrap());
         assert!(!apply_default(&db, &item).unwrap(), "second launch");
+
+        // They turn it off in Settings; no later launch turns it back on.
+        assert!(!set_by_user(&db, &item, false).unwrap());
+        for _ in 0..3 {
+            assert!(!apply_default(&db, &item).unwrap());
+        }
+        assert!(!item.is_enabled().unwrap(), "the user's choice stands");
     }
 
     /// A choice made in Settings before the default was ever applied (the
