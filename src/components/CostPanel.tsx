@@ -3,12 +3,6 @@ import { useTauriCommand } from "../hooks/useTauriCommand";
 import { useUiLocale } from "../i18n";
 import { formatUsd, monthlyLine, usageHeadline, type BlendedCost, type CostStats } from "../lib/usage";
 
-function shortModel(id: string): string {
-  if (id.length <= 28) return id;
-  const parts = id.split(".");
-  return parts[parts.length - 1] || id.slice(-28);
-}
-
 /**
  * Usage recorded on this Mac over the last 30 days: one row per request,
  * written by the backend as each request is answered (ai/cost.rs). Money is
@@ -74,7 +68,8 @@ export default memo(function CostPanel() {
           <div style={styles.list}>
             {data.top_expensive_30d.map((t, i) => (
               <div key={i} style={styles.row}>
-                <span style={styles.model}>{shortModel(t.model_id)}</span>
+                {/* The whole id: for Bedrock, the prefix says which profile was sent. */}
+                <span style={styles.model} title={t.model_id}>{t.model_id}</span>
                 <span style={styles.muted}>{t.input_tokens}+{t.output_tokens}</span>
                 <span style={styles.amount}>{t.price_unknown ? text("price unknown", "價格未知") : t.usd_cost === null ? text("free", "免費") : formatUsd(t.usd_cost)}</span>
               </div>
