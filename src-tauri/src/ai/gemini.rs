@@ -70,6 +70,22 @@ struct UsageMetadata {
     candidates_token_count: Option<i64>,
     #[serde(rename = "cachedContentTokenCount")]
     cached_content_token_count: Option<i64>,
+    /// Thinking, billed at the output rate; candidatesTokenCount leaves it out.
+    #[serde(rename = "thoughtsTokenCount")]
+    thoughts_token_count: Option<i64>,
+}
+
+impl UsageMetadata {
+    /// Fold one request into the turn. promptTokenCount already includes
+    /// the cached tokens.
+    fn add_to(&self, turn: &mut crate::ai::cost::TurnUsage) {
+        turn.add_request(
+            self.prompt_token_count.unwrap_or(0),
+            self.candidates_token_count.unwrap_or(0) + self.thoughts_token_count.unwrap_or(0),
+            self.cached_content_token_count.unwrap_or(0),
+            0,
+        );
+    }
 }
 
 #[derive(Deserialize, Debug)]
@@ -96,9 +112,7 @@ pub async fn send(
     ledger: &crate::ai::SideEffectLedger,
 ) -> Result<String, Box<dyn std::error::Error + Send + Sync>> {
     let started_at = std::time::Instant::now();
-    let mut total_prompt_tokens: i64 = 0;
-    let mut total_output_tokens: i64 = 0;
-    let mut total_cached_tokens: i64 = 0;
+    let mut turn = crate::ai::cost::TurnUsage::new("gemini", model);
     let client = Client::builder()
         .read_timeout(std::time::Duration::from_secs(90))
         .build()?;
@@ -113,16 +127,17 @@ pub async fn send(
     });
 
     let max_iterations = 5;
-    for _ in 0..max_iterations {
+    for round in 0..max_iterations {
+        let final_round = round + 1 == max_iterations;
         // Per-round usage: Gemini reports usageMetadata cumulatively within one
-        // request, so overwrite within a round and fold into totals when it ends.
+        // request, so overwrite within a round and fold into the turn when it ends.
         let mut usage = UsageMetadata::default();
         let url = format!(
             "{}/models/{}:streamGenerateContent?alt=sse",
             API_BASE, model
         );
 
-        let request_body = json!({
+        let mut request_body = json!({
             "contents": contents,
             "tools": gemini_tools,
             "systemInstruction": system_instruction,
@@ -130,6 +145,10 @@ pub async fn send(
                 "maxOutputTokens": 4096
             }
         });
+        if final_round {
+            // The last allowed round answers from what earlier rounds gathered.
+            request_body["toolConfig"] = json!({"functionCallingConfig": {"mode": "NONE"}});
+        }
 
         let response = client
             .post(&url)
@@ -137,16 +156,19 @@ pub async fn send(
             .header("Content-Type", "application/json")
             .json(&request_body)
             .send()
-            .await?;
+            .await;
+        let response = match response {
+            Ok(response) => response,
+            Err(e) => {
+                turn.record_if_billed(db, workload, started_at.elapsed().as_millis() as i64);
+                return Err(e.into());
+            }
+        };
 
         if !response.status().is_success() {
             let status = response.status();
             let body = response.text().await.unwrap_or_default();
-            record_partial_usage(
-                db, workload, model,
-                total_prompt_tokens, total_output_tokens, total_cached_tokens,
-                &started_at,
-            );
+            turn.record_if_billed(db, workload, started_at.elapsed().as_millis() as i64);
             return Err(format!("Gemini API error {}: {}", status, body).into());
         }
 
@@ -166,14 +188,8 @@ pub async fn send(
                 Ok(bytes) => bytes,
                 Err(e) => {
                     let _ = app_handle.emit("chat-state", json!({"state": "idle"}));
-                    total_prompt_tokens += usage.prompt_token_count.unwrap_or(0);
-                    total_output_tokens += usage.candidates_token_count.unwrap_or(0);
-                    total_cached_tokens += usage.cached_content_token_count.unwrap_or(0);
-                    record_partial_usage(
-                        db, workload, model,
-                        total_prompt_tokens, total_output_tokens, total_cached_tokens,
-                        &started_at,
-                    );
+                    usage.add_to(&mut turn);
+                    turn.record_if_billed(db, workload, started_at.elapsed().as_millis() as i64);
                     return Err(format!("Stream error: {}", e).into());
                 }
             };
@@ -273,11 +289,9 @@ pub async fn send(
             }
         }
 
-        total_prompt_tokens += usage.prompt_token_count.unwrap_or(0);
-        total_output_tokens += usage.candidates_token_count.unwrap_or(0);
-        total_cached_tokens += usage.cached_content_token_count.unwrap_or(0);
+        usage.add_to(&mut turn);
 
-        if !function_call_parts.is_empty() {
+        if !function_call_parts.is_empty() && !final_round {
             let mut assistant_parts: Vec<GeminiPart> = Vec::new();
             let full_text = text_parts.join("");
             if !full_text.is_empty() {
@@ -362,21 +376,18 @@ pub async fn send(
 
         let _ = app_handle.emit("chat-token", json!({"token": "", "done": true}));
         if !text_parts.is_empty() {
-            if total_prompt_tokens == 0 && total_output_tokens == 0 {
+            if turn.is_empty() {
                 log::warn!(
                     "[gemini] no usageMetadata received for non-empty response; recording zero tokens (model={})",
                     model
                 );
             }
-            crate::ai::cost::record_inference(
-                db, "gemini", workload, model,
-                total_prompt_tokens,
-                total_output_tokens,
-                total_cached_tokens,
-                0,
-                started_at.elapsed().as_millis() as i64,
-            );
+            turn.record(db, workload, started_at.elapsed().as_millis() as i64);
             return Ok(text_parts.join(""));
+        }
+        if final_round && !function_call_parts.is_empty() {
+            turn.record(db, workload, started_at.elapsed().as_millis() as i64);
+            return Ok(tools::tool_limit_fallback(&tools::read_language_pref(db)).into());
         }
         log::warn!(
             "[gemini] empty response: model={} finish_reason={:?} function_calls={} events={} bytes={} first_chunk={:?}",
@@ -387,27 +398,14 @@ pub async fn send(
             total_bytes,
             first_chunk_sample
         );
-        crate::ai::cost::record_inference(
-            db, "gemini", workload, model,
-            total_prompt_tokens,
-            total_output_tokens,
-            total_cached_tokens,
-            0,
-            started_at.elapsed().as_millis() as i64,
-        );
+        turn.record(db, workload, started_at.elapsed().as_millis() as i64);
         return Err(format!("Gemini returned no text (finish_reason={:?})", finish_reason).into());
     }
 
     let _ = app_handle.emit("chat-token", json!({"token": "", "done": true}));
-    crate::ai::cost::record_inference(
-        db, "gemini", workload, model,
-        total_prompt_tokens,
-        total_output_tokens,
-        total_cached_tokens,
-        0,
-        started_at.elapsed().as_millis() as i64,
-    );
-    Ok("I've completed the actions.".into())
+    turn.record(db, workload, started_at.elapsed().as_millis() as i64);
+    // The last round always returns above.
+    Ok(tools::tool_limit_fallback(&tools::read_language_pref(db)).into())
 }
 
 /// Map persisted `(role, content)` rows to Gemini contents. Rows whose content
@@ -430,26 +428,6 @@ fn history_contents(messages: Vec<(String, String)>) -> Vec<GeminiContent> {
         .collect()
 }
 
-/// Record usage accumulated so far when a turn ends abnormally, so tokens
-/// already billed by completed rounds are not lost from telemetry.
-fn record_partial_usage(
-    db: &crate::db::Database,
-    workload: crate::ai::Workload,
-    model: &str,
-    prompt_tokens: i64,
-    output_tokens: i64,
-    cached_tokens: i64,
-    started_at: &std::time::Instant,
-) {
-    if prompt_tokens > 0 || output_tokens > 0 || cached_tokens > 0 {
-        crate::ai::cost::record_inference(
-            db, "gemini", workload, model,
-            prompt_tokens, output_tokens, cached_tokens, 0,
-            started_at.elapsed().as_millis() as i64,
-        );
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -462,6 +440,21 @@ mod tests {
         assert_eq!(u.prompt_token_count, Some(12));
         assert_eq!(u.candidates_token_count, Some(34));
         assert_eq!(u.cached_content_token_count, Some(5));
+    }
+
+    /// gemini-3.7-flash, 800 thinking + 200 visible tokens: all 1,000 are
+    /// billed as output ($3.75/M), not just the 200.
+    #[test]
+    fn thinking_tokens_count_as_output() {
+        let json = r#"{"usageMetadata":{"promptTokenCount":1000,"candidatesTokenCount":200,"thoughtsTokenCount":800}}"#;
+        let sse: StreamChunk = serde_json::from_str(json).unwrap();
+        let db = crate::ai::cost::tests::temp_metrics_db("");
+        let mut turn = crate::ai::cost::TurnUsage::new("gemini", crate::ai::models::GEMINI_FLASH);
+        sse.usage_metadata.unwrap().add_to(&mut turn);
+        turn.record(&db, crate::ai::Workload::Tools, 1);
+        let (output, micro): (i64, i64) = db.conn.lock().unwrap().query_row("SELECT output_tokens, usd_cost_micro FROM inference_metrics", [], |r| Ok((r.get(0)?, r.get(1)?))).unwrap();
+        // 1,000 x $0.75 + 1,000 x $3.75 per 1M.
+        assert_eq!((output, micro), (1_000, 4_500));
     }
 
     #[test]

@@ -27,6 +27,9 @@ struct ChatCompletionRequest {
     messages: Vec<LocalMessage>,
     #[serde(skip_serializing_if = "Option::is_none")]
     tools: Option<Vec<serde_json::Value>>,
+    /// "none" on the last allowed round when native tools are sent.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    tool_choice: Option<&'static str>,
     #[serde(skip_serializing_if = "Option::is_none")]
     max_tokens: Option<u32>,
     stream: bool,
@@ -235,7 +238,8 @@ pub async fn send_local(
     };
 
     let max_iterations = 5;
-    for _ in 0..max_iterations {
+    for round in 0..max_iterations {
+        let final_round = round + 1 == max_iterations;
         // Per-round usage: the OpenAI-compatible stream reports one usage
         // object per request, so overwrite within a round and fold into the
         // totals when the round ends.
@@ -244,6 +248,7 @@ pub async fn send_local(
             model: model.to_string(),
             messages: local_messages.clone(),
             tools: request_tools.clone(),
+            tool_choice: (final_round && request_tools.is_some()).then_some("none"),
             max_tokens: Some(4096.min(context_length / 2)),
             stream: true,
             response_format: if use_response_format {
@@ -391,6 +396,17 @@ pub async fn send_local(
         // Handle prompt-injected tool calls (parse from text response)
         if matches!(effective_cap, ToolCapability::PromptInjected) && tool_map.is_empty() {
             let full_text = text_parts.join("");
+            if final_round {
+                if let Some(reply) = last_round_reply(&full_text, &tools::read_language_pref(db)) {
+                    let _ = app_handle.emit("chat-token", json!({"token": "", "done": true}));
+                    record_local_inference(
+                        db, workload, model,
+                        total_prompt_tokens, total_completion_tokens,
+                        &started_at,
+                    );
+                    return Ok(reply);
+                }
+            }
             let (parsed_calls, response_text) = parse_tool_calls_from_response(&full_text);
 
             if let Some(calls) = parsed_calls {
@@ -483,7 +499,7 @@ pub async fn send_local(
         }
 
         // Handle native tool calls (OpenAI format)
-        if finish_reason.as_deref() == Some("tool_calls") && !tool_map.is_empty() {
+        if finish_reason.as_deref() == Some("tool_calls") && !tool_map.is_empty() && !final_round {
             let text_content = text_parts.join("");
             let mut tool_calls_vec: Vec<LocalToolCall> = Vec::new();
             let mut sorted_indices: Vec<usize> = tool_map.keys().copied().collect();
@@ -586,7 +602,11 @@ pub async fn send_local(
             total_prompt_tokens, total_completion_tokens,
             &started_at,
         );
-        return Ok(text_parts.join(""));
+        let text = text_parts.join("");
+        if final_round && text.trim().is_empty() {
+            return Ok(tools::tool_limit_fallback(&tools::read_language_pref(db)).into());
+        }
+        return Ok(text);
     }
 
     let _ = app_handle.emit("chat-token", json!({"token": "", "done": true}));
@@ -595,7 +615,17 @@ pub async fn send_local(
         total_prompt_tokens, total_completion_tokens,
         &started_at,
     );
-    Ok("I've completed the actions.".into())
+    Ok(tools::tool_limit_fallback(&tools::read_language_pref(db)).into())
+}
+
+/// The reply when the last round's text asks for tools: none are run, as on
+/// the native path (a tool run there was followed by "ran out of steps", and
+/// the user's retry repeated it). Plain text around the call is kept. None
+/// when the text asks for no tool.
+fn last_round_reply(full_text: &str, language: &str) -> Option<String> {
+    let (calls, text) = parse_tool_calls_from_response(full_text);
+    calls.filter(|calls| !calls.is_empty())?;
+    Some(if text.trim().is_empty() { tools::tool_limit_fallback(language).to_string() } else { text })
 }
 
 /// Record a completed local turn. Local models are free (models::usd_cost_micro
@@ -622,6 +652,17 @@ fn record_local_inference(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The last round runs no tools, as on the native path: a tool run there
+    /// was followed by "ran out of steps", and the user's retry repeated it.
+    #[test]
+    fn the_last_round_answers_instead_of_running_an_injected_tool() {
+        let call = r#"{"tool_calls":[{"name":"create_task","arguments":{"title":"Call Mary"}}]}"#;
+        let reply = last_round_reply(call, "en").expect("a tool call on the last round is answered, not run");
+        assert_eq!(reply, tools::tool_limit_fallback("en"));
+        assert!(!reply.contains("create_task"), "{reply}");
+        assert_eq!(last_round_reply("You have two meetings today.", "en"), None, "plain text goes the usual way");
+    }
 
     #[test]
     fn sse_chunk_parses_usage_and_tolerates_its_absence() {

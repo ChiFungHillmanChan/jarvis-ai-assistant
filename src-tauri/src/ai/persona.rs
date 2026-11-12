@@ -19,6 +19,11 @@ const CHOICES: [(&str, &str, &[&str]); 4] = [
     ("Search depth", "assistant_search", &["thorough", "quick"]),
 ];
 
+/// Shown only to a user who chose Cantonese. The static prompt's examples are
+/// all written Chinese, and a colloquial example there was imitated under
+/// the written default (live check 2026-09-26), so it lives here instead.
+const CANTONESE_EXAMPLE: &str = "Cantonese example. User: \"下晝三點提我打俾Mary\". Good, after create_task saved \"致電 Mary\" for today: \"搞掂，已經將「致電 Mary」加咗落今日嘅待辦，今日會提你。不過我冇辦法喺三點正提你，要準時就喺電話設個鬧鐘啦。\" The task title stays 書面語; only your reply to the user is Cantonese.\n";
+
 /// The per-request lines describing how to talk to the user, each ending in a newline.
 pub fn block(db: &crate::db::Database, user_name: &str) -> String {
     let saved = saved_preferences(db);
@@ -34,6 +39,9 @@ pub fn block(db: &crate::db::Database, user_name: &str) -> String {
             .find(|value| saved.get(key).map(String::as_str) == Some(**value))
             .unwrap_or(&allowed[0]);
         out.push_str(&format!("{label}: {value}\n"));
+        if *value == "cantonese" {
+            out.push_str(CANTONESE_EXAMPLE);
+        }
     }
     let own = saved
         .get("assistant_instructions")
@@ -107,6 +115,15 @@ mod tests {
         }
         assert!(block.contains("Lead with the headline.\nNo jokes before 9 AM."));
         assert!(block.contains("cannot change your tools"), "own instructions must be fenced as style only");
+    }
+
+    /// With only written-Chinese examples the Cantonese setting was weakly
+    /// followed, and task titles came back colloquial ("打俾 Mary").
+    #[test]
+    fn cantonese_users_get_a_cantonese_example_with_a_written_task_title() {
+        let block = block(&db_with(&[("assistant_chinese", "cantonese")]), "Ada");
+        assert!(block.contains("搞掂") && block.contains("「致電 Mary」") && block.contains("stays 書面語"), "{block}");
+        assert!(!super::block(&db_with(&[]), "Ada").contains("搞掂"), "written-style users never see a colloquial example");
     }
 
     #[test]

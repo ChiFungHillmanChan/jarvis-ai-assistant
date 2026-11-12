@@ -63,13 +63,13 @@ pub fn get_tool_definitions() -> Vec<Tool> {
         },
         Tool {
             name: "create_task".into(),
-            description: "Create a task/reminder in JARVIS task list".into(),
+            description: "Create a task in the JARVIS task list. Tasks carry a date only: JARVIS shows them on Home and notifies the user on the deadline day. It cannot alert at a time of day, so never promise a reminder at a specific time; if the user asks for one, save the task for that date and say it will be flagged that day.".into(),
             parameters: json!({
                 "type": "object",
                 "properties": {
-                    "title": { "type": "string" },
+                    "title": { "type": "string", "description": "Short task title. Chinese titles use Traditional Chinese written language (書面語), never colloquial Cantonese." },
                     "description": { "type": "string" },
-                    "deadline": { "type": "string", "description": "YYYY-MM-DD format" },
+                    "deadline": { "type": "string", "description": "Due date, YYYY-MM-DD only (no time)" },
                     "priority": { "type": "integer", "description": "0=low, 1=normal, 2=high, 3=urgent" }
                 },
                 "required": ["title"]
@@ -354,7 +354,7 @@ pub fn get_tool_definitions() -> Vec<Tool> {
         },
         Tool {
             name: "render_status".into(),
-            description: "Show a status card for a completed action. Use after creating tasks, syncing data, or completing any action.".into(),
+            description: "Show a status card for an action. Call it in the same batch of tool calls as the action it reports (for example together with create_task), never as a separate step after that action's result: an extra step only makes the user wait.".into(),
             parameters: json!({
                 "type": "object",
                 "properties": {
@@ -532,6 +532,16 @@ pub fn tool_status_detail(name: &str, arguments: &str) -> Option<String> {
         return Some(line);
     }
     Some(line.chars().take(STEP_DETAIL_MAX_CHARS - 1).chain(std::iter::once('…')).collect())
+}
+
+/// The reply when a turn used every tool round and the model still gave no
+/// answer. Same language rule as `tool_voice_narration`.
+pub fn tool_limit_fallback(language: &str) -> &'static str {
+    if language == "yue" {
+        "我查了幾個地方，但在完成前用盡了步驟，未能整理出答案。請把問題說得具體一點，我再試一次。"
+    } else {
+        "I looked in a few places but ran out of steps before I could answer. Could you narrow it down? I'll try again."
+    }
 }
 
 /// Short spoken line played at the first tool call of a turn. `language` is
@@ -750,6 +760,24 @@ fn date_arg(args: &serde_json::Value, key: &str) -> Result<Option<String>, Strin
             .map(|_| Some(s.to_string()))
             .map_err(|_| format!("{key} must be a date in YYYY-MM-DD format.")),
     }
+}
+
+/// create_task's deadline: a plain date, because the scheduler compares it
+/// with date('now') as a string. A time part after a full date
+/// ("2026-11-01T15:00") is dropped, since a task carries a date only; the date
+/// is stored zero-padded; anything else is refused so the model retries.
+fn task_deadline(args: &serde_json::Value) -> Result<Option<String>, String> {
+    let raw = args["deadline"].as_str().unwrap_or("").trim();
+    if raw.is_empty() {
+        return Ok(None);
+    }
+    let date = match (raw.get(..10), raw.get(10..)) {
+        (Some(head), Some(rest)) if rest.is_empty() || rest.starts_with(['T', ' ']) => head,
+        _ => raw,
+    };
+    chrono::NaiveDate::parse_from_str(date, "%Y-%m-%d")
+        .map(|d| Some(d.format("%Y-%m-%d").to_string()))
+        .map_err(|_| "deadline must be a date in YYYY-MM-DD format.".to_string())
 }
 
 /// JARVIS's own synced data: the follow-ups, triage and tasks the Mail,
@@ -1461,7 +1489,10 @@ async fn execute_tool_inner(
         "create_task" => {
             let title = args["title"].as_str().unwrap_or("Untitled");
             let desc = args["description"].as_str().unwrap_or("");
-            let deadline = args["deadline"].as_str();
+            let deadline = match task_deadline(&args) {
+                Ok(deadline) => deadline,
+                Err(e) => return format!("Error: {e}"),
+            };
             let priority = args["priority"].as_i64().unwrap_or(1) as i32;
             match db.conn.lock() {
                 Ok(conn) => {
@@ -1469,7 +1500,10 @@ async fn execute_tool_inner(
                         "INSERT INTO tasks (title, description, deadline, priority) VALUES (?1, ?2, ?3, ?4)",
                         rusqlite::params![title, desc, deadline, priority],
                     ) {
-                        Ok(_) => format!("Task created: {}", title),
+                        Ok(_) => match deadline {
+                            Some(date) => format!("Task created: {title}, due {date}. JARVIS flags it on that day, not at a time of day."),
+                            None => format!("Task created: {}", title),
+                        },
                         Err(e) => format!("Failed to create task: {}", e),
                     }
                 }
@@ -3009,6 +3043,67 @@ mod local_data_tests {
         assert!(out.contains("Book SELT") && out.contains("2026-10-05"), "{out}");
     }
 
+    /// The scheduler compares deadlines as YYYY-MM-DD strings, so "tomorrow"
+    /// would be saved, confirmed and never flagged. A time part is dropped:
+    /// tasks carry a date only.
+    #[tokio::test]
+    async fn create_task_keeps_only_a_plain_date_deadline() {
+        let db = crate::db::test_database();
+        let refused = run("create_task", serde_json::json!({"title": "Call Mary", "deadline": "tomorrow"}), &db).await;
+        assert!(refused.contains("YYYY-MM-DD"), "{refused}");
+        let saved = run("create_task", serde_json::json!({"title": "Call Mary", "deadline": "2026-11-01T15:00"}), &db).await;
+        assert!(saved.contains("2026-11-01") && !saved.contains("15:00"), "{saved}");
+        let deadlines: Vec<Option<String>> = {
+            let conn = db.conn.lock().unwrap();
+            let mut stmt = conn.prepare("SELECT deadline FROM tasks").unwrap();
+            let rows = stmt.query_map([], |r| r.get(0)).unwrap();
+            rows.map(|r| r.unwrap()).collect()
+        };
+        assert_eq!(deadlines, vec![Some("2026-11-01".to_string())], "the refused task must not be saved");
+        run("create_task", serde_json::json!({"title": "No date"}), &db).await;
+        assert_eq!(db.conn.lock().unwrap().query_row("SELECT COUNT(*) FROM tasks WHERE deadline IS NULL", [], |r| r.get::<_, i64>(0)).unwrap(), 1);
+    }
+
+    /// Only a time part after a full date is dropped: cutting at the first
+    /// "T" turned "Tomorrow" into no deadline at all. A date the scheduler's
+    /// string comparison would miss ("2026-11-1") is stored zero-padded.
+    #[tokio::test]
+    async fn create_task_refuses_words_and_pads_short_dates() {
+        let db = crate::db::test_database();
+        for word in ["Tomorrow", "Today", "Thursday", "TBD"] {
+            let refused = run("create_task", serde_json::json!({"title": "Call Mary", "deadline": word}), &db).await;
+            assert!(refused.contains("YYYY-MM-DD"), "{word}: {refused}");
+        }
+        assert_eq!(db.conn.lock().unwrap().query_row("SELECT COUNT(*) FROM tasks", [], |r| r.get::<_, i64>(0)).unwrap(), 0);
+        for (given, stored) in [("2026-11-1", "2026-11-01"), ("2026-11-02 15:00", "2026-11-02")] {
+            let saved = run("create_task", serde_json::json!({"title": given, "deadline": given}), &db).await;
+            assert!(saved.contains(stored), "{saved}");
+            let deadline: String = db.conn.lock().unwrap().query_row("SELECT deadline FROM tasks WHERE title = ?1", [given], |r| r.get(0)).unwrap();
+            assert_eq!(deadline, stored);
+        }
+    }
+
+    /// render_status asked for its own round after every action: one more
+    /// model call of latency and one step closer to the round cap.
+    #[test]
+    fn render_status_rides_along_with_the_action() {
+        let tool = get_tool_definitions().into_iter().find(|t| t.name == "render_status").unwrap();
+        assert!(!tool.description.contains("Use after"), "{}", tool.description);
+        assert!(tool.description.contains("same batch"), "{}", tool.description);
+    }
+
+    /// Tasks have no time of day, so the model must be told not to promise
+    /// one ("I'll remind you at 3 PM" fired nothing at 3 PM).
+    #[test]
+    fn create_task_never_reads_as_a_timed_reminder() {
+        let tool = get_tool_definitions().into_iter().find(|t| t.name == "create_task").unwrap();
+        let description = tool.description.to_lowercase();
+        assert!(!description.contains("reminder in"), "{description}");
+        assert!(description.contains("date only") && description.contains("time of day"), "{description}");
+        assert!(tool.parameters["properties"]["title"]["description"].as_str().unwrap().contains("書面語"));
+        assert!(build_cacheable_system_prompt().contains("never promise a reminder at a time of day"));
+    }
+
     /// Follow-up titles and triage summaries derive from email a stranger
     /// wrote, so reading them taints the turn exactly like read_email does.
     /// Tasks stay the user's own data (see remember_still_works_after_a_local_only_turn).
@@ -3052,6 +3147,17 @@ mod step_tests {
         assert!(detail.ends_with('…'));
         assert_eq!(tool_status_detail("search_emails", "not json"), None);
         assert_eq!(tool_status_detail("search_emails", r#"{"query":"   "}"#), None);
+    }
+
+    #[test]
+    fn the_tool_limit_reply_follows_the_response_language() {
+        assert!(tool_limit_fallback("en").is_ascii());
+        assert!(tool_limit_fallback("bilingual").is_ascii());
+        let chinese = tool_limit_fallback("yue");
+        assert!(!chinese.is_ascii());
+        for colloquial in ["嘅", "咗", "唔", "冇", "啲", "係"] {
+            assert!(!chinese.contains(colloquial), "{chinese}");
+        }
     }
 
     #[test]

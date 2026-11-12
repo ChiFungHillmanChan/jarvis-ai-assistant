@@ -13,6 +13,10 @@ struct ClaudeRequest {
     max_tokens: u32,
     system: String,
     tools: Vec<serde_json::Value>,
+    /// {"type":"none"} on the last allowed round, so the model answers from
+    /// what the earlier rounds gathered instead of asking for another tool.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    tool_choice: Option<serde_json::Value>,
     messages: Vec<ClaudeMessage>,
     stream: bool,
 }
@@ -92,6 +96,22 @@ struct SseUsage {
     cache_creation_input_tokens: Option<i64>,
 }
 
+/// One request's usage. Anthropic's input_tokens leaves out the cached
+/// tokens, so they are added back: the cost table counts input inclusive.
+#[derive(Default)]
+struct RoundUsage {
+    input: i64,
+    output: i64,
+    cache_read: i64,
+    cache_write: i64,
+}
+
+impl RoundUsage {
+    fn add_to(&self, turn: &mut crate::ai::cost::TurnUsage) {
+        turn.add_request(self.input + self.cache_read + self.cache_write, self.output, self.cache_read, self.cache_write);
+    }
+}
+
 
 pub async fn send(
     api_key: &str,
@@ -122,19 +142,18 @@ pub async fn send(
         })
         .collect();
 
-    let mut total_input_tokens: i64 = 0;
-    let mut total_output_tokens: i64 = 0;
-    let mut total_cache_read: i64 = 0;
-    let mut total_cache_write: i64 = 0;
+    let mut turn = crate::ai::cost::TurnUsage::new("claude", &model);
     let started_at = std::time::Instant::now();
 
     let max_iterations = 5;
-    for _ in 0..max_iterations {
+    for round in 0..max_iterations {
+        let final_round = round + 1 == max_iterations;
         let request = ClaudeRequest {
             model: model.clone(),
             max_tokens: 4096,
             system: system.clone(),
             tools: claude_tools.clone(),
+            tool_choice: final_round.then(|| json!({"type": "none"})),
             messages: claude_messages.clone(),
             stream: true,
         };
@@ -146,11 +165,19 @@ pub async fn send(
             .header("content-type", "application/json")
             .json(&request)
             .send()
-            .await?;
+            .await;
+        let response = match response {
+            Ok(response) => response,
+            Err(e) => {
+                turn.record_if_billed(db, workload, started_at.elapsed().as_millis() as i64);
+                return Err(e.into());
+            }
+        };
 
         if !response.status().is_success() {
             let status = response.status();
             let body = response.text().await.unwrap_or_default();
+            turn.record_if_billed(db, workload, started_at.elapsed().as_millis() as i64);
             return Err(format!("Claude API error {}: {}", status, body).into());
         }
 
@@ -161,12 +188,15 @@ pub async fn send(
         let mut announced_tools: HashSet<usize> = HashSet::new();
         let mut stop_reason: Option<String> = None;
         let mut response_started = false;
+        let mut round_usage = RoundUsage::default();
 
         while let Some(chunk_result) = stream.next().await {
             let chunk = match chunk_result {
                 Ok(bytes) => bytes,
                 Err(e) => {
                     let _ = app_handle.emit("chat-state", json!({"state": "idle"}));
+                    round_usage.add_to(&mut turn);
+                    turn.record_if_billed(db, workload, started_at.elapsed().as_millis() as i64);
                     return Err(format!("Stream error: {}", e).into());
                 }
             };
@@ -201,6 +231,8 @@ pub async fn send(
                 if event_type == "error" {
                     log::error!("Claude SSE error: {}", data_str);
                     let _ = app_handle.emit("chat-state", json!({"state": "idle"}));
+                    round_usage.add_to(&mut turn);
+                    turn.record_if_billed(db, workload, started_at.elapsed().as_millis() as i64);
                     return Err(format!("Claude stream error: {}", data_str).into());
                 }
 
@@ -222,9 +254,9 @@ pub async fn send(
                     "message_start" => {
                         if let Some(ref msg) = sse.message {
                             if let Some(ref u) = msg.usage {
-                                total_input_tokens += u.input_tokens.unwrap_or(0);
-                                total_cache_read += u.cache_read_input_tokens.unwrap_or(0);
-                                total_cache_write += u.cache_creation_input_tokens.unwrap_or(0);
+                                round_usage.input = u.input_tokens.unwrap_or(0);
+                                round_usage.cache_read = u.cache_read_input_tokens.unwrap_or(0);
+                                round_usage.cache_write = u.cache_creation_input_tokens.unwrap_or(0);
                             }
                         }
                     }
@@ -307,14 +339,17 @@ pub async fn send(
                                 stop_reason = Some(sr.clone());
                             }
                         }
+                        // Cumulative for the message, so it replaces.
                         if let Some(ref u) = sse.usage {
-                            total_output_tokens += u.output_tokens.unwrap_or(0);
+                            round_usage.output = u.output_tokens.unwrap_or(0);
                         }
                     }
                     _ => {}
                 }
             }
         }
+
+        round_usage.add_to(&mut turn);
 
         // Collect tool calls from the map
         let tool_uses: Vec<(String, String, serde_json::Value)> = tool_map
@@ -325,8 +360,9 @@ pub async fn send(
             })
             .collect();
 
-        // If there are tool calls, execute them and continue
-        if !tool_uses.is_empty() {
+        // If there are tool calls, execute them and continue. The last round
+        // runs no tools.
+        if !tool_uses.is_empty() && !final_round {
             // Build assistant message with text and tool_use blocks
             let mut assistant_blocks: Vec<ContentBlock> = Vec::new();
             for text in &text_parts {
@@ -399,11 +435,7 @@ pub async fn send(
             if stop_reason.as_deref() == Some("end_turn") && !text_parts.is_empty() {
                 let _ = app_handle.emit("chat-token", json!({"token": "", "done": true}));
                 let _ = app_handle.emit("chat-thinking", json!({"text": "", "done": true}));
-                crate::ai::cost::record_inference(
-                    db, "claude", workload, &model,
-                    total_input_tokens, total_output_tokens, total_cache_read, total_cache_write,
-                    started_at.elapsed().as_millis() as i64,
-                );
+                turn.record(db, workload, started_at.elapsed().as_millis() as i64);
                 return Ok(text_parts.join(""));
             }
             let _ = app_handle.emit(
@@ -419,23 +451,48 @@ pub async fn send(
         // No tool calls -- emit done and return text
         let _ = app_handle.emit("chat-token", json!({"token": "", "done": true}));
         let _ = app_handle.emit("chat-thinking", json!({"text": "", "done": true}));
-        crate::ai::cost::record_inference(
-            db, "claude", workload, &model,
-            total_input_tokens, total_output_tokens, total_cache_read, total_cache_write,
-            started_at.elapsed().as_millis() as i64,
-        );
+        turn.record(db, workload, started_at.elapsed().as_millis() as i64);
         if !text_parts.is_empty() {
             return Ok(text_parts.join(""));
+        }
+        if final_round {
+            return Ok(tools::tool_limit_fallback(&tools::read_language_pref(db)).into());
         }
         return Ok(String::new());
     }
 
     let _ = app_handle.emit("chat-token", json!({"token": "", "done": true}));
     let _ = app_handle.emit("chat-thinking", json!({"text": "", "done": true}));
-    crate::ai::cost::record_inference(
-        db, "claude", workload, &model,
-        total_input_tokens, total_output_tokens, total_cache_read, total_cache_write,
-        started_at.elapsed().as_millis() as i64,
-    );
-    Ok("I've completed the actions.".into())
+    turn.record(db, workload, started_at.elapsed().as_millis() as i64);
+    // The last round always returns above.
+    Ok(tools::tool_limit_fallback(&tools::read_language_pref(db)).into())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Sonnet 4.6, a cache hit: 2,400 uncached in, 6,400 read from cache,
+    /// 250 out = $0.0072 + $0.00192 + $0.00375. Passing input_tokens as the
+    /// total let the cost table subtract the cache from it a second time.
+    #[test]
+    fn cached_input_is_not_subtracted_twice() {
+        let db = crate::ai::cost::tests::temp_metrics_db("");
+        let mut turn = crate::ai::cost::TurnUsage::new("claude", "claude-sonnet-4-6");
+        RoundUsage { input: 2_400, output: 250, cache_read: 6_400, cache_write: 0 }.add_to(&mut turn);
+        turn.record(&db, crate::ai::Workload::Tools, 1);
+        let micro: i64 = db.conn.lock().unwrap().query_row("SELECT usd_cost_micro FROM inference_metrics", [], |r| r.get(0)).unwrap();
+        assert_eq!(micro, 12_870);
+    }
+
+    /// The last allowed round must get an answer, not another tool call
+    /// that nothing will run.
+    #[test]
+    fn only_the_last_round_turns_tools_off() {
+        let request = |tool_choice| {
+            serde_json::to_value(ClaudeRequest { model: "m".into(), max_tokens: 1, system: String::new(), tools: Vec::new(), tool_choice, messages: Vec::new(), stream: true }).unwrap()
+        };
+        assert_eq!(request(Some(json!({"type": "none"})))["tool_choice"]["type"], "none");
+        assert!(request(None).get("tool_choice").is_none());
+    }
 }

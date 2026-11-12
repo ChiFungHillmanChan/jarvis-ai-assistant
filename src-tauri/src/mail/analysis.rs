@@ -100,6 +100,7 @@ pub async fn analyze(
     creds: Option<AwsCredentials>,
     openai_key: Option<String>,
     assistant: Option<AssistantRoute>,
+    metrics: Option<&crate::db::Database>,
 ) -> Result<MailAnalysis, String> {
     analyze_with_endpoints(
         context,
@@ -108,6 +109,7 @@ pub async fn analyze(
         assistant,
         OLLAMA_PORT,
         OpenAiEndpoint::Production,
+        metrics,
     )
     .await
 }
@@ -121,7 +123,9 @@ async fn analyze_with_endpoints(
     assistant: Option<AssistantRoute>,
     ollama_port: u16,
     openai_endpoint: OpenAiEndpoint,
+    metrics: Option<&crate::db::Database>,
 ) -> Result<MailAnalysis, String> {
+    let started = std::time::Instant::now();
     let mut prepared = prepare_request(context, Utc::now())?;
     let (text, usage) = match prepared.mode.as_str() {
         "assistant" => {
@@ -141,15 +145,12 @@ async fn analyze_with_endpoints(
             send_to_ollama(&prepared.model, &prepared.prompt, ollama_port).await?,
             openai::Usage::default(),
         ),
-        "bedrock" => (
-            send_to_bedrock(
-                creds.ok_or_else(|| "未設定 AWS 憑證，無法使用 Bedrock。".to_string())?,
-                &prepared.model,
-                &prepared.prompt,
-            )
-            .await?,
-            openai::Usage::default(),
-        ),
+        "bedrock" => send_to_bedrock(
+            creds.ok_or_else(|| "未設定 AWS 憑證，無法使用 Bedrock。".to_string())?,
+            &prepared.model,
+            &prepared.prompt,
+        )
+        .await?,
         "openai" => {
             let key = openai_key
                 .as_deref()
@@ -160,6 +161,16 @@ async fn analyze_with_endpoints(
         }
         _ => return Err("分析模式無效，只支援本機、Bedrock、OpenAI 或所選 AI。".into()),
     };
+    // The reply is billed whatever it says, so it is stored before the checks
+    // below can reject it. complete() stores "assistant"; "local" is free.
+    let billed_as = match prepared.mode.as_str() {
+        "openai" => Some("openai-mail"),
+        "bedrock" => Some("bedrock"),
+        _ => None,
+    };
+    if let (Some(db), Some(provider)) = (metrics, billed_as) {
+        crate::ai::cost::record_inference(db, provider, crate::ai::Workload::Volume, &prepared.model, usage.input_tokens, usage.output_tokens, usage.cached_tokens, 0, started.elapsed().as_millis() as i64);
+    }
     if text.trim().is_empty() {
         return Err("AI 沒有回覆，請檢查模型設定後重試。".into());
     }
@@ -568,12 +579,20 @@ async fn send_to_bedrock(
     creds: AwsCredentials,
     model: &str,
     prompt: &str,
-) -> Result<String, String> {
+) -> Result<(String, openai::Usage), String> {
     let mut creds = creds;
     creds.inference_profile = inference_profile_for_region(&creds.region).to_string();
-    crate::ai::bedrock::send_simple(&creds, model, prompt)
+    let (text, usage) = crate::ai::bedrock::send_simple(&creds, model, prompt)
         .await
-        .map_err(|_| "Bedrock 分析失敗，請檢查 AWS 憑證、區域及模型權限。".to_string())
+        .map_err(|_| "Bedrock 分析失敗，請檢查 AWS 憑證、區域及模型權限。".to_string())?;
+    let usage = usage
+        .map(|u| openai::Usage {
+            input_tokens: crate::ai::bedrock::inclusive_input(&u),
+            output_tokens: u.output_tokens() as i64,
+            cached_tokens: u.cache_read_input_tokens().unwrap_or(0) as i64,
+        })
+        .unwrap_or_default();
+    Ok((text, usage))
 }
 
 fn decorate_output(text: &str, notices: &[String]) -> String {
@@ -801,7 +820,7 @@ mod tests {
     ) -> Result<MailAnalysis, String> {
         tokio::time::timeout(
             Duration::from_secs(5),
-            analyze_with_endpoints(input, None, None, None, server.port, OpenAiEndpoint::Production),
+            analyze_with_endpoints(input, None, None, None, server.port, OpenAiEndpoint::Production, None),
         )
         .await
         .expect("local analysis must complete without a cloud fallback")
@@ -837,6 +856,7 @@ mod tests {
                 None,
                 server.port,
                 OpenAiEndpoint::Loopback(server.port),
+                None,
             ),
         )
         .await
@@ -1115,6 +1135,35 @@ mod tests {
             assert!(error.contains("引用"), "{error}");
             assert_eq!(server.finish().await.len(), 1);
         }
+    }
+
+    /// OpenAI bills a reply whatever its citations, so its usage is stored
+    /// before the citation guard can reject it.
+    #[tokio::test]
+    async fn a_reply_the_citation_guard_rejects_is_still_recorded() {
+        let db = crate::ai::cost::tests::temp_metrics_db("");
+        let server = HttpFixture::start(vec![HttpReply::json(openai_response("沒有來源的摘要"))]).await;
+        let error = tokio::time::timeout(
+            Duration::from_secs(5),
+            analyze_with_endpoints(
+                context("openai", "gpt-5.6-luna", vec![message(101, "正文")]),
+                None,
+                Some(OPENAI_FIXTURE_KEY.into()),
+                None,
+                server.port,
+                OpenAiEndpoint::Loopback(server.port),
+                Some(&db),
+            ),
+        )
+        .await
+        .unwrap()
+        .expect_err("a reply without citations is rejected");
+        assert!(error.contains("引用"), "{error}");
+        let stored: (String, i64, i64) = db.conn.lock().unwrap()
+            .query_row("SELECT provider, input_tokens, output_tokens FROM inference_metrics", [], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)))
+            .unwrap();
+        assert_eq!(stored, ("openai-mail".to_string(), 500, 50));
+        assert_eq!(server.finish().await.len(), 1);
     }
 
     #[tokio::test]
@@ -1632,7 +1681,7 @@ mod tests {
 
         let analysis = tokio::time::timeout(
             Duration::from_secs(180),
-            analyze(synthetic_mail_context("openai", &model), None, Some(key), None),
+            analyze(synthetic_mail_context("openai", &model), None, Some(key), None, None),
         )
         .await
         .expect("real OpenAI analysis exceeded three minutes")
@@ -1660,7 +1709,7 @@ mod tests {
 
         // Use the shipped entry point and fixed 127.0.0.1:11434 endpoint, not
         // the fixture port seam. No AWS credentials are provided or loaded.
-        let analysis = tokio::time::timeout(Duration::from_secs(180), analyze(input, None, None, None))
+        let analysis = tokio::time::timeout(Duration::from_secs(180), analyze(input, None, None, None, None))
             .await
             .expect("real local analysis exceeded three minutes")
             .expect("production local analysis must accept the installed model metadata and reply");
