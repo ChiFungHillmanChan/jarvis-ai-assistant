@@ -21,11 +21,12 @@ struct AppJobs {
 #[async_trait::async_trait]
 impl JobRunner for AppJobs {
     async fn run(&self, run: &Run) -> Result<String, String> {
-        // The briefing is the one job that behaves differently by trigger:
-        // only an on-time run may speak, and only while no sleep separates it
-        // from the moment the engine started it.
+        // The briefing is the one job that behaves differently by run: only
+        // an on-time run may speak, and only while no sleep separates it from
+        // the moment the engine started it; and a run for a day that is over
+        // shows nothing.
         if run.action_type == scheduled_briefing::ACTION_TYPE {
-            return self.briefing.run(scheduled_briefing::Occasion { trigger: run.trigger, started: run.started() }).await;
+            return self.briefing.run(scheduled_briefing::Occasion::of(run)).await;
         }
         jobs::run_action(&self.db, &self.google_auth, &run.action_type).await
     }

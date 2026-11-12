@@ -73,6 +73,7 @@ const SCHEDULER_TEXT: Record<string, string> = {
   "Automation not found": "找不到此自動排程。",
   "The scheduler is still starting. Try again in a moment.": "排程功能仍在啟動，請稍後再試。",
   "Already shown today": "今天已顯示過簡報。",
+  "Not shown: this briefing was for an earlier day": "沒有顯示：這次簡報屬於較早的日子。",
   "Briefing shown; AI summary added": "已顯示簡報，並已加入 AI 摘要。",
   "Briefing shown from what is saved on this Mac; the AI summary follows when the network returns": "已根據此 Mac 上儲存的資料顯示簡報；恢復網絡連線後會加入 AI 摘要。",
   "Briefing shown from what is saved on this Mac; the Mac went to sleep before the AI summary arrived, so it is added afterwards": "已根據此 Mac 上儲存的資料顯示簡報；AI 摘要未送達，Mac 已進入睡眠，稍後會補上。",

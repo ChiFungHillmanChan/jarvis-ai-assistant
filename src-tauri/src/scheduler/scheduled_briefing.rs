@@ -11,13 +11,15 @@
 //! screen unlocked. That is decided again immediately before the speech
 //! starts and asked all the way through it, so a Mac that sleeps or is locked
 //! while the AI summary is awaited, or part way through the speech, falls
-//! silent. A briefing that runs late for any reason (sleep, JARVIS closed, a
-//! crash) is shown once and never spoken. At most one briefing a day comes
-//! from the schedule.
+//! silent. A briefing that runs late on its own day for any reason (sleep,
+//! JARVIS closed, a crash) is shown once and never spoken. One whose day is
+//! already over when it could run is not shown at all: it is closed with a
+//! line in the run history, and the briefing of the day it is now comes at
+//! its own time. At most one briefing a day comes from the schedule.
 
-use super::engine::{format_baseline, write_status, Reading, SystemClock};
+use super::engine::{format_baseline, write_status, Reading, Run, SystemClock};
 use super::network::{Reachability, SystemReachability};
-use super::slots::{parse_schedule, Trigger, CLOCK_SET_BACK_TOLERANCE_SECS};
+use super::slots::{parse_schedule, Slot, Trigger, CLOCK_SET_BACK_TOLERANCE_SECS};
 use crate::auth::google::GoogleAuth;
 use crate::db::Database;
 use chrono::{DateTime, Datelike, FixedOffset, NaiveDateTime, TimeDelta, Utc};
@@ -65,6 +67,22 @@ pub struct Occasion {
     /// The Mac's clocks when the scheduler started the run. The voice belongs
     /// to that moment: a sleep or a clock change between it and now ends it.
     pub started: Reading,
+    /// The scheduled time this run is for, in local time. `None` for a
+    /// briefing asked for by hand, which belongs to no scheduled time.
+    pub slot: Option<Slot>,
+}
+
+impl Occasion {
+    pub fn of(run: &Run) -> Occasion {
+        Occasion { trigger: run.trigger, started: run.started(), slot: run.slot }
+    }
+
+    /// Whether the run is for a local day that is over by `now`: the Mac was
+    /// asleep or JARVIS closed from before that day's briefing time until a
+    /// later day.
+    fn is_for_a_day_before(&self, now: DateTime<FixedOffset>) -> bool {
+        self.slot.is_some_and(|slot| slot.date_naive() < now.date_naive())
+    }
 }
 
 /// Whether this run of the briefing is spoken aloud.
@@ -359,6 +377,9 @@ pub trait BriefingHost: Send + Sync {
 /// needs the same change there; a frontend test holds the two together.
 const ALREADY_SHOWN: &str = "Already shown today";
 
+/// What a run reports when the day it was for is over.
+const FOR_AN_EARLIER_DAY: &str = "Not shown: this briefing was for an earlier day";
+
 /// How the AI step of a brief ended.
 #[derive(Debug, PartialEq)]
 enum SummaryStep {
@@ -496,6 +517,14 @@ async fn speak_if_allowed(host: &dyn BriefingHost, text: &str, may_speak: &(dyn 
 
 /// One run of the briefing job.
 pub async fn run_with(db: &Database, host: &dyn BriefingHost, occasion: Occasion, now: DateTime<FixedOffset>) -> Result<String, String> {
+    // A briefing for a day that is over is of no use to anybody, and showing
+    // it would count as the briefing of the day it is now: that day's own,
+    // on-time, spoken briefing would then find "already shown today". So the
+    // run ends here, and with it the slot: nothing is shown, saved, announced
+    // or spoken, and today is not marked as shown.
+    if occasion.is_for_a_day_before(now) {
+        return Ok(FOR_AN_EARLIER_DAY.to_string());
+    }
     let trigger = occasion.trigger;
     let today = now.format("%Y-%m-%d").to_string();
     let (zh, voice_on, last_date) = {
@@ -855,6 +884,8 @@ impl BriefingHost for BriefingService {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::scheduler::engine::tests::{at, TestClock, TestNetwork};
+    use crate::scheduler::engine::{Clock, Engine, JobRunner};
 
     const AWAKE_AND_UNLOCKED: Screen = Screen { locked: false, display_asleep: false };
 
@@ -1011,8 +1042,15 @@ mod tests {
         Reading { wall: hk(MORNING).to_utc(), awake: Duration::from_secs(3_600) }
     }
 
+    /// A run with no scheduled time given. The tests about which day a run
+    /// is for say so with `due`.
     fn on(trigger: Trigger) -> Occasion {
-        Occasion { trigger, started: started() }
+        Occasion { trigger, started: started(), slot: None }
+    }
+
+    /// A run for the scheduled time `slot`.
+    fn due(trigger: Trigger, slot: &str) -> Occasion {
+        Occasion { slot: Some(hk(slot)), ..on(trigger) }
     }
 
     #[async_trait::async_trait]
@@ -1100,7 +1138,7 @@ mod tests {
         for trigger in [Trigger::CatchUp, Trigger::RetryInterrupted] {
             let db = crate::db::test_database();
             let host = FakeHost::new(true);
-            run_with(&db, &host, on(trigger), hk("2026-11-12T08:35:00+08:00")).await.unwrap();
+            run_with(&db, &host, due(trigger, "2026-11-12T08:30:00+08:00"), hk("2026-11-12T08:35:00+08:00")).await.unwrap();
             assert_eq!(host.notifications.lock().unwrap().len(), 1, "{trigger:?}: shown once");
             assert!(host.spoken.lock().unwrap().is_empty(), "{trigger:?}: never spoken");
             assert_eq!(host.last_shown().trigger, trigger.as_str());
@@ -1217,6 +1255,170 @@ mod tests {
         // The next local day is a new briefing.
         run_with(&db, &host, on(Trigger::Scheduled), hk("2026-11-13T08:30:00+08:00")).await.unwrap();
         assert_eq!(host.notifications.lock().unwrap().len(), 2);
+    }
+
+    /// The Mac was asleep, or JARVIS closed, from before the briefing time on
+    /// one day until some time on a later day. The old briefing is closed
+    /// without a trace on the screen, so that it cannot stand in for the
+    /// briefing of the day it is now.
+    #[tokio::test]
+    async fn a_briefing_whose_day_is_over_is_closed_without_showing_anything() {
+        for trigger in [Trigger::CatchUp, Trigger::RetryInterrupted] {
+            let db = crate::db::test_database();
+            let host = FakeHost::new(true);
+            // Sunday's briefing, when the Mac is opened on Monday at 07:00.
+            let sunday = due(trigger, "2026-11-15T08:30:00+08:00");
+            let report = run_with(&db, &host, sunday, hk("2026-11-16T07:00:00+08:00")).await.unwrap();
+            assert_eq!(report, "Not shown: this briefing was for an earlier day", "{trigger:?}");
+            assert!(host.shown.lock().unwrap().is_empty(), "{trigger:?}: nothing on the page");
+            assert!(host.notifications.lock().unwrap().is_empty(), "{trigger:?}: no notification");
+            assert!(host.spoken.lock().unwrap().is_empty(), "{trigger:?}: no voice");
+            assert_eq!(*host.asked_for_summary.lock().unwrap(), 0, "{trigger:?}: no AI call");
+            {
+                let conn = db.conn.lock().unwrap();
+                assert_eq!(load(&conn).unwrap(), None, "{trigger:?}: no brief is saved");
+                assert_eq!(preference(&conn, LAST_DATE_KEY).unwrap(), None, "{trigger:?}: Monday is not marked as shown");
+            }
+
+            // Monday's own briefing, on time.
+            let monday = Occasion { started: Reading { wall: hk("2026-11-16T08:30:01+08:00").to_utc(), ..started() }, ..due(Trigger::Scheduled, "2026-11-16T08:30:00+08:00") };
+            *host.clocks.lock().unwrap() = monday.started;
+            let report = run_with(&db, &host, monday, hk("2026-11-16T08:30:01+08:00")).await.unwrap();
+            assert_eq!(report, "Briefing shown; AI summary added");
+            assert_eq!(host.notifications.lock().unwrap().len(), 1);
+            assert_eq!(host.spoken.lock().unwrap().len(), 1, "{trigger:?}: Monday's briefing is spoken");
+            assert_eq!(host.last_shown().date, "2026-11-16");
+        }
+    }
+
+    /// The briefing job under the real scheduler, on a simulated Mac in Hong
+    /// Kong: the scheduler decides which scheduled time is run and how, and
+    /// the briefing decides what to do with it.
+    struct Mac {
+        db: Arc<Database>,
+        clock: Arc<TestClock>,
+        host: Arc<FakeHost>,
+        engine: Engine<TestClock>,
+        job: i64,
+    }
+
+    struct BriefingRuns {
+        db: Arc<Database>,
+        clock: Arc<TestClock>,
+        host: Arc<FakeHost>,
+    }
+
+    #[async_trait::async_trait]
+    impl JobRunner for BriefingRuns {
+        async fn run(&self, run: &Run) -> Result<String, String> {
+            // The briefing reads the same clocks as the scheduler.
+            *self.host.clocks.lock().unwrap() = Reading::of(self.clock.as_ref());
+            let hong_kong = FixedOffset::east_opt(8 * 3600).unwrap();
+            run_with(&self.db, self.host.as_ref(), Occasion::of(run), self.clock.now().with_timezone(&hong_kong)).await
+        }
+    }
+
+    impl Mac {
+        /// The briefing is turned on in Settings at `now`: 08:30, with voice.
+        fn with_the_briefing_turned_on_at(now: &str) -> Mac {
+            let db = Arc::new(crate::db::test_database());
+            let clock = TestClock::hong_kong(now);
+            let host = Arc::new(FakeHost::new(true));
+            let saved = write_settings(&db.conn.lock().unwrap(), true, DEFAULT_TIME, true, clock.now()).unwrap();
+            let runs = BriefingRuns { db: Arc::clone(&db), clock: Arc::clone(&clock), host: Arc::clone(&host) };
+            let engine = Engine::new(Arc::clone(&db), Arc::clone(&clock), TestNetwork::up(), Arc::new(runs));
+            engine.register(saved.job_id, JOB_NAME, &saved.schedule, ACTION_TYPE).unwrap();
+            Mac { db, clock, host, engine, job: saved.job_id }
+        }
+
+        /// The Mac stays awake, the scheduler ticking once a second.
+        async fn awake_until(&self, text: &str) {
+            while self.clock.now() < at(text) {
+                self.clock.pass(1);
+                for run in self.engine.tick() {
+                    self.engine.execute(run).await;
+                }
+            }
+        }
+
+        /// The briefing's run history, oldest first: "status trigger slot".
+        fn history(&self) -> Vec<String> {
+            let conn = self.db.conn.lock().unwrap();
+            let mut stmt = conn
+                .prepare("SELECT status, COALESCE(\"trigger\", '-'), COALESCE(slot, '-') FROM cron_runs WHERE job_id = ?1 ORDER BY id")
+                .unwrap();
+            let rows = stmt
+                .query_map([self.job], |r| Ok(format!("{} {} {}", r.get::<_, String>(0)?, r.get::<_, String>(1)?, r.get::<_, String>(2)?)))
+                .unwrap();
+            rows.collect::<Result<_, _>>().unwrap()
+        }
+
+        /// What the run for the scheduled time `slot` reported.
+        fn report_of(&self, slot: &str) -> String {
+            let conn = self.db.conn.lock().unwrap();
+            conn.query_row("SELECT result FROM cron_runs WHERE job_id = ?1 AND slot = ?2 AND status = 'completed'", params![self.job, slot], |r| r.get(0))
+                .unwrap()
+        }
+    }
+
+    /// Friday's briefing is shown and spoken, and the lid is closed for the
+    /// weekend. On Monday the Mac is opened at 07:00, before the briefing
+    /// time. The latest missed briefing is Sunday's: it is closed with a line
+    /// in the run history and nothing else. Monday's then comes at 08:30 as
+    /// the on-time run, and is spoken.
+    #[tokio::test]
+    async fn after_days_asleep_the_old_briefing_is_closed_and_todays_comes_on_time_and_is_spoken() {
+        let mac = Mac::with_the_briefing_turned_on_at("2026-11-13T08:00:00+08:00");
+        mac.awake_until("2026-11-13T08:31:00+08:00").await;
+        assert_eq!(mac.history(), ["completed scheduled 2026-11-13T08:30:00+08:00"]);
+        assert_eq!(mac.host.spoken.lock().unwrap().len(), 1, "Friday's briefing, on time");
+
+        mac.clock.sleep_until("2026-11-16T07:00:00+08:00");
+        mac.awake_until("2026-11-16T07:01:00+08:00").await;
+        assert_eq!(
+            mac.history(),
+            [
+                "completed scheduled 2026-11-13T08:30:00+08:00",
+                "completed catch_up 2026-11-15T08:30:00+08:00",
+                "collapsed - 2026-11-14T08:30:00+08:00",
+            ],
+            "Sunday's slot is closed; Saturday's had already collapsed into it"
+        );
+        assert_eq!(mac.report_of("2026-11-15T08:30:00+08:00"), "Not shown: this briefing was for an earlier day");
+        assert_eq!(mac.host.notifications.lock().unwrap().len(), 1, "no notification for Sunday's");
+        assert_eq!(mac.host.shown.lock().unwrap().last().map(|brief| brief.date.clone()).as_deref(), Some("2026-11-13"), "nothing new on the page");
+        assert_eq!(todays_brief(&mac.db, "2026-11-16").unwrap(), None);
+
+        mac.awake_until("2026-11-16T08:31:00+08:00").await;
+        assert_eq!(mac.history().last().map(String::as_str), Some("completed scheduled 2026-11-16T08:30:00+08:00"));
+        assert_eq!(mac.report_of("2026-11-16T08:30:00+08:00"), "Briefing shown; AI summary added");
+        assert_eq!(mac.host.notifications.lock().unwrap().len(), 2);
+        assert_eq!(mac.host.spoken.lock().unwrap().len(), 2, "Monday's briefing is spoken");
+        assert_eq!(todays_brief(&mac.db, "2026-11-16").unwrap().map(|brief| brief.trigger).as_deref(), Some("scheduled"));
+    }
+
+    /// The same weekend, but the Mac is opened on Monday at 10:00, after the
+    /// briefing time. Now the latest missed briefing is Monday's own: it is
+    /// shown once, without voice.
+    #[tokio::test]
+    async fn a_briefing_missed_earlier_the_same_day_is_still_shown_once_without_voice() {
+        let mac = Mac::with_the_briefing_turned_on_at("2026-11-13T08:00:00+08:00");
+        mac.awake_until("2026-11-13T08:31:00+08:00").await;
+
+        mac.clock.sleep_until("2026-11-16T10:00:00+08:00");
+        mac.awake_until("2026-11-16T10:05:00+08:00").await;
+        assert_eq!(
+            mac.history(),
+            [
+                "completed scheduled 2026-11-13T08:30:00+08:00",
+                "completed catch_up 2026-11-16T08:30:00+08:00",
+                "collapsed - 2026-11-15T08:30:00+08:00",
+            ]
+        );
+        assert_eq!(mac.report_of("2026-11-16T08:30:00+08:00"), "Briefing shown; AI summary added");
+        assert_eq!(mac.host.notifications.lock().unwrap().len(), 2, "shown once");
+        assert_eq!(mac.host.spoken.lock().unwrap().len(), 1, "only Friday's was spoken");
+        assert_eq!(todays_brief(&mac.db, "2026-11-16").unwrap().map(|brief| brief.trigger).as_deref(), Some("catch_up"));
     }
 
     /// "Show now" is the user's own request: always shown, never announced or

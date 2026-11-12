@@ -54,6 +54,7 @@ test('the fixed sentences of the scheduler are shown in the interface language',
   assert.equal(schedulerText('This automation is already running', en), 'This automation is already running');
   assert.equal(schedulerText('Briefing shown; AI summary added', zh), '已顯示簡報，並已加入 AI 摘要。');
   assert.equal(schedulerText('Already shown today', zh), '今天已顯示過簡報。');
+  assert.equal(schedulerText('Not shown: this briefing was for an earlier day', zh), '沒有顯示：這次簡報屬於較早的日子。');
   // A sentence with a detail of its own keeps the detail.
   assert.equal(
     schedulerText('Briefing shown from what is saved on this Mac; the AI summary failed: No AI provider is set up', zh),
