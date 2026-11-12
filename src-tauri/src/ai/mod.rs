@@ -1185,9 +1185,9 @@ mod tests {
         ProviderChainEntry { position: 0, provider_type: "bedrock".into(), endpoint_id: None, model_id: model_id.map(Into::into), enabled: true, base_url: None }
     }
 
-    /// The model saved in the chain is the one Bedrock runs; the V13
-    /// workload_routing rows (Nova Micro, Haiku 4.5, Sonnet 4.6) no longer
-    /// replace it.
+    /// A typed id is saved trimmed, or refused when it cannot be a Bedrock
+    /// id; what goes out for it follows the saved region only for a us.,
+    /// eu. or apac. profile.
     #[test]
     fn a_typed_bedrock_model_id_is_saved_trimmed_and_sent_for_the_saved_region() {
         use super::bedrock::UiLanguage::En;
@@ -1207,6 +1207,9 @@ mod tests {
         assert_eq!(sent(arn), arn);
     }
 
+    /// The model saved in the chain is the one Bedrock runs; the V13
+    /// workload_routing rows (Nova Micro, Haiku 4.5, Sonnet 4.6) no longer
+    /// replace it.
     #[test]
     fn bedrock_runs_the_model_saved_in_the_chain() {
         assert_eq!(bedrock_model(&bedrock_entry(Some("amazon.nova-pro-v1:0"))), "amazon.nova-pro-v1:0");

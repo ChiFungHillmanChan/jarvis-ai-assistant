@@ -483,15 +483,16 @@ export default function Settings() {
 
   // The backend saves the id trimmed, or the default model when empty, and
   // refuses one that cannot be a Bedrock id; the list is read back so the row
-  // shows what was saved.
-  async function handleSetBedrockModel(index: number, model: string) {
+  // shows what was saved. The error goes back to the field, which shows it
+  // beside the input.
+  async function handleSetBedrockModel(index: number, model: string): Promise<string | null> {
     const updated = chain.map((c, i) => i === index ? { ...c, model_id: model || undefined } : c);
     try {
       await updateProviderChain(updated);
       setChain(await getProviderChain());
-      setLlmError(null);
+      return null;
     } catch (e) {
-      setLlmError(String(e));
+      return String(e);
     }
   }
 
@@ -1527,22 +1528,21 @@ export default function Settings() {
   );
 }
 
-/// Decimal units, matching what Finder reports, so a user comparing the panel
-/// against Get Info sees the same number.
 /**
  * The model a Bedrock row runs. Either id the Bedrock console shows can be
  * typed: a model id, or an inference profile id. Requests and their usage
  * rows use the id that is sent (ai/mod.rs apply_inference_profile).
  */
-function BedrockModelField({ saved, fallback, onSave }: { saved: string; fallback: string; onSave: (model: string) => Promise<void> }) {
+function BedrockModelField({ saved, fallback, onSave }: { saved: string; fallback: string; onSave: (model: string) => Promise<string | null> }) {
   const { text } = useUiLocale();
   const [draft, setDraft] = useState(saved);
   const [busy, setBusy] = useState(false);
+  const [error, setError] = useState<string | null>(null);
   useEffect(() => { setDraft(saved); }, [saved]);
   const changed = draft.trim() !== saved;
   async function save() {
     setBusy(true);
-    try { await onSave(draft.trim()); } finally { setBusy(false); }
+    try { setError(await onSave(draft.trim())); } finally { setBusy(false); }
   }
   return (
     <div className="settings-bedrock-model">
@@ -1554,6 +1554,7 @@ function BedrockModelField({ saved, fallback, onSave }: { saved: string; fallbac
           style={{ ...styles.tokenInput, fontFamily: "var(--font-mono)" }} />
       </label>
       <button disabled={!changed || busy} onClick={() => void save()} style={styles.saveBtn}>{text("Save model", "儲存模型")}</button>
+      {error && <p role="alert" className="settings-bedrock-model-error">{error}</p>}
       <p className="settings-help">
         {text(
           `A model ID or an inference profile ID from the Bedrock console. A us., eu. or apac. profile is sent for the region of your saved AWS credentials; other IDs are sent as typed. Leave it empty for ${fallback || "the default model"}. Usage is recorded against the ID that is sent.`,
@@ -1564,6 +1565,8 @@ function BedrockModelField({ saved, fallback, onSave }: { saved: string; fallbac
   );
 }
 
+/// Decimal units, matching what Finder reports, so a user comparing the panel
+/// against Get Info sees the same number.
 function formatBytes(bytes: number): string {
   if (!Number.isFinite(bytes) || bytes <= 0) return "0 MB";
   const units = ["B", "KB", "MB", "GB", "TB"];
