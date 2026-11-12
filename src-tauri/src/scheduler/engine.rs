@@ -268,7 +268,7 @@ fn recover_from_clock_set_back(conn: &Connection, job_id: i64, mut row: JobRow, 
     if !handled_ahead && !baseline_ahead {
         return Ok((row, false));
     }
-    log::warn!("Cron job {}: its last handled time is ahead of the clock, so the clock was set back; continuing from now", job_id);
+    log::warn!("Cron job {}: its records are dated later than now, so the clock was set back; continuing from now", job_id);
     if handled_ahead {
         conn.execute("UPDATE cron_jobs SET handled_slot = NULL WHERE id = ?1", params![job_id]).map_err(db_err)?;
         row.handled = None;
