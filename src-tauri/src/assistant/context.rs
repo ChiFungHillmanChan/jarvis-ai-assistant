@@ -92,6 +92,7 @@ impl DayContext {
                 let events: Vec<String> = stmt.query_map([], |row| {
                     let summary: String = row.get(0)?;
                     let start: String = row.get(1)?;
+                    let start = crate::ai::tools::to_local_time(&start, &chrono::Local);
                     let location: Option<String> = row.get(3)?;
                     let loc = location.map(|l| format!(" at {}", l)).unwrap_or_default();
                     Ok(format!("- {} ({}{})", summary, start, loc))
@@ -484,6 +485,36 @@ mod tests {
         db.conn.lock().unwrap().execute("UPDATE provider_chain SET base_url = NULL", []).unwrap();
         let allowed = DayContext::gather(&db).unwrap();
         assert!(allowed.calendar_summary.contains("Term sheet call") && allowed.calendar_summary.contains("Cyberport"), "{}", allowed.calendar_summary);
+    }
+
+    /// Google stores a timed event in the calendar's own zone. The model reads
+    /// these times and answers or reschedules in the Mac's zone (see
+    /// ai::tools::with_local_offset), so they have to arrive in that zone.
+    #[test]
+    fn todays_event_times_reach_the_model_in_the_macs_zone() {
+        let now = chrono::Local::now();
+        let other = if now.offset().local_minus_utc() == 8 * 3600 { 9 } else { 8 };
+        let stored = now
+            .with_timezone(&chrono::FixedOffset::east_opt(other * 3600).unwrap())
+            .to_rfc3339_opts(chrono::SecondsFormat::Secs, false);
+        let db = Arc::new(crate::db::test_database());
+        {
+            let conn = db.conn.lock().unwrap();
+            conn.execute(
+                "INSERT INTO calendar_events (google_id, summary, start_time, end_time) VALUES ('e1', 'Standup', ?1, ?1)",
+                [&stored],
+            )
+            .unwrap();
+            // An AI allowed to see event titles (see the test above).
+            conn.execute_batch(
+                "DELETE FROM provider_chain;
+                 INSERT INTO provider_chain(position, provider_type, enabled, base_url) VALUES (0, 'openai', 1, NULL);",
+            )
+            .unwrap();
+        }
+        let summary = DayContext::gather(&db).unwrap().calendar_summary;
+        let local = now.to_rfc3339_opts(chrono::SecondsFormat::Secs, false);
+        assert!(summary.contains(&format!("Standup ({local})")), "stored {stored}, got {summary}");
     }
 
     /// A task made from an email carries the email's words in its title. The

@@ -991,16 +991,8 @@ async fn execute_calendar_tool(
             if events.is_empty() {
                 return Ok("No events found in the specified date range.".to_string());
             }
-            let lines: Vec<String> = events
-                .iter()
-                .map(|e| {
-                    let loc = e.location.as_deref().unwrap_or("none");
-                    format!(
-                        "ID: {} | {} | {} - {} | Location: {}",
-                        e.id, e.summary, e.start_time, e.end_time, loc,
-                    )
-                })
-                .collect();
+            let lines: Vec<String> =
+                events.iter().map(|e| event_line(e, &chrono::Local)).collect();
             Ok(lines.join("\n"))
         }
         "create_event" => {
@@ -1642,6 +1634,40 @@ where
         Some(dt) => dt.to_rfc3339_opts(chrono::SecondsFormat::Secs, false),
         None => value.to_string(),
     }
+}
+
+/// Show a Google Calendar time in `tz`, the zone `with_local_offset` stamps
+/// onto the times the model sends back. Google returns a timed event in the
+/// calendar's own zone; handed over as-is, a Hong Kong calendar on a Mac set
+/// to UK time had the model read 17:00+08:00, send "18:00" for "an hour
+/// later", and JARVIS book 18:00 UK time -- 02:00 the next day in Hong Kong.
+/// An all-day date, or anything that is not an RFC3339 instant, is returned
+/// unchanged.
+pub fn to_local_time<Tz>(value: &str, tz: &Tz) -> String
+where
+    Tz: chrono::TimeZone,
+    Tz::Offset: std::fmt::Display,
+{
+    match chrono::DateTime::parse_from_rfc3339(value) {
+        Ok(dt) => dt.with_timezone(tz).to_rfc3339_opts(chrono::SecondsFormat::Secs, false),
+        Err(_) => value.to_string(),
+    }
+}
+
+/// One list_events line, with times in `tz` (see `to_local_time`).
+pub fn event_line<Tz>(e: &crate::integrations::calendar::CalendarEvent, tz: &Tz) -> String
+where
+    Tz: chrono::TimeZone,
+    Tz::Offset: std::fmt::Display,
+{
+    format!(
+        "ID: {} | {} | {} - {} | Location: {}",
+        e.id,
+        e.summary,
+        to_local_time(&e.start_time, tz),
+        to_local_time(&e.end_time, tz),
+        e.location.as_deref().unwrap_or("none"),
+    )
 }
 
 /// The memory block of the system prompt. Memories the chosen AI must not be
@@ -2694,6 +2720,77 @@ mod local_time_tests {
             with_local_offset("2026-08-15T10:00:00", &Eastern)
                 .replace("2026-08-15", "2026-12-03"),
             "the two sides of the changeover must not share an offset"
+        );
+    }
+
+    fn uk_winter() -> FixedOffset {
+        FixedOffset::east_opt(0).unwrap()
+    }
+
+    fn event(start: &str, end: &str) -> crate::integrations::calendar::CalendarEvent {
+        crate::integrations::calendar::CalendarEvent {
+            id: "evt1".into(),
+            summary: "Project review".into(),
+            description: None,
+            location: None,
+            start_time: start.into(),
+            end_time: end.into(),
+            attendees: vec![],
+            status: "confirmed".into(),
+        }
+    }
+
+    #[test]
+    fn to_local_time_shows_a_google_time_in_the_macs_zone() {
+        assert_eq!(
+            to_local_time("2027-01-18T17:00:00+08:00", &uk_winter()),
+            "2027-01-18T09:00:00+00:00"
+        );
+        assert_eq!(
+            to_local_time("2027-01-18T09:00:00Z", &hong_kong()),
+            "2027-01-18T17:00:00+08:00"
+        );
+        // The offset is the one in force on the event's own date.
+        assert_eq!(to_local_time("2026-12-03T15:00:00Z", &Eastern), "2026-12-03T10:00:00-05:00");
+        assert_eq!(to_local_time("2026-08-15T14:00:00Z", &Eastern), "2026-08-15T10:00:00-04:00");
+        // An all-day event has no instant to convert; anything else is left alone.
+        assert_eq!(to_local_time("2027-01-18", &uk_winter()), "2027-01-18");
+        assert_eq!(to_local_time("", &uk_winter()), "");
+    }
+
+    #[test]
+    fn event_line_lists_times_in_the_macs_zone() {
+        let line = event_line(
+            &event("2027-01-18T17:00:00+08:00", "2027-01-18T18:00:00+08:00"),
+            &uk_winter(),
+        );
+        assert_eq!(
+            line,
+            "ID: evt1 | Project review | 2027-01-18T09:00:00+00:00 - 2027-01-18T10:00:00+00:00 | Location: none"
+        );
+    }
+
+    /// The bug this closes, seen live on 2026-11-12 with the Mac on UK time
+    /// and Google Calendar on Hong Kong time: list_events handed the model
+    /// Google's "17:00+08:00", the model was asked to move the event an hour
+    /// later and sent the wall clock "18:00" as the tool told it to, JARVIS
+    /// stamped the Mac's +00:00 on that, and the event landed at 02:00 the
+    /// next day in Hong Kong. The listed wall clock and the offset JARVIS
+    /// attaches have to be the same zone's.
+    #[test]
+    fn moving_a_listed_event_one_hour_later_lands_one_hour_later() {
+        let google_start = "2027-01-18T17:00:00+08:00";
+        let line = event_line(&event(google_start, "2027-01-18T18:00:00+08:00"), &uk_winter());
+        // What the model does: read the start it was shown, add an hour to the
+        // wall clock and send it back with no offset.
+        let shown = line.split(" | ").nth(2).unwrap().split(" - ").next().unwrap();
+        let wall = NaiveDateTime::parse_from_str(&shown[..19], "%Y-%m-%dT%H:%M:%S").unwrap()
+            + chrono::TimeDelta::hours(1);
+        let sent = with_local_offset(&wall.format("%Y-%m-%dT%H:%M:%S").to_string(), &uk_winter());
+        assert_eq!(
+            DateTime::parse_from_rfc3339(&sent).unwrap(),
+            DateTime::parse_from_rfc3339(google_start).unwrap() + chrono::TimeDelta::hours(1),
+            "listed {line}, sent {sent}"
         );
     }
 
