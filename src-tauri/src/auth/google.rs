@@ -59,7 +59,21 @@ const REVOKE_URL: &str = "https://oauth2.googleapis.com/revoke";
 
 /// Google access tokens live about an hour. Treat one as spent slightly early
 /// so a call that starts just before the boundary does not land just after it.
-const TOKEN_EXPIRY_MARGIN: std::time::Duration = std::time::Duration::from_secs(60);
+const TOKEN_EXPIRY_MARGIN_SECS: i64 = 60;
+
+/// Whether an access token expiring at `expires_at` can still be used at
+/// `now`. Both are wall-clock Unix seconds, as for Cognito
+/// (`cognito::needs_refresh`). The expiry used to be a monotonic `Instant`,
+/// which stands still while the Mac sleeps: after an hour asleep the token was
+/// an hour older than the app believed, and the first calls after waking went
+/// out with a spent token.
+fn token_is_live(expires_at: i64, now: i64) -> bool {
+    now + TOKEN_EXPIRY_MARGIN_SECS < expires_at
+}
+
+fn unix_now() -> i64 {
+    chrono::Utc::now().timestamp()
+}
 
 /// Assumed lifetime when a token response omits `expires_in`. Matches Google's
 /// documented default; the margin above absorbs the difference either way.
@@ -186,10 +200,10 @@ pub struct GoogleAuth {
     client_id: String,
     client_secret: String,
     pub access_token: Mutex<Option<String>>,
-    /// When the cached access token stops being usable. Written together with
-    /// the token itself -- without it every caller kept using an hour-old token
-    /// and depended on a 401 to find out.
-    access_token_expiry: Mutex<Option<std::time::Instant>>,
+    /// When the cached access token stops being usable, as wall-clock Unix
+    /// seconds. Written together with the token itself -- without it every
+    /// caller kept using an hour-old token and depended on a 401 to find out.
+    access_token_expiry: Mutex<Option<i64>>,
     pub refresh_token: Mutex<Option<String>>,
     /// Serialises refreshes so a burst of calls that all find the token expired
     /// produces one round trip to Google, not one per caller.
@@ -442,15 +456,15 @@ impl GoogleAuth {
     fn store_access_token(&self, token: String, expires_in: Option<std::time::Duration>) {
         let lifetime = expires_in.unwrap_or(DEFAULT_TOKEN_LIFETIME);
         *self.access_token.lock().unwrap() = Some(token);
-        *self.access_token_expiry.lock().unwrap() =
-            Some(std::time::Instant::now() + lifetime);
+        let lifetime_secs = i64::try_from(lifetime.as_secs()).unwrap_or(i64::MAX);
+        *self.access_token_expiry.lock().unwrap() = Some(unix_now().saturating_add(lifetime_secs));
     }
 
     /// The cached access token, but only while it is still comfortably valid.
     fn live_access_token(&self) -> Option<String> {
         let token = self.access_token.lock().unwrap().clone()?;
         let expiry = (*self.access_token_expiry.lock().unwrap())?;
-        if std::time::Instant::now() + TOKEN_EXPIRY_MARGIN < expiry {
+        if token_is_live(expiry, unix_now()) {
             Some(token)
         } else {
             None
@@ -821,6 +835,24 @@ mod tests {
 
         auth.store_access_token("spent".to_string(), Some(std::time::Duration::from_secs(0)));
         assert_eq!(auth.live_access_token(), None);
+    }
+
+    /// The expiry is a wall-clock time, so sleep counts against it. A token
+    /// issued at 09:00 for an hour is spent at 10:00 whether or not the Mac
+    /// was awake in between; the old monotonic clock stopped with the lid.
+    #[test]
+    fn a_token_expires_by_the_wall_clock() {
+        let issued_at = 1_794_450_000;
+        let expires_at = issued_at + 3600;
+        assert!(token_is_live(expires_at, issued_at));
+        assert!(token_is_live(expires_at, issued_at + 3500));
+        assert!(!token_is_live(expires_at, issued_at + 3540), "inside the one-minute margin");
+        assert!(!token_is_live(expires_at, issued_at + 3 * 3600), "three hours later, asleep or not");
+
+        let auth = GoogleAuth::new_empty();
+        auth.store_access_token("fresh".to_string(), Some(std::time::Duration::from_secs(3600)));
+        let stored = auth.access_token_expiry.lock().unwrap().unwrap();
+        assert!((3598..=3602).contains(&(stored - unix_now())), "stored as Unix seconds an hour from now");
     }
 
     /// Closing the browser tab tells JARVIS nothing, so the button stayed busy
