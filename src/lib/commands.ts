@@ -3,7 +3,7 @@ import type { CheckoutPage, PaymentPage } from "./types";
 import type { UiLocale } from "../i18n/catalog";
 import type { MailAccount } from "./mail";
 import { beginAccountSessionChange, finishAccountSessionChange } from "./account.ts";
-import type { Task, ChatMessage, DashboardData, Settings, EmailSummary, EmailStats, CalendarEventView, CronJobView, CronRunView, NotionPageView, GitHubItemView, GitHubStats, VoiceState, VoiceSettings, WakeWordStatus, EmailRule, BriefingResult, LocalEndpoint, LocalModel, ProviderChainEntry, EndpointHealth, SystemCompatibility, PrerequisiteCheck, RecommendedModel, LaunchReadiness, BetaTesterInput, BetaTesterView, BetaFeedbackInput, AwsCredsStatus, StorageUsage, SweepReport, StorageScope, AccountStatus } from "./types";
+import type { Task, ChatMessage, DashboardData, Settings, EmailSummary, EmailStats, CalendarEventView, CronJobView, CronRunView, DailyBrief, DailyBriefingSettings, KeepAwakeView, NotionPageView, GitHubItemView, GitHubStats, VoiceState, VoiceSettings, WakeWordStatus, EmailRule, BriefingResult, LocalEndpoint, LocalModel, ProviderChainEntry, EndpointHealth, SystemCompatibility, PrerequisiteCheck, RecommendedModel, LaunchReadiness, BetaTesterInput, BetaTesterView, BetaFeedbackInput, AwsCredsStatus, StorageUsage, SweepReport, StorageScope, AccountStatus } from "./types";
 
 // Tauri v2 commands default to rename_all = "camelCase", so a Rust parameter named
 // `gmail_id` is looked up on the IPC boundary as `gmailId`. A required arg sent as
@@ -113,6 +113,19 @@ export interface CronInterpretation { name: string; schedule: string; action_typ
 export async function previewCustomCron(description: string): Promise<CronInterpretation> { return invoke("preview_custom_cron", { description }); }
 export async function createReviewedCron(interpretation: CronInterpretation): Promise<CronJobView> { return invoke("create_reviewed_cron", { interpretation }); }
 export async function setCronJobStatus(jobId: number, status: "active" | "paused"): Promise<string> { return invoke("set_cron_job_status", { jobId, status }); }
+/** Start a run outside the schedule. Resolves once the run has started, not when it ends. */
+export async function runCronJobNow(jobId: number): Promise<void> { return invoke("run_cron_job_now", { jobId }); }
+
+// Background: open at login, keep awake on mains power, the scheduled daily briefing.
+// Each setter resolves with the state the backend reports after the change.
+export async function getOpenAtLogin(): Promise<boolean> { return invoke("get_open_at_login"); }
+export async function setOpenAtLogin(enabled: boolean): Promise<boolean> { return invoke("set_open_at_login", { enabled }); }
+export async function getKeepAwake(): Promise<KeepAwakeView> { return invoke("get_keep_awake"); }
+export async function setKeepAwake(enabled: boolean): Promise<KeepAwakeView> { return invoke("set_keep_awake", { enabled }); }
+export async function getDailyBriefingSettings(): Promise<DailyBriefingSettings> { return invoke("get_daily_briefing_settings"); }
+export async function setDailyBriefingSettings(enabled: boolean, time: string, voice: boolean): Promise<DailyBriefingSettings> { return invoke("set_daily_briefing_settings", { enabled, time, voice }); }
+/** Today's briefing, or null when none has been shown today. */
+export async function getDailyBriefing(): Promise<DailyBrief | null> { return invoke("get_daily_briefing"); }
 
 // Google Auth
 // `force` is how the user switches accounts: the backend revokes the current

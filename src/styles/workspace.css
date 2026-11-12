@@ -192,6 +192,10 @@
 .automation-result>div:not(.section-heading) { margin:12px 0; max-height:220px; overflow:auto; font-size:13px; }
 .automation-hint { margin-top:22px; font-size:12px; color:var(--text-muted); line-height:1.8; }
 .automation-followups { margin-bottom:26px; }
+.automation-brief { margin-bottom:26px; border:1px solid var(--border-primary); border-radius:8px; background:var(--surface); padding:17px; }
+.automation-brief>div:not(.section-heading) { margin-bottom:12px; font-size:13px; }
+.automation-brief>pre { margin:0; font:inherit; font-size:13px; line-height:1.7; color:var(--text-secondary); white-space:pre-wrap; }
+.automation-brief>small { display:block; margin-top:10px; color:var(--text-muted); font-size:11px; line-height:1.6; }
 .workspace-assistant-dock { width:350px; flex-shrink:0; border-left:1px solid var(--border-primary); background:var(--surface); min-height:0; }
 .assistant-panel { height:100%; display:flex; flex-direction:column; min-height:0; }
 .assistant-header { display:flex; align-items:center; gap:10px; padding:17px 20px; border-bottom:1px solid var(--border-primary); flex-shrink:0; }

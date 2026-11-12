@@ -59,12 +59,13 @@ import ChooseAi from "../components/ChooseAi";
 import { useAiModels } from "../lib/ai-models";
 import { aiServiceLabel, currentAi, type CurrentAi } from "../lib/ai-choice";
 import AccountPanel from "../components/AccountPanel";
+import BackgroundSettings from "../components/BackgroundSettings";
 import { UserRound } from "lucide-react";
 import { useWorkspace, useWorkspaceValue } from "../workspace/WorkspaceContext";
 import "./settings-workspace.css";
 import { MAX_ADDRESS_CHARS, MAX_INSTRUCTIONS_CHARS, PERSONA_CHOICES, personaLabel, personaValue, type PersonaKey } from "../lib/persona";
 import { canSwitchListening, voiceStateKind } from "../lib/always-listening";
-import { Cpu, Key, Globe, Gem, Mic, Bot, Palette, HardDrive, GithubMark, NotionMark } from "../components/icons";
+import { Cpu, Key, Globe, Gem, Mic, Bot, Palette, HardDrive, Power, GithubMark, NotionMark } from "../components/icons";
 
 const API_KEY_PROVIDERS = [
   { id: "gemini", label: "Google Gemini", help: "Gemini chat and speech-to-text" },
@@ -87,7 +88,6 @@ export default function Settings() {
   const { appearance, setAppearance, open } = useWorkspace();
   const { locale, setLocale, saveError: localeSaveError, retrySave: retryLocaleSave, t, text } = useUiLocale();
   const [aiProvider, setAiProvider] = useState("gemini_primary");
-  const [autoBriefing, setAutoBriefing] = useState(false);
   const [displayName, setDisplayName] = useState("");
   const [persona, setPersona] = useState<Record<string, string>>({});
   const [personaText, setPersonaText] = useState({ assistant_address: "", assistant_instructions: "" });
@@ -232,8 +232,6 @@ export default function Settings() {
     try {
       const s = await getSettings();
       setAiProvider(s.values["ai_provider"] || "gemini_primary");
-      // Same rule as the startup reader in lib.rs: an absent row means off.
-      setAutoBriefing(s.values["auto_briefing"] === "true");
       setDisplayName(s.values[DISPLAY_NAME_KEY] ?? "");
       setPersona(Object.fromEntries(Object.keys(PERSONA_CHOICES).map(key => [key, personaValue(key as PersonaKey, s.values[key] ?? null)])));
       setPersonaText({ assistant_address: s.values.assistant_address ?? "", assistant_instructions: s.values.assistant_instructions ?? "" });
@@ -735,6 +733,7 @@ export default function Settings() {
     { id: "obsidian", label: "Obsidian", icon: <Gem size={17} /> },
     { id: "voice", label: text("Voice", "語音"), icon: <Mic size={17} /> },
     { id: "assistant", label: t("navAssistant"), icon: <Bot size={17} /> },
+    { id: "background", label: t("backgroundSection"), icon: <Power size={17} /> },
     { id: "appearance", label: text("Appearance", "外觀"), icon: <Palette size={17} /> },
     { id: "storage", label: text("Storage", "儲存空間"), icon: <HardDrive size={17} /> },
   ];
@@ -1258,14 +1257,9 @@ export default function Settings() {
             }}>{personaSaved ? t("saved") : t("save")}</button>
             {personaError && <div style={styles.errorText}>{personaError}</div>}
           </div>
-          <div className="settings-panel">
-            <h2 className="settings-heading">{text('Briefing', '簡報')}</h2>
-            <label style={styles.option}>
-              <input type="checkbox" checked={autoBriefing} onChange={(e) => { setAutoBriefing(e.target.checked); void updateSetting("auto_briefing", String(e.target.checked)); }} style={styles.radio} />
-              <span style={styles.optionLabel}>{text('Speak morning briefing on startup (once per day)', '啟動時朗讀晨早簡報（每日一次）')}</span>
-            </label>
-          </div>
         </>)}
+
+        {section === "background" && <BackgroundSettings />}
 
         {section === "appearance" && (<>
           <div className="settings-panel">
