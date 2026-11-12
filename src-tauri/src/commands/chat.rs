@@ -1,4 +1,4 @@
-use crate::ai::{classify_workload, AiRouter, Workload};
+use crate::ai::{classify_workload, cost::Feature, AiRouter, Workload};
 use crate::db::Database;
 use crate::voice::tts::StreamingTts;
 use crate::voice::VoiceEngine;
@@ -184,7 +184,7 @@ async fn send_scoped(
                     }),
                 );
                 let search_response = match router
-                    .send_with_untrusted_context(search_messages, &db, &google_auth, &app_handle, None, Workload::Volume)
+                    .send_with_untrusted_context(search_messages, &db, &google_auth, &app_handle, None, Workload::Volume, Feature::Chat)
                     .await
                 {
                     Ok(r) => r,
@@ -313,11 +313,12 @@ async fn send_scoped(
                 &app_handle,
                 tts_tx,
                 selected_workload,
+                Feature::Chat,
             )
             .await
     } else {
         router
-            .send(messages, &db, &google_auth, &app_handle, tts_tx, selected_workload)
+            .send(messages, &db, &google_auth, &app_handle, tts_tx, selected_workload, Feature::Chat)
             .await
     };
     // Join the task-owned consumer before releasing the foreground gate on

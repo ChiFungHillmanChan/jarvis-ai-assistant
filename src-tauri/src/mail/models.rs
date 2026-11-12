@@ -106,7 +106,10 @@ pub struct MailTriageRun {
     pub luna_input_tokens: i64,
     pub luna_output_tokens: i64,
     /// None when only a local model ran: it is free, so show the tokens.
+    /// Leaves out requests whose price is unknown.
     pub cost_usd: Option<f64>,
+    /// Some request used a cloud model the price list does not know.
+    pub price_unknown: bool,
     pub warning: Option<String>,
 }
 

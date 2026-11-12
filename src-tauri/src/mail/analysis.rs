@@ -52,6 +52,8 @@ struct OllamaOptions {
 struct OllamaResponse {
     message: OllamaResponseMessage,
     done_reason: Option<String>,
+    prompt_eval_count: Option<i64>,
+    eval_count: Option<i64>,
 }
 
 #[derive(Deserialize)]
@@ -133,7 +135,7 @@ async fn analyze_with_endpoints(
             let done = crate::ai::complete::complete(
                 &route.router,
                 &route.db,
-                crate::ai::complete::Request { system: "", user: &prepared.prompt, json: false, max_tokens: 4_096 },
+                crate::ai::complete::Request { system: "", user: &prepared.prompt, json: false, max_tokens: 4_096, feature: crate::ai::cost::Feature::MailAnalysis },
             )
             .await?;
             prepared.model = format!("{} · {}", done.provider, done.model);
@@ -141,10 +143,7 @@ async fn analyze_with_endpoints(
             // caller does not record it twice.
             (done.text, openai::Usage::default())
         }
-        "local" => (
-            send_to_ollama(&prepared.model, &prepared.prompt, ollama_port).await?,
-            openai::Usage::default(),
-        ),
+        "local" => send_to_ollama(&prepared.model, &prepared.prompt, ollama_port).await?,
         "bedrock" => send_to_bedrock(
             creds.ok_or_else(|| "未設定 AWS 憑證，無法使用 Bedrock。".to_string())?,
             &prepared.model,
@@ -162,14 +161,16 @@ async fn analyze_with_endpoints(
         _ => return Err("分析模式無效，只支援本機、Bedrock、OpenAI 或所選 AI。".into()),
     };
     // The reply is billed whatever it says, so it is stored before the checks
-    // below can reject it. complete() stores "assistant"; "local" is free.
-    let billed_as = match prepared.mode.as_str() {
-        "openai" => Some("openai-mail"),
+    // below can reject it. "assistant" went through complete(), which stores
+    // its own row; "local" is stored free, with its tokens.
+    let recorded_as = match prepared.mode.as_str() {
+        "openai" => Some("openai"),
         "bedrock" => Some("bedrock"),
+        "local" => Some("local"),
         _ => None,
     };
-    if let (Some(db), Some(provider)) = (metrics, billed_as) {
-        crate::ai::cost::record_inference(db, provider, crate::ai::Workload::Volume, &prepared.model, usage.input_tokens, usage.output_tokens, usage.cached_tokens, 0, started.elapsed().as_millis() as i64);
+    if let (Some(db), Some(provider)) = (metrics, recorded_as) {
+        crate::ai::cost::record_inference(db, provider, crate::ai::cost::Feature::MailAnalysis, crate::ai::Workload::Volume, &prepared.model, usage.input_tokens, usage.output_tokens, usage.cached_tokens, 0, started.elapsed().as_millis() as i64);
     }
     if text.trim().is_empty() {
         return Err("AI 沒有回覆，請檢查模型設定後重試。".into());
@@ -405,7 +406,7 @@ fn truncate_chars(value: &str, limit: usize) -> (String, bool) {
     (truncated, was_truncated)
 }
 
-async fn send_to_ollama(model: &str, prompt: &str, port: u16) -> Result<String, String> {
+async fn send_to_ollama(model: &str, prompt: &str, port: u16) -> Result<(String, openai::Usage), String> {
     let client = reqwest::Client::builder()
         .no_proxy()
         .redirect(reqwest::redirect::Policy::none())
@@ -458,16 +459,21 @@ async fn send_to_ollama(model: &str, prompt: &str, port: u16) -> Result<String, 
         .json()
         .await
         .map_err(|_| "Ollama 回覆格式無效。".to_string())?;
+    let usage = openai::Usage {
+        input_tokens: response.prompt_eval_count.unwrap_or(0),
+        output_tokens: response.eval_count.unwrap_or(0),
+        cached_tokens: 0,
+    };
     let text = response.message.content;
     if text.trim().is_empty() {
         return Err("AI 沒有回覆，請檢查模型設定後重試。".into());
     }
     if response.done_reason.as_deref() == Some("length") {
-        Ok(format!(
+        Ok((format!(
             "資料限制：本機模型回覆因長度上限已截斷。\n\n{text}"
-        ))
+        ), usage))
     } else {
-        Ok(text)
+        Ok((text, usage))
     }
 }
 
@@ -1159,11 +1165,38 @@ mod tests {
         .unwrap()
         .expect_err("a reply without citations is rejected");
         assert!(error.contains("引用"), "{error}");
-        let stored: (String, i64, i64) = db.conn.lock().unwrap()
-            .query_row("SELECT provider, input_tokens, output_tokens FROM inference_metrics", [], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)))
+        let stored: (String, String, i64, i64) = db.conn.lock().unwrap()
+            .query_row("SELECT provider, feature, input_tokens, output_tokens FROM inference_metrics", [], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)))
             .unwrap();
-        assert_eq!(stored, ("openai-mail".to_string(), 500, 50));
+        assert_eq!(stored, ("openai".to_string(), "mail_analysis".to_string(), 500, 50));
         assert_eq!(server.finish().await.len(), 1);
+    }
+
+    /// A local analysis is stored too: free, with Ollama's token counts.
+    #[tokio::test]
+    async fn a_local_analysis_is_recorded_free_with_its_tokens() {
+        let db = crate::ai::cost::tests::temp_metrics_db("");
+        let server = HttpFixture::start(vec![
+            HttpReply::json(local_tags()),
+            HttpReply::json(local_show()),
+            chat_reply("星期五前回覆合約。[郵件 #42]", "stop"),
+        ])
+        .await;
+        let result = tokio::time::timeout(
+            Duration::from_secs(5),
+            analyze_with_endpoints(context("local", "qwen3", vec![message(42, "正文")]), None, None, None, server.port, OpenAiEndpoint::Production, Some(&db)),
+        )
+        .await
+        .unwrap()
+        .expect("valid local analysis");
+        assert_eq!((result.input_tokens, result.output_tokens), (500, 20));
+        let rows = crate::ai::cost::tests::usage_rows(&db);
+        assert_eq!(rows.len(), 1);
+        assert_eq!(
+            (rows[0].provider.as_str(), rows[0].feature.as_str(), rows[0].input_tokens, rows[0].output_tokens, rows[0].usd_cost_micro, rows[0].price_unknown),
+            ("local", "mail_analysis", 500, 20, Some(0), false)
+        );
+        server.finish().await;
     }
 
     #[tokio::test]

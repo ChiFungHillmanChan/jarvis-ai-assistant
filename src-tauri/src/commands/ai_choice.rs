@@ -172,7 +172,7 @@ pub async fn choose_ai(
     complete::complete(
         &candidate,
         &db,
-        complete::Request { system: "", user: "Reply with the single word OK.", json: false, max_tokens: 1_024 },
+        complete::Request { system: "", user: "Reply with the single word OK.", json: false, max_tokens: 1_024, feature: crate::ai::cost::Feature::Other },
     )
     .await?;
     save(&db, &choice, &entry)?;

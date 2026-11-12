@@ -6,7 +6,9 @@
 //! module, and the frontend (through `ai_models`), reads from here.
 //!
 //! Local models run on the user's Mac and have no cost: `usd_cost_micro`
-//! returns None for them and callers report the tokens instead.
+//! returns None for them and callers report the tokens instead. A cloud model
+//! missing from CLOUD_MODELS has no price either: its usage is stored with the
+//! cost unknown (`price_known`), never with a guessed rate.
 
 use serde::Serialize;
 
@@ -62,15 +64,25 @@ pub struct CloudModel {
     pub family: bool,
     pub price: Price,
     pub long_context: Option<LongContext>,
+    /// The most output tokens (thinking included) one request may ask for.
+    /// None where it is not recorded; callers then keep their own cap.
+    pub max_output_tokens: Option<u32>,
 }
 
 const fn model(provider: &'static str, id: &'static str, label: &'static str, price: Price) -> CloudModel {
-    CloudModel { provider, id, label, family: false, price, long_context: None }
+    CloudModel { provider, id, label, family: false, price, long_context: None, max_output_tokens: None }
 }
 
 const fn family(provider: &'static str, id: &'static str, price: Price) -> CloudModel {
-    CloudModel { provider, id, label: id, family: true, price, long_context: None }
+    CloudModel { provider, id, label: id, family: true, price, long_context: None, max_output_tokens: None }
 }
+
+/// Gemini 2.5 and 3.x accept up to 65,536 output tokens per request (Google's
+/// model pages: 2.5 Pro, 2.5 Flash, 3 Pro and 3 Flash). The 3.1, 3.5, 3.6 and
+/// 3.7 ids are assumed to keep that limit; the ignored test
+/// `gemini_output_limits_match_what_google_serves` checks it against
+/// `outputTokenLimit` with a real key.
+const GEMINI_MAX_OUTPUT: Option<u32> = Some(65_536);
 
 /// Sources and dates are noted per group; re-check a rate before quoting it.
 pub const CLOUD_MODELS: &[CloudModel] = &[
@@ -103,23 +115,25 @@ pub const CLOUD_MODELS: &[CloudModel] = &[
     // WARNING: gemini-3.7-flash is an INTRODUCTORY rate. It doubles to
     // $1.50 / $7.50 (cache read $0.15) on 2027-01-01; update it that day or
     // every blended-cost figure for the default chain reads half the truth.
-    model("gemini", "gemini-3.7-flash", "Gemini 3.7 Flash", price(0.75, 3.75, 0.075, 0.75)),
+    CloudModel { max_output_tokens: GEMINI_MAX_OUTPUT, ..model("gemini", "gemini-3.7-flash", "Gemini 3.7 Flash", price(0.75, 3.75, 0.075, 0.75)) },
     CloudModel {
         long_context: Some(LongContext { above: 200_000, price: price(4.0, 18.0, 1.0, 4.0) }),
+        max_output_tokens: GEMINI_MAX_OUTPUT,
         ..model("gemini", "gemini-3.1-pro", "Gemini 3.1 Pro", price(2.0, 12.0, 0.50, 2.0))
     },
-    model("gemini", "gemini-3.6-flash", "Gemini 3.6 Flash", price(1.50, 7.50, 0.375, 1.50)),
-    model("gemini", "gemini-3.5-flash", "Gemini 3.5 Flash", price(1.50, 9.0, 0.375, 1.50)),
-    model("gemini", "gemini-3.5-flash-lite", "Gemini 3.5 Flash-Lite", price(0.30, 2.50, 0.075, 0.30)),
-    model("gemini", "gemini-3.1-flash-lite", "Gemini 3.1 Flash-Lite", price(0.25, 1.50, 0.0625, 0.25)),
+    CloudModel { max_output_tokens: GEMINI_MAX_OUTPUT, ..model("gemini", "gemini-3.6-flash", "Gemini 3.6 Flash", price(1.50, 7.50, 0.375, 1.50)) },
+    CloudModel { max_output_tokens: GEMINI_MAX_OUTPUT, ..model("gemini", "gemini-3.5-flash", "Gemini 3.5 Flash", price(1.50, 9.0, 0.375, 1.50)) },
+    CloudModel { max_output_tokens: GEMINI_MAX_OUTPUT, ..model("gemini", "gemini-3.5-flash-lite", "Gemini 3.5 Flash-Lite", price(0.30, 2.50, 0.075, 0.30)) },
+    CloudModel { max_output_tokens: GEMINI_MAX_OUTPUT, ..model("gemini", "gemini-3.1-flash-lite", "Gemini 3.1 Flash-Lite", price(0.25, 1.50, 0.0625, 0.25)) },
     // Last known preview rate; no longer on Google's public page.
-    model("gemini", "gemini-3-flash", "Gemini 3 Flash", price(0.50, 3.0, 0.125, 0.50)),
+    CloudModel { max_output_tokens: GEMINI_MAX_OUTPUT, ..model("gemini", "gemini-3-flash", "Gemini 3 Flash", price(0.50, 3.0, 0.125, 0.50)) },
     CloudModel {
         long_context: Some(LongContext { above: 200_000, price: price(2.50, 15.0, 0.625, 2.50) }),
+        max_output_tokens: GEMINI_MAX_OUTPUT,
         ..model("gemini", "gemini-2.5-pro", "Gemini 2.5 Pro", price(1.25, 10.0, 0.31, 1.25))
     },
     family("gemini", "gemini-pro", price(1.25, 10.0, 0.31, 1.25)),
-    model("gemini", "gemini-2.5-flash", "Gemini 2.5 Flash", price(0.30, 2.50, 0.075, 0.30)),
+    CloudModel { max_output_tokens: GEMINI_MAX_OUTPUT, ..model("gemini", "gemini-2.5-flash", "Gemini 2.5 Flash", price(0.30, 2.50, 0.075, 0.30)) },
     family("gemini", "gemini-flash", price(0.30, 2.50, 0.075, 0.30)),
     // Amazon Nova on Bedrock.
     model("bedrock", "nova-micro", "Amazon Nova Micro", price(0.035, 0.14, 0.00875, 0.04375)),
@@ -129,28 +143,31 @@ pub const CLOUD_MODELS: &[CloudModel] = &[
     family("typesafe", "jev", price(0.042, 0.0, 0.042, 0.042)),
 ];
 
-/// Charged for a model missing from CLOUD_MODELS. Never zero: a bumped model
-/// id must not make the cost dashboard read as free. The most expensive common
-/// tier, so the number errs toward alarming.
-const UNKNOWN_PRICE: Price = price(3.0, 15.0, 0.30, 3.75);
-
 fn find(model_id: &str) -> Option<&'static CloudModel> {
     let m = model_id.to_lowercase();
     CLOUD_MODELS.iter().filter(|entry| m.contains(entry.id)).max_by_key(|entry| entry.id.len())
 }
 
-/// The base price of a cloud model.
-pub fn price_for(model_id: &str) -> Price {
-    match find(model_id) {
-        Some(entry) => entry.price,
-        None => {
-            log::error!(
-                "cost: no price for model '{model_id}' -- billing it at $3/$15 per 1M. \
-                 Add it to CLOUD_MODELS in ai/models.rs."
-            );
-            UNKNOWN_PRICE
-        }
+/// The base price of a cloud model, or None when CLOUD_MODELS has no entry
+/// for it (a model picked from a provider's live list, or a new id). There is
+/// no fallback rate: a guess either hides spend ($0) or invents it.
+pub fn price_for(model_id: &str) -> Option<Price> {
+    let found = find(model_id).map(|entry| entry.price);
+    if found.is_none() {
+        log::warn!("cost: no price for model '{model_id}'; its usage is stored with the cost unknown. Add it to CLOUD_MODELS in ai/models.rs.");
     }
+    found
+}
+
+/// Whether usage of this model can be turned into money: always for a local
+/// model (free), and for a cloud model only when CLOUD_MODELS prices it.
+pub fn price_known(provider: &str, model_id: &str) -> bool {
+    is_local(provider) || find(model_id).is_some()
+}
+
+/// The output cap one request to this model may ask for, when recorded.
+pub fn max_output_tokens(model_id: &str) -> Option<u32> {
+    find(model_id).and_then(|entry| entry.max_output_tokens)
 }
 
 // ---------------------------------------------------------------------------
@@ -163,15 +180,16 @@ pub fn is_local(provider: &str) -> bool {
     matches!(provider.to_lowercase().as_str(), "local" | "ollama" | "本機 ai")
 }
 
-/// What one request cost in micro-USD, or None for a local model, which is
-/// free: report its tokens instead.
+/// What one request cost in micro-USD. None when there is no money figure:
+/// a local model, which is free (report its tokens instead), or a cloud model
+/// without a price (`price_known` tells the two apart).
 pub fn usd_cost_micro(provider: &str, model_id: &str, input_tokens: i64, output_tokens: i64, cache_read_tokens: i64, cache_write_tokens: i64) -> Option<i64> {
     if is_local(provider) {
         return None;
     }
     let p = match find(model_id).and_then(|entry| entry.long_context) {
         Some(long) if input_tokens > long.above => long.price,
-        _ => price_for(model_id),
+        _ => price_for(model_id)?,
     };
     let billable_input = (input_tokens - cache_read_tokens - cache_write_tokens).max(0);
     let usd = (billable_input as f64) * p.input_per_million / 1_000_000.0
@@ -308,33 +326,45 @@ mod tests {
         }
     }
 
-    /// A model without a price must cost something, never a silent $0.
+    /// A model without a price has no cost figure at all: not a silent $0,
+    /// and not the $3/$15 guess that used to make it look expensive.
     #[test]
-    fn unknown_model_is_billed_at_the_frontier_rate_not_zero() {
-        let unknown = cost("mystery-model", 1000, 1000, 0);
-        assert_eq!(unknown, cost("claude-sonnet-4-6", 1000, 1000, 0));
-        assert!(unknown > 0);
+    fn unknown_model_has_no_price_instead_of_a_guess() {
+        assert_eq!(usd_cost_micro("openai", "gpt-7-mystery", 1000, 1000, 0, 0), None);
+        assert_eq!(price_for("gpt-7-mystery"), None);
+        assert!(!price_known("openai", "gpt-7-mystery"));
+        assert!(price_known("openai", "gpt-6-luna"));
+        assert!(price_known("local", "anything:7b"), "a local model is known to be free");
+    }
+
+    #[test]
+    fn gemini_models_carry_their_output_limit() {
+        assert_eq!(max_output_tokens(GEMINI_FLASH), Some(65_536));
+        assert_eq!(max_output_tokens(GEMINI_PRO), Some(65_536));
+        assert_eq!(max_output_tokens("gemini-2.5-flash"), Some(65_536));
+        assert_eq!(max_output_tokens("gemini-flash-latest"), None, "a family pattern does not guess a limit");
+        assert_eq!(max_output_tokens("gemini-9-mystery"), None);
     }
 
     /// The longest matching entry wins, so a specific id is never priced as
     /// the family it contains, whatever the order of CLOUD_MODELS.
     #[test]
     fn specific_ids_beat_the_families_they_contain() {
-        assert_eq!(price_for("gpt-5.6-luna").input_per_million, 0.20);
-        assert_eq!(price_for("gpt-5").input_per_million, 1.25);
-        assert_eq!(price_for("gemini-3.5-flash-lite").input_per_million, 0.30);
-        assert_eq!(price_for("gemini-3.5-flash").input_per_million, 1.50);
-        assert_eq!(price_for("gemini-3.6-flash").input_per_million, 1.50);
-        assert_eq!(price_for("gemini-3.1-flash-lite").input_per_million, 0.25);
-        assert_eq!(price_for("global.anthropic.claude-sonnet-4-6").input_per_million, 3.0);
-        assert_eq!(price_for("amazon.nova-micro-v1:0").input_per_million, 0.035);
+        assert_eq!(price_for("gpt-5.6-luna").unwrap().input_per_million, 0.20);
+        assert_eq!(price_for("gpt-5").unwrap().input_per_million, 1.25);
+        assert_eq!(price_for("gemini-3.5-flash-lite").unwrap().input_per_million, 0.30);
+        assert_eq!(price_for("gemini-3.5-flash").unwrap().input_per_million, 1.50);
+        assert_eq!(price_for("gemini-3.6-flash").unwrap().input_per_million, 1.50);
+        assert_eq!(price_for("gemini-3.1-flash-lite").unwrap().input_per_million, 0.25);
+        assert_eq!(price_for("global.anthropic.claude-sonnet-4-6").unwrap().input_per_million, 3.0);
+        assert_eq!(price_for("amazon.nova-micro-v1:0").unwrap().input_per_million, 0.035);
     }
 
     #[test]
     fn gpt_6_luna_and_jev_have_their_own_prices() {
-        let luna = price_for("gpt-6-luna");
+        let luna = price_for("gpt-6-luna").unwrap();
         assert_eq!((luna.input_per_million, luna.output_per_million), (0.10, 0.50));
-        let jev = price_for("jev-1.13.0");
+        let jev = price_for("jev-1.13.0").unwrap();
         assert_eq!((jev.input_per_million, jev.output_per_million), (0.042, 0.0));
         assert_eq!(cost("gpt-6-luna", 200_000, 100_000, 0), 70_000);
         // Above 272K the whole request moves to 2x input.
@@ -356,17 +386,40 @@ mod tests {
         assert_eq!(cost("claude-haiku-5-5", 50_000, 10_000, 0), 10_000);
         // 200K in at $0.50: $0.10.
         assert_eq!(cost("claude-haiku-5-5", 200_000, 0, 0), 100_000);
-        assert_eq!(price_for("claude-haiku-5-5").input_per_million, 0.10, "not priced as haiku-4-5");
+        assert_eq!(price_for("claude-haiku-5-5").unwrap().input_per_million, 0.10, "not priced as haiku-4-5");
     }
 
-    /// Every default must have its own price, or the fallback above fires on
-    /// the traffic that matters most.
+    /// Every default must have its own price, or the traffic that matters
+    /// most is stored with the cost unknown.
     #[test]
     fn every_default_model_has_a_real_price() {
         for id in [OPENAI_DEFAULT, CLAUDE_DEFAULT, GEMINI_FLASH, GEMINI_PRO, BEDROCK_DEFAULT, JEV] {
             assert!(find(id).is_some(), "{id} has no entry in CLOUD_MODELS");
         }
-        assert_eq!(price_for(GEMINI_FLASH).input_per_million, 0.75, "gemini-3.7-flash rate; it doubles on 2027-01-01");
+        assert_eq!(price_for(GEMINI_FLASH).unwrap().input_per_million, 0.75, "gemini-3.7-flash rate; it doubles on 2027-01-01");
+    }
+
+    /// The output limits above are partly assumed (see GEMINI_MAX_OUTPUT).
+    /// Asking for more than a model allows is a 400, so check them against
+    /// what Google reports before relying on a new id. Run deliberately:
+    ///   GEMINI_API_KEY=... cargo test --manifest-path src-tauri/Cargo.toml \
+    ///     gemini_output_limits_match_what_google_serves -- --ignored --nocapture
+    #[tokio::test]
+    #[ignore]
+    async fn gemini_output_limits_match_what_google_serves() {
+        let key = std::env::var("GEMINI_API_KEY").expect("set GEMINI_API_KEY to run this test");
+        let mut wrong = Vec::new();
+        for entry in CLOUD_MODELS.iter().filter(|m| m.provider == "gemini" && !m.family) {
+            let id = if entry.id == "gemini-3.1-pro" { GEMINI_PRO } else { entry.id };
+            let url = format!("{}/models/{id}", crate::ai::gemini::API_BASE);
+            let body: serde_json::Value = reqwest::Client::new().get(url).header("x-goog-api-key", &key).send().await.unwrap().json().await.unwrap();
+            let served = body["outputTokenLimit"].as_u64().map(|n| n as u32);
+            println!("{id}: served {served:?}, recorded {:?}", entry.max_output_tokens);
+            if served.is_some() && served != entry.max_output_tokens {
+                wrong.push((id, served, entry.max_output_tokens));
+            }
+        }
+        assert!(wrong.is_empty(), "outputTokenLimit differs from models.rs: {wrong:?}");
     }
 
     #[test]

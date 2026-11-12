@@ -1,5 +1,6 @@
 import { memo } from "react";
 import { useTauriCommand } from "../hooks/useTauriCommand";
+import { useUiLocale } from "../i18n";
 
 interface ProviderBreakdown {
   provider: string;
@@ -8,6 +9,8 @@ interface ProviderBreakdown {
   usd_cost: number | null;
   input_tokens: number;
   output_tokens: number;
+  /** Turns whose model has no price; left out of usd_cost. */
+  price_unknown_turns: number;
 }
 
 interface ExpensiveTurn {
@@ -15,9 +18,12 @@ interface ExpensiveTurn {
   provider: string;
   model_id: string;
   workload: string;
+  feature: string;
   input_tokens: number;
   output_tokens: number;
+  /** null for a local model, and when the price is unknown. */
   usd_cost: number | null;
+  price_unknown: boolean;
   latency_ms: number;
 }
 
@@ -27,6 +33,7 @@ interface CostStats {
   avg_usd_per_turn_30d: number;
   local_turns_30d: number;
   local_share_pct: number;
+  price_unknown_turns_30d: number;
   by_provider_30d: ProviderBreakdown[];
   top_expensive_30d: ExpensiveTurn[];
 }
@@ -51,6 +58,7 @@ function shortModel(id: string): string {
 }
 
 export default memo(function CostPanel() {
+  const { text } = useUiLocale();
   const { data, error, loading } = useTauriCommand<CostStats>("get_cost_stats");
   const { data: blended, error: blendedError } = useTauriCommand<BlendedCost>("get_blended_cost", { days: 30 });
 
@@ -103,6 +111,14 @@ export default memo(function CostPanel() {
       {!blended && blendedError && (
         <div style={styles.blended}>Implied blended: unavailable ({blendedError})</div>
       )}
+      {data.price_unknown_turns_30d > 0 && (
+        <div style={styles.blended}>
+          {text(
+            `${data.price_unknown_turns_30d} with price unknown, not in the total`,
+            `${data.price_unknown_turns_30d} 次價格未知，未計入總額`,
+          )}
+        </div>
+      )}
 
       <div style={styles.subheader}>BY PROVIDER</div>
       <div style={styles.providerList}>
@@ -110,7 +126,10 @@ export default memo(function CostPanel() {
           <div key={p.provider} style={styles.providerRow}>
             <span style={styles.providerName}>{p.provider}</span>
             <span style={styles.providerTurns}>{p.turns}</span>
-            <span style={styles.providerCost}>{p.usd_cost === null ? `${(p.input_tokens + p.output_tokens).toLocaleString()} tok` : formatUsd(p.usd_cost)}</span>
+            <span style={styles.providerCost}>
+              {p.usd_cost === null ? `${(p.input_tokens + p.output_tokens).toLocaleString()} tok` : p.price_unknown_turns === p.turns ? text("price unknown", "價格未知") : formatUsd(p.usd_cost)}
+              {p.usd_cost !== null && p.price_unknown_turns > 0 && p.price_unknown_turns < p.turns ? text(" + price unknown", " + 價格未知") : ""}
+            </span>
           </div>
         ))}
       </div>
@@ -125,7 +144,7 @@ export default memo(function CostPanel() {
                 <span style={styles.expensiveTokens}>
                   {t.input_tokens}+{t.output_tokens}
                 </span>
-                <span style={styles.expensiveCost}>{t.usd_cost === null ? "free" : formatUsd(t.usd_cost)}</span>
+                <span style={styles.expensiveCost}>{t.price_unknown ? text("price unknown", "價格未知") : t.usd_cost === null ? "free" : formatUsd(t.usd_cost)}</span>
               </div>
             ))}
           </div>

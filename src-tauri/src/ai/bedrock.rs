@@ -80,6 +80,88 @@ pub async fn send_simple(
     Ok((text, out.usage))
 }
 
+/// Appended to the system prompt when a plain completion asks for JSON.
+/// Converse has no JSON switch that every Bedrock model accepts (a forced
+/// tool choice is refused by models without tool choice), so `complete`
+/// asks in words and checks the reply.
+pub(crate) const JSON_INSTRUCTION: &str = "Reply with only one JSON object: no code fences and no text before or after it.";
+
+/// One plain Converse request, as `complete` sends it: no tools, no cache
+/// points, not streamed.
+pub(crate) struct PlainRequest {
+    pub system: Vec<SystemContentBlock>,
+    pub messages: Vec<Message>,
+    pub inference: InferenceConfiguration,
+}
+
+pub(crate) fn plain_request(system: &str, user: &str, json: bool, max_tokens: u32) -> Result<PlainRequest, String> {
+    let system = match (system.trim().is_empty(), json) {
+        (true, false) => None,
+        (true, true) => Some(JSON_INSTRUCTION.to_string()),
+        (false, false) => Some(system.to_string()),
+        (false, true) => Some(format!("{system}\n\n{JSON_INSTRUCTION}")),
+    };
+    let message = Message::builder()
+        .role(ConversationRole::User)
+        .content(ContentBlock::Text(user.to_string()))
+        .build()
+        .map_err(|_| "未能建立 Bedrock 請求。".to_string())?;
+    Ok(PlainRequest {
+        system: system.map(SystemContentBlock::Text).into_iter().collect(),
+        messages: vec![message],
+        inference: InferenceConfiguration::builder().max_tokens(max_tokens.min(i32::MAX as u32) as i32).build(),
+    })
+}
+
+pub(crate) async fn converse_plain(
+    creds: &AwsCredentials,
+    model_id: &str,
+    request: PlainRequest,
+) -> Result<aws_sdk_bedrockruntime::operation::converse::ConverseOutput, String> {
+    let client = client_for(creds).await;
+    client
+        .converse()
+        .model_id(model_id)
+        .set_system((!request.system.is_empty()).then_some(request.system))
+        .set_messages(Some(request.messages))
+        .inference_config(request.inference)
+        .send()
+        .await
+        .map_err(|err| {
+            log::warn!("{}", converse_error(&err));
+            plain_error(err.as_service_error().map(|e| aws_sdk_bedrockruntime::error::ProvideErrorMetadata::code(e).unwrap_or_default()))
+        })
+}
+
+/// What a failed plain request means, in the user's terms. The SDK error is
+/// logged, never shown: a validation message can quote the request. `code` is
+/// the service's error code, or None when the request never reached AWS.
+fn plain_error(code: Option<&str>) -> String {
+    match code {
+        Some("AccessDeniedException" | "UnrecognizedClientException" | "InvalidSignatureException" | "ExpiredTokenException") => {
+            "Bedrock 拒絕了 AWS 憑證或模型存取權限，請在設定中檢查後重試。".into()
+        }
+        Some("ResourceNotFoundException") => "Bedrock 找不到所選模型，請檢查模型 ID 及區域。".into(),
+        Some("ThrottlingException" | "ServiceQuotaExceededException") => "Bedrock 暫時限速或額度不足，請稍後重試。".into(),
+        Some("ValidationException") => "Bedrock 不接受這個請求，請檢查所選模型及區域。".into(),
+        Some(_) => "Bedrock 暫時未能回覆，請稍後重試。".into(),
+        None => "未能連接 AWS Bedrock，請檢查網絡及 AWS 憑證。".into(),
+    }
+}
+
+/// The reply of a plain request and its usage: (text, input tokens
+/// including cache, output tokens, cache-read tokens).
+pub(crate) fn plain_result(output: &aws_sdk_bedrockruntime::operation::converse::ConverseOutput) -> (String, i64, i64, i64) {
+    let text = match output.output() {
+        Some(aws_sdk_bedrockruntime::types::ConverseOutput::Message(message)) => collect_text(message).join(""),
+        _ => String::new(),
+    };
+    match output.usage() {
+        Some(usage) => (text, inclusive_input(usage), usage.output_tokens() as i64, usage.cache_read_input_tokens().unwrap_or(0) as i64),
+        None => (text, 0, 0, 0),
+    }
+}
+
 #[allow(clippy::too_many_arguments)]
 pub async fn send(
     creds: &AwsCredentials,
@@ -388,6 +470,7 @@ async fn record_metrics(
     crate::ai::cost::record_inference(
         db,
         "bedrock",
+        crate::ai::cost::current_feature(),
         workload,
         model_id,
         inclusive_input(usage),

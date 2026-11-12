@@ -49,6 +49,9 @@ pub fn classify_workload(message: &str, explicit_premium: bool) -> Workload {
     Workload::Tools
 }
 
+/// Reads the V13 `workload_routing` table. Nothing calls this at runtime:
+/// the Bedrock chain row's own model is used (ai/mod.rs), and the table is
+/// kept only as history until the model registry replaces it (P05).
 pub struct WorkloadRouter {
     db: Arc<Database>,
 }

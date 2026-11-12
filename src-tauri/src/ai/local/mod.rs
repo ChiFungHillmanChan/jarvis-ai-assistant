@@ -643,7 +643,7 @@ fn record_local_inference(
     started_at: &std::time::Instant,
 ) {
     crate::ai::cost::record_inference(
-        db, "local", workload, model,
+        db, "local", crate::ai::cost::current_feature(), workload, model,
         prompt_tokens, completion_tokens, 0, 0,
         started_at.elapsed().as_millis() as i64,
     );
@@ -682,15 +682,16 @@ mod tests {
 
     /// A local turn must cost 0 because it ran on the user's own hardware --
     /// which is a fact about the provider, not about whether the model id
-    /// happens to be missing from the cloud price table. `models::price_for` bills
-    /// unrecognised ids at the frontier rate on purpose, so this asserts the
-    /// local-provider rule rather than the table lookup.
+    /// happens to be missing from the cloud price table. An unrecognised cloud
+    /// id is stored with the cost unknown, so this asserts the local-provider
+    /// rule rather than the table lookup.
     #[test]
     fn local_turns_are_recorded_at_zero_cost() {
         let db = crate::ai::cost::tests::temp_metrics_db("");
         crate::ai::cost::record_inference(
             &db,
             "local",
+            crate::ai::cost::Feature::Chat,
             crate::ai::Workload::Tools,
             "llama3.1:8b-instruct-q4_K_M",
             4000,
@@ -700,14 +701,15 @@ mod tests {
             120,
         );
         let conn = db.conn.lock().unwrap();
-        let (cost, turns): (i64, i64) = conn
+        let (cost, turns, unknown): (i64, i64, i64) = conn
             .query_row(
-                "SELECT COALESCE(SUM(usd_cost_micro), 0), COUNT(*) FROM inference_metrics",
+                "SELECT COALESCE(SUM(usd_cost_micro), 0), COUNT(*), SUM(price_unknown) FROM inference_metrics",
                 [],
-                |r| Ok((r.get(0)?, r.get(1)?)),
+                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
             )
             .unwrap();
         assert_eq!(cost, 0, "local inference must cost nothing");
         assert_eq!(turns, 1, "but the turn must still be counted");
+        assert_eq!(unknown, 0, "free is a known price");
     }
 }

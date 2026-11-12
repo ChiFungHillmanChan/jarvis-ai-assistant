@@ -5,6 +5,7 @@
 //!
 //! Error bodies can echo the request (mail text), so they are never
 //! surfaced: only the provider and the HTTP status are.
+use super::cost::Feature;
 use super::{compat, gemini, AiRouter, ProviderChainEntry, Workload};
 use crate::db::Database;
 use serde_json::{json, Value};
@@ -21,6 +22,8 @@ pub struct Request<'a> {
     /// must still say so, because not every provider has a JSON mode.
     pub json: bool,
     pub max_tokens: u32,
+    /// What the request is for, stored with its usage row.
+    pub feature: Feature,
 }
 
 #[derive(Debug)]
@@ -34,8 +37,12 @@ pub struct Completion {
     pub output_tokens: i64,
     /// Read from the provider's cache, billed at its cached rate.
     pub cached_tokens: i64,
-    /// From models::usd_cost_micro; None for a local model, which is free.
+    /// From models::usd_cost_micro; None for a local model, which is free,
+    /// and for a cloud model without a price.
     pub cost_micro: Option<i64>,
+    /// A cloud model the price list does not know: `cost_micro` is None but
+    /// the request was not free.
+    pub price_unknown: bool,
 }
 
 /// The chosen AI, tried in chain order. An empty chain means the user has not
@@ -50,8 +57,8 @@ pub async fn complete(router: &AiRouter, db: &Database, request: Request<'_>) ->
         let started = Instant::now();
         match complete_one(router, db, entry, &request).await {
             Ok(mut done) => {
-                let provider = if entry.provider_type == "local" { "local".to_string() } else { done.provider.to_lowercase() };
-                record(db, &provider, &mut done, started.elapsed().as_millis() as i64);
+                let provider = super::cost::provider_id(&entry.provider_type, entry.base_url.as_deref());
+                record(db, &provider, request.feature, &mut done, started.elapsed().as_millis() as i64);
                 return Ok(done);
             }
             Err(error) => errors.push(error),
@@ -61,9 +68,10 @@ pub async fn complete(router: &AiRouter, db: &Database, request: Request<'_>) ->
 }
 
 /// Price the completion and store it as one Volume row.
-fn record(db: &Database, provider: &str, done: &mut Completion, latency_ms: i64) {
+fn record(db: &Database, provider: &str, feature: Feature, done: &mut Completion, latency_ms: i64) {
     done.cost_micro = super::models::usd_cost_micro(provider, &done.model, done.input_tokens, done.output_tokens, done.cached_tokens, 0);
-    super::cost::record_inference(db, provider, Workload::Volume, &done.model, done.input_tokens, done.output_tokens, done.cached_tokens, 0, latency_ms);
+    done.price_unknown = !super::models::price_known(provider, &done.model);
+    super::cost::record_inference(db, provider, feature, Workload::Volume, &done.model, done.input_tokens, done.output_tokens, done.cached_tokens, 0, latency_ms);
 }
 
 async fn complete_one(router: &AiRouter, db: &Database, entry: &ProviderChainEntry, request: &Request<'_>) -> Result<Completion, String> {
@@ -134,27 +142,87 @@ async fn complete_one(router: &AiRouter, db: &Database, entry: &ProviderChainEnt
         "claude" => {
             let key = router.claude_key.clone().ok_or("尚未設定 Claude API 密鑰。")?;
             let model = entry.model_id.clone().unwrap_or_else(|| crate::ai::models::CLAUDE_DEFAULT.to_string());
-            let mut body = json!({
-                "model": model,
-                "max_tokens": request.max_tokens,
-                "messages": [{"role": "user", "content": request.user}],
-            });
-            if !request.system.is_empty() {
-                body["system"] = json!(request.system);
-            }
+            let body = claude_body(&model, request);
             let value = post(&client, "https://api.anthropic.com/v1/messages", "Claude", |r| r.header("x-api-key", &key).header("anthropic-version", "2023-06-01"), &body).await?;
-            let text = value
-                .get("content")
-                .and_then(Value::as_array)
-                .map(|blocks| blocks.iter().filter_map(|b| b.get("text").and_then(Value::as_str)).collect::<String>())
-                .unwrap_or_default();
-            done(text, "Claude".into(), model, value.pointer("/usage/input_tokens"), value.pointer("/usage/output_tokens"))
+            claude_result(&value, model)
         }
-        other => {
-            let _ = db;
-            Err(format!("{other} 暫不支援這項功能，請在設定中改用其他 AI。"))
+        "bedrock" => {
+            let creds = crate::aws::credentials::load_from(db)?.ok_or("尚未設定 AWS 憑證，請在設定中加入後重試。")?;
+            // The chain row's model, pointed at the geography the credentials
+            // were saved for, as in chat.
+            let model = super::apply_inference_profile(&super::bedrock_model(entry), &creds.inference_profile);
+            let plain = super::bedrock::plain_request(request.system, request.user, request.json, request.max_tokens)?;
+            let output = super::bedrock::converse_plain(&creds, &model, plain).await?;
+            bedrock_result(&output, model, request.json)
         }
+        other => Err(format!("{other} 暫不支援這項功能，請在設定中改用其他 AI。")),
     }
+}
+
+/// The one tool a JSON request to Claude is made to call. Claude has no
+/// JSON switch on every model; a forced tool call always arrives as a JSON
+/// object, so the shape is guaranteed by the API rather than asked for in
+/// words. The schema is open because the instructions carry the real one.
+const CLAUDE_JSON_TOOL: &str = "json_reply";
+
+fn claude_body(model: &str, request: &Request<'_>) -> Value {
+    let mut body = json!({
+        "model": model,
+        "max_tokens": request.max_tokens,
+        "messages": [{"role": "user", "content": request.user}],
+    });
+    if !request.system.is_empty() {
+        body["system"] = json!(request.system);
+    }
+    if request.json {
+        body["tools"] = json!([{
+            "name": CLAUDE_JSON_TOOL,
+            "description": "Give your whole answer as this tool's input: one JSON object in the shape the instructions describe.",
+            "input_schema": {"type": "object"},
+        }]);
+        body["tool_choice"] = json!({"type": "tool", "name": CLAUDE_JSON_TOOL});
+    }
+    body
+}
+
+/// A JSON answer is the forced tool call's input; anything else is the text
+/// blocks.
+fn claude_result(value: &Value, model: String) -> Result<Completion, String> {
+    let blocks = value.get("content").and_then(Value::as_array).cloned().unwrap_or_default();
+    let tool_input = blocks
+        .iter()
+        .find(|b| b.get("type").and_then(Value::as_str) == Some("tool_use") && b.get("name").and_then(Value::as_str) == Some(CLAUDE_JSON_TOOL))
+        .and_then(|b| b.get("input"))
+        .filter(|input| input.as_object().is_some_and(|fields| !fields.is_empty()));
+    let text = match tool_input {
+        Some(input) => input.to_string(),
+        None => blocks.iter().filter_map(|b| b.get("text").and_then(Value::as_str)).collect::<String>(),
+    };
+    done(text, "Claude".into(), model, value.pointer("/usage/input_tokens"), value.pointer("/usage/output_tokens"))
+}
+
+/// A JSON answer must hold one JSON object, returned without code fences or
+/// prose around it; Bedrock models are asked in words (bedrock::JSON_INSTRUCTION).
+fn bedrock_result(output: &aws_sdk_bedrockruntime::operation::converse::ConverseOutput, model: String, json: bool) -> Result<Completion, String> {
+    let (text, input_tokens, output_tokens, cached_tokens) = super::bedrock::plain_result(output);
+    let text = if json && !text.trim().is_empty() {
+        json_object_text(&text).ok_or_else(|| format!("Bedrock（{model}）回覆的不是有效 JSON，請重試或改用其他模型。"))?
+    } else {
+        text
+    };
+    let mut done = done(text, "Bedrock".into(), model, None, None)?;
+    done.input_tokens = input_tokens;
+    done.output_tokens = output_tokens;
+    done.cached_tokens = cached_tokens;
+    Ok(done)
+}
+
+/// The JSON object in a reply, without code fences or prose around it.
+fn json_object_text(text: &str) -> Option<String> {
+    let start = text.find('{')?;
+    let end = text.rfind('}')?;
+    let value: Value = serde_json::from_str(text.get(start..=end)?).ok()?;
+    value.is_object().then(|| value.to_string())
 }
 
 /// OpenAI Chat Completions body. api.openai.com takes
@@ -206,6 +274,7 @@ fn done(text: String, provider: String, model: String, input: Option<&Value>, ou
         output_tokens: output.and_then(Value::as_i64).unwrap_or(0),
         cached_tokens: 0,
         cost_micro: None,
+        price_unknown: false,
     })
 }
 
@@ -248,7 +317,7 @@ pub(crate) mod tests {
 
     #[test]
     fn chat_completions_bodies_follow_each_service() {
-        let request = Request { system: "rules", user: "hi", json: true, max_tokens: 100 };
+        let request = Request { system: "rules", user: "hi", json: true, max_tokens: 100, feature: Feature::Other };
         let official = chat_completions_body("gpt-6-luna", &request, true);
         assert_eq!(official["max_completion_tokens"], 100);
         assert!(official.get("max_tokens").is_none());
@@ -295,8 +364,8 @@ pub(crate) mod tests {
     fn a_completion_is_priced_and_stored_with_its_cached_tokens() {
         let db = crate::ai::cost::tests::temp_metrics_db("");
         let mut done = chat_completions_result(&luna_cache_hit(), "OpenAI".into(), "gpt-6-luna".into()).unwrap();
-        record(&db, "openai", &mut done, 1);
-        assert_eq!(done.cost_micro, Some(331));
+        record(&db, "openai", Feature::MailAnalysis, &mut done, 1);
+        assert_eq!((done.cost_micro, done.price_unknown), (Some(331), false));
         let stored: (i64, i64) = db.conn.lock().unwrap().query_row("SELECT cache_read_tokens, usd_cost_micro FROM inference_metrics", [], |r| Ok((r.get(0)?, r.get(1)?))).unwrap();
         assert_eq!(stored, (19_824, 331));
     }
@@ -311,6 +380,171 @@ pub(crate) mod tests {
         let done = gemini_result(&value, crate::ai::models::GEMINI_FLASH.into()).unwrap();
         assert_eq!(done.text, "OK");
         assert_eq!((done.input_tokens, done.output_tokens, done.cached_tokens), (1_000, 1_000, 300));
+    }
+
+    fn sort_request(json: bool) -> Request<'static> {
+        Request { system: "Sort this email.", user: "From: a@example.com", json, max_tokens: 2_048, feature: Feature::MailSort }
+    }
+
+    /// Claude's JSON mode is one forced tool call, so the object arrives as
+    /// structured input rather than text that may carry fences or prose.
+    #[test]
+    fn a_claude_json_request_forces_the_reply_tool() {
+        let body = claude_body("claude-sonnet-4-6", &sort_request(true));
+        assert_eq!(body["model"], "claude-sonnet-4-6");
+        assert_eq!(body["max_tokens"], 2_048);
+        assert_eq!(body["system"], "Sort this email.");
+        assert_eq!(body["messages"], json!([{"role": "user", "content": "From: a@example.com"}]));
+        assert_eq!(body["tools"].as_array().unwrap().len(), 1);
+        assert_eq!(body["tools"][0]["name"], CLAUDE_JSON_TOOL);
+        assert_eq!(body["tools"][0]["input_schema"], json!({"type": "object"}));
+        assert_eq!(body["tool_choice"], json!({"type": "tool", "name": CLAUDE_JSON_TOOL}));
+
+        let plain = claude_body("claude-sonnet-4-6", &Request { system: "", ..sort_request(false) });
+        assert!(plain.get("tools").is_none() && plain.get("tool_choice").is_none());
+        assert!(plain.get("system").is_none(), "no empty system prompt");
+    }
+
+    /// A Messages API reply to a forced tool call (stop_reason tool_use).
+    fn claude_tool_reply() -> Value {
+        json!({
+            "id": "msg_fixture", "type": "message", "role": "assistant", "model": "claude-sonnet-4-6",
+            "content": [{"type": "tool_use", "id": "toolu_fixture", "name": "json_reply", "input": {"category": "action", "summary": "Reply by Friday"}}],
+            "stop_reason": "tool_use",
+            "usage": {"input_tokens": 812, "output_tokens": 64}
+        })
+    }
+
+    #[test]
+    fn a_claude_json_reply_is_the_tool_input() {
+        let done = claude_result(&claude_tool_reply(), "claude-sonnet-4-6".into()).unwrap();
+        let parsed: Value = serde_json::from_str(&done.text).unwrap();
+        assert_eq!(parsed, json!({"category": "action", "summary": "Reply by Friday"}));
+        assert_eq!((done.provider.as_str(), done.input_tokens, done.output_tokens), ("Claude", 812, 64));
+    }
+
+    #[test]
+    fn a_plain_claude_reply_is_its_text() {
+        let value = json!({"content": [{"type": "text", "text": "Reply "}, {"type": "text", "text": "by Friday"}], "usage": {"input_tokens": 10, "output_tokens": 4}});
+        assert_eq!(claude_result(&value, "m".into()).unwrap().text, "Reply by Friday");
+        let empty_tool = json!({"content": [{"type": "tool_use", "name": "json_reply", "input": {}}], "usage": {}});
+        assert!(claude_result(&empty_tool, "m".into()).is_err(), "an empty object is no answer");
+    }
+
+    #[test]
+    fn a_bedrock_json_request_asks_for_one_object() {
+        use aws_sdk_bedrockruntime::types::{ContentBlock, ConversationRole, SystemContentBlock};
+        let request = super::super::bedrock::plain_request("Sort this email.", "From: a@example.com", true, 2_048).unwrap();
+        assert_eq!(request.system.len(), 1);
+        let SystemContentBlock::Text(system) = &request.system[0] else { panic!("a text system block") };
+        assert_eq!(system, &format!("Sort this email.\n\n{}", super::super::bedrock::JSON_INSTRUCTION));
+        assert_eq!(request.messages.len(), 1);
+        assert_eq!(*request.messages[0].role(), ConversationRole::User);
+        assert_eq!(request.messages[0].content(), &[ContentBlock::Text("From: a@example.com".into())]);
+        assert_eq!(request.inference.max_tokens(), Some(2_048));
+
+        let plain = super::super::bedrock::plain_request("", "hi", false, 10).unwrap();
+        assert!(plain.system.is_empty(), "no empty system block");
+        let json_only = super::super::bedrock::plain_request("", "hi", true, 10).unwrap();
+        assert_eq!(json_only.system, vec![SystemContentBlock::Text(super::super::bedrock::JSON_INSTRUCTION.into())]);
+    }
+
+    /// A Converse reply, as the SDK hands it back.
+    fn converse_reply(text: &str) -> aws_sdk_bedrockruntime::operation::converse::ConverseOutput {
+        use aws_sdk_bedrockruntime::types::{ContentBlock, ConversationRole, ConverseMetrics, ConverseOutput as Output, Message, StopReason, TokenUsage};
+        aws_sdk_bedrockruntime::operation::converse::ConverseOutput::builder()
+            .output(Output::Message(Message::builder().role(ConversationRole::Assistant).content(ContentBlock::Text(text.into())).build().unwrap()))
+            .stop_reason(StopReason::EndTurn)
+            .usage(TokenUsage::builder().input_tokens(700).output_tokens(40).total_tokens(1_040).cache_read_input_tokens(300).build().unwrap())
+            .metrics(ConverseMetrics::builder().latency_ms(5).build().unwrap())
+            .build()
+            .unwrap()
+    }
+
+    #[test]
+    fn a_bedrock_json_reply_is_one_object_without_fences() {
+        let done = bedrock_result(&converse_reply("```json\n{\"category\": \"action\"}\n```"), "us.amazon.nova-pro-v1:0".into(), true).unwrap();
+        assert_eq!(done.text, r#"{"category":"action"}"#);
+        // inputTokens leaves the cache read out; the row counts it in.
+        assert_eq!((done.input_tokens, done.output_tokens, done.cached_tokens), (1_000, 40, 300));
+        assert_eq!(done.provider, "Bedrock");
+    }
+
+    #[test]
+    fn a_bedrock_reply_that_is_not_json_is_an_error() {
+        let error = bedrock_result(&converse_reply("The email asks for a reply."), "m".into(), true).unwrap_err();
+        assert!(error.contains("Bedrock") && error.contains("JSON"), "{error}");
+        assert!(bedrock_result(&converse_reply("[1, 2]"), "m".into(), true).is_err(), "an array is not the object asked for");
+        let plain = bedrock_result(&converse_reply("The email asks for a reply."), "m".into(), false).unwrap();
+        assert_eq!(plain.text, "The email asks for a reply.");
+    }
+
+    /// No AWS credentials saved: Bedrock asks for them instead of saying it is
+    /// not supported. (No credentials row, so the Keychain is never read.)
+    #[tokio::test]
+    async fn bedrock_without_credentials_asks_for_them() {
+        let db = crate::db::test_database();
+        let mut router = AiRouter::new("gemini_primary");
+        router.set_provider_chain(vec![ProviderChainEntry { position: 0, provider_type: "bedrock".into(), endpoint_id: None, model_id: None, enabled: true, base_url: None }]);
+        let error = complete(&router, &db, sort_request(true)).await.unwrap_err();
+        assert!(error.contains("AWS 憑證"), "{error}");
+        assert!(!error.contains("暫不支援"), "{error}");
+    }
+
+    /// One loopback HTTP reply, for a request that would go to a service.
+    async fn one_reply(body: Value) -> (u16, tokio::task::JoinHandle<String>) {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        let listener = tokio::net::TcpListener::bind((std::net::Ipv4Addr::LOCALHOST, 0)).await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let task = tokio::spawn(async move {
+            let (mut stream, _) = listener.accept().await.unwrap();
+            let mut request = Vec::new();
+            let mut buffer = [0; 4096];
+            loop {
+                let count = stream.read(&mut buffer).await.unwrap();
+                request.extend_from_slice(&buffer[..count]);
+                let text = String::from_utf8_lossy(&request).to_string();
+                if let Some(end) = text.find("\r\n\r\n") {
+                    let length = text[..end].lines().find_map(|line| line.to_lowercase().strip_prefix("content-length:").map(|n| n.trim().parse::<usize>().unwrap())).unwrap_or(0);
+                    if request.len() >= end + 4 + length || count == 0 {
+                        break;
+                    }
+                }
+            }
+            let body = body.to_string();
+            let reply = format!("HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}", body.len());
+            stream.write_all(reply.as_bytes()).await.unwrap();
+            String::from_utf8_lossy(&request).to_string()
+        });
+        (port, task)
+    }
+
+    /// The row says what the completion was for and names the service by its
+    /// provider id; a model without a price is stored with the cost unknown.
+    #[tokio::test]
+    async fn a_completion_is_stored_with_its_feature_and_provider_id() {
+        let (port, server) = one_reply(json!({"choices": [{"message": {"content": "{\"category\": \"action\"}"}}], "usage": {"prompt_tokens": 300, "completion_tokens": 20}})).await;
+        let base = format!("http://127.0.0.1:{port}/v1");
+        let mut router = AiRouter::new("gemini_primary");
+        router.set_compat_key(&base, "sk-fixture-not-a-real-key");
+        router.set_provider_chain(vec![ProviderChainEntry { position: 0, provider_type: "openai".into(), endpoint_id: None, model_id: Some("unlisted-chat-1".into()), enabled: true, base_url: Some(base) }]);
+        let db = crate::ai::cost::tests::temp_metrics_db("");
+        let done = complete(&router, &db, sort_request(true)).await.unwrap();
+        assert_eq!((done.cost_micro, done.price_unknown), (None, true));
+        let request = server.await.unwrap();
+        assert!(request.starts_with("POST /v1/chat/completions"), "{request}");
+        assert_eq!(
+            crate::ai::cost::tests::usage_rows(&db),
+            vec![crate::ai::cost::tests::UsageRow {
+                provider: "compat:127.0.0.1".into(),
+                feature: "mail_sort".into(),
+                model_id: "unlisted-chat-1".into(),
+                input_tokens: 300,
+                output_tokens: 20,
+                usd_cost_micro: None,
+                price_unknown: true,
+            }]
+        );
     }
 
     /// Gemini's OpenAI-compatible endpoint stands in for Kimi and Qwen: a
@@ -349,11 +583,11 @@ pub(crate) mod tests {
         compatible.set_provider_chain(vec![entry("openai", Some(crate::ai::models::GEMINI_FLASH), Some(GEMINI_COMPAT))]);
         cases.push(("compatible", compatible));
         for (name, router) in cases {
-            let done = complete(&router, &db, Request { system: "Answer in one word.", user: "Reply with the single word OK.", json: false, max_tokens: 1_024 }).await;
+            let done = complete(&router, &db, Request { system: "Answer in one word.", user: "Reply with the single word OK.", json: false, max_tokens: 1_024, feature: Feature::Other }).await;
             println!("{name}: {done:?}");
             let done = done.unwrap_or_else(|e| panic!("{name}: {e}"));
             assert!(done.text.to_uppercase().contains("OK"), "{name}: {}", done.text);
-            let json = complete(&router, &db, Request { system: "", user: "Return a JSON object with one field \"ok\" set to true.", json: true, max_tokens: 1_024 }).await.unwrap();
+            let json = complete(&router, &db, Request { system: "", user: "Return a JSON object with one field \"ok\" set to true.", json: true, max_tokens: 1_024, feature: Feature::Other }).await.unwrap();
             let parsed: Value = serde_json::from_str(json.text.trim().trim_start_matches("```json").trim_end_matches("```").trim()).unwrap_or_else(|_| panic!("{name} JSON: {}", json.text));
             assert_eq!(parsed["ok"], true, "{name}");
         }
@@ -367,7 +601,7 @@ pub(crate) mod tests {
         let db = crate::db::test_database();
         let mut router = AiRouter::new("gemini_primary");
         router.set_provider_chain(Vec::new());
-        let error = complete(&router, &db, Request { system: "", user: "hi", json: false, max_tokens: 10 }).await.unwrap_err();
+        let error = complete(&router, &db, Request { system: "", user: "hi", json: false, max_tokens: 10, feature: Feature::Other }).await.unwrap_err();
         assert!(error.contains("尚未選擇 AI"), "{error}");
     }
 }

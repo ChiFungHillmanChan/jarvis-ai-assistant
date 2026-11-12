@@ -17,6 +17,8 @@ export function chatErrorText(error: string, text: Text): { message: string; det
     ? text('Could not reach your AI. Check the network and try again.', '未能連接你的 AI，請檢查網絡後再試。')
     : has('api error 400')
     ? text('Your AI rejected this request. Try again, or choose another model in Settings → Your AI.', '你的 AI 不接受這個請求。請再試一次，或到「設定 → 你的 AI」改用其他模型。')
+    : /gemini \([^)]*\) returned no text/.test(lower)
+    ? text('Gemini returned an empty answer. Try again, or choose another model in Settings → Your AI.', 'Gemini 沒有回覆任何內容。請再試一次，或到「設定 → 你的 AI」改用其他模型。')
     : text('Your AI could not answer just now. Try again shortly.', '你的 AI 暫時未能回覆，請稍後再試。');
   return { message, detail: error };
 }

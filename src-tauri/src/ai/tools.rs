@@ -455,7 +455,7 @@ pub fn to_gemini_format(tools: &[Tool]) -> Vec<serde_json::Value> {
             json!({
                 "name": t.name,
                 "description": t.description,
-                "parameters": t.parameters,
+                "parameters": super::gemini::sanitize_schema(&t.parameters),
             })
         })
         .collect();
@@ -1375,6 +1375,7 @@ pub async fn execute_tool(
     if crate::chat_session::TOOL_EXECUTION_DISABLED.try_with(|v| *v).unwrap_or(false) {
         return "Tools are disabled for this request. Return only the requested output.".into();
     }
+    crate::ai::cost::note_tool_call();
     crate::chat_session::TOOL_CALL_ID.scope(uuid::Uuid::new_v4().to_string(),
         crate::chat_session::TOOL_RESULT_AVAILABLE.scope(std::cell::Cell::new(false), async {
             crate::chat_session::tool_lifecycle(name, "started");
