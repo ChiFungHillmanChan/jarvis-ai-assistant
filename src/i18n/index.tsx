@@ -14,6 +14,7 @@ const store = createLocaleStore(initialLocale(), () => getOptionalPreference('ui
 export function getUiLocale() { return store.getSnapshot().locale; }
 export const subscribeUiLocale = store.subscribe;
 export const setUiLocale = store.setLocale;
+export const keepUiLocaleInUse = store.keepLocaleInUse;
 type LocaleContextValue = {
   locale: UiLocale; ready: boolean; hasSavedChoice: boolean; saving: boolean; loadError: boolean;
   saveError: string | null; retryLoad: () => void; retrySave: () => void;
