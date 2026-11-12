@@ -598,7 +598,7 @@ async fn send_to_bedrock(
     creds.inference_profile = inference_profile_for_region(&creds.region).to_string();
     let (text, usage) = crate::ai::bedrock::send_simple(&creds, model, prompt)
         .await
-        .map_err(|_| "Bedrock 分析失敗，請檢查 AWS 憑證、區域及模型權限。".to_string())?;
+        .map_err(|_| "Bedrock 分析失敗，請檢查 AWS 憑證、地區及模型權限。".to_string())?;
     let stored = usage.as_ref().and_then(crate::ai::bedrock::StoredUsage::from_aws);
     match (metrics, stored) {
         (Some(db), Some(s)) => crate::ai::cost::record_inference(
@@ -1222,6 +1222,26 @@ mod tests {
         server.await.unwrap();
         assert!(!error.contains("PRIVATE"), "{error}");
         assert_eq!(crate::ai::cost::tests::usage_rows(&db).len(), 1, "nothing stored for the refused request");
+    }
+
+    /// AWS bills a reply that holds no message. Its usage is stored, and the
+    /// empty answer is then rejected.
+    #[tokio::test]
+    async fn a_billed_bedrock_reply_without_a_message_is_stored_then_rejected() {
+        let db = crate::ai::cost::tests::temp_metrics_db("");
+        let creds = crate::ai::bedrock::tests::fixture_creds("ap-southeast-1");
+        let mut reply = crate::ai::bedrock::tests::converse_json("");
+        reply.as_object_mut().unwrap().remove("output");
+        let server = crate::ai::bedrock::tests::aws_loopback(200, None, reply).await;
+        let error = analyze_with_endpoints(context("bedrock", "apac.amazon.nova-pro-v1:0", vec![message(42, "正文")]), Some(creds), None, None, OLLAMA_PORT, OpenAiEndpoint::Production, Some(&db))
+            .await
+            .unwrap_err();
+        server.await.unwrap();
+        assert_eq!(error, "AI 沒有回覆，請檢查模型設定後重試。");
+        let rows = crate::ai::cost::tests::usage_rows(&db);
+        assert_eq!(rows.len(), 1, "the billed reply is stored");
+        assert_eq!((rows[0].model_id.as_str(), rows[0].input_tokens, rows[0].output_tokens), ("apac.amazon.nova-pro-v1:0", 1_320, 45));
+        assert_eq!(crate::ai::cost::tests::cache_tokens(&db), vec![(800, 400)]);
     }
 
     /// A local analysis is stored too: free, with Ollama's token counts.

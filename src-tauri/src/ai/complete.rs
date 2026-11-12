@@ -188,9 +188,20 @@ async fn complete_one(router: &AiRouter, db: &Database, entry: &ProviderChainEnt
         }
         "bedrock" => {
             let language = super::bedrock::UiLanguage::read(db);
-            let creds = crate::aws::credentials::load_from(db)?.ok_or_else(|| {
-                language.pick("AWS credentials are not set up. Add them in Settings and try again.", "尚未設定 AWS 憑證，請在設定中加入後重試。")
-            })?;
+            // A saved row whose Keychain item is gone (after a restore, say)
+            // fails here. The user is asked to save the credentials again;
+            // the Keychain or database text goes to the log only.
+            let creds = crate::aws::credentials::load_from(db)
+                .map_err(|e| {
+                    log::warn!("Bedrock completion: the saved AWS credentials could not be read: {e}");
+                    language.pick(
+                        "JARVIS could not read your saved AWS credentials. Save them again in Settings and try again.",
+                        "JARVIS 未能讀取已儲存的 AWS 憑證，請在設定中重新儲存後重試。",
+                    )
+                })?
+                .ok_or_else(|| {
+                    language.pick("AWS credentials are not set up. Add them in Settings and try again.", "尚未設定 AWS 憑證，請在設定中加入後重試。")
+                })?;
             // The chain row's model, pointed at the inference profile of the
             // saved region (load_from derives it from the region; chat reads
             // the stored profile, and the two agree). This id is the one sent
@@ -653,6 +664,30 @@ pub(crate) mod tests {
             assert_eq!(crate::ai::cost::tests::usage_rows(&db).len(), 1, "nothing stored for the refused request");
         });
         let _ = crate::security::keychain::KeychainStore::delete("com.jarvis.aws", "secret_access_key");
+    }
+
+    /// Credentials saved on this Mac whose Keychain item is gone: the user is
+    /// asked to save them again, in the interface language, and sees no
+    /// Keychain text. Nothing is sent, so nothing is stored.
+    #[test]
+    fn bedrock_credentials_that_cannot_be_read_ask_to_be_saved_again() {
+        let _keychain = crate::aws::credentials::tests::KEYCHAIN_GUARD.lock().unwrap_or_else(|e| e.into_inner());
+        let runtime = tokio::runtime::Builder::new_current_thread().enable_all().build().unwrap();
+        runtime.block_on(async {
+            let db = std::sync::Arc::new(crate::db::test_database());
+            crate::aws::credentials::AwsCredsRepo::new(db.clone()).save(&crate::ai::bedrock::tests::fixture_creds("ap-southeast-1")).await.unwrap();
+            crate::security::keychain::KeychainStore::delete("com.jarvis.aws", "secret_access_key").unwrap();
+            let mut router = AiRouter::new("gemini_primary");
+            router.set_provider_chain(vec![ProviderChainEntry { position: 0, provider_type: "bedrock".into(), endpoint_id: None, model_id: None, enabled: true, base_url: None }]);
+
+            let error = complete(&router, &db, sort_request(true)).await.unwrap_err();
+            assert_eq!(error, "JARVIS could not read your saved AWS credentials. Save them again in Settings and try again.");
+            db.conn.lock().unwrap().execute("INSERT OR REPLACE INTO user_preferences (key, value) VALUES ('ui_locale', 'zh-HK')", []).unwrap();
+            let error = complete(&router, &db, sort_request(true)).await.unwrap_err();
+            assert_eq!(error, "JARVIS 未能讀取已儲存的 AWS 憑證，請在設定中重新儲存後重試。");
+            assert!(!error.to_lowercase().contains("keychain"));
+            assert!(crate::ai::cost::tests::usage_rows(&db).is_empty());
+        });
     }
 
     /// One loopback HTTP reply, for a request that would go to a service.

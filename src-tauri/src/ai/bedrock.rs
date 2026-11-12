@@ -95,19 +95,22 @@ pub async fn send_simple(
         .send()
         .await
         .map_err(|e| format!("converse: {e}"))?;
-    let output = out.output.ok_or("no output")?;
-    let message = output
-        .as_message()
-        .map_err(|_| "output is not a message".to_string())?;
-    let text = message
-        .content()
-        .iter()
-        .filter_map(|b| match b {
-            ContentBlock::Text(t) => Some(t.clone()),
-            _ => None,
-        })
-        .collect::<Vec<_>>()
-        .join("");
+    // AWS bills a reply whether or not it holds a message (the SDK reads a
+    // missing or unfamiliar output as Unknown). Such a reply comes back as
+    // empty text with its usage, so the caller stores the usage and then
+    // rejects the empty answer.
+    let text = match out.output.as_ref().and_then(|output| output.as_message().ok()) {
+        Some(message) => message
+            .content()
+            .iter()
+            .filter_map(|b| match b {
+                ContentBlock::Text(t) => Some(t.clone()),
+                _ => None,
+            })
+            .collect::<Vec<_>>()
+            .join(""),
+        None => String::new(),
+    };
     Ok((text, out.usage))
 }
 
@@ -194,7 +197,7 @@ fn plain_error(code: Option<&str>, language: UiLanguage) -> String {
         ),
         Some("ResourceNotFoundException") => language.pick(
             "Bedrock could not find the chosen model. Check the model ID and the region.",
-            "Bedrock 找不到所選模型，請檢查模型 ID 及區域。",
+            "Bedrock 找不到所選模型，請檢查模型 ID 及地區。",
         ),
         Some("ThrottlingException" | "ServiceQuotaExceededException") => language.pick(
             "Bedrock is limiting requests or your quota is used up. Try again later.",
@@ -202,7 +205,7 @@ fn plain_error(code: Option<&str>, language: UiLanguage) -> String {
         ),
         Some("ValidationException") => language.pick(
             "Bedrock did not accept this request. Check the chosen model and the region.",
-            "Bedrock 不接受這個請求，請檢查所選模型及區域。",
+            "Bedrock 不接受這個請求，請檢查所選模型及地區。",
         ),
         Some(_) => language.pick("Bedrock could not answer just now. Try again later.", "Bedrock 暫時未能回覆，請稍後重試。"),
         None => language.pick(
@@ -795,6 +798,29 @@ pub(crate) mod tests {
         assert_eq!(crate::ai::cost::tests::cache_tokens(&db), vec![(800, 400)]);
     }
 
+    /// The order inside `converse_round`: a reply asking for a tool that will
+    /// run marks the turn before its row is stored, so that row is stored as
+    /// tools. Storing first would leave it as chat.
+    #[tokio::test]
+    async fn a_chat_request_whose_reply_asks_for_a_tool_is_stored_as_tools() {
+        let mut reply = converse_json("");
+        reply["output"]["message"]["content"] = json!([{"toolUse": {"toolUseId": "tooluse_fixture_1", "name": "list_calendar_events", "input": {}}}]);
+        reply["stopReason"] = json!("tool_use");
+        let server = aws_loopback(200, None, reply).await;
+        let db = crate::ai::cost::tests::temp_metrics_db("");
+        let client = client_for(&fixture_creds("ap-southeast-1")).await;
+        let tools = build_tool_config().unwrap();
+        let system = build_system_blocks("rules".into(), "today".into()).unwrap();
+        let inference = InferenceConfiguration::builder().max_tokens(64).build();
+        let turn = ChatTurn { client: &client, model_id: "apac.anthropic.claude-haiku-4-5-20251001-v1:0", system: &system, tools: &tools, inference: &inference, db: &db, workload: crate::ai::Workload::Tools };
+        let messages = build_messages(vec![("user".into(), "what is on today?".into())]).unwrap();
+        let (_, _, tool_uses) = crate::ai::cost::with_feature(crate::ai::cost::Feature::Chat, converse_round(&turn, &messages, false)).await.unwrap();
+        server.await.unwrap();
+        assert_eq!(tool_uses.len(), 1, "the stand-in's reply asks for one tool");
+        assert_eq!(features(&db), vec!["tools"]);
+        assert_eq!(crate::ai::cost::tests::usage_rows(&db)[0].input_tokens, 1_320, "the row holds this reply's usage");
+    }
+
     /// A chat request AWS refuses stores nothing: there is no usage to store.
     #[tokio::test]
     async fn a_failed_chat_request_stores_nothing() {
@@ -858,7 +884,11 @@ pub(crate) mod tests {
             assert!(!chinese.is_ascii(), "{code:?}: {chinese}");
         }
         assert_eq!(plain_error(Some("ValidationException"), UiLanguage::En), "Bedrock did not accept this request. Check the chosen model and the region.");
-        assert_eq!(plain_error(Some("ValidationException"), UiLanguage::ZhHk), "Bedrock 不接受這個請求，請檢查所選模型及區域。");
+        assert_eq!(plain_error(Some("ValidationException"), UiLanguage::ZhHk), "Bedrock 不接受這個請求，請檢查所選模型及地區。");
+        // Settings calls the AWS Region 地區; the messages use the same word.
+        for code in codes {
+            assert!(!plain_error(code, UiLanguage::ZhHk).contains("區域"), "{code:?}");
+        }
     }
 
     /// The language is the one the frontend saved; anything else is English.
