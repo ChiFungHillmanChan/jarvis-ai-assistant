@@ -290,9 +290,11 @@ export async function purgeStorage(scope: StorageScope): Promise<number> {
 export async function setRetentionPolicy(days: number, enabled: boolean): Promise<void> {
   await invoke("set_retention_policy", { days, enabled });
 }
-/** Resolves only with the Keychain items left behind: when none are, JARVIS restarts. */
-export async function deleteAllData(): Promise<string[]> {
-  return await invoke<string[]>("delete_all_data");
+/** What "Delete all JARVIS data" could not remove: Keychain items, as "service / account", and the login item. */
+export interface EraseLeftovers { keychain: string[]; openAtLogin: boolean }
+/** Resolves only when something was left behind: when nothing was, JARVIS restarts. */
+export async function deleteAllData(): Promise<EraseLeftovers> {
+  return await invoke<EraseLeftovers>("delete_all_data");
 }
 
 // CosyVoice 2 offline TTS
