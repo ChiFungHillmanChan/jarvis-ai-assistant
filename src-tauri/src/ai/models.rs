@@ -77,11 +77,17 @@ const fn family(provider: &'static str, id: &'static str, price: Price) -> Cloud
     CloudModel { provider, id, label: id, family: true, price, long_context: None, max_output_tokens: None }
 }
 
-/// Gemini 2.5 and 3.x accept up to 65,536 output tokens per request (Google's
-/// model pages: 2.5 Pro, 2.5 Flash, 3 Pro and 3 Flash). The 3.1, 3.5, 3.6 and
-/// 3.7 ids are assumed to keep that limit; the ignored test
-/// `gemini_output_limits_match_what_google_serves` checks it against
-/// `outputTokenLimit` with a real key.
+/// The most output tokens (thinking included) one Gemini request may ask for.
+/// Documented, not verified by a live call: on 2026-11-12 Google's model pages
+/// (aistudio.google.com/docs/models/<id>) each stated "Output token limit
+/// 65,536" for gemini-3.7-flash, gemini-3.1-pro-preview, gemini-3.6-flash,
+/// gemini-3.5-flash, gemini-3.5-flash-lite and gemini-3.1-flash-lite. The
+/// gemini-3-flash, gemini-2.5-pro and gemini-2.5-flash pages were not re-read
+/// that day; 65,536 is their last published limit. The gemini-3.7-flash page
+/// also says that id is deprecated and its requests are routed to
+/// gemini-3.8-flash, whose page states the same 65,536; the ids and defaults
+/// here are unchanged. The ignored test
+/// `gemini_output_limits_match_what_google_serves` makes the live check.
 const GEMINI_MAX_OUTPUT: Option<u32> = Some(65_536);
 
 /// Sources and dates are noted per group; re-check a rate before quoting it.
@@ -399,9 +405,12 @@ mod tests {
         assert_eq!(price_for(GEMINI_FLASH).unwrap().input_per_million, 0.75, "gemini-3.7-flash rate; it doubles on 2027-01-01");
     }
 
-    /// The output limits above are partly assumed (see GEMINI_MAX_OUTPUT).
-    /// Asking for more than a model allows is a 400, so check them against
-    /// what Google reports before relying on a new id. Run deliberately:
+    /// The output limits above are documented, not checked live (see
+    /// GEMINI_MAX_OUTPUT). Asking for more than a model allows is a 400, which
+    /// stops the chain, so check them against what Google reports before
+    /// relying on them. The default Flash and Pro ids must report a limit: a
+    /// bad key or a retired id answers without one, and that proves nothing.
+    /// Run deliberately:
     ///   GEMINI_API_KEY=... cargo test --manifest-path src-tauri/Cargo.toml \
     ///     gemini_output_limits_match_what_google_serves -- --ignored --nocapture
     #[tokio::test]
@@ -409,16 +418,26 @@ mod tests {
     async fn gemini_output_limits_match_what_google_serves() {
         let key = std::env::var("GEMINI_API_KEY").expect("set GEMINI_API_KEY to run this test");
         let mut wrong = Vec::new();
+        let mut unserved = Vec::new();
+        let mut checked = Vec::new();
         for entry in CLOUD_MODELS.iter().filter(|m| m.provider == "gemini" && !m.family) {
             let id = if entry.id == "gemini-3.1-pro" { GEMINI_PRO } else { entry.id };
             let url = format!("{}/models/{id}", crate::ai::gemini::API_BASE);
-            let body: serde_json::Value = reqwest::Client::new().get(url).header("x-goog-api-key", &key).send().await.unwrap().json().await.unwrap();
+            let response = reqwest::Client::new().get(url).header("x-goog-api-key", &key).send().await.unwrap();
+            let status = response.status();
+            let body: serde_json::Value = response.json().await.unwrap_or_default();
             let served = body["outputTokenLimit"].as_u64().map(|n| n as u32);
-            println!("{id}: served {served:?}, recorded {:?}", entry.max_output_tokens);
+            println!("{id}: HTTP {status}, served {served:?}, recorded {:?}", entry.max_output_tokens);
+            checked.push(id);
+            if served.is_none() && [GEMINI_FLASH, GEMINI_PRO].contains(&id) {
+                unserved.push((id, status));
+            }
             if served.is_some() && served != entry.max_output_tokens {
                 wrong.push((id, served, entry.max_output_tokens));
             }
         }
+        assert!(checked.contains(&GEMINI_FLASH) && checked.contains(&GEMINI_PRO), "the default ids were not checked: {checked:?}");
+        assert!(unserved.is_empty(), "no outputTokenLimit for a default model, so nothing was checked (bad key or retired id?): {unserved:?}");
         assert!(wrong.is_empty(), "outputTokenLimit differs from models.rs: {wrong:?}");
     }
 
