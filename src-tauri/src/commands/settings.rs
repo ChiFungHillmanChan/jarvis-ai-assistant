@@ -247,7 +247,7 @@ mod tests {
 
     #[test]
     fn ordinary_preferences_are_not_denied() {
-        for key in ["ai_provider", "language", "auto_briefing", "user_name", "tts_offline_mode"] {
+        for key in ["ai_provider", "language", "daily_briefing_voice", "user_name", "tts_offline_mode"] {
             assert!(!is_secret_preference(key), "{key} must stay readable");
         }
     }

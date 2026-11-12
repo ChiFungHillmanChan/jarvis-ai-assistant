@@ -2,22 +2,30 @@ pub mod daily_briefing;
 pub mod engine;
 pub mod jobs;
 pub mod network;
+pub mod scheduled_briefing;
 pub mod slots;
 
 use crate::auth::google::GoogleAuth;
 use crate::db::Database;
 use engine::{Engine, JobRunner, Run, SystemClock};
+use scheduled_briefing::BriefingService;
 use std::sync::{Arc, Mutex};
 
 /// The app's own jobs, as the engine runs them.
 struct AppJobs {
     db: Arc<Database>,
     google_auth: Arc<GoogleAuth>,
+    briefing: Arc<BriefingService>,
 }
 
 #[async_trait::async_trait]
 impl JobRunner for AppJobs {
     async fn run(&self, run: &Run) -> Result<String, String> {
+        // The briefing is the one job that behaves differently by trigger:
+        // only an on-time run may speak.
+        if run.action_type == scheduled_briefing::ACTION_TYPE {
+            return self.briefing.run(run.trigger).await;
+        }
         jobs::run_action(&self.db, &self.google_auth, &run.action_type).await
     }
 }
@@ -29,10 +37,11 @@ const TICK: std::time::Duration = std::time::Duration::from_secs(1);
 pub struct Scheduler {
     engine: Arc<Engine<SystemClock>>,
     db: Arc<Database>,
+    briefing: Arc<BriefingService>,
 }
 
 impl Scheduler {
-    pub async fn new(db: Arc<Database>, google_auth: Arc<GoogleAuth>) -> Result<Self, String> {
+    pub async fn new(db: Arc<Database>, google_auth: Arc<GoogleAuth>, briefing: Arc<BriefingService>) -> Result<Self, String> {
         // Reduce proactive check from every 1 min to every 5 min to lower DB contention
         {
             let conn = db.conn.lock().map_err(|e| e.to_string())?;
@@ -48,7 +57,7 @@ impl Scheduler {
             Arc::clone(&db),
             Arc::new(SystemClock::new()),
             Arc::new(network::SystemReachability),
-            Arc::new(AppJobs { db: Arc::clone(&db), google_auth }),
+            Arc::new(AppJobs { db: Arc::clone(&db), google_auth, briefing: Arc::clone(&briefing) }),
         );
 
         let job_rows: Vec<(i64, String, String, String)> = {
@@ -60,7 +69,7 @@ impl Scheduler {
             rows
         };
 
-        let this = Scheduler { engine: Arc::new(engine), db };
+        let this = Scheduler { engine: Arc::new(engine), db, briefing };
 
         for (job_id, name, schedule, action_type) in job_rows {
             // One unparseable row used to abort Scheduler::new with `?`, which
@@ -121,6 +130,7 @@ impl Scheduler {
     /// catch-up: every registered job is asked for its missed slot.
     pub async fn start(&self) -> Result<(), String> {
         let engine = Arc::clone(&self.engine);
+        let briefing = Arc::clone(&self.briefing);
         tauri::async_runtime::spawn(async move {
             let mut ticker = tokio::time::interval(TICK);
             ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
@@ -130,6 +140,9 @@ impl Scheduler {
                     let engine = Arc::clone(&engine);
                     tauri::async_runtime::spawn(async move { engine.execute(run).await });
                 }
+                // A briefing shown while offline is owed its AI summary; the
+                // same settled network the jobs wait for is what it waits for.
+                briefing.on_tick(engine.online());
             }
         });
         log::info!("Cron scheduler started");
@@ -213,5 +226,100 @@ mod tests {
             .unwrap();
         assert_eq!(other_status, "active", "the remaining jobs keep running");
         assert_eq!(other_desc, "Every 5 minutes");
+    }
+
+    /// A database from the last release (V32), upgraded in place.
+    fn upgraded(prepare: impl FnOnce(&Connection)) -> Database {
+        let directory = std::env::temp_dir().join(format!("jarvis-scheduler-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir(&directory).unwrap();
+        let path = directory.join("jarvis.db");
+        {
+            let db = crate::db::test_database_at_version(&path, 32);
+            prepare(&db.conn.lock().unwrap());
+        }
+        let db = crate::db::test_database_at(&path);
+        std::fs::remove_dir_all(&directory).unwrap();
+        db
+    }
+
+    /// The first launch after upgrading must not catch up history: every
+    /// existing job starts counting from the moment of the upgrade.
+    #[test]
+    fn upgrading_starts_every_existing_job_from_now() {
+        let before = chrono::Utc::now() - chrono::TimeDelta::seconds(2);
+        let db = upgraded(|conn| {
+            conn.execute("UPDATE cron_jobs SET last_run = '2026-01-01 09:00:00'", []).unwrap();
+            conn.execute(
+                "INSERT INTO cron_runs (job_id, status, started_at, finished_at) SELECT id, 'completed', '2026-01-01 09:00:00', '2026-01-01 09:00:05' FROM cron_jobs LIMIT 1",
+                [],
+            )
+            .unwrap();
+        });
+        let conn = db.conn.lock().unwrap();
+        let mut stmt = conn.prepare("SELECT baseline_at, handled_slot FROM cron_jobs").unwrap();
+        let rows: Vec<(String, Option<String>)> = stmt.query_map([], |r| Ok((r.get(0)?, r.get(1)?))).unwrap().map(|r| r.unwrap()).collect();
+        assert!(rows.len() > 1, "the seeded jobs");
+        for (baseline_at, handled_slot) in rows {
+            let baseline = chrono::DateTime::parse_from_rfc3339(&baseline_at).unwrap();
+            assert!(baseline >= before && baseline <= chrono::Utc::now() + chrono::TimeDelta::seconds(2), "{baseline_at}");
+            assert_eq!(handled_slot, None);
+        }
+        let (trigger, slot): (Option<String>, Option<String>) =
+            conn.query_row("SELECT \"trigger\", slot FROM cron_runs", [], |r| Ok((r.get(0)?, r.get(1)?))).unwrap();
+        assert_eq!((trigger, slot), (None, None), "runs from before the upgrade keep no trigger or slot");
+    }
+
+    fn briefing_job(db: &Database) -> (String, String) {
+        db.conn
+            .lock()
+            .unwrap()
+            .query_row("SELECT schedule, status FROM cron_jobs WHERE action_type = 'daily_briefing'", [], |r| Ok((r.get(0)?, r.get(1)?)))
+            .unwrap()
+    }
+
+    fn preference(db: &Database, key: &str) -> Option<String> {
+        use rusqlite::OptionalExtension;
+        db.conn
+            .lock()
+            .unwrap()
+            .query_row("SELECT value FROM user_preferences WHERE key = ?1", [key], |r| r.get(0))
+            .optional()
+            .unwrap()
+    }
+
+    /// The scheduled briefing is off after an upgrade, at 08:30, for everyone
+    /// who never turned on the briefing that was spoken at startup.
+    #[test]
+    fn upgrading_leaves_the_briefing_off_by_default() {
+        for old_setting in [None, Some("false")] {
+            let db = upgraded(|conn| {
+                conn.execute("DELETE FROM user_preferences WHERE key = 'auto_briefing'", []).unwrap();
+                if let Some(value) = old_setting {
+                    conn.execute("INSERT INTO user_preferences (key, value) VALUES ('auto_briefing', ?1)", [value]).unwrap();
+                }
+            });
+            assert_eq!(briefing_job(&db), ("0 30 8 * * *".to_string(), "paused".to_string()), "{old_setting:?}");
+            assert_eq!(preference(&db, "auto_briefing"), None, "the old setting is gone");
+        }
+    }
+
+    /// Someone who had "speak a briefing at startup" on is moved to the
+    /// scheduled briefing, on, and is not briefed a second time today.
+    #[test]
+    fn upgrading_moves_a_startup_briefing_user_to_the_scheduled_one() {
+        let db = upgraded(|conn| {
+            conn.execute_batch(
+                "INSERT INTO user_preferences (key, value) VALUES ('auto_briefing', 'true')
+                     ON CONFLICT(key) DO UPDATE SET value = 'true';
+                 INSERT INTO user_preferences (key, value) VALUES ('last_briefing_date', '2026-11-12')
+                     ON CONFLICT(key) DO UPDATE SET value = '2026-11-12';",
+            )
+            .unwrap();
+        });
+        assert_eq!(briefing_job(&db), ("0 30 8 * * *".to_string(), "active".to_string()));
+        assert_eq!(preference(&db, "auto_briefing"), None);
+        assert_eq!(preference(&db, "daily_briefing_last_date").as_deref(), Some("2026-11-12"));
+        let settings = scheduled_briefing::read_settings(&db.conn.lock().unwrap()).unwrap();
+        assert!(settings.enabled && settings.voice && settings.time == "08:30");
     }
 }

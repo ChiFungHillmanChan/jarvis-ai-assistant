@@ -230,9 +230,10 @@ mod tests {
     }
 
     /// Reads the real flags once. It asserts nothing about the answer, which
-    /// depends on the machine; it proves the call links and returns.
+    /// depends on the machine; it proves the call links and returns. Run with
+    /// `--nocapture` to see what this Mac reports.
     #[test]
     fn the_system_reachability_call_returns() {
-        let _ = SystemReachability.online();
+        println!("reachability flags = {:?}, online = {}", macos::reachability_flags(), SystemReachability.online());
     }
 }

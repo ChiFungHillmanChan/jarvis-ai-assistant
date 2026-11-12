@@ -222,8 +222,8 @@ async fn run_github_digest(db: &Arc<Database>) -> Result<String, String> {
 /// three definitions as assistant::context and commands::dashboard. Shared with
 /// the tests below.
 const DEADLINE_WINDOW_QUERY: &str = "SELECT id, title, deadline FROM tasks WHERE status != 'completed' AND deadline IS NOT NULL AND deadline <= date('now', 'localtime', '+3 days') ORDER BY deadline ASC";
-const OVERDUE_TASKS_QUERY: &str = "SELECT title FROM tasks WHERE status != 'completed' AND deadline IS NOT NULL AND deadline < date('now', 'localtime') ORDER BY deadline ASC, id ASC";
-const DUE_TODAY_QUERY: &str = "SELECT title FROM tasks WHERE status != 'completed' AND deadline = date('now', 'localtime') ORDER BY id ASC";
+pub(super) const OVERDUE_TASKS_QUERY: &str = "SELECT title FROM tasks WHERE status != 'completed' AND deadline IS NOT NULL AND deadline < date('now', 'localtime') ORDER BY deadline ASC, id ASC";
+pub(super) const DUE_TODAY_QUERY: &str = "SELECT title FROM tasks WHERE status != 'completed' AND deadline = date('now', 'localtime') ORDER BY id ASC";
 
 async fn run_deadline_monitor(db: &Arc<Database>) -> Result<String, String> {
     let warnings: Vec<(i64, String, String)> = {
@@ -247,6 +247,101 @@ async fn run_deadline_monitor(db: &Arc<Database>) -> Result<String, String> {
 /// fires. Both sides are wrapped in datetime() so they are parsed instead.
 /// Shared with the test below so it cannot drift back to a string compare.
 const UPCOMING_MEETING_QUERY: &str = "SELECT summary, description, attendees FROM calendar_events WHERE datetime(start_time) > datetime('now') AND datetime(start_time) <= datetime('now', '+15 minutes') ORDER BY datetime(start_time) ASC LIMIT 1";
+
+/// Every meeting whose 15-minute alert window is open: the window of
+/// UPCOMING_MEETING_QUERY without its LIMIT. A check that runs inside a
+/// meeting's window has not missed it, whether or not that meeting was the one
+/// the alert named.
+const MEETINGS_IN_ALERT_WINDOW_QUERY: &str = "SELECT id, start_time FROM calendar_events WHERE datetime(start_time) > datetime('now') AND datetime(start_time) <= datetime('now', '+15 minutes')";
+
+/// Meetings that have started and not ended, from the calendar saved on this
+/// Mac. An all-day event (a bare date, 10 characters; see
+/// commands::calendar::TODAYS_EVENT_PREDICATE) is not a meeting anyone walks
+/// into late, so it is left out.
+const MEETINGS_IN_PROGRESS_QUERY: &str = "SELECT id, start_time, summary, end_time FROM calendar_events WHERE length(start_time) > 10 AND datetime(start_time) <= datetime('now') AND datetime(end_time) > datetime('now') ORDER BY datetime(start_time) ASC, id ASC";
+
+/// The meetings a check has already seen, one token per line.
+const MEETINGS_SEEN_KEY: &str = "meeting_alerts_seen";
+
+/// A meeting at a particular start time. A meeting that is moved is a new one.
+fn meeting_token(id: i64, start_time: &str) -> String {
+    format!("{id}@{start_time}")
+}
+
+#[derive(Clone, Debug, PartialEq)]
+struct MeetingInProgress {
+    token: String,
+    summary: String,
+    end_time: String,
+}
+
+/// Which running meetings are owed an "in progress" notice, and the list to
+/// remember for the next check.
+///
+/// A meeting is owed one when no check ran inside its alert window: the Mac
+/// was asleep, or JARVIS was closed, from before the window opened until
+/// after the meeting began. It gets one notice, on the first check that finds
+/// it running. The list holds only meetings that are near or running, so a
+/// meeting that has ended drops out of it by itself and is never announced.
+fn meetings_to_announce<'a>(
+    seen: &std::collections::HashSet<&str>,
+    in_alert_window: &[String],
+    in_progress: &'a [MeetingInProgress],
+) -> (Vec<&'a MeetingInProgress>, Vec<String>) {
+    let announce = in_progress.iter().filter(|meeting| !seen.contains(meeting.token.as_str())).collect();
+    let remember = in_alert_window.iter().cloned().chain(in_progress.iter().map(|meeting| meeting.token.clone())).collect();
+    (announce, remember)
+}
+
+fn meeting_in_progress_line<Tz>(zh: bool, meeting: &MeetingInProgress, tz: &Tz) -> String
+where
+    Tz: chrono::TimeZone,
+    Tz::Offset: std::fmt::Display,
+{
+    let until = chrono::DateTime::parse_from_rfc3339(&meeting.end_time).ok().map(|end| end.with_timezone(tz).format("%H:%M").to_string());
+    one_line(&match (zh, until) {
+        (true, Some(until)) => format!("會議進行中：{}（至 {}）", meeting.summary, until),
+        (true, None) => format!("會議進行中：{}", meeting.summary),
+        (false, Some(until)) => format!("Meeting in progress: {} (until {})", meeting.summary, until),
+        (false, None) => format!("Meeting in progress: {}", meeting.summary),
+    })
+}
+
+/// Read the saved calendar, work out which running meetings were never
+/// alerted, and remember what this check saw.
+fn missed_meetings_in_progress(db: &Database) -> Result<Vec<MeetingInProgress>, String> {
+    let conn = db.conn.lock().map_err(|e| e.to_string())?;
+    let seen: String = conn
+        .query_row("SELECT value FROM user_preferences WHERE key = ?1", [MEETINGS_SEEN_KEY], |r| r.get(0))
+        .unwrap_or_default();
+    let in_alert_window: Vec<String> = {
+        let mut stmt = conn.prepare(MEETINGS_IN_ALERT_WINDOW_QUERY).map_err(|e| e.to_string())?;
+        let rows = stmt
+            .query_map([], |r| Ok(meeting_token(r.get(0)?, &r.get::<_, String>(1)?)))
+            .map_err(|e| e.to_string())?;
+        rows.collect::<Result<_, _>>().map_err(|e| e.to_string())?
+    };
+    let in_progress: Vec<MeetingInProgress> = {
+        let mut stmt = conn.prepare(MEETINGS_IN_PROGRESS_QUERY).map_err(|e| e.to_string())?;
+        let rows = stmt
+            .query_map([], |r| {
+                Ok(MeetingInProgress { token: meeting_token(r.get(0)?, &r.get::<_, String>(1)?), summary: r.get(2)?, end_time: r.get(3)? })
+            })
+            .map_err(|e| e.to_string())?;
+        rows.collect::<Result<_, _>>().map_err(|e| e.to_string())?
+    };
+    let (announce, remember) = meetings_to_announce(&seen.lines().collect(), &in_alert_window, &in_progress);
+    let announce: Vec<MeetingInProgress> = announce.into_iter().cloned().collect();
+    // Remembered before anything is shown, like last_alerts: a notice that
+    // fails to post is not repeated at every check.
+    conn.execute(
+        "INSERT INTO user_preferences (key, value, updated_at) VALUES (?1, ?2, datetime('now'))
+         ON CONFLICT(key) DO UPDATE SET value = ?2, updated_at = datetime('now')",
+        rusqlite::params![MEETINGS_SEEN_KEY, remember.join("\n")],
+    )
+    .map_err(|e| e.to_string())?;
+    Ok(announce)
+}
 
 /// What raises the "cron job(s) failed" alert the user actually sees. Only
 /// genuine failures count: a run resolved as 'interrupted' by
@@ -361,6 +456,13 @@ async fn run_proactive_check(db: &Arc<Database>) -> Result<String, String> {
             prep.push_str(&format!(" | {}{}", label, related_tasks.join(", ")));
         }
         alerts.push(one_line(&prep));
+    }
+
+    // A meeting whose alert window passed with nobody checking (the Mac was
+    // asleep, or JARVIS was closed) gets one notice while it is still going
+    // on. Nothing for a meeting that has already ended.
+    for meeting in missed_meetings_in_progress(db)? {
+        alerts.push(meeting_in_progress_line(zh, &meeting, &chrono::Local));
     }
 
     let failed: i64 = {
@@ -622,6 +724,100 @@ mod tests {
             .collect();
 
         assert_eq!(ids, vec!["new".to_string()], "already-archived mail must not be sent to Gmail again");
+    }
+
+    fn meeting(id: i64, start: &str, end: &str) -> MeetingInProgress {
+        MeetingInProgress { token: meeting_token(id, start), summary: "Mentor sync".to_string(), end_time: end.to_string() }
+    }
+
+    /// Woken at 10:05 with a 10:00-11:00 meeting nobody was alerted about: one
+    /// notice, on that check and no later one.
+    #[test]
+    fn a_meeting_whose_alert_window_was_slept_through_is_announced_once() {
+        let running = [meeting(7, "2026-11-12T10:00:00+08:00", "2026-11-12T11:00:00+08:00")];
+        let (announce, remember) = meetings_to_announce(&Default::default(), &[], &running);
+        assert_eq!(announce, [&running[0]]);
+        assert_eq!(remember, ["7@2026-11-12T10:00:00+08:00"]);
+
+        let seen = remember.iter().map(String::as_str).collect();
+        let (announce, remember) = meetings_to_announce(&seen, &[], &running);
+        assert!(announce.is_empty(), "the next check, five minutes later");
+        assert_eq!(remember.len(), 1);
+
+        // The meeting has ended: it is in neither list, and is forgotten.
+        let (announce, remember) = meetings_to_announce(&seen, &[], &[]);
+        assert!(announce.is_empty() && remember.is_empty());
+    }
+
+    /// Awake through the alert window: the ordinary "in 15 minutes" alert
+    /// covered it, so nothing more is said when the meeting starts.
+    #[test]
+    fn a_meeting_that_was_alerted_on_time_gets_no_second_notice() {
+        let start = "2026-11-12T10:00:00+08:00";
+        let (announce, remember) = meetings_to_announce(&Default::default(), &[meeting_token(7, start)], &[]);
+        assert!(announce.is_empty());
+
+        let seen = remember.iter().map(String::as_str).collect();
+        let running = [meeting(7, start, "2026-11-12T11:00:00+08:00")];
+        let (announce, _) = meetings_to_announce(&seen, &[], &running);
+        assert!(announce.is_empty());
+
+        // Moved to a new time, it is a new meeting.
+        let moved = [meeting(7, "2026-11-12T10:30:00+08:00", "2026-11-12T11:30:00+08:00")];
+        let (announce, _) = meetings_to_announce(&seen, &[], &moved);
+        assert_eq!(announce.len(), 1);
+    }
+
+    #[test]
+    fn the_in_progress_notice_names_the_meeting_and_when_it_ends() {
+        let hkt = chrono::FixedOffset::east_opt(8 * 3600).unwrap();
+        let running = meeting(7, "2026-11-12T02:00:00Z", "2026-11-12T03:00:00Z");
+        assert_eq!(meeting_in_progress_line(false, &running, &hkt), "Meeting in progress: Mentor sync (until 11:00)");
+        assert_eq!(meeting_in_progress_line(true, &running, &hkt), "會議進行中：Mentor sync（至 11:00）");
+        let odd = MeetingInProgress { end_time: "soon".to_string(), ..running };
+        assert_eq!(meeting_in_progress_line(false, &odd, &hkt), "Meeting in progress: Mentor sync");
+    }
+
+    /// The whole path against the saved calendar: only a meeting that is
+    /// running now is found, and it is announced once.
+    #[test]
+    fn only_a_running_meeting_is_announced_from_the_saved_calendar() {
+        let db = crate::db::test_database();
+        let add = |google_id: &str, summary: &str, start_minutes: i64, end_minutes: i64| {
+            let at = |minutes: i64| (chrono::Utc::now() + chrono::TimeDelta::minutes(minutes)).to_rfc3339();
+            db.conn
+                .lock()
+                .unwrap()
+                .execute(
+                    "INSERT INTO calendar_events (google_id, summary, start_time, end_time) VALUES (?1, ?2, ?3, ?4)",
+                    rusqlite::params![google_id, summary, at(start_minutes), at(end_minutes)],
+                )
+                .unwrap();
+        };
+        add("ended", "Ended already", -90, -30);
+        add("running", "Mentor sync", -5, 55);
+        add("soon", "Starts in ten minutes", 10, 40);
+        add("later", "This afternoon", 180, 240);
+        db.conn
+            .lock()
+            .unwrap()
+            .execute(
+                "INSERT INTO calendar_events (google_id, summary, start_time, end_time) VALUES ('allday', 'Company day', date('now'), date('now', '+1 day'))",
+                [],
+            )
+            .unwrap();
+
+        let announced = missed_meetings_in_progress(&db).unwrap();
+        assert_eq!(announced.iter().map(|m| m.summary.as_str()).collect::<Vec<_>>(), ["Mentor sync"]);
+        assert!(missed_meetings_in_progress(&db).unwrap().is_empty(), "once only");
+
+        let seen: String = db
+            .conn
+            .lock()
+            .unwrap()
+            .query_row("SELECT value FROM user_preferences WHERE key = 'meeting_alerts_seen'", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(seen.lines().count(), 2, "the running meeting and the one whose alert window is open: {seen}");
     }
 
     fn cron_runs_db() -> Connection {

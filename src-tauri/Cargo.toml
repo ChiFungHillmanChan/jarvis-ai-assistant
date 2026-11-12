@@ -55,6 +55,7 @@ sysinfo = "0.33"
 async-trait = "0.1"
 tokio-util = "0.7"
 cocoa = "0.26"
+core-foundation = "0.10"
 aws-config = "1.8.16"
 aws-sdk-bedrockruntime = { version = "1.130.0", default-features = false, features = ["default-https-client", "rt-tokio"] }
 aws-smithy-types = "1.4.7"
