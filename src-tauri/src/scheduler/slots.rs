@@ -268,6 +268,24 @@ pub fn next_slot<Z: TimeZone>(
     lookup.scan(now, now + Duration::days(MAX_LOOKBACK_DAYS * 5), 1).first
 }
 
+/// How far ahead of now a handled slot or a baseline may lie before it counts
+/// as written under a clock that has since been set back. A correction from
+/// the time server is far smaller than this; a clock set back by less than
+/// this only delays a job by that much.
+pub const CLOCK_SET_BACK_TOLERANCE_SECS: i64 = 60;
+
+/// Whether the handled slot, and whether the baseline, lie ahead of `now`.
+///
+/// Both are written at or before the moment they describe, so one that lies
+/// ahead of now means the clock was ahead when it was written and has been
+/// set back since. Instants are compared, so a flight west or the end of
+/// daylight saving never looks like this: the local reading goes back there,
+/// the instant does not.
+pub fn written_ahead_of(now: DateTime<Utc>, handled: Option<&Slot>, baseline: Option<DateTime<Utc>>) -> (bool, bool) {
+    let limit = now + Duration::seconds(CLOCK_SET_BACK_TOLERANCE_SECS);
+    (handled.is_some_and(|slot| slot.with_timezone(&Utc) > limit), baseline.is_some_and(|at| at > limit))
+}
+
 /// `scheduled` only for the live tick: within two minutes of the slot, with no
 /// wake or launch since the slot. Everything else that runs a missed slot is a
 /// catch-up.
@@ -595,6 +613,32 @@ mod tests {
         let due = missed(EVERY_5_MIN, &hk(), Some("2026-01-01T00:00:00+08:00"), "2025-01-01T00:00:00+08:00", "2026-11-12T13:01:00+08:00").unwrap();
         assert_eq!(due.slot, slot("2026-11-12T13:00:00+08:00"));
         assert_eq!(due.collapsed, COLLAPSED_COUNT_CAP);
+    }
+
+    /// A handled slot or a baseline that lies ahead of now was written under a
+    /// clock that has since been set back. Travel and daylight saving never
+    /// look like that: there the local reading goes back, the instant does not.
+    #[test]
+    fn only_a_clock_set_back_puts_a_handled_slot_ahead_of_now() {
+        let now = at("2026-11-12T10:00:00+08:00");
+        let ahead = |handled: &str| written_ahead_of(now, Some(&slot(handled)), None).0;
+        assert!(ahead("2026-11-12T12:00:00+08:00"), "two hours ahead");
+        assert!(ahead("2026-12-12T09:00:00+08:00"), "a month ahead");
+        assert!(!ahead("2026-11-12T10:00:00+08:00"), "handled just now");
+        assert!(!ahead("2026-11-12T10:00:30+08:00"), "a correction from the time server");
+        assert!(!ahead("2026-11-11T09:00:00+08:00"), "yesterday");
+        assert_eq!(written_ahead_of(now, None, None), (false, false), "a job that has never run");
+        assert_eq!(written_ahead_of(now, None, Some(at("2026-12-12T09:58:00+08:00"))), (false, true), "created under a clock that was ahead");
+        assert_eq!(written_ahead_of(now, None, Some(at("2026-11-12T09:58:00+08:00"))), (false, false));
+
+        // A flight west: 09:00 in Hong Kong was handled, and an hour later the
+        // Mac reads 18:00 the day before, in Los Angeles.
+        let after_landing = at("2026-11-11T18:00:00-08:00");
+        assert_eq!(written_ahead_of(after_landing, Some(&slot("2026-11-12T09:00:00+08:00")), None), (false, false));
+        // The end of daylight saving in London: 01:30 summer time was handled,
+        // and ten minutes later the Mac reads 01:10.
+        let after_the_change = at("2026-10-25T01:10:00+00:00");
+        assert_eq!(written_ahead_of(after_the_change, Some(&slot("2026-10-25T01:30:00+01:00")), None), (false, false));
     }
 
     #[test]

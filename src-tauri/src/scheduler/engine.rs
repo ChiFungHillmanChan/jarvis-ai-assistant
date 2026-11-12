@@ -168,6 +168,9 @@ struct JobRow {
     baseline: Option<DateTime<Utc>>,
 }
 
+/// The status stored for a manual run that could not reach the network.
+const MANUAL_RUN_OFFLINE: &str = "skipped_offline_final";
+
 const SLEPT_DURING_RUN: &str = "Interrupted: the Mac went to sleep during this run";
 const INTERRUPTED_TWICE: &str = "Interrupted again on the retry; this occurrence is not retried a second time";
 
@@ -217,6 +220,29 @@ impl JobRow {
             .map_err(db_err)?;
         Ok(now)
     }
+}
+
+/// A job whose handled slot or baseline lies ahead of now was written while
+/// the Mac's clock was ahead, and the clock has since been set back. Left
+/// alone, nothing would be owed until real time reached that point: the job
+/// would stop without a word, for as long as the clock had been wrong by.
+///
+/// Such a job continues from now, with nothing caught up. A slot that ran
+/// under the wrong clock therefore runs again when its real time comes.
+/// Returns the row as it now stands, and whether it was changed.
+fn recover_from_clock_set_back(conn: &Connection, job_id: i64, mut row: JobRow, now: DateTime<Utc>) -> Result<(JobRow, bool), String> {
+    let (handled_ahead, baseline_ahead) = slots::written_ahead_of(now, row.handled.as_ref(), row.baseline);
+    if !handled_ahead && !baseline_ahead {
+        return Ok((row, false));
+    }
+    log::warn!("Cron job {}: its last handled time is ahead of the clock, so the clock was set back; continuing from now", job_id);
+    if handled_ahead {
+        conn.execute("UPDATE cron_jobs SET handled_slot = NULL WHERE id = ?1", params![job_id]).map_err(db_err)?;
+        row.handled = None;
+    }
+    conn.execute("UPDATE cron_jobs SET baseline_at = ?1 WHERE id = ?2", params![format_baseline(now), job_id]).map_err(db_err)?;
+    row.baseline = Some(now);
+    Ok((row, true))
 }
 
 /// Pause or resume a job. Pausing keeps `handled_slot`. Resuming moves the
@@ -294,6 +320,10 @@ fn has_skipped_offline(conn: &Connection, job_id: i64, slot: &Slot) -> Result<bo
 /// A slot recorded as `skipped_offline` is still owed, until a newer slot
 /// comes due. From then on the newer one is the missed slot, and the old one
 /// is final: `skipped_offline_final`. Returns whether anything changed.
+///
+/// A slot that waited and then ran when the network came back is not touched:
+/// its wait stays in the history as a wait, and is never relabelled "was not
+/// run".
 fn close_superseded_offline<Z: TimeZone>(
     conn: &Connection,
     job_id: i64,
@@ -303,7 +333,12 @@ fn close_superseded_offline<Z: TimeZone>(
 ) -> Result<bool, String> {
     let waiting: Vec<String> = {
         let mut stmt = conn
-            .prepare("SELECT DISTINCT slot FROM cron_runs WHERE job_id = ?1 AND status = 'skipped_offline' AND slot IS NOT NULL")
+            .prepare(
+                "SELECT DISTINCT waited.slot FROM cron_runs waited \
+                 WHERE waited.job_id = ?1 AND waited.status = 'skipped_offline' AND waited.slot IS NOT NULL \
+                 AND NOT EXISTS (SELECT 1 FROM cron_runs ran WHERE ran.job_id = waited.job_id AND ran.slot = waited.slot \
+                                 AND ran.status IN ('completed', 'failed'))",
+            )
             .map_err(db_err)?;
         let rows = stmt.query_map(params![job_id], |row| row.get::<_, String>(0)).map_err(db_err)?;
         rows.collect::<Result<Vec<_>, _>>().map_err(db_err)?
@@ -362,7 +397,10 @@ impl<C: Clock> Engine<C> {
             last_awake: clock.awake(),
             last_wake_or_launch: now,
             offset: clock.zone().offset_from_utc_datetime(&now.naive_utc()).fix(),
-            network: if reachability.online() { Network::Online } else { Network::Offline },
+            // A network that is up at launch has to show it stays up, like one
+            // that comes back after a wake. JARVIS opens at login, when Wi-Fi
+            // has associated a moment before DNS answers.
+            network: if reachability.online() { Network::Settling(clock.awake()) } else { Network::Offline },
         };
         Engine { db, clock, reachability, runner, state: Mutex::new(state) }
     }
@@ -377,6 +415,7 @@ impl<C: Clock> Engine<C> {
         {
             let conn = self.db.conn.lock().map_err(|e| e.to_string())?;
             if let Some(row) = JobRow::read(&conn, job_id)? {
+                let (row, _) = recover_from_clock_set_back(&conn, job_id, row, now)?;
                 let baseline = row.baseline_or_set(&conn, job_id, now)?;
                 let next = slots::next_slot(&cron, &zone, row.handled.as_ref(), baseline, now);
                 write_next_run(&conn, job_id, next.as_ref())?;
@@ -510,20 +549,33 @@ impl<C: Clock> Engine<C> {
             (Err(error), _) => (None, Some(error.as_str())),
         };
 
+        // A run with a slot that ends offline is still owed and runs when the
+        // network is back. A manual run belongs to no slot, so nothing runs it
+        // again: for it, "no network" is the end, and the row must say so.
+        let stored_status = match (status, &run.slot) {
+            (RunStatus::SkippedOffline, None) => MANUAL_RUN_OFFLINE,
+            _ => status.as_str(),
+        };
+
         let Ok(mut state) = self.state.lock() else { return };
+        // One transaction: the run's outcome and the slot it settles are
+        // written together or not at all. Written apart, a crash between the
+        // two left a finished run with its slot still owed, and the slot ran a
+        // second time on the next launch.
         let recorded = self.db.conn.lock().map_err(|e| e.to_string()).and_then(|conn| {
-            conn.execute(
+            let tx = conn.unchecked_transaction().map_err(db_err)?;
+            tx.execute(
                 "UPDATE cron_runs SET finished_at = datetime('now'), status = ?1, result = ?2, error = ?3 WHERE id = ?4",
-                params![status.as_str(), result, error, run.run_id],
+                params![stored_status, result, error, run.run_id],
             )
             .map_err(db_err)?;
-            conn.execute("UPDATE cron_jobs SET last_run = datetime('now') WHERE id = ?1", params![run.job_id])
+            tx.execute("UPDATE cron_jobs SET last_run = datetime('now') WHERE id = ?1", params![run.job_id])
                 .map_err(db_err)?;
             if let Some(slot) = run.slot.as_ref().filter(|_| status.is_final()) {
-                mark_handled(&conn, run.job_id, slot, now, &self.clock.zone())?;
+                mark_handled(&tx, run.job_id, slot, now, &self.clock.zone())?;
             }
-            conn.execute(CRON_RUNS_RETENTION_QUERY, params![run.job_id]).map_err(db_err)?;
-            Ok(())
+            tx.execute(CRON_RUNS_RETENTION_QUERY, params![run.job_id]).map_err(db_err)?;
+            tx.commit().map_err(db_err)
         });
         if let Err(e) = recorded {
             log::error!("Could not record the outcome of cron job {}: {}", run.job_id, e);
@@ -627,6 +679,11 @@ fn settle<Z: TimeZone>(conn: &Connection, job_id: i64, job: &mut Job, moment: &M
                 return Ok(None);
             }
         };
+        let (row, clock_was_set_back) = recover_from_clock_set_back(conn, job_id, row, now)?;
+        if clock_was_set_back {
+            // Whatever was waiting for the network was a slot of the wrong clock.
+            job.wait = None;
+        }
         let baseline = row.baseline_or_set(conn, job_id, now)?;
         let next = slots::next_slot(&job.cron, &moment.zone, row.handled.as_ref(), baseline, now);
         let next_check = Some(next.as_ref().map_or(now + TimeDelta::days(1), |slot| slot.with_timezone(&Utc)));
@@ -730,6 +787,12 @@ mod tests {
             let mut wall = self.wall.lock().unwrap();
             assert!(at(text) > *wall, "a sleep ends later than it began");
             *wall = at(text);
+        }
+
+        /// Somebody, or a bad time server, sets the clock: the wall clock
+        /// moves, forwards or backwards, and awake time does not.
+        fn set(&self, text: &str) {
+            *self.wall.lock().unwrap() = at(text);
         }
 
         fn set_zone(&self, zone: TestZone) {
@@ -1423,6 +1486,181 @@ mod tests {
         sim.add_job("deadline_monitor", "0 30 1 * * *");
         sim.awake_until("2026-10-25T03:00:00+00:00").await;
         assert_eq!(sim.ran(), ["scheduled 2026-10-25T01:30:00+01:00"]);
+    }
+
+    // Case: launch, with the network already reported up. JARVIS opens at
+    // login, when Wi-Fi has associated a moment before DNS answers.
+    #[tokio::test]
+    async fn a_network_job_waits_for_the_network_to_settle_after_a_launch() {
+        let sim = Sim::start("2026-11-12T09:58:00+08:00");
+        let job = sim.add_job("email_sync", EVERY_5_MIN);
+        sim.awake_until("2026-11-12T10:00:30+08:00").await;
+
+        // Quit, and opened again half an hour later with the network up.
+        sim.clock.pass(1_800);
+        let sim = sim.relaunch();
+        assert_eq!(sim.tick().await, 0, "not on the launch tick");
+        sim.awake_for(NETWORK_SETTLE_SECS - 1).await;
+        assert_eq!(sim.ran().len(), 1, "not before the network has stayed up for the settle time");
+
+        sim.awake_for(1).await;
+        assert_eq!(sim.ran(), ["scheduled 2026-11-12T10:00:00+08:00", "catch_up 2026-11-12T10:30:00+08:00"]);
+        assert!(!sim.history(job).iter().any(|row| row.starts_with("skipped_offline")), "a few seconds of settling is not a wait worth recording");
+        assert_eq!(sim.failed_runs(), 0);
+    }
+
+    /// Local jobs do not wait for it: task alerts and reminders fire on the
+    /// launch tick.
+    #[tokio::test]
+    async fn a_local_job_runs_on_the_launch_tick() {
+        let sim = Sim::start("2026-11-12T09:58:00+08:00");
+        let local = sim.add_job("proactive_check", EVERY_5_MIN);
+        let remote = sim.add_job("email_sync", EVERY_5_MIN);
+        sim.awake_until("2026-11-12T10:00:30+08:00").await;
+
+        sim.clock.pass(1_800);
+        let sim = sim.relaunch();
+        assert_eq!(sim.tick().await, 1, "the local job, and only that");
+        assert!(sim.history(local).contains(&"completed catch_up 2026-11-12T10:30:00+08:00".to_string()));
+        assert_eq!(sim.history(remote), ["completed scheduled 2026-11-12T10:00:00+08:00"], "the sync waits for the network to settle");
+    }
+
+    // Case: the clock is set forward by mistake, jobs run under it, and it is
+    // put right. Their handled slots are then ahead of the clock.
+    #[tokio::test]
+    async fn a_clock_set_forward_and_back_does_not_stop_the_jobs() {
+        let sim = Sim::start("2026-11-12T08:58:00+08:00");
+        let frequent = sim.add_job("proactive_check", EVERY_5_MIN);
+        let daily = sim.add_job("deadline_monitor", DAILY_0900);
+        sim.awake_until("2026-11-12T09:01:00+08:00").await;
+        assert_eq!(sim.ran().len(), 2, "09:00, both jobs");
+
+        // A month ahead. Both jobs run under the wrong clock.
+        sim.clock.set("2026-12-12T09:04:00+08:00");
+        sim.awake_until("2026-12-12T09:06:00+08:00").await;
+        assert_eq!(sim.handled(frequent).as_deref(), Some("2026-12-12T09:05:00+08:00"));
+        assert_eq!(sim.handled(daily).as_deref(), Some("2026-12-12T09:00:00+08:00"));
+        let ran_under_the_wrong_clock = sim.ran().len();
+
+        // Put right. Nothing is caught up, and both go on from here.
+        sim.clock.set("2026-11-12T09:07:00+08:00");
+        assert_eq!(sim.tick().await, 0, "nothing to catch up");
+        assert_eq!(sim.column(frequent, "next_run").as_deref(), Some("2026-11-12 01:10:00"), "09:10 today, not next month");
+        assert_eq!(sim.column(daily, "next_run").as_deref(), Some("2026-11-13 01:00:00"), "09:00 tomorrow, not next month");
+
+        sim.awake_until("2026-11-12T09:11:00+08:00").await;
+        assert_eq!(sim.ran()[ran_under_the_wrong_clock..], ["scheduled 2026-11-12T09:10:00+08:00"], "the frequent job runs at its next real slot");
+
+        sim.clock.sleep_until("2026-11-13T08:59:30+08:00");
+        sim.awake_until("2026-11-13T09:01:00+08:00").await;
+        assert_eq!(
+            sim.history(daily).last().map(String::as_str),
+            Some("completed scheduled 2026-11-13T09:00:00+08:00"),
+            "the set-time job runs at its next real slot"
+        );
+        assert_eq!(sim.history(frequent).last().map(String::as_str), Some("completed scheduled 2026-11-13T09:00:00+08:00"));
+        assert_eq!(sim.failed_runs(), 0);
+    }
+
+    /// The same when the clock was put right while JARVIS was closed: the
+    /// launch notices it.
+    #[tokio::test]
+    async fn a_clock_put_right_while_jarvis_was_closed_is_noticed_at_launch() {
+        let sim = Sim::start("2026-11-12T08:58:00+08:00");
+        let daily = sim.add_job("deadline_monitor", DAILY_0900);
+        sim.clock.set("2026-11-20T10:00:00+08:00");
+        sim.awake_for(5).await;
+        assert_eq!(sim.handled(daily).as_deref(), Some("2026-11-20T09:00:00+08:00"), "caught up under the wrong clock");
+
+        sim.clock.set("2026-11-12T10:10:00+08:00");
+        let sim = sim.relaunch();
+        assert_eq!(sim.column(daily, "next_run").as_deref(), Some("2026-11-13 01:00:00"), "tomorrow's 09:00, written at registration");
+        assert_eq!(sim.handled(daily), None);
+
+        sim.clock.sleep_until("2026-11-13T08:59:30+08:00");
+        sim.awake_until("2026-11-13T09:01:00+08:00").await;
+        assert_eq!(sim.ran().last().map(String::as_str), Some("scheduled 2026-11-13T09:00:00+08:00"));
+    }
+
+    /// A job created while the clock was ahead has a baseline in the future,
+    /// which would hold it back in the same way.
+    #[tokio::test]
+    async fn a_job_created_under_a_clock_that_was_ahead_still_runs() {
+        let sim = Sim::start("2026-12-12T09:58:00+08:00");
+        sim.add_job("proactive_check", EVERY_5_MIN);
+        sim.clock.set("2026-11-12T09:58:00+08:00");
+        sim.awake_until("2026-11-12T10:00:30+08:00").await;
+        assert_eq!(sim.ran(), ["scheduled 2026-11-12T10:00:00+08:00"]);
+    }
+
+    /// A slot that waited for the network and then ran keeps its history: the
+    /// wait is not relabelled "not run" when the next slot comes.
+    #[tokio::test]
+    async fn a_wait_that_ended_in_a_run_is_never_relabelled_as_not_run() {
+        let sim = Sim::start("2026-11-12T09:59:00+08:00");
+        let job = sim.add_job("github_digest", HOURLY);
+        sim.network.set(false);
+        sim.awake_until("2026-11-12T10:06:00+08:00").await;
+        sim.network.set(true);
+        sim.awake_for(60).await;
+        let ten = ["skipped_offline - 2026-11-12T10:00:00+08:00", "completed catch_up 2026-11-12T10:00:00+08:00"];
+        assert_eq!(sim.history(job), ten);
+
+        // 11:00 and 12:00 come and run on time.
+        sim.awake_until("2026-11-12T12:01:00+08:00").await;
+        assert_eq!(
+            sim.history(job),
+            [ten[0], ten[1], "completed scheduled 2026-11-12T11:00:00+08:00", "completed scheduled 2026-11-12T12:00:00+08:00"]
+        );
+    }
+
+    /// A manual run belongs to no slot, so nothing runs it again. When it
+    /// ends for lack of a network its row says it did not go ahead, not that
+    /// it is waiting; and it is not a failure the user is alerted to.
+    #[tokio::test]
+    async fn a_manual_run_that_ends_offline_is_not_recorded_as_waiting() {
+        let sim = Sim::start("2026-11-12T10:01:00+08:00");
+        let job = sim.add_job("email_sync", HOURLY);
+        sim.network.set(false);
+        sim.jobs.next_run_will(|| Err("Gmail request timed out".to_string()));
+        let run = sim.engine.run_now(job).unwrap();
+        sim.engine.execute(run).await;
+        assert_eq!(sim.history(job), ["skipped_offline_final manual -"]);
+        assert_eq!(sim.failed_runs(), 0);
+
+        // The network returns: the manual run is not started again.
+        sim.network.set(true);
+        sim.awake_for(120).await;
+        assert_eq!(sim.ran(), ["manual -"]);
+        assert_eq!(sim.history(job), ["skipped_offline_final manual -"]);
+    }
+
+    /// The outcome of a run and the slot it settles are one write. If the
+    /// slot cannot be marked handled, the run is not recorded as finished
+    /// either: a finished run with its slot still owed is how one occurrence
+    /// came to run twice.
+    #[tokio::test]
+    async fn a_run_outcome_is_written_whole_or_not_at_all() {
+        let sim = Sim::start("2026-11-12T08:59:00+08:00");
+        let job = sim.add_job("deadline_monitor", DAILY_0900);
+        sim.db
+            .conn
+            .lock()
+            .unwrap()
+            .execute_batch(
+                "CREATE TRIGGER handled_slot_cannot_be_written BEFORE UPDATE OF handled_slot ON cron_jobs \
+                 BEGIN SELECT RAISE(ABORT, 'disk full'); END;",
+            )
+            .unwrap();
+        sim.clock.pass(60);
+        let runs = sim.engine.tick();
+        assert_eq!(runs.len(), 1);
+        for run in runs {
+            sim.engine.execute(run).await;
+        }
+        assert_eq!(sim.history(job), ["running scheduled 2026-11-12T09:00:00+08:00"], "not half recorded");
+        assert_eq!(sim.column(job, "last_run"), None);
+        assert_eq!(sim.handled(job), None);
     }
 
     #[test]
