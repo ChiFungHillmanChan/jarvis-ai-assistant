@@ -3,7 +3,7 @@ JARVIS v0.5.12
 This update makes automations dependable across restarts, sleep and quitting JARVIS. Nothing runs while your Mac is asleep; JARVIS catches up after it wakes.
 
 New
-- Open at login: JARVIS now opens when you log in to your Mac, so automations keep running after a restart. Turn it off in Settings > Background; once you turn it off, it stays off.
+- Open at login: JARVIS now opens when you log in to your Mac, so automations keep running after a restart. It turns on by itself once JARVIS is in your Applications folder. Turn it off in Settings > Background; once you turn it off, it stays off.
 - Daily briefing: turn it on in Settings > Background and choose a time (08:30 unless you change it). JARVIS shows a notification and a briefing on the Automation page with today's meetings, tasks and unread mail, and adds an AI summary when the network is available. It is read aloud only when it runs on time, with the Mac awake and the screen unlocked. If the Mac was asleep or JARVIS was closed at that time, the briefing is shown once afterwards and is not read aloud.
 - Keep awake on mains power (off unless you turn it on): while it is plugged in, the Mac does not go to sleep on its own. It does not help with the lid closed.
 - The Automations page has a Run now button, and the run history says whether a run was on time, caught up afterwards or started by hand.
