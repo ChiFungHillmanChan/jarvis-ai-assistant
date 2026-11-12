@@ -1,55 +1,7 @@
 import { memo } from "react";
 import { useTauriCommand } from "../hooks/useTauriCommand";
 import { useUiLocale } from "../i18n";
-
-interface ProviderBreakdown {
-  provider: string;
-  turns: number;
-  /** null for a local model: free, so the tokens are shown instead. */
-  usd_cost: number | null;
-  input_tokens: number;
-  output_tokens: number;
-  /** Turns whose model has no price; left out of usd_cost. */
-  price_unknown_turns: number;
-}
-
-interface ExpensiveTurn {
-  ts: number;
-  provider: string;
-  model_id: string;
-  workload: string;
-  feature: string;
-  input_tokens: number;
-  output_tokens: number;
-  /** null for a local model, and when the price is unknown. */
-  usd_cost: number | null;
-  price_unknown: boolean;
-  latency_ms: number;
-}
-
-interface CostStats {
-  total_turns_30d: number;
-  total_usd_30d: number;
-  avg_usd_per_turn_30d: number;
-  local_turns_30d: number;
-  local_share_pct: number;
-  price_unknown_turns_30d: number;
-  by_provider_30d: ProviderBreakdown[];
-  top_expensive_30d: ExpensiveTurn[];
-}
-
-interface BlendedCost {
-  total_usd: number;
-  active_days: number;
-  implied_monthly_usd: number;
-}
-
-function formatUsd(usd: number): string {
-  if (usd === 0) return "$0";
-  if (usd < 0.01) return `$${usd.toFixed(4)}`;
-  if (usd < 1) return `$${usd.toFixed(3)}`;
-  return `$${usd.toFixed(2)}`;
-}
+import { formatUsd, monthlyLine, usageHeadline, type BlendedCost, type CostStats } from "../lib/usage";
 
 function shortModel(id: string): string {
   if (id.length <= 28) return id;
@@ -57,77 +9,59 @@ function shortModel(id: string): string {
   return parts[parts.length - 1] || id.slice(-28);
 }
 
+/**
+ * Usage recorded on this Mac over the last 30 days: one row per request,
+ * written by the backend as each request is answered (ai/cost.rs). Money is
+ * shown only where the price is known; see lib/usage.ts.
+ */
 export default memo(function CostPanel() {
   const { text } = useUiLocale();
   const { data, error, loading } = useTauriCommand<CostStats>("get_cost_stats");
   const { data: blended, error: blendedError } = useTauriCommand<BlendedCost>("get_blended_cost", { days: 30 });
+  const header = <div style={styles.header}>{text("Last 30 days", "最近 30 日")}</div>;
 
   if (loading) {
-    return (
-      <div style={styles.container}>
-        <div style={styles.header}>INFERENCE COST · 30D</div>
-        <div style={styles.loading}>loading...</div>
-      </div>
-    );
+    return <div style={styles.container}>{header}<div style={styles.muted}>{text("Loading…", "載入中…")}</div></div>;
   }
   if (error) {
-    return (
-      <div style={styles.container}>
-        <div style={styles.header}>INFERENCE COST · 30D</div>
-        <div style={styles.error}>{error}</div>
-      </div>
-    );
+    return <div style={styles.container}>{header}<div role="alert" style={styles.error}>{error}</div></div>;
   }
   if (!data || data.total_turns_30d === 0) {
-    return (
-      <div style={styles.container}>
-        <div style={styles.header}>INFERENCE COST · 30D</div>
-        <div style={styles.empty}>
-          No inference recorded yet. Send a chat to start tracking.
-        </div>
-      </div>
-    );
+    return <div style={styles.container}>{header}<div style={styles.muted}>{text("No usage recorded on this Mac yet.", "此 Mac 尚未記錄任何用量。")}</div></div>;
   }
 
+  const headline = usageHeadline(data, text);
   return (
     <div style={styles.container}>
-      <div style={styles.header}>INFERENCE COST · 30D</div>
+      {header}
       <div style={styles.kpiRow}>
-        <Kpi label="Total" value={formatUsd(data.total_usd_30d)} />
-        <Kpi label="Per turn" value={formatUsd(data.avg_usd_per_turn_30d)} />
-        <Kpi label="Turns" value={String(data.total_turns_30d)} />
-        <Kpi
-          label="Local share"
-          value={`${data.local_share_pct.toFixed(0)}%`}
-          highlight={data.local_share_pct >= 50}
-        />
+        <Kpi label={text("Total", "總額")} value={headline.total} />
+        <Kpi label={headline.perRequestLabel} value={headline.perRequest} />
+        <Kpi label={text("Requests", "請求次數")} value={String(data.total_turns_30d)} />
+        <Kpi label={text("Local model share", "本機模型佔比")} value={`${data.local_share_pct.toFixed(0)}%`} />
       </div>
 
-      {blended && (
-        <div style={styles.blended}>
-          Implied blended: ${blended.implied_monthly_usd.toFixed(2)}/mo  ({blended.active_days}d active)
-        </div>
-      )}
+      {blended && <div style={styles.note}>{monthlyLine(blended, text)}</div>}
       {!blended && blendedError && (
-        <div style={styles.blended}>Implied blended: unavailable ({blendedError})</div>
+        <div style={styles.note}>{text(`Monthly rate unavailable (${blendedError})`, `未能計算每月費用（${blendedError}）`)}</div>
       )}
       {data.price_unknown_turns_30d > 0 && (
-        <div style={styles.blended}>
+        <div style={styles.note}>
           {text(
-            `${data.price_unknown_turns_30d} with price unknown, not in the total`,
-            `${data.price_unknown_turns_30d} 次價格未知，未計入總額`,
+            `${data.price_unknown_turns_30d} requests with price unknown, not in the total`,
+            `${data.price_unknown_turns_30d} 次請求價格未知，未計入總額`,
           )}
         </div>
       )}
 
-      <div style={styles.subheader}>BY PROVIDER</div>
-      <div style={styles.providerList}>
+      <div style={styles.subheader}>{text("By provider", "按供應商")}</div>
+      <div style={styles.list}>
         {data.by_provider_30d.map((p) => (
-          <div key={p.provider} style={styles.providerRow}>
-            <span style={styles.providerName}>{p.provider}</span>
-            <span style={styles.providerTurns}>{p.turns}</span>
-            <span style={styles.providerCost}>
-              {p.usd_cost === null ? `${(p.input_tokens + p.output_tokens).toLocaleString()} tok` : p.price_unknown_turns === p.turns ? text("price unknown", "價格未知") : formatUsd(p.usd_cost)}
+          <div key={p.provider} style={styles.row}>
+            <span style={styles.name}>{p.provider}</span>
+            <span style={styles.muted}>{p.turns}</span>
+            <span style={styles.amount}>
+              {p.usd_cost === null ? `${(p.input_tokens + p.output_tokens).toLocaleString()} tokens` : p.price_unknown_turns === p.turns ? text("price unknown", "價格未知") : formatUsd(p.usd_cost)}
               {p.usd_cost !== null && p.price_unknown_turns > 0 && p.price_unknown_turns < p.turns ? text(" + price unknown", " + 價格未知") : ""}
             </span>
           </div>
@@ -136,15 +70,13 @@ export default memo(function CostPanel() {
 
       {data.top_expensive_30d.length > 0 && (
         <>
-          <div style={styles.subheader}>TOP 5 EXPENSIVE TURNS</div>
-          <div style={styles.expensiveList}>
+          <div style={styles.subheader}>{text("Most expensive requests", "費用最高的請求")}</div>
+          <div style={styles.list}>
             {data.top_expensive_30d.map((t, i) => (
-              <div key={i} style={styles.expensiveRow}>
-                <span style={styles.expensiveModel}>{shortModel(t.model_id)}</span>
-                <span style={styles.expensiveTokens}>
-                  {t.input_tokens}+{t.output_tokens}
-                </span>
-                <span style={styles.expensiveCost}>{t.price_unknown ? text("price unknown", "價格未知") : t.usd_cost === null ? "free" : formatUsd(t.usd_cost)}</span>
+              <div key={i} style={styles.row}>
+                <span style={styles.model}>{shortModel(t.model_id)}</span>
+                <span style={styles.muted}>{t.input_tokens}+{t.output_tokens}</span>
+                <span style={styles.amount}>{t.price_unknown ? text("price unknown", "價格未知") : t.usd_cost === null ? text("free", "免費") : formatUsd(t.usd_cost)}</span>
               </div>
             ))}
           </div>
@@ -154,62 +86,36 @@ export default memo(function CostPanel() {
   );
 });
 
-function Kpi({ label, value, highlight }: { label: string; value: string; highlight?: boolean }) {
+function Kpi({ label, value }: { label: string; value: string }) {
   return (
     <div style={styles.kpi}>
       <div style={styles.kpiLabel}>{label}</div>
-      <div style={{ ...styles.kpiValue, ...(highlight ? { color: "rgba(0, 220, 180, 1)" } : {}) }}>
-        {value}
-      </div>
+      <div style={styles.kpiValue}>{value}</div>
     </div>
   );
 }
 
+// Theme variables, so the panel reads in the light and the dark appearance.
 const styles: Record<string, React.CSSProperties> = {
   container: {
-    background: "rgba(0, 30, 50, 0.4)",
-    border: "1px solid rgba(0, 180, 255, 0.2)",
+    border: "1px solid var(--border-primary)",
     borderRadius: 6,
     padding: 14,
-    fontFamily: "JetBrains Mono, monospace",
-    fontSize: 12,
-    color: "rgba(180, 220, 255, 0.9)",
+    fontSize: 13,
+    color: "var(--text-primary)",
   },
-  header: {
-    fontSize: 11,
-    letterSpacing: 1.5,
-    color: "rgba(0, 180, 255, 0.8)",
-    marginBottom: 12,
-  },
-  subheader: {
-    fontSize: 10,
-    letterSpacing: 1.2,
-    color: "rgba(0, 180, 255, 0.5)",
-    marginTop: 14,
-    marginBottom: 6,
-  },
-  blended: { fontSize: 11, color: "rgba(180, 220, 255, 0.7)", marginTop: 10 },
-  kpiRow: { display: "flex", gap: 16 },
+  header: { fontSize: 12, color: "var(--text-secondary)", marginBottom: 12 },
+  subheader: { fontSize: 12, color: "var(--text-secondary)", marginTop: 16, marginBottom: 6 },
+  note: { fontSize: 12, color: "var(--text-secondary)", marginTop: 10, lineHeight: 1.5 },
+  kpiRow: { display: "flex", flexWrap: "wrap", gap: 20 },
   kpi: { display: "flex", flexDirection: "column", gap: 2 },
-  kpiLabel: { fontSize: 10, color: "rgba(180, 220, 255, 0.5)", letterSpacing: 1 },
-  kpiValue: { fontSize: 16, color: "rgba(220, 240, 255, 1)" },
-  providerList: { display: "flex", flexDirection: "column", gap: 4 },
-  providerRow: { display: "grid", gridTemplateColumns: "1fr auto auto", gap: 12, alignItems: "center" },
-  providerName: { color: "rgba(220, 240, 255, 0.9)" },
-  providerTurns: { color: "rgba(180, 220, 255, 0.5)", fontSize: 11 },
-  providerCost: { color: "rgba(0, 220, 180, 0.9)", textAlign: "right" },
-  expensiveList: { display: "flex", flexDirection: "column", gap: 3 },
-  expensiveRow: {
-    display: "grid",
-    gridTemplateColumns: "1fr auto auto",
-    gap: 12,
-    fontSize: 11,
-    color: "rgba(180, 220, 255, 0.7)",
-  },
-  expensiveModel: { overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" },
-  expensiveTokens: { color: "rgba(180, 220, 255, 0.4)" },
-  expensiveCost: { color: "rgba(255, 180, 100, 0.9)", textAlign: "right" },
-  loading: { color: "rgba(180, 220, 255, 0.4)", fontSize: 11 },
-  error: { color: "rgba(255, 100, 100, 0.8)", fontSize: 11 },
-  empty: { color: "rgba(180, 220, 255, 0.4)", fontSize: 11, lineHeight: 1.5 },
+  kpiLabel: { fontSize: 11, color: "var(--text-secondary)" },
+  kpiValue: { fontSize: 16, fontFamily: "var(--font-mono)", color: "var(--text-primary)" },
+  list: { display: "flex", flexDirection: "column", gap: 4 },
+  row: { display: "grid", gridTemplateColumns: "minmax(0, 1fr) auto auto", gap: 12, alignItems: "center", fontFamily: "var(--font-mono)", fontSize: 12 },
+  name: { color: "var(--text-primary)", overflowWrap: "anywhere" },
+  model: { color: "var(--text-primary)", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" },
+  muted: { color: "var(--text-secondary)", fontSize: 12 },
+  amount: { color: "var(--text-primary)", textAlign: "right" },
+  error: { color: "var(--accent-urgent)", fontSize: 12 },
 };

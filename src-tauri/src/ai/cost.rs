@@ -241,19 +241,34 @@ fn insert_row(
     }
 }
 
-/// 回傳(自 since_ts 起嘅 usd_cost_micro 總和, 有 inference 嘅唯一 UTC 日數)。
+/// Spend recorded since a time, from the rows whose price is known, and how
+/// much usage had no price.
+#[derive(Debug, PartialEq)]
+pub struct Blended {
+    /// Sum of usd_cost_micro: only rows whose price is known have one.
+    pub total_micro: i64,
+    /// Distinct UTC days with at least one row whose price is known. A day
+    /// with only unpriced usage is left out: counting it would lower the
+    /// daily average by spend that is not in the total.
+    pub active_days: i64,
+    /// Requests whose price is unknown. They are in neither figure above, so
+    /// the total is low by what they cost.
+    pub price_unknown_turns: i64,
+}
+
 /// Errors propagate so a telemetry failure never renders as a real "$0.00/mo".
-pub fn blended_cost_micro(db: &crate::db::Database, since_ts: i64) -> Result<(i64, i64), String> {
+pub fn blended_cost_micro(db: &crate::db::Database, since_ts: i64) -> Result<Blended, String> {
     let conn = db.conn.lock().map_err(|e| {
         log::warn!("cost: db lock failed reading blended cost (since_ts={since_ts}): {e}");
         format!("db lock failed: {e}")
     })?;
     conn.query_row(
         "SELECT COALESCE(SUM(usd_cost_micro), 0),
-                COUNT(DISTINCT CAST(ts / 86400 AS INTEGER))
+                COUNT(DISTINCT CASE WHEN COALESCE(price_unknown, 0) = 0 THEN CAST(ts / 86400 AS INTEGER) END),
+                COALESCE(SUM(COALESCE(price_unknown, 0)), 0)
          FROM inference_metrics WHERE ts >= ?1",
         rusqlite::params![since_ts],
-        |r| Ok((r.get(0)?, r.get(1)?)),
+        |r| Ok(Blended { total_micro: r.get(0)?, active_days: r.get(1)?, price_unknown_turns: r.get(2)? }),
     )
     .map_err(|e| {
         log::warn!("cost: blended cost query failed: {e}");
@@ -296,16 +311,31 @@ pub(crate) mod tests {
     #[test]
     fn blended_sums_and_counts_active_days() {
         let db = temp_metrics_db(SEED_ROWS);
-        let (total, days) = blended_cost_micro(&db, 0).unwrap();
+        let Blended { total_micro: total, active_days: days, .. } = blended_cost_micro(&db, 0).unwrap();
         assert_eq!(total, 1_750_000); // 1.75 USD
         assert_eq!(days, 2);          // 兩個唔同 UTC 日
+    }
+
+    /// Unpriced usage is counted, left out of the money, and does not add
+    /// days that would lower the average. Day A has priced and unpriced
+    /// rows, day B only unpriced ones.
+    #[test]
+    fn blended_counts_unpriced_usage_without_lowering_the_average() {
+        let db = temp_metrics_db(
+            "INSERT INTO inference_metrics (ts, usd_cost_micro, price_unknown) VALUES
+               (1000, 500000, 0),
+               (1500, NULL, 1),
+               (90000, NULL, 1),
+               (90500, NULL, 1);",
+        );
+        assert_eq!(blended_cost_micro(&db, 0).unwrap(), Blended { total_micro: 500_000, active_days: 1, price_unknown_turns: 3 });
     }
 
     #[test]
     fn blended_since_ts_excludes_rows_before_window() {
         let db = temp_metrics_db(SEED_ROWS);
         // Window opens after both day-A rows: only the 90000-ts row counts.
-        let (total, days) = blended_cost_micro(&db, 50_000).unwrap();
+        let Blended { total_micro: total, active_days: days, .. } = blended_cost_micro(&db, 50_000).unwrap();
         assert_eq!(total, 1_000_000);
         assert_eq!(days, 1);
     }
@@ -545,7 +575,7 @@ pub(crate) mod tests {
     #[test]
     fn blended_empty_table_returns_zero_zero() {
         let db = temp_metrics_db("");
-        let (total, days) = blended_cost_micro(&db, 0).unwrap();
+        let Blended { total_micro: total, active_days: days, .. } = blended_cost_micro(&db, 0).unwrap();
         assert_eq!((total, days), (0, 0));
     }
 

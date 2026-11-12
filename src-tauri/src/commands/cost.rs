@@ -164,9 +164,14 @@ fn stats_since(conn: &rusqlite::Connection, cutoff: i64) -> Result<CostStats, St
 
 #[derive(serde::Serialize)]
 pub struct BlendedCost {
+    /// Over the requests whose price is known.
     pub total_usd: f64,
+    /// Days with usage whose price is known.
     pub active_days: i64,
     pub implied_monthly_usd: f64,
+    /// Requests with no price. They are left out of the figures above, which
+    /// are therefore low by what these cost; the panel says so.
+    pub price_unknown_turns: i64,
 }
 
 #[tauri::command]
@@ -176,13 +181,17 @@ pub async fn get_blended_cost(
 ) -> Result<BlendedCost, String> {
     let days = days.clamp(1, 3650);
     let now = chrono::Utc::now().timestamp();
-    let since = now - days * 86400;
-    let (total_micro, active_days) = crate::ai::cost::blended_cost_micro(&db, since)?;
-    let total_usd = total_micro as f64 / 1_000_000.0;
+    blended_since(&db, now - days * 86400)
+}
+
+fn blended_since(db: &crate::db::Database, since: i64) -> Result<BlendedCost, String> {
+    let blended = crate::ai::cost::blended_cost_micro(db, since)?;
+    let total_usd = blended.total_micro as f64 / 1_000_000.0;
     Ok(BlendedCost {
         total_usd,
-        active_days,
-        implied_monthly_usd: implied_monthly_usd(total_usd, active_days),
+        active_days: blended.active_days,
+        implied_monthly_usd: implied_monthly_usd(total_usd, blended.active_days),
+        price_unknown_turns: blended.price_unknown_turns,
     })
 }
 
@@ -227,6 +236,25 @@ mod tests {
         let unknown: Vec<(&str, Option<f64>, bool)> = stats.top_expensive_30d.iter().filter(|t| t.price_unknown).map(|t| (t.feature.as_str(), t.usd_cost, t.price_unknown)).collect();
         assert_eq!(unknown.len(), 2);
         assert!(unknown.iter().all(|(_, cost, _)| cost.is_none()), "{unknown:?}");
+    }
+
+    /// The blended figure says how many requests it could not price, so a low
+    /// figure is never silently low.
+    #[test]
+    fn the_blended_cost_says_how_much_usage_had_no_price() {
+        let db = crate::db::test_database();
+        let now = chrono::Utc::now().timestamp();
+        db.conn
+            .lock()
+            .unwrap()
+            .execute_batch(&format!(
+                "INSERT INTO inference_metrics (ts, workload, model_id, input_tokens, output_tokens, latency_ms, provider, usd_cost_micro, feature, price_unknown) VALUES
+                    ({now}, 'tools', 'kimi-k2', 2000, 20, 5, 'compat:api.moonshot.ai', NULL, 'chat', 1),
+                    ({now}, 'tools', 'kimi-k2', 1000, 10, 5, 'compat:api.moonshot.ai', NULL, 'chat', 1);"
+            ))
+            .unwrap();
+        let blended = blended_since(&db, now - 60).unwrap();
+        assert_eq!((blended.total_usd, blended.active_days, blended.implied_monthly_usd, blended.price_unknown_turns), (0.0, 0, 0.0, 2));
     }
 
     #[test]

@@ -25,6 +25,7 @@ export {
   Palette,
   CreditCard,
   HardDrive,
+  BarChart3,
 } from "lucide-react";
 
 interface MarkProps { size?: number }

@@ -59,12 +59,13 @@ import ChooseAi from "../components/ChooseAi";
 import { useAiModels } from "../lib/ai-models";
 import { aiServiceLabel, currentAi, type CurrentAi } from "../lib/ai-choice";
 import AccountPanel from "../components/AccountPanel";
+import CostPanel from "../components/CostPanel";
 import { UserRound } from "lucide-react";
 import { useWorkspace, useWorkspaceValue } from "../workspace/WorkspaceContext";
 import "./settings-workspace.css";
 import { MAX_ADDRESS_CHARS, MAX_INSTRUCTIONS_CHARS, PERSONA_CHOICES, personaLabel, personaValue, type PersonaKey } from "../lib/persona";
 import { canSwitchListening, voiceStateKind } from "../lib/always-listening";
-import { Cpu, Key, Globe, Gem, Mic, Bot, Palette, HardDrive, GithubMark, NotionMark } from "../components/icons";
+import { Cpu, Key, Globe, Gem, Mic, Bot, Palette, HardDrive, BarChart3, GithubMark, NotionMark } from "../components/icons";
 
 const API_KEY_PROVIDERS = [
   { id: "gemini", label: "Google Gemini", help: "Gemini chat and speech-to-text" },
@@ -742,6 +743,7 @@ export default function Settings() {
   const SECTIONS = [
     { id: "account", label: t("accountSection"), icon: <UserRound size={17} /> },
     { id: "ai", label: text("Models", "模型"), icon: <Cpu size={17} /> },
+    { id: "usage", label: text("Usage", "用量"), icon: <BarChart3 size={17} /> },
     { id: "keys", label: t("apiKeys"), icon: <Key size={17} /> },
     { id: "google", label: text("Assistant Google", "助手 Google"), icon: <Globe size={17} /> },
     { id: "notion", label: "Notion", icon: <NotionMark size={17} /> },
@@ -1350,6 +1352,18 @@ export default function Settings() {
           </div>
         </>)}
 
+        {section === "usage" && (
+          <div className="settings-panel">
+            <h2 className="settings-heading">{text("Usage recorded on this Mac", "此 Mac 記錄的用量")}</h2>
+            <p className="settings-help" style={{ marginBottom: 14, maxWidth: "72ch" }}>
+              {text(
+                "The AI requests JARVIS sent from this Mac, recorded only on this Mac. Costs are worked out from list prices where JARVIS knows them, so your provider's bill is the final figure. For AWS Bedrock, the token counts are the ones AWS returned for each request, and your AWS bill is the final figure.",
+                "JARVIS 在此 Mac 發出的 AI 請求，只記錄在此 Mac。費用按 JARVIS 已知的公開價目計算，實際收費以供應商帳單為準。AWS Bedrock 的 token 數目是 AWS 就每次請求回報的數字，實際收費以你的 AWS 帳單為準。",
+              )}
+            </p>
+            <CostPanel />
+          </div>
+        )}
         {section === "storage" && (<>
           <div className="settings-panel">
             <h2 className="settings-heading">{text('On this Mac', '本機用量')}</h2>
