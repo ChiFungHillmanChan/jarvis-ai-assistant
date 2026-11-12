@@ -208,19 +208,24 @@ pub async fn send(
             .map_err(converse_error)?;
         let latency_ms = start.elapsed().as_millis() as i64;
 
+        let output_message = match response.output() {
+            Some(aws_sdk_bedrockruntime::types::ConverseOutput::Message(message)) => {
+                Some(message.clone())
+            }
+            _ => None,
+        };
+        let tool_uses = output_message.as_ref().map(collect_tool_uses).unwrap_or_default();
+        note_tools_to_run(tool_uses.len(), final_round);
+
         if let Some(usage) = response.usage() {
             record_metrics(db, workload, model_id, usage, latency_ms).await;
         }
 
-        let output_message = match response.output() {
-            Some(aws_sdk_bedrockruntime::types::ConverseOutput::Message(message)) => {
-                message.clone()
-            }
-            _ => return Err("Bedrock returned no message output".into()),
+        let Some(output_message) = output_message else {
+            return Err("Bedrock returned no message output".into());
         };
 
         let text_parts = collect_text(&output_message);
-        let tool_uses = collect_tool_uses(&output_message);
 
         // The last round runs no tools.
         if (!tool_uses.is_empty() || response.stop_reason() == &StopReason::ToolUse) && !final_round {
@@ -458,6 +463,17 @@ fn collect_tool_uses(message: &Message) -> Vec<aws_sdk_bedrockruntime::types::To
         .collect()
 }
 
+/// Bedrock stores a row per request, and `tools::execute_tool` marks a chat
+/// turn as a tool turn only when the tool runs, after this request's row. So
+/// a response that asks for a tool which will run marks the turn first: the
+/// last round runs no tools, and some requests turn tools off.
+fn note_tools_to_run(tool_uses: usize, final_round: bool) {
+    let disabled = crate::chat_session::TOOL_EXECUTION_DISABLED.try_with(|v| *v).unwrap_or(false);
+    if tool_uses > 0 && !final_round && !disabled {
+        crate::ai::cost::note_tool_call();
+    }
+}
+
 async fn record_metrics(
     db: &crate::db::Database,
     workload: crate::ai::Workload,
@@ -551,6 +567,63 @@ mod tests {
         record_metrics(&db, crate::ai::Workload::Tools, "global.anthropic.claude-sonnet-4-6", &usage, 1).await;
         let (input, micro): (i64, i64) = db.conn.lock().unwrap().query_row("SELECT input_tokens, usd_cost_micro FROM inference_metrics", [], |r| Ok((r.get(0)?, r.get(1)?))).unwrap();
         assert_eq!((input, micro), (8_800, 12_870));
+    }
+
+    fn usage() -> TokenUsage {
+        TokenUsage::builder().input_tokens(2_400).output_tokens(250).total_tokens(2_650).build().unwrap()
+    }
+
+    fn features(db: &crate::db::Database) -> Vec<String> {
+        crate::ai::cost::tests::usage_rows(db).into_iter().map(|row| row.feature).collect()
+    }
+
+    /// Each Bedrock request is stored under the feature of the request that
+    /// started the chain.
+    #[tokio::test]
+    async fn bedrock_rows_carry_the_feature_of_their_request() {
+        let db = crate::ai::cost::tests::temp_metrics_db("");
+        crate::ai::cost::with_feature(crate::ai::cost::Feature::Briefing, record_metrics(&db, crate::ai::Workload::Tools, "us.amazon.nova-pro-v1:0", &usage(), 1)).await;
+        crate::ai::cost::with_feature(crate::ai::cost::Feature::Chat, record_metrics(&db, crate::ai::Workload::Tools, "us.amazon.nova-pro-v1:0", &usage(), 1)).await;
+        assert_eq!(features(&db), vec!["briefing", "chat"]);
+        let rows = crate::ai::cost::tests::usage_rows(&db);
+        assert_eq!((rows[0].provider.as_str(), rows[0].input_tokens), ("bedrock", 2_400));
+    }
+
+    /// A chat turn that runs a tool takes three requests: the one asking for
+    /// the tool carries the prompt, the tool list and the history, so it is
+    /// stored as tools with the rest, not as chat.
+    #[tokio::test]
+    async fn every_request_of_a_bedrock_tool_turn_is_stored_as_tools() {
+        let db = crate::ai::cost::tests::temp_metrics_db("");
+        crate::ai::cost::with_feature(crate::ai::cost::Feature::Chat, async {
+            for tool_uses in [1, 1, 0] {
+                note_tools_to_run(tool_uses, false);
+                record_metrics(&db, crate::ai::Workload::Tools, "us.amazon.nova-pro-v1:0", &usage(), 1).await;
+            }
+        })
+        .await;
+        assert_eq!(features(&db), vec!["tools", "tools", "tools"]);
+    }
+
+    /// No tool runs on the last round, or when the request turns tools off,
+    /// so those turns stay chat.
+    #[tokio::test]
+    async fn a_tool_request_that_runs_nothing_stays_chat() {
+        let db = crate::ai::cost::tests::temp_metrics_db("");
+        crate::ai::cost::with_feature(crate::ai::cost::Feature::Chat, async {
+            note_tools_to_run(1, true);
+            record_metrics(&db, crate::ai::Workload::Tools, "m", &usage(), 1).await;
+        })
+        .await;
+        crate::ai::cost::with_feature(
+            crate::ai::cost::Feature::Chat,
+            crate::chat_session::TOOL_EXECUTION_DISABLED.scope(true, async {
+                note_tools_to_run(2, false);
+                record_metrics(&db, crate::ai::Workload::Tools, "m", &usage(), 1).await;
+            }),
+        )
+        .await;
+        assert_eq!(features(&db), vec!["chat", "chat"]);
     }
 
     /// A persisted assistant row with no text must not reach the model: the
