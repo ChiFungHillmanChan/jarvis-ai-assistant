@@ -6,6 +6,7 @@ import { DataStack } from '../lib/data-stack';
 import { ObservabilityStack } from '../lib/observability-stack';
 import { PaymentStack } from '../lib/payment-stack';
 import { AuditStack } from '../lib/audit-stack';
+import { AiProxyStack } from '../lib/ai-proxy-stack';
 
 const app = new cdk.App();
 
@@ -54,6 +55,7 @@ new PaymentStack(app, `Jarvis-${env}-Payment`, {
   userMetaTable: data.userMetaTable,
   userPool: auth.userPool,
   userPoolClient: auth.userPoolClient,
+  aiTables: data.aiTables,
 });
 
 new AuditStack(app, `Jarvis-${env}-Audit`, {
@@ -61,3 +63,8 @@ new AuditStack(app, `Jarvis-${env}-Audit`, {
   envName: env,
   kmsKey: auth.dataKey,
 });
+
+// Sandbox only: the Bedrock budget and kill switch exist only there, so dev/prod get a proxy in a later PR together with their own.
+if (env === 'sandbox') {
+  new AiProxyStack(app, `Jarvis-${env}-AiProxy`, { ...stackProps, envName: env, kmsKey: auth.dataKey, userPool: auth.userPool, userPoolClient: auth.userPoolClient, userMetaTable: data.userMetaTable, aiTables: data.aiTables, billingAlertEmail: ctx.billingAlertEmail });
+}

@@ -106,11 +106,17 @@ export class AuthStack extends cdk.Stack {
     this.userPoolClient = this.userPool.addClient('JarvisAppClient', {
       userPoolClientName: `jarvis-${props.envName}-app`,
       authFlows: {
-        userSrp: true,
+        // The desktop app signs in only through the hosted UI (authorization code + PKCE). SRP
+        // would hand out tokens carrying aws.cognito.signin.user.admin.
+        userSrp: false,
         userPassword: false,
         adminUserPassword: false,
         custom: false,
       },
+      // Write attributes stay at Cognito's default: it refuses email_verified as a client write
+      // attribute, and Google sign-in must store it for account linking. After sign-up, users can't
+      // change attributes (UpdateUserAttributes needs the aws.cognito.signin.user.admin scope; SRP is
+      // off and the OAuth scopes never include it). At sign-up, the pre-sign-up trigger refuses custom:*.
       preventUserExistenceErrors: true,
       enableTokenRevocation: true,
       refreshTokenValidity: cdk.Duration.days(30),

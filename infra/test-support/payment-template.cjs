@@ -27,6 +27,7 @@ exports.paymentTemplate = function paymentTemplate(extraContext = {}) {
     userMetaTable: cdk.aws_dynamodb.Table.fromTableName(base, 'Users', 'fixture-users'),
     userPool: cdk.aws_cognito.UserPool.fromUserPoolId(base, 'Pool', 'ap-southeast-1_fixture'),
     userPoolClient: cdk.aws_cognito.UserPoolClient.fromUserPoolClientId(base, 'Client', 'fixture-client'),
+    aiTables: Object.fromEntries(['usage', 'period', 'grants', 'config'].map(k => [k, cdk.aws_dynamodb.Table.fromTableName(base, k, `fixture-ai-${k}`)])),
   });
   return Template.fromStack(stack).toJSON();
 };

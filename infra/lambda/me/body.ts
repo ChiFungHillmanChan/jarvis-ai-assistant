@@ -27,3 +27,17 @@ export function meBody(sub: string, email: string | null, item: Record<string, u
     trialDays: typeof item?.stripeSubscriptionId === 'string' ? 0 : trialDays,
   };
 }
+
+const APP_VERSION = /^\d+\.\d+\.\d+([-+][0-9A-Za-z.-]{1,20})?$/;
+const MAILBOX_COUNT = /^\d{1,2}$/;
+
+/** Client-reported labels for the touch write. Anything that does not match is dropped, so no free text reaches the table. */
+export function clientInfo(headers: Record<string, string | undefined>): { appVersion: string | null; mailboxCount: number | null } {
+  const version = headers['x-jarvis-app-version'];
+  const count = headers['x-jarvis-mailbox-count'];
+  const mailboxCount = count !== undefined && MAILBOX_COUNT.test(count) ? Number(count) : null;
+  return {
+    appVersion: version !== undefined && APP_VERSION.test(version) ? version : null,
+    mailboxCount: mailboxCount !== null && mailboxCount <= 50 ? mailboxCount : null,
+  };
+}

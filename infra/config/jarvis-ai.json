@@ -1,0 +1,26 @@
+{
+  "catalog": {
+    "qwen.qwen3-32b-v1:0": { "region": "ap-northeast-1", "tools": true, "dsml": false },
+    "deepseek.v3.2": { "region": "ap-northeast-1", "tools": true, "dsml": true }
+  },
+  "defaults": {
+    "multiplierBps": 15000,
+    "includedMicros": 20000000,
+    "defaultCapMicros": 60000000,
+    "trialCreditMicros": 20000000,
+    "globalPause": false,
+    "subscriptionAccess": false,
+    "globalDailyCapMicros": 10000000,
+    "models": {
+      "chat": { "primary": "qwen.qwen3-32b-v1:0", "fallback": "deepseek.v3.2" },
+      "mail_analysis": { "primary": "qwen.qwen3-32b-v1:0", "fallback": "deepseek.v3.2" },
+      "mail_sort": { "primary": "qwen.qwen3-32b-v1:0", "fallback": "deepseek.v3.2" },
+      "voice": { "primary": "qwen.qwen3-32b-v1:0", "fallback": "deepseek.v3.2" }
+    },
+    "prices": {
+      "qwen.qwen3-32b-v1:0": { "inputMicrosPerMTok": 180000, "outputMicrosPerMTok": 730000 },
+      "deepseek.v3.2": { "inputMicrosPerMTok": 740000, "outputMicrosPerMTok": 2220000 }
+    },
+    "pricesCheckedOn": "2026-10-29"
+  }
+}

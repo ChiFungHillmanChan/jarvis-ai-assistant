@@ -134,3 +134,59 @@ Checkout、Webhook、Portal 及 `/me` Lambda 均為 `Active`／`Successful`，�
 最新 `npm test` 為 41 passed／0 failed，包含真正 handler 的本機 AWS／Stripe mock 與真實 CDK 合成範本的路由依賴測試；測試不載入憑證或發出 API 請求。TypeScript 建置及 `git diff --check` 通過。原生 App 的 Portal 期末取消、重啟後重新登入取得 Pro，以及新版 Portal 繁體中文介面均已實測。第一筆付款早於 locale 修正，新中文 Checkout session 尚待另行驗收。
 
 Stripe 投遞紀錄補充：並行通知曾收到 HTTP 409 `billing_busy`；`invoice.paid` 及後續訂閱更新為 HTTP 200。手動重送同一 `checkout.session.completed` 及 `customer.subscription.created` 事件均回傳 HTTP 200。唯讀核對仍只有一筆測試訂閱，期末取消設定不變。歷史錯誤比例包含這些重試，不應把 Lambda Errors=0 說成所有通知首次都成功。正式 DMG、live 付款及其他異常流程仍需驗收。
+
+## JARVIS AI 營運（kill switch、全域暫停、安全服務）
+
+以下指令一律加 `--profile jarvis-deploy`，region 為 `ap-southeast-1`（Bedrock 與 Budgets 以外的資源都在這裡）。`<env>` 為 `sandbox` / `dev` / `prod`。
+
+**解除 Bedrock kill switch。** Bedrock 月度預算 `jarvis-bedrock-monthly`（US$100）的實際花費到 150% 時，budget action 會自動把 managed policy `jarvis-bedrock-kill-switch`（Deny `bedrock:InvokeModel*`）掛到 role `jarvis-<env>-ai-proxy`，所有 AI 請求隨即失敗。只有 sandbox stack 擁有這個預算與 policy。確認超支原因並決定恢復後：
+
+```bash
+# 1. 把 kill switch 從 proxy role 卸下，AI 即時恢復
+aws iam detach-role-policy --profile jarvis-deploy \
+  --role-name jarvis-<env>-ai-proxy \
+  --policy-arn arn:aws:iam::759626151650:policy/jarvis-bedrock-kill-switch
+
+# 2. action 已觸發後狀態不會自動回到待命；如需讓它能再次觸發，先查 action id 再 reset
+aws budgets describe-budget-actions-for-budget --profile jarvis-deploy \
+  --account-id 759626151650 --budget-name jarvis-bedrock-monthly
+aws budgets execute-budget-action --profile jarvis-deploy \
+  --account-id 759626151650 --budget-name jarvis-bedrock-monthly \
+  --action-id <ACTION_ID> --execution-type RESET_BUDGET_ACTION
+```
+
+若本月花費仍高於 150%，reset 後 action 可能立即再次觸發；先處理花費來源，或接受它再次封鎖。不要為了繞過它而移除 policy 或預算。
+
+**為所有人暫停 AI，或調整全域每日上限。** 兩者都在 DynamoDB 表 `jarvis-<env>-ai-config`，鍵為 `{"config": "current"}` 的那一列，設定以 JSON 字串存放在 `body` 欄位內：`globalPause`（`true` 即暫停，請求回 503 `paused`）及 `globalDailyCapMicros`（當日香港時間所有用戶合計的 billed 微美元上限，整數；shipped default 為 10000000，即 US$10）。proxy 最多快取 30 秒，`/me` 每次重讀，毋須部署；改動最遲約 30 秒生效。
+
+```bash
+# 1. 在 infra/ 內把現有的列存成 ai-config-item.json；內容為 null 代表尚未建立，第 2 步會改用 defaults
+aws dynamodb get-item --profile jarvis-deploy --region ap-southeast-1 \
+  --table-name jarvis-<env>-ai-config --key '{"config":{"S":"current"}}' \
+  --query Item --output json > ai-config-item.json
+
+# 2. 以現有列的 body 為底（列不存在時用 config/jarvis-ai.json 的完整 defaults），只修改 globalPause / globalDailyCapMicros，
+#    其餘欄位原樣保留，結果寫回 ai-config-item.json。指令前不加變數即不作任何修改。
+#    暫停：在指令前加 PAUSE=true；恢復：加 PAUSE=false；改上限：加 CAP=<微美元整數>（例如 CAP=5000000 即 US$5）
+node -e 'const fs=require("fs");const row=JSON.parse(fs.readFileSync("ai-config-item.json","utf8"));const d=row?JSON.parse(row.body.S):require("./config/jarvis-ai.json").defaults;if(process.env.PAUSE&&!["true","false"].includes(process.env.PAUSE))throw new Error("PAUSE must be true or false");if(process.env.PAUSE)d.globalPause=process.env.PAUSE==="true";if(process.env.CAP)d.globalDailyCapMicros=Number(process.env.CAP);if(!Number.isSafeInteger(d.globalDailyCapMicros)||d.globalDailyCapMicros<=0)throw new Error("CAP must be a positive integer");fs.writeFileSync("ai-config-item.json",JSON.stringify({config:{S:"current"},body:{S:JSON.stringify(d)}}))'
+
+# 3. 整列寫入
+aws dynamodb put-item --profile jarvis-deploy --region ap-southeast-1 \
+  --table-name jarvis-<env>-ai-config --item file://ai-config-item.json
+```
+
+`body` 必須是完整、有效的設定，不可只寫 `globalPause` 或 `globalDailyCapMicros` 兩個欄位；內容無效時 proxy 會失效關閉（fail closed），等同全域暫停。列不存在時 proxy 使用 `config/jarvis-ai.json` 的 defaults，所以只有要暫停或改上限時才需建立這一列。`ai-config-item.json` 寫入後即可刪除，不要提交。
+
+**GuardDuty 與 IAM Access Analyzer 不在 CDK 內，須用 CLI 在 `ap-southeast-1` 與 `ap-northeast-1` 各啟用一次**（每個 region 各自獨立；GuardDuty 未啟用時，finding 警報規則不會收到任何事件）：
+
+```bash
+for r in ap-southeast-1 ap-northeast-1; do
+  aws guardduty create-detector --enable --region "$r" --profile jarvis-deploy
+  aws accessanalyzer create-analyzer --type ACCOUNT \
+    --analyzer-name jarvis-account-analyzer --region "$r" --profile jarvis-deploy
+done
+```
+
+指令重複執行會因已存在而報錯，這是正常的；先用 `aws guardduty list-detectors` 與 `aws accessanalyzer list-analyzers` 查看是否已啟用。
+
+警報涵蓋範圍有限：GuardDuty finding 的警報規則只存在於 `ap-southeast-1`；`ap-northeast-1` 的 GuardDuty finding 及所有 IAM Access Analyzer finding 只會出現在 console，不會發出電郵，須定期手動查看。

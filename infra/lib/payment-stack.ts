@@ -10,12 +10,14 @@ import * as ddb from 'aws-cdk-lib/aws-dynamodb';
 import { HttpJwtAuthorizer } from 'aws-cdk-lib/aws-apigatewayv2-authorizers';
 import { Construct } from 'constructs';
 import * as path from 'path';
+import type { AiTables } from './data-stack';
 
 export interface PaymentStackProps extends cdk.StackProps {
   envName: string;
   userMetaTable: ddb.ITable;
   userPool: cognito.IUserPool;
   userPoolClient: cognito.IUserPoolClient;
+  aiTables: AiTables;
 }
 
 export class PaymentStack extends cdk.Stack {
@@ -135,10 +137,31 @@ export class PaymentStack extends cdk.Stack {
         USER_META_TABLE: props.userMetaTable.tableName,
         USER_POOL_ID: props.userPool.userPoolId,
         TRIAL_DAYS: trialDays,
+        AI_GRANTS_TABLE: props.aiTables.grants.tableName,
+        AI_PERIOD_TABLE: props.aiTables.period.tableName,
+        AI_CONFIG_TABLE: props.aiTables.config.tableName,
       },
       bundling: { minify: true, sourceMap: true },
     });
-    props.userMetaTable.grantReadData(meFn);
+    // Write as well as read: every /me call records lastSeenAt on the user's row.
+    props.userMetaTable.grantReadWriteData(meFn);
+    props.aiTables.grants.grantReadData(meFn);
+    props.aiTables.period.grantReadData(meFn);
+    props.aiTables.config.grantReadData(meFn);
+
+    const accessRequestFn = new nodejs.NodejsFunction(this, 'AiAccessRequestFn', {
+      functionName: `jarvis-${props.envName}-ai-access-request`,
+      runtime: lambda.Runtime.NODEJS_24_X,
+      entry: path.join(__dirname, '../lambda/me/access-request.ts'),
+      handler: 'handler',
+      timeout: cdk.Duration.seconds(5),
+      memorySize: 256,
+      environment: {
+        USER_META_TABLE: props.userMetaTable.tableName,
+      },
+      bundling: { minify: true, sourceMap: true },
+    });
+    props.userMetaTable.grantReadWriteData(accessRequestFn);
 
     // Both look up the signed-in user's email; the access token does not carry it.
     const adminGetUser = new iam.PolicyStatement({
@@ -188,8 +211,14 @@ export class PaymentStack extends cdk.Stack {
       integration: new apigwv2Integ.HttpLambdaIntegration('MeIntegration', meFn),
       ...authorised,
     });
+    const accessRequestRoutes = httpApi.addRoutes({
+      path: '/me/ai-access-request',
+      methods: [apigwv2.HttpMethod.POST],
+      integration: new apigwv2Integ.HttpLambdaIntegration('AiAccessRequestIntegration', accessRequestFn),
+      ...authorised,
+    });
 
-    // POST /checkout, POST /portal and GET /me require a Cognito access token (JWT authorizer
+    // POST /checkout, POST /portal, GET /me and POST /me/ai-access-request require a Cognito access token (JWT authorizer
     // above); the Lambdas take the user id from the verified `sub` claim.
     // Throttling stays as a second line: API Gateway throttles per stage and
     // route, so it caps cost, not any one caller.
@@ -197,7 +226,7 @@ export class PaymentStack extends cdk.Stack {
     // RouteSettings uses plain route-key strings, so CloudFormation cannot infer
     // these dependencies. API Gateway rejects stage updates until every named
     // route exists; ordering also keeps routes present during stage rollback.
-    for (const route of [...checkoutRoutes, ...portalRoutes]) {
+    for (const route of [...checkoutRoutes, ...portalRoutes, ...accessRequestRoutes]) {
       defaultStage.addDependency(route.node.defaultChild as apigwv2.CfnRoute);
     }
     defaultStage.defaultRouteSettings = {
@@ -212,6 +241,10 @@ export class PaymentStack extends cdk.Stack {
         ThrottlingBurstLimit: 5,
       },
       'POST /checkout': {
+        ThrottlingRateLimit: 2,
+        ThrottlingBurstLimit: 5,
+      },
+      'POST /me/ai-access-request': {
         ThrottlingRateLimit: 2,
         ThrottlingBurstLimit: 5,
       },
