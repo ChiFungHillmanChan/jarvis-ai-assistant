@@ -204,8 +204,17 @@ struct JobRow {
 /// The status stored for a manual run that could not reach the network.
 const MANUAL_RUN_OFFLINE: &str = "skipped_offline_final";
 
+/// The error stored for a run the Mac slept under. It is also how such a run
+/// is told from one that JARVIS exited under (`CutShort`), so it must stay
+/// exactly this.
 const SLEPT_DURING_RUN: &str = "Interrupted: the Mac went to sleep during this run";
 const INTERRUPTED_TWICE: &str = "Interrupted again on the retry; this occurrence is not retried a second time";
+
+/// How many times a slot is run again after JARVIS exited under its run: a
+/// crash, a force-quit, a quit. A run cut short by sleep is not counted
+/// against this: nothing went wrong, so its slot is simply run again after
+/// each wake.
+const RETRIES_AFTER_AN_EXIT: i64 = 1;
 
 fn db_err(e: rusqlite::Error) -> String {
     e.to_string()
@@ -392,16 +401,42 @@ fn close_superseded_offline<Z: TimeZone>(
     }
 }
 
-/// The interrupted runs of a slot: how many, and how many of those were
-/// themselves the retry.
-fn interrupted_runs(conn: &Connection, job_id: i64, slot: &Slot) -> Result<(i64, i64), String> {
-    conn.query_row(
-        "SELECT COUNT(*), COALESCE(SUM(\"trigger\" = 'retry_interrupted'), 0) FROM cron_runs \
-         WHERE job_id = ?1 AND slot = ?2 AND status = 'interrupted'",
-        params![job_id, slots::format_slot(slot)],
-        |row| Ok((row.get(0)?, row.get(1)?)),
+/// The runs of a slot that were cut short: its `interrupted` rows.
+struct CutShort {
+    total: i64,
+    /// Those JARVIS exited under: a `running` row found at launch. Every
+    /// other one was cut short by sleep, and says so in its `error`.
+    by_exit: i64,
+}
+
+impl CutShort {
+    fn of(conn: &Connection, job_id: i64, slot: &Slot) -> Result<CutShort, String> {
+        conn.query_row(
+            "SELECT COUNT(*), COALESCE(SUM(error IS NOT ?3), 0) FROM cron_runs \
+             WHERE job_id = ?1 AND slot = ?2 AND status = 'interrupted'",
+            params![job_id, slots::format_slot(slot), SLEPT_DURING_RUN],
+            |row| Ok(CutShort { total: row.get(0)?, by_exit: row.get(1)? }),
+        )
+        .map_err(db_err)
+    }
+}
+
+/// End a slot whose run and whose retry JARVIS both exited under: the later
+/// of the two becomes a failure the user is told about, and the slot is
+/// handled. Runs of the slot that sleep cut short stay as they are; they
+/// never become failures.
+fn close_after_a_second_exit<Z: TimeZone>(conn: &Connection, job_id: i64, slot: &Slot, now: DateTime<Utc>, zone: &Z) -> Result<(), String> {
+    // Together or not at all: with the row rewritten and the slot still
+    // owed, the next launch would count one exit and run it a third time.
+    let tx = conn.unchecked_transaction().map_err(db_err)?;
+    tx.execute(
+        "UPDATE cron_runs SET status = 'failed', error = ?1 WHERE id = \
+         (SELECT MAX(id) FROM cron_runs WHERE job_id = ?2 AND slot = ?3 AND status = 'interrupted' AND error IS NOT ?4)",
+        params![INTERRUPTED_TWICE, job_id, slots::format_slot(slot), SLEPT_DURING_RUN],
     )
-    .map_err(db_err)
+    .map_err(db_err)?;
+    mark_handled(&tx, job_id, slot, now, zone)?;
+    tx.commit().map_err(db_err)
 }
 
 pub struct Engine<C: Clock> {
@@ -740,24 +775,19 @@ fn settle<Z: TimeZone>(conn: &Connection, job_id: i64, job: &mut Job, moment: &M
             continue;
         }
 
-        let trigger = match interrupted_runs(conn, job_id, &slot)? {
+        let cut_short = CutShort::of(conn, job_id, &slot)?;
+        let trigger = if cut_short.total == 0 {
             // Anything that had to wait for the network is a catch-up, even
             // inside the two minutes.
-            (0, _) if job.wait.is_some() => Trigger::CatchUp,
-            (0, _) => slots::trigger_for(&slot, now, moment.last_wake_or_launch),
-            (_, 0) => Trigger::RetryInterrupted,
-            // The retry was cut short as well. Never more than one retry per
-            // slot: the slot ends here, as a failure the user is told about.
-            _ => {
-                conn.execute(
-                    "UPDATE cron_runs SET status = 'failed', error = ?1 \
-                     WHERE job_id = ?2 AND slot = ?3 AND status = 'interrupted' AND \"trigger\" = 'retry_interrupted'",
-                    params![INTERRUPTED_TWICE, job_id, slots::format_slot(&slot)],
-                )
-                .map_err(db_err)?;
-                mark_handled(conn, job_id, &slot, now, &moment.zone)?;
-                continue;
-            }
+            if job.wait.is_some() { Trigger::CatchUp } else { slots::trigger_for(&slot, now, moment.last_wake_or_launch) }
+        } else if cut_short.by_exit <= RETRIES_AFTER_AN_EXIT {
+            // Still owed. A run the Mac slept under is run again after every
+            // wake, however often that happens, until it finishes or a newer
+            // slot takes its place: only exits are counted.
+            Trigger::RetryInterrupted
+        } else {
+            close_after_a_second_exit(conn, job_id, &slot, now, &moment.zone)?;
+            continue;
         };
 
         job.next_check = next_check;
@@ -791,32 +821,39 @@ fn settle<Z: TimeZone>(conn: &Connection, job_id: i64, job: &mut Job, moment: &M
     Err("the job did not settle".to_string())
 }
 
+/// The simulated Mac is shared with the tests of the jobs and of the briefing,
+/// which need a real engine under them.
 #[cfg(test)]
-mod tests {
+pub(super) mod tests {
     use super::*;
     use crate::scheduler::slots::test_zone::TestZone;
     use std::collections::VecDeque;
     use std::sync::atomic::{AtomicBool, Ordering};
 
-    fn at(text: &str) -> DateTime<Utc> {
+    pub(crate) fn at(text: &str) -> DateTime<Utc> {
         DateTime::parse_from_rfc3339(text).unwrap().with_timezone(&Utc)
     }
 
     /// The injected clock. `pass` is time with the Mac awake; `sleep_until`
     /// moves the wall clock only, which is what a sleeping Mac does.
-    struct TestClock {
+    pub(crate) struct TestClock {
         wall: Mutex<DateTime<Utc>>,
         awake: Mutex<Duration>,
         zone: Mutex<TestZone>,
     }
 
     impl TestClock {
-        fn pass(&self, secs: u64) {
+        /// A clock in Hong Kong that reads `now`, on a Mac that has just started.
+        pub(crate) fn hong_kong(now: &str) -> Arc<TestClock> {
+            Arc::new(TestClock { wall: Mutex::new(at(now)), awake: Mutex::new(Duration::ZERO), zone: Mutex::new(TestZone::fixed(8)) })
+        }
+
+        pub(crate) fn pass(&self, secs: u64) {
             *self.wall.lock().unwrap() += TimeDelta::seconds(secs as i64);
             *self.awake.lock().unwrap() += Duration::from_secs(secs);
         }
 
-        fn sleep_until(&self, text: &str) {
+        pub(crate) fn sleep_until(&self, text: &str) {
             let mut wall = self.wall.lock().unwrap();
             assert!(at(text) > *wall, "a sleep ends later than it began");
             *wall = at(text);
@@ -850,9 +887,13 @@ mod tests {
     }
 
     /// The injected reachability source.
-    struct TestNetwork(AtomicBool);
+    pub(crate) struct TestNetwork(AtomicBool);
 
     impl TestNetwork {
+        pub(crate) fn up() -> Arc<TestNetwork> {
+            Arc::new(TestNetwork(AtomicBool::new(true)))
+        }
+
         fn set(&self, online: bool) {
             self.0.store(online, Ordering::SeqCst);
         }
@@ -869,13 +910,13 @@ mod tests {
     /// The injected jobs. Every run is written down; a scripted step decides
     /// how the next run ends, and a run with no step succeeds.
     #[derive(Default)]
-    struct TestJobs {
+    pub(crate) struct TestJobs {
         ran: Mutex<Vec<String>>,
         script: Mutex<VecDeque<Step>>,
     }
 
     impl TestJobs {
-        fn next_run_will(&self, step: impl FnOnce() -> Result<String, String> + Send + 'static) {
+        pub(crate) fn next_run_will(&self, step: impl FnOnce() -> Result<String, String> + Send + 'static) {
             self.script.lock().unwrap().push_back(Box::new(step));
         }
     }
@@ -894,9 +935,9 @@ mod tests {
     }
 
     /// One Mac: a database, a clock, a network and the engine over them.
-    struct Sim {
-        db: Arc<Database>,
-        clock: Arc<TestClock>,
+    pub(crate) struct Sim {
+        pub(crate) db: Arc<Database>,
+        pub(crate) clock: Arc<TestClock>,
         network: Arc<TestNetwork>,
         jobs: Arc<TestJobs>,
         engine: Engine<TestClock>,
@@ -904,15 +945,10 @@ mod tests {
 
     impl Sim {
         /// A Mac in Hong Kong with the network up and no jobs yet.
-        fn start(now: &str) -> Sim {
+        pub(crate) fn start(now: &str) -> Sim {
             let db = Arc::new(crate::db::test_database());
             db.conn.lock().unwrap().execute_batch("DELETE FROM cron_runs; DELETE FROM cron_jobs;").unwrap();
-            let clock = Arc::new(TestClock {
-                wall: Mutex::new(at(now)),
-                awake: Mutex::new(Duration::ZERO),
-                zone: Mutex::new(TestZone::fixed(8)),
-            });
-            Sim::launch(db, clock, Arc::new(TestNetwork(AtomicBool::new(true))), Arc::new(TestJobs::default()))
+            Sim::launch(db, TestClock::hong_kong(now), TestNetwork::up(), Arc::new(TestJobs::default()))
         }
 
         fn launch(db: Arc<Database>, clock: Arc<TestClock>, network: Arc<TestNetwork>, jobs: Arc<TestJobs>) -> Sim {
@@ -938,7 +974,7 @@ mod tests {
         }
 
         /// A job created now, the way the app creates one.
-        fn add_job(&self, action: &str, schedule: &str) -> i64 {
+        pub(crate) fn add_job(&self, action: &str, schedule: &str) -> i64 {
             let id = {
                 let conn = self.db.conn.lock().unwrap();
                 conn.execute(
@@ -977,8 +1013,18 @@ mod tests {
             started
         }
 
+        /// The lid closes while the next run is in flight. By the time the
+        /// Mac wakes, at `wake`, the run's connection has died with the sleep.
+        pub(crate) fn next_run_is_cut_short_by_a_sleep_until(&self, wake: &'static str) {
+            let clock = Arc::clone(&self.clock);
+            self.jobs.next_run_will(move || {
+                clock.sleep_until(wake);
+                Err("connection reset".to_string())
+            });
+        }
+
         /// The Mac stays awake, ticking once a second, until the given time.
-        async fn awake_until(&self, text: &str) {
+        pub(crate) async fn awake_until(&self, text: &str) {
             let end = at(text);
             assert!(end >= self.clock.now(), "awake_until goes forwards");
             while self.clock.now() < end {
@@ -1000,7 +1046,7 @@ mod tests {
         }
 
         /// The job's `cron_runs` rows, oldest first: "status trigger slot".
-        fn history(&self, job_id: i64) -> Vec<String> {
+        pub(crate) fn history(&self, job_id: i64) -> Vec<String> {
             let conn = self.db.conn.lock().unwrap();
             let mut stmt = conn
                 .prepare("SELECT status, COALESCE(\"trigger\", '-'), COALESCE(slot, '-') FROM cron_runs WHERE job_id = ?1 ORDER BY id")
@@ -1008,6 +1054,15 @@ mod tests {
             let rows = stmt
                 .query_map([job_id], |r| Ok(format!("{} {} {}", r.get::<_, String>(0)?, r.get::<_, String>(1)?, r.get::<_, String>(2)?)))
                 .unwrap();
+            rows.collect::<Result<_, _>>().unwrap()
+        }
+
+        /// The `error` of each of the job's rows, oldest first; empty for a
+        /// row without one.
+        fn errors(&self, job_id: i64) -> Vec<String> {
+            let conn = self.db.conn.lock().unwrap();
+            let mut stmt = conn.prepare("SELECT COALESCE(error, '') FROM cron_runs WHERE job_id = ?1 ORDER BY id").unwrap();
+            let rows = stmt.query_map([job_id], |r| r.get::<_, String>(0)).unwrap();
             rows.collect::<Result<_, _>>().unwrap()
         }
 
@@ -1353,7 +1408,8 @@ mod tests {
         assert_eq!(sim.failed_runs(), 0, "a force-quit is not a failed job");
     }
 
-    /// Never more than one retry per slot.
+    /// Never more than one retry per slot after JARVIS exited under its run:
+    /// a slot that crashes the app every time must not be run for ever.
     #[tokio::test]
     async fn a_retry_that_is_interrupted_too_is_not_retried_again() {
         let sim = Sim::start("2026-11-12T08:59:59+08:00");
@@ -1376,6 +1432,7 @@ mod tests {
             sim.history(job),
             ["interrupted scheduled 2026-11-12T09:00:00+08:00", "failed retry_interrupted 2026-11-12T09:00:00+08:00"]
         );
+        assert_eq!(sim.errors(job)[1], INTERRUPTED_TWICE);
         assert_eq!(sim.handled(job).as_deref(), Some("2026-11-12T09:00:00+08:00"));
 
         // The next day's slot is a new slot and runs as usual.
@@ -1385,7 +1442,7 @@ mod tests {
     }
 
     /// A run that was in flight when the lid closed did not fail: its
-    /// connection died with the sleep. It is retried like any interrupted run.
+    /// connection died with the sleep. Its slot is run again after the wake.
     #[tokio::test]
     async fn a_run_the_mac_slept_under_is_retried_not_failed() {
         let sim = Sim::start("2026-11-12T09:59:00+08:00");
@@ -1402,6 +1459,139 @@ mod tests {
             ["interrupted scheduled 2026-11-12T10:00:00+08:00", "completed retry_interrupted 2026-11-12T10:00:00+08:00"]
         );
         assert_eq!(sim.failed_runs(), 0, "no false failure after the wake");
+    }
+
+    const EVERY_10_MIN: &str = "0 */10 * * * *";
+
+    /// The lid is opened for a glance three times inside one ten-minute slot.
+    /// The first two glances are too short for the sync to finish. Nothing
+    /// failed: the slot is run again after each wake until it gets through.
+    #[tokio::test]
+    async fn a_run_that_sleep_keeps_cutting_short_is_run_again_after_each_wake() {
+        let sim = Sim::start("2026-11-12T08:54:00+08:00");
+        let job = sim.add_job("notion_sync", EVERY_10_MIN);
+        sim.awake_until("2026-11-12T08:55:00+08:00").await;
+
+        sim.clock.sleep_until("2026-11-12T09:02:00+08:00");
+        sim.next_run_is_cut_short_by_a_sleep_until("2026-11-12T09:05:00+08:00");
+        sim.next_run_is_cut_short_by_a_sleep_until("2026-11-12T09:08:00+08:00");
+        sim.awake_until("2026-11-12T09:08:04+08:00").await;
+        assert_eq!(
+            sim.history(job),
+            ["interrupted catch_up 2026-11-12T09:00:00+08:00", "interrupted retry_interrupted 2026-11-12T09:00:00+08:00"],
+            "cut short twice, and the network has not settled yet after the third wake"
+        );
+        assert_eq!(sim.errors(job), [SLEPT_DURING_RUN, SLEPT_DURING_RUN]);
+        assert_eq!(sim.handled(job), None, "the slot is still owed");
+
+        sim.awake_until("2026-11-12T09:09:00+08:00").await;
+        assert_eq!(
+            sim.history(job),
+            [
+                "interrupted catch_up 2026-11-12T09:00:00+08:00",
+                "interrupted retry_interrupted 2026-11-12T09:00:00+08:00",
+                "completed retry_interrupted 2026-11-12T09:00:00+08:00",
+            ]
+        );
+        assert_eq!(sim.handled(job).as_deref(), Some("2026-11-12T09:00:00+08:00"));
+        assert_eq!(sim.failed_runs(), 0, "a run the Mac slept under is never a failure");
+        assert_eq!(sim.ran().len(), 3, "and once it has finished it is not run again");
+    }
+
+    /// A slot that sleep kept cutting short is owed only until the job's next
+    /// slot comes due. Then the newer one is the one to run.
+    #[tokio::test]
+    async fn a_newer_slot_takes_the_place_of_one_that_sleep_kept_cutting_short() {
+        let sim = Sim::start("2026-11-12T08:54:00+08:00");
+        let job = sim.add_job("notion_sync", EVERY_10_MIN);
+        sim.awake_until("2026-11-12T08:55:00+08:00").await;
+
+        sim.clock.sleep_until("2026-11-12T09:02:00+08:00");
+        sim.next_run_is_cut_short_by_a_sleep_until("2026-11-12T09:05:00+08:00");
+        // The second time the lid stays closed until after the 09:10 slot.
+        sim.next_run_is_cut_short_by_a_sleep_until("2026-11-12T09:12:00+08:00");
+        sim.awake_until("2026-11-12T09:13:00+08:00").await;
+
+        assert_eq!(
+            sim.history(job),
+            [
+                "interrupted catch_up 2026-11-12T09:00:00+08:00",
+                "interrupted retry_interrupted 2026-11-12T09:00:00+08:00",
+                "completed catch_up 2026-11-12T09:10:00+08:00",
+                "collapsed - 2026-11-12T09:00:00+08:00",
+            ],
+            "the 09:00 slot is not run a third time; it is counted as missed"
+        );
+        assert_eq!(sim.handled(job).as_deref(), Some("2026-11-12T09:10:00+08:00"));
+        assert_eq!(sim.failed_runs(), 0);
+    }
+
+    /// A slot with both kinds of cut in its history. Only the exits count
+    /// toward the one retry: the run cut short by sleep neither uses it up
+    /// nor is ever the one turned into a failure.
+    #[tokio::test]
+    async fn a_run_cut_short_by_sleep_does_not_use_up_the_retry_after_a_crash() {
+        let sim = Sim::start("2026-11-12T08:59:59+08:00");
+        let job = sim.add_job("deadline_monitor", DAILY_0900);
+        // JARVIS is force-quit under the 09:00 run.
+        sim.clock.pass(1);
+        drop(sim.engine.tick());
+        sim.clock.pass(30);
+        let sim = sim.relaunch();
+
+        // The retry is in flight when the lid closes.
+        sim.next_run_is_cut_short_by_a_sleep_until("2026-11-12T09:20:00+08:00");
+        assert_eq!(sim.tick().await, 1);
+        assert_eq!(
+            sim.history(job),
+            ["interrupted scheduled 2026-11-12T09:00:00+08:00", "interrupted retry_interrupted 2026-11-12T09:00:00+08:00"]
+        );
+
+        // One exit so far, so the slot is still owed, and this time it gets through.
+        sim.awake_for(600).await;
+        assert_eq!(
+            sim.history(job),
+            [
+                "interrupted scheduled 2026-11-12T09:00:00+08:00",
+                "interrupted retry_interrupted 2026-11-12T09:00:00+08:00",
+                "completed retry_interrupted 2026-11-12T09:00:00+08:00",
+            ]
+        );
+        assert_eq!(sim.failed_runs(), 0);
+    }
+
+    #[tokio::test]
+    async fn a_second_crash_ends_the_slot_whatever_sleep_did_in_between() {
+        let sim = Sim::start("2026-11-12T08:59:59+08:00");
+        let job = sim.add_job("deadline_monitor", DAILY_0900);
+        sim.clock.pass(1);
+        drop(sim.engine.tick());
+        sim.clock.pass(30);
+        let sim = sim.relaunch();
+        sim.next_run_is_cut_short_by_a_sleep_until("2026-11-12T09:20:00+08:00");
+        assert_eq!(sim.tick().await, 1);
+
+        // JARVIS is force-quit again, under the run that followed the wake.
+        sim.clock.pass(1);
+        let third = sim.engine.tick();
+        assert_eq!(third.len(), 1);
+        drop(third);
+        sim.clock.pass(30);
+        let sim = sim.relaunch();
+        sim.awake_for(600).await;
+
+        assert_eq!(
+            sim.history(job),
+            [
+                "interrupted scheduled 2026-11-12T09:00:00+08:00",
+                "interrupted retry_interrupted 2026-11-12T09:00:00+08:00",
+                "failed retry_interrupted 2026-11-12T09:00:00+08:00",
+            ],
+            "the second exit is the failure; the run the Mac slept under stays as it was"
+        );
+        assert_eq!(sim.errors(job)[1..], [SLEPT_DURING_RUN, INTERRUPTED_TWICE]);
+        assert_eq!(sim.ran().len(), 1, "only the run that sleep cut short reached the job; the slot is not run a fourth time");
+        assert_eq!(sim.handled(job).as_deref(), Some("2026-11-12T09:00:00+08:00"));
     }
 
     // Case: paused, then re-enabled.

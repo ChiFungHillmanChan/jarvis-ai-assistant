@@ -33,7 +33,9 @@ pub enum RunStatus {
     /// A real error. Final: the slot is handled and the failure alert applies.
     Failed,
     /// The run was cut short: JARVIS exited, or the Mac slept under it. Not
-    /// final: the slot is run once more.
+    /// final. After an exit the slot is run once more; after a sleep it is
+    /// run again after each wake, until it finishes or a newer slot takes its
+    /// place.
     Interrupted,
     /// The Mac had no usable network. Not final: the slot runs once the
     /// network is back, unless a newer slot supersedes it first.

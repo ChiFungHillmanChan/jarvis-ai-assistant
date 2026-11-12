@@ -34,7 +34,9 @@ pub enum Trigger {
     CatchUp,
     /// The user asked for a run. Never changes `handled_slot`.
     Manual,
-    /// The one retry of a slot whose run was cut short.
+    /// A slot run again because its last run was cut short: once after
+    /// JARVIS exited under it, and after every wake for a run the Mac slept
+    /// under.
     RetryInterrupted,
 }
 

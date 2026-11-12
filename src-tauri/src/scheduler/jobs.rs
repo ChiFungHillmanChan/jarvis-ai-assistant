@@ -1035,6 +1035,32 @@ mod tests {
         assert_eq!(alerted, 1, "a real failure must still surface");
     }
 
+    /// A sync that the lid keeps closing on has not failed. However many
+    /// times sleep cuts one slot's run short, no row of it becomes `failed`,
+    /// so "Scheduled jobs failed in the last hour" is never posted for it.
+    /// The rows here are written by the real engine, on a simulated Mac.
+    #[tokio::test]
+    async fn a_run_that_sleep_keeps_cutting_short_does_not_raise_a_failure_alert() {
+        use crate::scheduler::engine::tests::Sim;
+        let alerted = |sim: &Sim| -> i64 { sim.db.conn.lock().unwrap().query_row(FAILED_RUNS_ALERT_QUERY, [], |r| r.get(0)).unwrap() };
+
+        let sim = Sim::start("2026-11-12T08:54:00+08:00");
+        let job = sim.add_job("notion_sync", "0 */10 * * * *");
+        sim.awake_until("2026-11-12T08:55:00+08:00").await;
+        sim.clock.sleep_until("2026-11-12T09:02:00+08:00");
+        sim.next_run_is_cut_short_by_a_sleep_until("2026-11-12T09:05:00+08:00");
+        sim.next_run_is_cut_short_by_a_sleep_until("2026-11-12T09:08:00+08:00");
+
+        // The third wake. Both attempts at the 09:00 slot are behind it.
+        sim.awake_until("2026-11-12T09:08:04+08:00").await;
+        assert_eq!(sim.history(job).len(), 2);
+        assert_eq!(alerted(&sim), 0, "two runs cut short by sleep are not a failure");
+
+        sim.awake_until("2026-11-12T09:09:00+08:00").await;
+        assert_eq!(sim.history(job).len(), 3, "the slot was run again and finished");
+        assert_eq!(alerted(&sim), 0);
+    }
+
     /// An alert has to say which task it is about: "1 overdue task(s)" gave the
     /// user nothing to act on, and the app has no task list to look it up in.
     #[test]
