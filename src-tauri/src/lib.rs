@@ -492,6 +492,7 @@ pub fn run() {
             commands::cron::delete_cron_job,
             commands::cron::toggle_cron_job,
             commands::cron::get_upcoming_runs,
+            commands::cron::run_cron_job_now,
             commands::google_auth::google_connect,
             commands::google_auth::google_connect_gmail,
             commands::google_auth::google_cancel_connect,

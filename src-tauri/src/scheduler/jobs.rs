@@ -5,8 +5,9 @@ use std::sync::Arc;
 
 /// cron_runs is append-only otherwise: the seeded five-minute jobs add a row on
 /// every tick, including ticks that skip immediately, and nothing else prunes
-/// them. Keep a bounded history per job. Shared with the test below.
-const CRON_RUNS_RETENTION_QUERY: &str = "DELETE FROM cron_runs WHERE job_id = ?1 AND id NOT IN \
+/// them. Keep a bounded history per job. Shared with the engine, which runs it
+/// after every run, and with the test below.
+pub(super) const CRON_RUNS_RETENTION_QUERY: &str = "DELETE FROM cron_runs WHERE job_id = ?1 AND id NOT IN \
      (SELECT id FROM cron_runs WHERE job_id = ?1 ORDER BY id DESC LIMIT 200)";
 
 /// A cron_runs row still marked 'running' when the process starts cannot be
@@ -29,42 +30,18 @@ const RECONCILE_INTERRUPTED_RUNS_QUERY: &str = "UPDATE cron_runs SET status = 'i
      WHERE status = 'running'";
 
 /// Resolve runs orphaned by an unclean exit. Idempotent, and safe only before
-/// the first run of this process has inserted its own 'running' row.
+/// the first run of this process has inserted its own 'running' row: the
+/// engine calls it when it is built.
 pub fn reconcile_interrupted_runs(db: &Arc<Database>) -> Result<usize, String> {
     let conn = db.conn.lock().map_err(|e| e.to_string())?;
     conn.execute(RECONCILE_INTERRUPTED_RUNS_QUERY, []).map_err(|e| e.to_string())
 }
 
-pub async fn run_job(db: &Arc<Database>, auth: &Arc<GoogleAuth>, action_type: &str, job_id: i64) -> Result<String, String> {
-    // Once per process, before this run inserts its own row, so a live run is
-    // never mistaken for an orphan.
-    static RECONCILE_ONCE: std::sync::Once = std::sync::Once::new();
-    RECONCILE_ONCE.call_once(|| match reconcile_interrupted_runs(db) {
-        Ok(0) => {}
-        Ok(n) => log::info!("Resolved {} cron run(s) interrupted by an unclean exit", n),
-        Err(e) => log::warn!("Could not reconcile interrupted cron runs: {}", e),
-    });
-
-    {
-        let conn = db.conn.lock().map_err(|e| e.to_string())?;
-        // The scheduler registers jobs once at startup. Re-check the job's
-        // current status here so a pause or delete the user made in the
-        // dashboard takes effect immediately instead of only after a restart.
-        let status: Option<String> = conn
-            .query_row(
-                "SELECT status FROM cron_jobs WHERE id = ?1",
-                rusqlite::params![job_id],
-                |row| row.get(0),
-            )
-            .ok();
-        match status.as_deref() {
-            Some("active") => {}
-            _ => return Ok("Skipped: job paused or removed".to_string()),
-        }
-        conn.execute("INSERT INTO cron_runs (job_id, status) VALUES (?1, 'running')", rusqlite::params![job_id]).map_err(|e| e.to_string())?;
-    }
-
-    let result = match action_type {
+/// Does the work of one job. Everything around it (the `cron_runs` row, the
+/// handled slot, retention, whether the job is still active) belongs to the
+/// engine.
+pub async fn run_action(db: &Arc<Database>, auth: &Arc<GoogleAuth>, action_type: &str) -> Result<String, String> {
+    match action_type {
         job if waits_for_an_encrypted_database(job) => Ok("Skipped: the database is not encrypted".to_string()),
         "email_sync" => run_email_sync(db, auth).await,
         "mail_workspace_sync" => run_mail_workspace_sync(db).await,
@@ -75,23 +52,7 @@ pub async fn run_job(db: &Arc<Database>, auth: &Arc<GoogleAuth>, action_type: &s
         "auto_archive_emails" => run_auto_archive(db, auth).await,
         "proactive_check" => run_proactive_check(db).await,
         other => Err(format!("Unknown job type: {}", other)),
-    };
-
-    {
-        let conn = db.conn.lock().map_err(|e| e.to_string())?;
-        let (status, result_text, error_text) = match &result {
-            Ok(msg) => ("completed", Some(msg.as_str()), None),
-            Err(e) => ("failed", None, Some(e.as_str())),
-        };
-        conn.execute(
-            "UPDATE cron_runs SET finished_at = datetime('now'), status = ?1, result = ?2, error = ?3
-             WHERE id = (SELECT id FROM cron_runs WHERE job_id = ?4 AND status = 'running' ORDER BY id DESC LIMIT 1)",
-            rusqlite::params![status, result_text, error_text, job_id],
-        ).map_err(|e| e.to_string())?;
-        conn.execute("UPDATE cron_jobs SET last_run = datetime('now') WHERE id = ?1", rusqlite::params![job_id]).map_err(|e| e.to_string())?;
-        conn.execute(CRON_RUNS_RETENTION_QUERY, rusqlite::params![job_id]).map_err(|e| e.to_string())?;
     }
-    result
 }
 
 /// The main account's token, or why the job does nothing. A grant Google

@@ -1,27 +1,38 @@
 pub mod daily_briefing;
+pub mod engine;
 pub mod jobs;
+pub mod network;
+pub mod slots;
 
 use crate::auth::google::GoogleAuth;
 use crate::db::Database;
-use std::collections::HashMap;
+use engine::{Engine, JobRunner, Run, SystemClock};
 use std::sync::{Arc, Mutex};
-use tokio_cron_scheduler::{Job, JobScheduler};
-use uuid::Uuid;
 
-pub struct Scheduler {
-    scheduler: JobScheduler,
+/// The app's own jobs, as the engine runs them.
+struct AppJobs {
     db: Arc<Database>,
     google_auth: Arc<GoogleAuth>,
-    /// cron_jobs.id -> its live JobScheduler registration. Registration used to
-    /// happen only here at startup, so a job the user created, paused or
-    /// deleted in the dashboard did not take effect until the next launch.
-    registered: Mutex<HashMap<i64, Uuid>>,
+}
+
+#[async_trait::async_trait]
+impl JobRunner for AppJobs {
+    async fn run(&self, run: &Run) -> Result<String, String> {
+        jobs::run_action(&self.db, &self.google_auth, &run.action_type).await
+    }
+}
+
+/// How often the engine looks at the jobs. A slot is noticed within this long
+/// of coming due, and a wake within this long of the Mac waking.
+const TICK: std::time::Duration = std::time::Duration::from_secs(1);
+
+pub struct Scheduler {
+    engine: Arc<Engine<SystemClock>>,
+    db: Arc<Database>,
 }
 
 impl Scheduler {
     pub async fn new(db: Arc<Database>, google_auth: Arc<GoogleAuth>) -> Result<Self, String> {
-        let scheduler = JobScheduler::new().await.map_err(|e| format!("Failed to create scheduler: {}", e))?;
-
         // Reduce proactive check from every 1 min to every 5 min to lower DB contention
         {
             let conn = db.conn.lock().map_err(|e| e.to_string())?;
@@ -31,23 +42,27 @@ impl Scheduler {
             );
         }
 
-        let job_rows: Vec<(i64, String, String, String, Option<String>)> = {
+        // Built before any job is registered: this is where runs orphaned by
+        // the last exit are resolved, and where "launch" is timed from.
+        let engine = Engine::new(
+            Arc::clone(&db),
+            Arc::new(SystemClock::new()),
+            Arc::new(network::SystemReachability),
+            Arc::new(AppJobs { db: Arc::clone(&db), google_auth }),
+        );
+
+        let job_rows: Vec<(i64, String, String, String)> = {
             let conn = db.conn.lock().map_err(|e| e.to_string())?;
-            let mut stmt = conn.prepare("SELECT id, name, schedule, action_type, parameters FROM cron_jobs WHERE status = 'active'").map_err(|e| e.to_string())?;
-            let rows = stmt.query_map([], |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?, row.get(4)?)))
+            let mut stmt = conn.prepare("SELECT id, name, schedule, action_type FROM cron_jobs WHERE status = 'active'").map_err(|e| e.to_string())?;
+            let rows = stmt.query_map([], |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)))
                 .map_err(|e| e.to_string())?
                 .collect::<Result<Vec<_>, _>>().map_err(|e| e.to_string())?;
             rows
         };
 
-        let this = Scheduler {
-            scheduler,
-            db,
-            google_auth,
-            registered: Mutex::new(HashMap::new()),
-        };
+        let this = Scheduler { engine: Arc::new(engine), db };
 
-        for (job_id, name, schedule, action_type, _params) in job_rows {
+        for (job_id, name, schedule, action_type) in job_rows {
             // One unparseable row used to abort Scheduler::new with `?`, which
             // left every other job unregistered and the app running with no
             // scheduler at all. Park the offending row and keep going.
@@ -59,8 +74,10 @@ impl Scheduler {
         Ok(this)
     }
 
-    /// Wire a `cron_jobs` row into the running scheduler, replacing any earlier
-    /// registration for the same row.
+    /// Put a `cron_jobs` row under the running scheduler, replacing any earlier
+    /// registration for the same row. Registration used to happen only at
+    /// startup, so a job the user created, paused or deleted in the dashboard
+    /// did not take effect until the next launch.
     pub async fn register(
         &self,
         job_id: i64,
@@ -68,35 +85,7 @@ impl Scheduler {
         schedule: &str,
         action_type: &str,
     ) -> Result<(), String> {
-        self.unregister(job_id).await;
-
-        let db_clone = Arc::clone(&self.db);
-        let auth_clone = Arc::clone(&self.google_auth);
-        let action_type = action_type.to_string();
-        // Local, not UTC: the schedules are written by the user ("9am") and the
-        // dashboard already renders upcoming runs in local time, so a UTC
-        // registration fired the job at the wrong hour everywhere but London.
-        let job = Job::new_async_tz(schedule, chrono::Local, move |_uuid, _lock| {
-            let db = Arc::clone(&db_clone);
-            let auth = Arc::clone(&auth_clone);
-            let action = action_type.clone();
-            let jid = job_id;
-            Box::pin(async move {
-                log::info!("Running cron job {}: {}", jid, action);
-                let result = jobs::run_job(&db, &auth, &action, jid).await;
-                match &result {
-                    Ok(msg) => log::info!("Job {} completed: {}", jid, msg),
-                    Err(e) => log::error!("Job {} failed: {}", jid, e),
-                }
-            })
-        }).map_err(|e| format!("Failed to create job '{}': {}", name, e))?;
-        let uuid = self.scheduler.add(job).await.map_err(|e| e.to_string())?;
-        match self.registered.lock() {
-            Ok(mut map) => { map.insert(job_id, uuid); }
-            Err(e) => log::error!("Scheduler registry lock poisoned: {}", e),
-        }
-        log::info!("Registered cron job: {} ({})", name, schedule);
-        Ok(())
+        self.engine.register(job_id, name, schedule, action_type)
     }
 
     /// Move a row the scheduler refused out of the active set and record why,
@@ -125,24 +114,33 @@ impl Scheduler {
     /// at startup, or created while the scheduler was still booting) is not an
     /// error -- the caller only wants it gone.
     pub async fn unregister(&self, job_id: i64) {
-        let uuid = match self.registered.lock() {
-            Ok(mut map) => map.remove(&job_id),
-            Err(e) => {
-                log::error!("Scheduler registry lock poisoned: {}", e);
-                None
-            }
-        };
-        if let Some(uuid) = uuid {
-            match self.scheduler.remove(&uuid).await {
-                Ok(()) => log::info!("Unregistered cron job {}", job_id),
-                Err(e) => log::warn!("Failed to unregister cron job {}: {}", job_id, e),
-            }
-        }
+        self.engine.unregister(job_id);
     }
 
+    /// Start the tick. The first one runs at once, and that is the launch
+    /// catch-up: every registered job is asked for its missed slot.
     pub async fn start(&self) -> Result<(), String> {
-        self.scheduler.start().await.map_err(|e| format!("Failed to start scheduler: {}", e))?;
+        let engine = Arc::clone(&self.engine);
+        tauri::async_runtime::spawn(async move {
+            let mut ticker = tokio::time::interval(TICK);
+            ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+            loop {
+                ticker.tick().await;
+                for run in engine.tick() {
+                    let engine = Arc::clone(&engine);
+                    tauri::async_runtime::spawn(async move { engine.execute(run).await });
+                }
+            }
+        });
         log::info!("Cron scheduler started");
+        Ok(())
+    }
+
+    /// Run a job now, outside its schedule. Returns once the run has started.
+    pub fn run_now(&self, job_id: i64) -> Result<(), String> {
+        let run = self.engine.run_now(job_id)?;
+        let engine = Arc::clone(&self.engine);
+        tauri::async_runtime::spawn(async move { engine.execute(run).await });
         Ok(())
     }
 }

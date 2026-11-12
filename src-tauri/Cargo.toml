@@ -39,7 +39,6 @@ tauri-plugin-process = "2"
 tauri-plugin-global-shortcut = "2"
 dotenvy = "0.15"
 oauth2 = { version = "5", default-features = false, features = ["reqwest"] }
-tokio-cron-scheduler = "0.13"
 croner = "2.2"
 uuid = { version = "1", features = ["v4"] }
 open = "5"
