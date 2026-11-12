@@ -1176,6 +1176,23 @@ mod tests {
         assert_eq!(apply_inference_profile(&bedrock_model(&bedrock_entry(Some("anthropic.claude-sonnet-4-6"))), "apac"), apply_inference_profile("anthropic.claude-sonnet-4-6", "apac"));
     }
 
+    /// Every chat, voice and briefing row gets its feature from this wrapper:
+    /// the providers record deep in the chain, where only the task-local is in
+    /// reach. A refactor that dropped it would store them all as "other" and
+    /// leave every other test green.
+    #[test]
+    fn send_with_ledger_runs_the_chain_under_its_feature() {
+        let source = include_str!("mod.rs");
+        let start = source.find("async fn send_with_ledger(").expect("send_with_ledger exists");
+        let body = &source[start..];
+        let body = &body[..body.find("\n    }\n").expect("end of send_with_ledger")];
+        let body = body.split_whitespace().collect::<Vec<_>>().join(" ");
+        assert!(
+            body.contains("cost::with_feature( feature, finish_request_with_hud( self.run_provider_chain("),
+            "send_with_ledger must run the provider chain inside cost::with_feature: {body}"
+        );
+    }
+
     /// The table stays as history (P05 replaces it with the registry), but
     /// the request paths no longer read it, directly or through
     /// routing::WorkloadRouter (constructed only in its own tests).
