@@ -311,8 +311,14 @@ pub fn todays_brief(db: &Database, today: &str) -> Result<Option<Brief>, String>
 /// be tested without a network, a screen or a voice.
 #[async_trait::async_trait]
 pub trait BriefingHost: Send + Sync {
-    /// Whether macOS reports a usable network right now.
+    /// Whether macOS reports a usable network right now. This is what decides
+    /// whether a failed AI step was "offline" or a real failure.
     fn online(&self) -> bool;
+    /// Whether the network is up and has been for long enough to use: the
+    /// settled state the scheduler's network jobs wait for. In the first
+    /// seconds after a wake macOS can report a network that cannot carry a
+    /// request yet, and an AI step started then would fail for no real reason.
+    fn network_ready(&self) -> bool;
     fn screen(&self) -> Screen;
     /// Ask the AI for the day's summary. Needs the network.
     async fn summarise(&self) -> Result<String, String>;
@@ -389,7 +395,7 @@ pub async fn run_with(db: &Database, host: &dyn BriefingHost, trigger: Trigger, 
     }
 
     let speak = should_speak(trigger, voice_on, host.screen());
-    if !host.online() {
+    if !host.network_ready() {
         if speak {
             host.speak(&brief.local).await;
         }
@@ -519,6 +525,8 @@ pub struct BriefingService {
     db: Arc<Database>,
     google_auth: Arc<GoogleAuth>,
     app: tauri::AppHandle,
+    /// The scheduler's settled network state, as of its last tick.
+    network_ready: AtomicBool,
     /// A summary is owed and waiting for the network.
     pending: AtomicBool,
     /// A summary is being fetched for it now.
@@ -531,7 +539,15 @@ impl BriefingService {
         // A summary still owed from before the last quit.
         let today = chrono::Local::now().format("%Y-%m-%d").to_string();
         let pending = todays_brief(&db, &today).ok().flatten().is_some_and(|brief| brief.summary_pending);
-        BriefingService { db, google_auth, app, pending: AtomicBool::new(pending), busy: AtomicBool::new(false), retry_at: Mutex::new(None) }
+        BriefingService {
+            db,
+            google_auth,
+            app,
+            network_ready: AtomicBool::new(false),
+            pending: AtomicBool::new(pending),
+            busy: AtomicBool::new(false),
+            retry_at: Mutex::new(None),
+        }
     }
 
     pub async fn run(&self, trigger: Trigger) -> Result<String, String> {
@@ -545,6 +561,7 @@ impl BriefingService {
     /// Called on every scheduler tick with whether the network is up and
     /// settled. Fetches an owed summary once it is.
     pub fn on_tick(self: &Arc<Self>, online: bool) {
+        self.network_ready.store(online, Ordering::SeqCst);
         if !online || !self.pending.load(Ordering::SeqCst) {
             return;
         }
@@ -597,6 +614,10 @@ where
 impl BriefingHost for BriefingService {
     fn online(&self) -> bool {
         SystemReachability.online()
+    }
+
+    fn network_ready(&self) -> bool {
+        self.network_ready.load(Ordering::SeqCst)
     }
 
     fn screen(&self) -> Screen {
@@ -741,6 +762,8 @@ mod tests {
     /// A host that records what the briefing did to the outside world.
     struct FakeHost {
         online: AtomicBool,
+        /// The network is reported up but has only just come back.
+        settling: AtomicBool,
         screen: Screen,
         summary: Mutex<Result<String, String>>,
         asked_for_summary: Mutex<u32>,
@@ -753,6 +776,7 @@ mod tests {
         fn new(online: bool) -> FakeHost {
             FakeHost {
                 online: AtomicBool::new(online),
+                settling: AtomicBool::new(false),
                 screen: AWAKE_AND_UNLOCKED,
                 summary: Mutex::new(Ok("You have one meeting and two things due.".to_string())),
                 asked_for_summary: Mutex::new(0),
@@ -771,6 +795,10 @@ mod tests {
     impl BriefingHost for FakeHost {
         fn online(&self) -> bool {
             self.online.load(Ordering::SeqCst)
+        }
+
+        fn network_ready(&self) -> bool {
+            self.online() && !self.settling.load(Ordering::SeqCst)
         }
 
         fn screen(&self) -> Screen {
@@ -875,6 +903,27 @@ mod tests {
         // Nothing is owed any more.
         assert!(!complete_pending_with(&db, &host, "2026-11-12").await.unwrap());
         assert_eq!(*host.asked_for_summary.lock().unwrap(), 2);
+    }
+
+    /// A briefing that catches up in the first seconds after a wake does not
+    /// start its AI step into a network that has only just come back; the
+    /// summary is added once the network has settled, and nothing is reported
+    /// as failed.
+    #[tokio::test]
+    async fn a_briefing_right_after_a_wake_waits_for_the_network_to_settle() {
+        let db = crate::db::test_database();
+        let host = FakeHost::new(true);
+        host.settling.store(true, Ordering::SeqCst);
+        run_with(&db, &host, Trigger::CatchUp, hk("2026-11-12T08:35:00+08:00")).await.unwrap();
+        assert_eq!(*host.asked_for_summary.lock().unwrap(), 0, "no AI call yet");
+        let brief = host.last_shown();
+        assert!(brief.summary_pending && brief.summary_error.is_none(), "owed, not failed");
+
+        host.settling.store(false, Ordering::SeqCst);
+        assert!(!complete_pending_with(&db, &host, "2026-11-12").await.unwrap());
+        assert!(host.last_shown().summary.is_some());
+        assert_eq!(host.notifications.lock().unwrap().len(), 1);
+        assert!(host.spoken.lock().unwrap().is_empty());
     }
 
     #[tokio::test]

@@ -44,7 +44,7 @@ const messages = {
   dailyBriefingHint: ['At this time JARVIS shows a notification and a briefing on the Automation page, from what is saved on this Mac: today’s meetings, tasks and unread mail. An AI summary is added when the network is available. Nothing runs while the Mac is asleep or JARVIS is closed.', '到達設定時間時，JARVIS 會顯示通知，並在工作總覽顯示簡報。內容來自此 Mac 已儲存的資料：當日會議、工作及未讀郵件。網絡可用時會補上 AI 摘要。Mac 睡眠或 JARVIS 未開啟期間不會執行任何工作。'],
   dailyBriefingVoiceHint: ['It is read aloud only when it runs on time, with the Mac awake and the screen unlocked. If the Mac was asleep or JARVIS was closed at that time, the briefing is shown once afterwards and is not read aloud.', '只有準時執行、Mac 未進入睡眠而且螢幕未鎖定時才會朗讀。如當時 Mac 正在睡眠或 JARVIS 未開啟，簡報會在之後顯示一次，不會朗讀。'],
   dailyBriefingSpeechOff: ['“Enable text-to-speech” is off in Voice settings, so the briefing is not read aloud.', '「語音」設定中的「啟用文字朗讀」已關閉，因此簡報不會朗讀。'],
-  dailyBriefingNext: ['The first briefing comes at the next {time}.', '首次簡報會在下一個 {time} 顯示。'],
+  dailyBriefingNext: ['The next briefing comes at the next {time}.', '下一次簡報會在下一個 {time} 顯示。'],
   briefTitle: ['Today’s briefing', '今日簡報'], briefSummaryPending: ['The AI summary will be added when the network is available.', '網絡可用時會補上 AI 摘要。'],
   briefSummaryFailed: ['The AI summary could not be prepared: {reason}', '未能準備 AI 摘要：{reason}'], briefShownLate: ['Shown after its scheduled time, so it was not read aloud.', '顯示時間晚於排程時間，因此沒有朗讀。'],
 } as const;
