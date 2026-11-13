@@ -112,6 +112,11 @@ export function periodLabel(days: PeriodDays, text: Text): string {
   }
 }
 
+/** The period after "in the last" in English: "year", not "1 year". */
+function lastSpan(period: PeriodDays): string {
+  return period === 365 ? 'year' : periodLabel(period, (english) => english);
+}
+
 export function groupByLabel(by: GroupBy, text: Text): string {
   switch (by) {
     case 'model': return text('Model', '模型');
@@ -191,12 +196,12 @@ export function perDayLine(blended: BlendedCost, period: PeriodDays, text: Text)
   const span = periodLabel(period, text);
   if (unknown === 0) {
     return text(
-      `${amount} per day of use, ${dayCount} with usage in the last ${span}`,
+      `${amount} per day of use, ${dayCount} with usage in the last ${lastSpan(period)}`,
       `每個使用日平均${amount}，最近 ${span}內有 ${days} 日有使用`,
     );
   }
   return text(
-    `${amount} per day of use for requests with a known price, ${dayCount} with such usage in the last ${span}`,
+    `${amount} per day of use for requests with a known price, ${dayCount} with such usage in the last ${lastSpan(period)}`,
     `已知價格的請求每個使用日平均${amount}，最近 ${span}內有 ${days} 日有這類用量`,
   );
 }
@@ -214,7 +219,7 @@ export function unpricedNote(stats: CostStats, text: Text): string | null {
 /** Said in place of the figures when the period has no usage. */
 export function emptyPeriodLine(period: PeriodDays, text: Text): string {
   const span = periodLabel(period, text);
-  return text(`No usage recorded on this Mac in the last ${span}.`, `最近 ${span}此 Mac 未有記錄任何用量。`);
+  return text(`No usage recorded on this Mac in the last ${lastSpan(period)}.`, `最近 ${span}此 Mac 未有記錄任何用量。`);
 }
 
 /** How the history is kept, in one line under the table. */

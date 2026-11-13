@@ -174,6 +174,11 @@ test('the five periods are named the same way in the selector and the sentences'
   assert.deepEqual(PERIODS.map(days => periodLabel(days, en)), ['30 days', '90 days', '6 months', '1 year', '2 years']);
   assert.deepEqual(PERIODS.map(days => periodLabel(days, zh)), ['30 日', '90 日', '6 個月', '1 年', '2 年']);
   assert.equal(emptyPeriodLine(180, en), 'No usage recorded on this Mac in the last 6 months.');
+  // Window check 2 point (c): natural English for one year; the selector
+  // still says "1 year" and the other periods read as before.
+  assert.equal(emptyPeriodLine(365, en), 'No usage recorded on this Mac in the last year.');
+  assert.equal(emptyPeriodLine(365, zh), '最近 1 年此 Mac 未有記錄任何用量。');
+  assert.equal(periodLabel(365, en), '1 year');
   assert.equal(emptyPeriodLine(730, zh), '最近 2 年此 Mac 未有記錄任何用量。');
 });
 
@@ -188,6 +193,9 @@ test('the headline and the per-day line follow the chosen period, in both langua
   const halfYear = blended({ total_usd: 3, active_days: 12, usd_per_active_day: 0.25 });
   assert.equal(perDayLine(halfYear, 180, en), 'About US$0.250 per day of use, 12 days with usage in the last 6 months');
   assert.equal(perDayLine(halfYear, 180, zh), '每個使用日平均約 US$0.250，最近 6 個月內有 12 日有使用');
+  assert.equal(perDayLine(halfYear, 365, en), 'About US$0.250 per day of use, 12 days with usage in the last year');
+  assert.equal(perDayLine(twoYears, 365, en), 'About US$0.250 per day of use for requests with a known price, 50 days with such usage in the last year');
+  assert.equal(perDayLine(halfYear, 365, zh), '每個使用日平均約 US$0.250，最近 1 年內有 12 日有使用');
   const unknownOnly = stats({ days: 90, total_requests: 7, price_unknown_requests: 7 });
   for (const text of [en, zh]) {
     const headline = usageHeadline(unknownOnly, text);
