@@ -1469,8 +1469,8 @@ mod tests {
                 }
             }
         };
-        for i in 0..n {
-            if kinds[i] == Kind::Comment {
+        for (i, kind) in kinds.iter().enumerate() {
+            if *kind == Kind::Comment {
                 blank(&mut out, i, i + 1);
             }
         }
