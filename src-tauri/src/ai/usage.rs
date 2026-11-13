@@ -19,10 +19,12 @@
 //! years back is dated before the first day kept, which never moves back:
 //! the roll-up that moves it deletes it with the oldest totals (pinned by
 //! `a_request_stored_under_a_clock_two_years_back_is_deleted_when_rolled_up`).
-//! The first day kept is first recorded no earlier than the first day JARVIS
-//! could have stored usage, so a total from such a clock that is there before
-//! any day is recorded goes at the next run too, instead of holding expiry
-//! back for years (`the_first_day_kept_never_starts_before_usage_could_exist`).
+//! When the first day kept is first recorded, it is the later of the oldest
+//! total and the first day usage could exist, but never later than the day
+//! two years back, which until 3 May 2028 is the day recorded on every Mac.
+//! So a total from such a clock that is there before any day is recorded goes
+//! at the next run too, instead of holding expiry back for years
+//! (`the_first_day_kept_never_starts_before_usage_could_exist`).
 //!
 //! Days are UTC days (`ts / 86400`) in both levels, so a period is exact to
 //! the day. Nothing here leaves the Mac, and the log gets counts only.
@@ -481,16 +483,18 @@ fn expire(tx: &Connection, today: i64) -> rusqlite::Result<usize> {
     let from = match read_day(tx, KEPT_FROM_KEY)? {
         Some(day) => day,
         None => {
-            // The first run with totals only records where they start, no
-            // later than the oldest total and never before the first day
-            // usage could exist (a total dated earlier, from a clock years
-            // back, then goes at the next run), and deletes nothing. Any later run can
-            // move that day forward by one and delete what is before it, and
-            // that includes the clean-up at start-up of the same launch
-            // (commands/storage.rs `sweep` runs a roll-up of its own). So with
-            // the clock two years ahead at the first launch after the update
-            // and clean-up on, the first day of real usage still goes at that
-            // launch; each run takes at most one day.
+            // The first run with totals only records where expiry starts and
+            // deletes nothing: the later of the oldest total and the first
+            // day usage could exist, but never later than the day two years
+            // back, which until 3 May 2028 is the day recorded on every Mac.
+            // A total dated before the day recorded, from a clock years back,
+            // goes at the next run. Any later run can move that day forward
+            // by one and delete what is before it, and that includes the
+            // clean-up at start-up of the same launch (commands/storage.rs
+            // `sweep` runs a roll-up of its own). So with the clock two years
+            // ahead at the first launch after the update and clean-up on, the
+            // first day of real usage still goes at that launch; each run
+            // takes at most one day.
             if let Some(oldest) = tx.query_row("SELECT MIN(day) FROM usage_daily", [], |r| r.get::<_, Option<i64>>(0))? {
                 write_day(tx, KEPT_FROM_KEY, oldest.max(FIRST_USAGE_DAY).min(due))?;
             }
