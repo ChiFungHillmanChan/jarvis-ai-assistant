@@ -1004,7 +1004,7 @@ mod tests {
         // 2026-05-04: `git log -1 --format=%aI 57da92f` is 2026-05-04T19:16:54+01:00.
         assert_eq!(chrono::DateTime::from_timestamp(FIRST_USAGE_DAY * DAY, 0).unwrap().format("%Y-%m-%d").to_string(), "2026-05-04");
         let reset = 11_323; // 2001-01-01
-        for (now, recorded) in [(NOW, TODAY - 730), (NOW + 1_000 * DAY, FIRST_USAGE_DAY)] {
+        for (now, recorded, next) in [(NOW, TODAY - 730, TODAY - 730), (NOW + 1_000 * DAY, FIRST_USAGE_DAY, FIRST_USAGE_DAY + 1)] {
             let db = opened();
             let conn = db.conn.lock().unwrap();
             store(&conn, &[
@@ -1017,6 +1017,8 @@ mod tests {
             assert!(recorded > reset, "not 2001");
             assert_eq!(roll_up(&conn, now, 30).unwrap().totals_expired, 1, "{now}");
             assert_eq!(daily_days(&conn), vec![FIRST_USAGE_DAY + 10], "{now}: the 2001 total is gone, the real one is there");
+            // Expiry goes on from there, not one day at a time from 2001.
+            assert_eq!(read_day(&conn, KEPT_FROM_KEY).unwrap(), Some(next), "{now}");
         }
     }
 
