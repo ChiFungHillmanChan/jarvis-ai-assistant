@@ -1233,12 +1233,221 @@ mod tests {
         std::fs::remove_dir_all(&directory).unwrap();
     }
 
+    /// What Rust code runs outside tests: `source` with every comment and
+    /// every `#[cfg(test)]` item blanked out, wherever it is in the file,
+    /// newlines kept so lines keep their numbers. Strings are kept: the SQL
+    /// is in them.
+    fn runtime_code(source: &str) -> String {
+        #[derive(Clone, Copy, PartialEq)]
+        enum Kind {
+            Code,
+            Text,
+            Comment,
+        }
+        let chars: Vec<char> = source.chars().collect();
+        let n = chars.len();
+        let at = |i: usize| chars.get(i).copied().unwrap_or('\0');
+        let ident = |i: Option<usize>| i.is_some_and(|i| chars[i].is_alphanumeric() || chars[i] == '_');
+        let mut kinds = vec![Kind::Code; n];
+        let mut i = 0;
+        while i < n {
+            let start = i;
+            let kind = match (chars[i], at(i + 1)) {
+                ('/', '/') => {
+                    while i < n && chars[i] != '\n' {
+                        i += 1;
+                    }
+                    Kind::Comment
+                }
+                ('/', '*') => {
+                    let mut depth = 0;
+                    while i < n {
+                        if chars[i] == '/' && at(i + 1) == '*' {
+                            depth += 1;
+                            i += 2;
+                        } else if chars[i] == '*' && at(i + 1) == '/' {
+                            depth -= 1;
+                            i += 2;
+                            if depth == 0 {
+                                break;
+                            }
+                        } else {
+                            i += 1;
+                        }
+                    }
+                    Kind::Comment
+                }
+                ('r', '"' | '#') if !ident(i.checked_sub(1)) || (chars[i - 1] == 'b' && !ident(i.checked_sub(2))) => {
+                    let mut j = i + 1;
+                    let mut hashes = 0;
+                    while at(j) == '#' {
+                        hashes += 1;
+                        j += 1;
+                    }
+                    if at(j) != '"' {
+                        // A raw identifier such as r#type.
+                        i += 1;
+                        continue;
+                    }
+                    j += 1;
+                    while j < n && !(chars[j] == '"' && (1..=hashes).all(|k| at(j + k) == '#')) {
+                        j += 1;
+                    }
+                    i = (j + 1 + hashes).min(n);
+                    Kind::Text
+                }
+                ('"', _) => {
+                    i += 1;
+                    while i < n && chars[i] != '"' {
+                        i += if chars[i] == '\\' { 2 } else { 1 };
+                    }
+                    i = (i + 1).min(n);
+                    Kind::Text
+                }
+                ('\'', '\\') => {
+                    i += 3;
+                    while i < n && chars[i] != '\'' {
+                        i += 1;
+                    }
+                    i = (i + 1).min(n);
+                    Kind::Text
+                }
+                ('\'', _) if at(i + 2) == '\'' => {
+                    i += 3;
+                    Kind::Text
+                }
+                _ => {
+                    i += 1;
+                    continue;
+                }
+            };
+            kinds[start..i].fill(kind);
+        }
+        let mut out = chars.clone();
+        let blank = |out: &mut Vec<char>, from: usize, to: usize| {
+            for c in &mut out[from..to.min(n)] {
+                if *c != '\n' {
+                    *c = ' ';
+                }
+            }
+        };
+        for i in 0..n {
+            if kinds[i] == Kind::Comment {
+                blank(&mut out, i, i + 1);
+            }
+        }
+        let attribute: Vec<char> = "#[cfg(test)]".chars().collect();
+        let mut i = 0;
+        while i + attribute.len() <= n {
+            if kinds[i] != Kind::Code || chars[i..i + attribute.len()] != attribute[..] {
+                i += 1;
+                continue;
+            }
+            // The item ends at its first `;`, or at the brace that closes its
+            // first `{`, whichever comes first.
+            let mut j = i + attribute.len();
+            while j < n && !(kinds[j] == Kind::Code && (chars[j] == '{' || chars[j] == ';')) {
+                j += 1;
+            }
+            if j < n && chars[j] == '{' {
+                let mut depth = 0;
+                while j < n {
+                    if kinds[j] == Kind::Code && chars[j] == '{' {
+                        depth += 1;
+                    } else if kinds[j] == Kind::Code && chars[j] == '}' {
+                        depth -= 1;
+                        if depth == 0 {
+                            break;
+                        }
+                    }
+                    j += 1;
+                }
+            }
+            blank(&mut out, i, j + 1);
+            i = j + 1;
+        }
+        out.into_iter().collect()
+    }
+
+    /// The span of `fn name(`, signature and body, in code from
+    /// [`runtime_code`]; braces inside strings and char literals do not count.
+    fn function_span(code: &str, signature: &str) -> Option<std::ops::Range<usize>> {
+        let start = code.find(signature)?;
+        let open = start + code[start..].find('{')?;
+        let chars: Vec<(usize, char)> = code[open..].char_indices().collect();
+        let (mut depth, mut in_string, mut i) = (0, false, 0);
+        while i < chars.len() {
+            let c = chars[i].1;
+            if in_string {
+                match c {
+                    '\\' => i += 1,
+                    '"' => in_string = false,
+                    _ => {}
+                }
+            } else if c == '"' {
+                in_string = true;
+            } else if c == '\'' && chars.get(i + 2).is_some_and(|(_, c)| *c == '\'') {
+                i += 2;
+            } else if c == '{' {
+                depth += 1;
+            } else if c == '}' {
+                depth -= 1;
+                if depth == 0 {
+                    return Some(start..open + chars[i].0 + 1);
+                }
+            }
+            i += 1;
+        }
+        None
+    }
+
+    /// The functions of ai/cost.rs that may name the tables: the one insert,
+    /// and the one-time correction of old rows.
+    const COST_RS_EXEMPT: [&str; 2] = ["fn insert_row(", "pub fn correct_old_rows("];
+
+    /// Each line of runtime code in `name` (a path under src/) that names
+    /// either table, in any case, quoted, qualified or built into a string.
+    /// ai/usage.rs may; ai/cost.rs may only inside [`COST_RS_EXEMPT`].
+    fn usage_table_mentions(name: &str, source: &str) -> Vec<String> {
+        if name == "ai/usage.rs" {
+            return Vec::new();
+        }
+        let mut code = runtime_code(source);
+        if name == "ai/cost.rs" {
+            for signature in COST_RS_EXEMPT {
+                let span = function_span(&code, signature).unwrap_or_else(|| panic!("{signature} is in ai/cost.rs"));
+                let blank: String = code[span.clone()].chars().map(|c| if c == '\n' { '\n' } else { ' ' }).collect();
+                code.replace_range(span, &blank);
+            }
+        }
+        code.lines()
+            .enumerate()
+            .filter(|(_, line)| {
+                let line = line.to_lowercase();
+                line.contains("inference_metrics") || line.contains("usage_daily")
+            })
+            .map(|(number, line)| format!("{name}:{}: {}", number + 1, line.trim()))
+            .collect()
+    }
+
+    /// The migrations that define the two tables. A new one that changes or
+    /// reads them (a view too) is reviewed with this module before it joins
+    /// the list.
+    const USAGE_MIGRATIONS: [&str; 3] = ["V13__aws_credentials_and_routing.sql", "V16__cost_telemetry.sql", "V34__usage_feature_and_unknown_price.sql"];
+
+    fn migration_mentions(file: &str, sql: &str) -> bool {
+        let sql = sql.to_lowercase();
+        !USAGE_MIGRATIONS.contains(&file) && (sql.contains("inference_metrics") || sql.contains("usage_daily"))
+    }
+
     /// Every read of usage goes through this module, so the two levels are
-    /// always added together (P07 and P10 too). Other code may store a
-    /// request and correct the old rows once (both in ai/cost.rs), but
-    /// reads neither table, and deletes from neither.
+    /// always added together (P07 and P10 too), and nothing else changes
+    /// either table: other code may only store a request and correct the old
+    /// rows once (the two functions of ai/cost.rs). Searched: all code that
+    /// runs outside tests, in every file, for the bare table names, reads
+    /// and writes alike; and every migration.
     #[test]
-    fn no_other_code_reads_the_usage_tables() {
+    fn no_other_code_reads_or_writes_the_usage_tables() {
         fn rust_files(dir: &std::path::Path, found: &mut Vec<std::path::PathBuf>) {
             for entry in std::fs::read_dir(dir).unwrap() {
                 let path = entry.unwrap().path();
@@ -1249,45 +1458,58 @@ mod tests {
                 }
             }
         }
-        /// The source before its test module.
-        fn runtime(source: &str) -> &str {
-            let mut at = 0;
-            while let Some(found) = source[at..].find("#[cfg(test)]") {
-                let start = at + found;
-                let next = source[start + "#[cfg(test)]".len()..].trim_start();
-                if ["mod ", "pub mod ", "pub(crate) mod "].iter().any(|item| next.starts_with(item)) {
-                    return &source[..start];
-                }
-                at = start + 1;
-            }
-            source
-        }
-        let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src");
+        let manifest = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
+        let root = manifest.join("src");
         let mut files = Vec::new();
         rust_files(&root, &mut files);
         assert!(files.len() > 50, "the sources were found");
-        let mut reads = Vec::new();
+        let mut found = Vec::new();
         for path in files {
             let name = path.strip_prefix(&root).unwrap().to_string_lossy().into_owned();
-            if name == "ai/usage.rs" {
-                continue;
-            }
-            let source = std::fs::read_to_string(&path).unwrap();
-            let mut code = runtime(&source).to_string();
-            if name == "ai/cost.rs" {
-                let start = code.find("pub fn correct_old_rows(").expect("the correction is in cost.rs");
-                let end = start + code[start..].find("\n}\n").unwrap();
-                code.replace_range(start..end, "");
-            }
-            let code = code.split_whitespace().collect::<Vec<_>>().join(" ").to_lowercase();
-            for table in ["inference_metrics", "usage_daily"] {
-                for verb in ["from", "join"] {
-                    if code.contains(&format!("{verb} {table}")) {
-                        reads.push(format!("{name}: {verb} {table}"));
-                    }
-                }
+            found.extend(usage_table_mentions(&name, &std::fs::read_to_string(&path).unwrap()));
+        }
+        let mut migrations = 0;
+        for entry in std::fs::read_dir(manifest.join("migrations")).unwrap() {
+            let path = entry.unwrap().path();
+            let file = path.file_name().unwrap().to_string_lossy().into_owned();
+            migrations += 1;
+            if migration_mentions(&file, &std::fs::read_to_string(&path).unwrap()) {
+                found.push(format!("migrations/{file}"));
             }
         }
-        assert!(reads.is_empty(), "read usage through ai/usage.rs: {reads:?}");
+        assert!(migrations > 30, "the migrations were found");
+        assert!(found.is_empty(), "read and write usage through ai/usage.rs: {found:#?}");
+    }
+
+    /// U6. The guard sees each kind of use the review named, and what it
+    /// leaves alone. It cannot see a table name assembled from pieces at run
+    /// time (concat!("inference", "_metrics")); review has to.
+    #[test]
+    fn the_usage_guard_sees_each_kind_of_use() {
+        let seen = |source: &str| !usage_table_mentions("commands/new.rs", source).is_empty();
+        // 1. A table name put in at run time.
+        assert!(seen("fn f(conn: &Connection) { let table = \"inference_metrics\"; conn.execute(&format!(\"DELETE FROM {table}\"), []).ok(); }"));
+        // 2. Quoted, qualified, or in another case.
+        assert!(seen("const Q: &str = \"SELECT * FROM \\\"usage_daily\\\"\";"));
+        assert!(seen("const Q: &str = \"SELECT * FROM main.usage_daily\";"));
+        assert!(seen("const Q: &str = r#\"SELECT * FROM Inference_Metrics\"#;"));
+        // 3. A comma join.
+        assert!(seen("const Q: &str = \"SELECT * FROM emails, inference_metrics\";"));
+        // 4. Writes.
+        assert!(seen("const Q: &str = \"UPDATE usage_daily SET requests = 0\";"));
+        assert!(seen("const Q: &str = \"INSERT INTO usage_daily (day) VALUES (1)\";"));
+        // 5. Code after a test module.
+        assert!(seen("#[cfg(test)]\nmod tests {\n    fn t() {}\n}\nfn later() { let _ = \"DELETE FROM inference_metrics\"; }"));
+        // 6. A migration, a view included.
+        assert!(migration_mentions("V35__usage_view.sql", "CREATE VIEW spend AS SELECT * FROM usage_daily;"));
+        assert!(!migration_mentions("V35__other.sql", "CREATE TABLE notes (id INTEGER);"));
+
+        // Left alone: comments, test code, this module, and the two
+        // functions of ai/cost.rs; another function there is not.
+        assert!(!seen("// reads inference_metrics\n/* and usage_daily */\nfn f() {}"));
+        assert!(!seen("#[cfg(test)]\nfn fixture() { let _ = \"INSERT INTO inference_metrics\"; }\nfn f() { let c = '{'; let _ = c; }"));
+        assert!(usage_table_mentions("ai/usage.rs", "const Q: &str = \"SELECT * FROM usage_daily\";").is_empty());
+        let cost = "fn insert_row() { let _ = \"INSERT INTO inference_metrics\"; }\npub fn correct_old_rows() { if true { let _ = \"UPDATE inference_metrics {\"; } let _ = ('{', \"SELECT 1 FROM inference_metrics\"); }\nfn helper() { let _ = \"DELETE FROM usage_daily\"; }";
+        assert_eq!(usage_table_mentions("ai/cost.rs", cost), ["ai/cost.rs:3: fn helper() { let _ = \"DELETE FROM usage_daily\"; }"]);
     }
 }
