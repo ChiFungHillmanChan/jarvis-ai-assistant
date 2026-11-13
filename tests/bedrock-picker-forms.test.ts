@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { readFileSync } from 'node:fs';
+import { readFileSync, readdirSync } from 'node:fs';
 import { document } from './dom.ts';
 import { StrictMode, createElement } from 'react';
 import { flushSync } from 'react-dom';
@@ -246,12 +246,15 @@ test('the mail forms say a us., eu. or apac. profile is sent for the saved regio
 // ---------------------------------------------------------------------------
 // Requirement 7: when JARVIS asks AWS, rendered for real.
 
+// Each request the stand-in receives: answer it with asked[i], or make the
+// command itself fail with refused[i].
 const asked: Array<(value: BedrockModelList) => void> = [];
+const refused: Array<(error: Error) => void> = [];
 const calls: Array<Record<string, unknown> | undefined> = [];
 mockIPC((command, args) => {
   assert.equal(command, 'list_bedrock_models', 'the hook sends nothing else');
   calls.push(args as Record<string, unknown> | undefined);
-  return new Promise((resolve) => asked.push(resolve));
+  return new Promise((resolve, reject) => { asked.push(resolve); refused.push(reject); });
 });
 const { watchUserActivity } = await import('../src/lib/user-activity.ts');
 const activity: Record<string, () => void> = {};
@@ -325,38 +328,72 @@ test('the mail forms ask only while the picker is open, after a key or click, on
 // button, and the setup guide after it saved AWS credentials, ask again once
 // each. A reply that arrives after the picker closed is not shown. Breaks if
 // the hook stops remembering that this opening has asked, reload stops
-// asking, or the request counter stops guarding a late reply.
+// asking, or the request counter stops guarding a late reply. It stands
+// alone (review M-5.3): it opens the gate itself and counts only its own
+// requests.
 test('loading the list again asks once more; a late reply after closing is dropped', async () => {
+  flushSync(() => activity.keydown());
+  const before = asked.length;
   const probe = mount();
   probe.render(true);
   await settle();
-  const before = asked.length;
-  assert.equal(before, 3, 'a new opening asks once (the gate is already open)');
-  asked[before - 1](builtIn);
+  assert.equal(asked.length, before + 1, 'a new opening asks once');
+  asked[before](builtIn);
   await settle();
 
   probe.reload();
   await settle();
-  assert.equal(asked.length, before + 1, 'reload asks once');
-  asked[before](awsList);
+  assert.equal(asked.length, before + 2, 'reload asks once');
+  asked[before + 1](awsList);
   await settle();
   assert.deepEqual(probe.last(), { status: 'ready', list: awsList });
 
   probe.reload();
   await settle();
-  assert.equal(asked.length, before + 2);
+  assert.equal(asked.length, before + 3);
   probe.render(false);
-  asked[before + 1](builtIn);
+  asked[before + 2](builtIn);
   await settle();
   assert.deepEqual(probe.last(), { status: 'idle' }, 'the reply for a closed picker is not shown');
 
   probe.reload();
   await settle();
-  assert.equal(asked.length, before + 2, 'nothing is asked while closed, whatever asks');
+  assert.equal(asked.length, before + 3, 'nothing is asked while closed, whatever asks');
   probe.render(true);
   await settle();
-  assert.equal(asked.length, before + 3, 'reopened: asked once');
+  assert.equal(asked.length, before + 4, 'reopened: asked once');
   probe.unmount();
+});
+
+// Review M-5.5: the command itself failing gives the error state, whose
+// line says to load the list again; the button stays enabled, reads "Load
+// the list again", and asks once more. Breaks if the hook stops catching the
+// failure, or the button is disabled in the error state.
+test('a failed request shows the error state, and loading the list again asks once more', async () => {
+  flushSync(() => activity.keydown());
+  const before = asked.length;
+  const probe = mount();
+  probe.render(true);
+  await settle();
+  assert.equal(asked.length, before + 1, 'asked once');
+  refused[before](new Error('stand-in failure'));
+  await settle();
+  assert.deepEqual(probe.last(), { status: 'error' });
+  assert.equal(listStatus({ status: 'error' }, en, 'mail'), 'JARVIS could not load the model list. Load it again to retry.');
+  assert.equal(listStatus({ status: 'error' }, zh, 'setup'), 'JARVIS 未能載入模型清單，可重新載入再試。');
+
+  probe.reload();
+  await settle();
+  assert.equal(asked.length, before + 2, '"Load the list again" asks once more');
+  assert.deepEqual(probe.last(), { status: 'loading' });
+  asked[before + 1](builtIn);
+  await settle();
+  assert.deepEqual(probe.last(), { status: 'ready', list: builtIn });
+  probe.unmount();
+
+  const picker = source('../src/components/BedrockModelPicker.tsx');
+  assert.match(picker, /<button type="button" disabled=\{listState\.status === "loading" \|\| busy\} onClick=\{onReload\}/, 'enabled in the error state');
+  assert.match(picker, /\{listState\.status === "idle" \? text\("Load the list", "載入清單"\) : text\("Load the list again", "重新載入清單"\)\}/);
 });
 
 // ---------------------------------------------------------------------------
@@ -389,6 +426,27 @@ test('the forms use the shared picker and hook, and only they ask', () => {
   assert.match(hook, /const userActed = useUserHasActed\(\);/);
   const picker = source('../src/components/BedrockModelPicker.tsx');
   assert.doesNotMatch(picker, /listBedrockModels|invoke\(/, 'the picker shows a list; it does not ask');
+});
+
+// Review M-5.4: who may ask AWS for the list, anywhere under src/. The
+// commands module defines the call; only Settings > Models and the forms'
+// hook make it; no other file names the command. Breaks if any other file
+// imports or calls listBedrockModels, or invokes list_bedrock_models itself.
+test('only Settings and the hook call listBedrockModels, anywhere under src/', () => {
+  const root = new URL('../src/', import.meta.url);
+  const files = readdirSync(root, { recursive: true }).map(String).filter((file) => /\.(ts|tsx|js|jsx)$/.test(file));
+  const read = (file: string) => readFileSync(new URL(file, root), 'utf8');
+  assert.ok(files.length > 50, 'the walk reaches the source tree');
+  assert.deepEqual(files.filter((file) => /\blistBedrockModels\b/.test(read(file))).sort(), ['hooks/useBedrockModelList.ts', 'lib/commands.ts', 'pages/Settings.tsx']);
+  assert.deepEqual(files.filter((file) => /["'`]list_bedrock_models["'`]/.test(read(file))), ['lib/commands.ts']);
+});
+
+// Review M-5.1: a form gets the form options (no empty "Default" entry, a
+// choice is required), Settings gets its own. Breaks if the forms are given
+// Settings' options or the other way round.
+test('a form gets the form options, Settings gets its own', () => {
+  const picker = source('../src/components/BedrockModelPicker.tsx');
+  assert.match(picker, /const options = props\.place === "settings"\s*\? pickerOptions\(list, props\.saved, fallback, text\)\s*: formPickerOptions\(list, state\.other \? null : props\.value, props\.stored, fallback, text\);/);
 });
 
 // Requirements 4, 5 and 7 in the Mail dialog. Breaks if the list is asked
