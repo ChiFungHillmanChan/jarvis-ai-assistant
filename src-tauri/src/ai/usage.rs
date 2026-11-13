@@ -471,9 +471,13 @@ fn expire(tx: &Connection, today: i64) -> rusqlite::Result<usize> {
         Some(day) => day,
         None => {
             // The first run with totals only records where they start, no
-            // later than the oldest, and deletes nothing: with the clock two
-            // years ahead at that run, the first day of real usage would
-            // otherwise go although it is weeks old.
+            // later than the oldest, and deletes nothing. Any later run can
+            // move that day forward by one and delete what is before it, and
+            // that includes the clean-up at start-up of the same launch
+            // (commands/storage.rs `sweep` runs a roll-up of its own). So with
+            // the clock two years ahead at the first launch after the update
+            // and clean-up on, the first day of real usage still goes at that
+            // launch; each run takes at most one day.
             if let Some(oldest) = tx.query_row("SELECT MIN(day) FROM usage_daily", [], |r| r.get::<_, Option<i64>>(0))? {
                 write_day(tx, KEPT_FROM_KEY, oldest.min(due))?;
             }
