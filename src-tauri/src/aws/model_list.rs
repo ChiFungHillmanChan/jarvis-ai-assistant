@@ -229,7 +229,17 @@ fn failure<E: ProvideErrorMetadata, R>(call: &str, err: &SdkError<E, R>) -> Fail
     let (reason, kind) = match err {
         SdkError::ServiceError(_) => match code {
             "AccessDeniedException" | "NotAuthorized" => (Reason::NotAllowed, format!("code {code}")),
-            "UnrecognizedClientException" | "InvalidSignatureException" | "IncompleteSignature" | "ExpiredTokenException" => {
+            // Common Error Types (Bedrock API Reference), the shipped request
+            // path's InvalidSignatureException, and two more AWS names for a
+            // key id or secret it rejects: InvalidClientTokenId (Bedrock User
+            // Guide, API error codes) and SignatureDoesNotMatch (IAM User
+            // Guide, Signature Version 4 troubleshooting).
+            "UnrecognizedClientException"
+            | "InvalidSignatureException"
+            | "IncompleteSignature"
+            | "ExpiredTokenException"
+            | "InvalidClientTokenId"
+            | "SignatureDoesNotMatch" => {
                 (Reason::CredentialsRefused, format!("code {code}"))
             }
             "" => (Reason::Failed, "service error without a code".to_string()),
@@ -532,6 +542,30 @@ mod tests {
         assert_eq!(pages.iter().filter(|p| p.contains("nextToken=page-2")).count(), 1, "{pages:?}");
     }
 
+    /// A page token that comes back unchanged ends the paging (round 8,
+    /// R7-5), and what was read is still listed. Breaks if the
+    /// `token.as_deref() != Some(next)` guard is removed: the same page is
+    /// then asked for until MAX_PAGES.
+    #[tokio::test]
+    async fn a_page_token_that_repeats_stops_the_paging_and_the_list_still_comes_back() {
+        let (seen, _endpoint) = control_plane(|target| {
+            if target.starts_with("/inference-profiles") && target.contains("nextToken=") {
+                ok(json!({"inferenceProfileSummaries": [profile("apac.amazon.nova-micro-v1:0", "APAC Nova Micro", "amazon.nova-micro-v1:0")], "nextToken": "same"}))
+            } else if target.starts_with("/inference-profiles") {
+                ok(json!({"inferenceProfileSummaries": [profile("global.anthropic.claude-haiku-4-5-20251001-v1:0", "Global Claude Haiku 4.5", "anthropic.claude-haiku-4-5-20251001-v1:0")], "nextToken": "same"}))
+            } else {
+                ok(json!({"modelSummaries": []}))
+            }
+        })
+        .await;
+        let list = list_with(&fixture_creds("ap-southeast-1"), LIST_TIME_LIMIT).await;
+        assert_eq!(list.source, Source::Aws);
+        let ids: Vec<&str> = list.models.iter().map(|m| m.id.as_str()).collect();
+        assert_eq!(ids, vec!["apac.amazon.nova-micro-v1:0", "global.anthropic.claude-haiku-4-5-20251001-v1:0"]);
+        let pages = seen.lock().unwrap().iter().filter(|s| s.target.starts_with("/inference-profiles")).count();
+        assert_eq!(pages, 2, "the first page, then the page for \"same\", then stop");
+    }
+
     /// A key that may not list gets the built-in list, naming the refused
     /// action as AWS names it. Breaks if the AccessDeniedException arm or the
     /// `denied` names are removed, or a partial AWS list is shown instead.
@@ -557,6 +591,26 @@ mod tests {
         assert_eq!(list.missing_permissions, vec!["bedrock:ListInferenceProfiles", "bedrock:ListFoundationModels"]);
     }
 
+    /// The reverse mix (round 8, R7-5): profiles listed, models refused. The
+    /// listed profiles are not shown alone; the built-in list names the
+    /// models action. Breaks if the `LIST_MODELS_ACTION` push is removed, or
+    /// a partial AWS list is returned when one call succeeds.
+    #[tokio::test]
+    async fn profiles_listed_but_models_refused_gets_the_built_in_list_naming_that_permission() {
+        let (_seen, _endpoint) = control_plane(|target| {
+            if target.starts_with("/inference-profiles") {
+                ok(json!({"inferenceProfileSummaries": [profile("apac.amazon.nova-micro-v1:0", "APAC Nova Micro", "amazon.nova-micro-v1:0")]}))
+            } else {
+                refused(403, "AccessDeniedException")
+            }
+        })
+        .await;
+        let list = list_with(&fixture_creds("ap-southeast-1"), LIST_TIME_LIMIT).await;
+        assert_eq!((list.source, list.reason), (Source::Fallback, Some(Reason::NotAllowed)));
+        assert_eq!(list.missing_permissions, vec!["bedrock:ListFoundationModels"]);
+        assert_eq!(list.models, built_in(Some("ap-southeast-1")));
+    }
+
     /// Credentials AWS does not accept, and any other service error, also get
     /// the built-in list, each with its own reason. Breaks if the codes are
     /// read as "not allowed" or the error arm is dropped.
@@ -567,6 +621,14 @@ mod tests {
         assert_eq!((list.source, list.reason), (Source::Fallback, Some(Reason::CredentialsRefused)));
         assert!(list.missing_permissions.is_empty());
         drop(_endpoint);
+
+        // Round 8, R7-2: the two further codes AWS's pages give for a key id
+        // or a secret it rejects. Breaks if they leave the credentials arm.
+        for code in ["InvalidClientTokenId", "SignatureDoesNotMatch"] {
+            let (_seen, _endpoint) = control_plane(move |_| refused(403, code)).await;
+            let list = list_with(&fixture_creds("ap-southeast-1"), LIST_TIME_LIMIT).await;
+            assert_eq!((list.source, list.reason), (Source::Fallback, Some(Reason::CredentialsRefused)), "{code}");
+        }
 
         let (_seen, _endpoint) = control_plane(|_| refused(500, "InternalServerException")).await;
         let list = list_with(&fixture_creds("ap-southeast-1"), LIST_TIME_LIMIT).await;
