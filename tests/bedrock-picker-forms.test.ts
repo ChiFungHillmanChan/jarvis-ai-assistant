@@ -125,8 +125,9 @@ const ready = (reason: BedrockListReason, list: BedrockModelList = builtIn): Bed
 // Requirement 9: each place has its own true "no credentials" line, in both
 // languages. Settings' says to save them below; the Mail dialog has no such
 // panel (they are in Settings > Models); the setup guide takes the keys
-// above and saves them with its test button. Breaks if a place falls back
-// to another place's words.
+// above and saves them with its test button, which needs a model, so it
+// says to choose one first (review M-3). Breaks if a place falls back to
+// another place's words.
 test('each place says where to save AWS credentials, in both languages', () => {
   assert.equal(
     listStatus(ready('no_credentials'), en, 'settings'),
@@ -143,11 +144,11 @@ test('each place says where to save AWS credentials, in both languages', () => {
   );
   assert.equal(
     listStatus(ready('no_credentials'), en, 'setup'),
-    `Built-in list: no AWS credentials are saved. The keys entered above are saved when you press “Test and use Bedrock for mail”, and JARVIS then asks your AWS account for the list. ${BUILT_IN_REGION_NOTE[0]}`,
+    `Built-in list: no AWS credentials are saved. Choose a model first; the keys entered above are saved when you press “Test and use Bedrock for mail”, and JARVIS then asks your AWS account for the list. ${BUILT_IN_REGION_NOTE[0]}`,
   );
   assert.equal(
     listStatus(ready('no_credentials'), zh, 'setup'),
-    `內置清單：尚未儲存 AWS 憑證。上方輸入的密鑰會在按「測試並以 Bedrock 處理電郵」時儲存，之後 JARVIS 會向你的 AWS 帳戶查詢清單。${BUILT_IN_REGION_NOTE[1]}`,
+    `內置清單：尚未儲存 AWS 憑證。請先選擇模型；上方輸入的密鑰會在按「測試並以 Bedrock 處理電郵」時儲存，之後 JARVIS 會向你的 AWS 帳戶查詢清單。${BUILT_IN_REGION_NOTE[1]}`,
   );
   // The other two lines about saved credentials follow the same rule.
   for (const reason of CREDENTIAL_REASONS) {
@@ -191,7 +192,7 @@ test('every other line is the same in each place, with the region and refusal se
   }
   // The setup guide also takes new keys: its AWS line says the list is from the saved ones.
   assert.match(listStatus({ status: 'ready', list: awsList }, en, 'setup'), /^List from the AWS account of your saved credentials, for ap-southeast-1\./);
-  assert.match(listStatus({ status: 'ready', list: awsList }, zh, 'setup'), /^清單來自已儲存憑證的 AWS 帳戶（地區：ap-southeast-1）。/);
+  assert.match(listStatus({ status: 'ready', list: awsList }, zh, 'setup'), /^清單來自已儲存憑證所屬的 AWS 帳戶（地區：ap-southeast-1）。/);
   assert.equal(listStatus({ status: 'ready', list: awsList }, en, 'mail'), listStatus({ status: 'ready', list: awsList }, en, 'settings'));
 });
 

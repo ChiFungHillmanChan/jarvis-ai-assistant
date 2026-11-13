@@ -40,7 +40,10 @@ export type BedrockModelList = {
   models: BedrockModelChoice[];
 };
 
-/** Where the picker's list stands while the Models section is open. */
+/**
+ * Where the picker's list stands while the picker is on screen: in Settings >
+ * Models, the Mail dialog's Analysis settings or the setup guide.
+ */
 export type BedrockListState =
   | { status: 'idle' }
   | { status: 'loading' }
@@ -48,8 +51,11 @@ export type BedrockListState =
   | { status: 'error' };
 
 /**
- * The value of "Other (enter an ID)". A saved model id never holds a space
- * (bedrock_model_to_save refuses whitespace), so no id can be this value.
+ * The value of "Other (enter an ID)". No model id can be this value, which
+ * begins with a space: in Settings a saved id never holds a space
+ * (bedrock_model_to_save refuses whitespace); in the Mail dialog and the
+ * setup guide the picker trims what is typed (BedrockModelPicker) and
+ * mail/store.rs trims what it saves, so a mail id never begins with one.
  */
 export const OTHER_MODEL = ' other';
 
@@ -177,7 +183,7 @@ export function listStatus(state: BedrockListState, text: Text, place: PickerPla
     return place === 'setup'
       ? text(
         `List from the AWS account of your saved credentials, for ${region}. AWS can still refuse a listed model if your account has no access to it.`,
-        `清單來自已儲存憑證的 AWS 帳戶（地區：${region}）。如帳戶未獲某個模型的存取權限，即使該模型在清單中，AWS 仍可能拒絕。`,
+        `清單來自已儲存憑證所屬的 AWS 帳戶（地區：${region}）。如帳戶未獲某個模型的存取權限，即使該模型在清單中，AWS 仍可能拒絕。`,
       )
       : text(
         `List from your AWS account for ${region}. AWS can still refuse a listed model if your account has no access to it.`,
@@ -213,7 +219,7 @@ function credentialsReason(reason: 'no_credentials' | 'unreadable_credentials' |
   }
   switch (reason) {
     case 'no_credentials':
-      return text('Built-in list: no AWS credentials are saved. The keys entered above are saved when you press “Test and use Bedrock for mail”, and JARVIS then asks your AWS account for the list.', '內置清單：尚未儲存 AWS 憑證。上方輸入的密鑰會在按「測試並以 Bedrock 處理電郵」時儲存，之後 JARVIS 會向你的 AWS 帳戶查詢清單。');
+      return text('Built-in list: no AWS credentials are saved. Choose a model first; the keys entered above are saved when you press “Test and use Bedrock for mail”, and JARVIS then asks your AWS account for the list.', '內置清單：尚未儲存 AWS 憑證。請先選擇模型；上方輸入的密鑰會在按「測試並以 Bedrock 處理電郵」時儲存，之後 JARVIS 會向你的 AWS 帳戶查詢清單。');
     case 'unreadable_credentials':
       return text('Built-in list: JARVIS could not read your saved AWS credentials. Enter them again above; they are saved when you press “Test and use Bedrock for mail”.', '內置清單：JARVIS 未能讀取已儲存的 AWS 憑證。請在上方重新輸入，按「測試並以 Bedrock 處理電郵」時便會儲存。');
     case 'credentials_refused':
@@ -246,7 +252,10 @@ function fallbackReason(list: BedrockModelList, text: Text, place: PickerPlace):
   }
 }
 
-/** The picker's own state. The saved id lives in the chain row, not here. */
+/**
+ * The picker's own state. The id it shows lives with the page, not here: the
+ * chain row in Settings, the form in the Mail dialog and the setup guide.
+ */
 export type PickerState = {
   /** "Other (enter an ID)" is chosen: the ID field shows. */
   other: boolean;
