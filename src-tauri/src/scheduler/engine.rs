@@ -534,8 +534,11 @@ impl<C: Clock> Engine<C> {
         if wall_clock_jumped(now - state.last_wall, awake.saturating_sub(state.last_awake)) {
             log::info!("Scheduler: the Mac woke or its clock changed; checking every job for a missed run");
             state.last_wake_or_launch = now;
-            // The network that was up before the sleep has to show it is up again.
-            if matches!(state.network, Network::Online) {
+            // A network that was up before the sleep has to show it is up
+            // again, and from now: a settle that was already under way starts
+            // over, because the awake seconds it had counted were before the
+            // sleep and say nothing about the network after it.
+            if !matches!(state.network, Network::Offline) {
                 state.network = Network::Settling(awake);
             }
             state.jobs.values_mut().for_each(|job| job.next_check = None);
@@ -1729,6 +1732,40 @@ pub(super) mod tests {
         sim.awake_for(1).await;
         assert_eq!(sim.ran(), ["scheduled 2026-11-12T10:00:00+08:00", "catch_up 2026-11-12T10:30:00+08:00"]);
         assert!(!sim.history(job).iter().any(|row| row.starts_with("skipped_offline")), "a few seconds of settling is not a wait worth recording");
+        assert_eq!(sim.failed_runs(), 0);
+    }
+
+    // Case: the lid is closed inside the settle time and opened an hour later
+    // with the network reported up. The settle starts again at that wake: the
+    // seconds counted before the sleep say nothing about the network now.
+    #[tokio::test]
+    async fn a_wake_starts_the_settle_again_when_one_was_already_under_way() {
+        let sim = Sim::start("2026-11-12T09:58:00+08:00");
+        let local = sim.add_job("proactive_check", EVERY_5_MIN);
+        let remote = sim.add_job("email_sync", EVERY_5_MIN);
+        sim.awake_until("2026-11-12T10:00:30+08:00").await;
+
+        // Quit and opened again. Two seconds into the settle the lid is closed.
+        sim.clock.pass(60);
+        let sim = sim.relaunch();
+        sim.awake_for(2).await;
+        assert_eq!(sim.ran().len(), 2, "10:00, both jobs, and nothing since");
+
+        sim.clock.sleep_until("2026-11-12T11:01:32+08:00");
+        assert_eq!(sim.tick().await, 1, "the local job runs at once, and only that");
+        assert!(sim.history(local).contains(&"completed catch_up 2026-11-12T11:00:00+08:00".to_string()));
+
+        sim.awake_for(NETWORK_SETTLE_SECS - 1).await;
+        assert_eq!(
+            sim.history(remote),
+            ["completed scheduled 2026-11-12T10:00:00+08:00"],
+            "not before the network has stayed up for the settle time after this wake"
+        );
+
+        sim.awake_for(1).await;
+        assert_eq!(sim.ran().last().map(String::as_str), Some("catch_up 2026-11-12T11:00:00+08:00"));
+        assert!(sim.history(remote).contains(&"completed catch_up 2026-11-12T11:00:00+08:00".to_string()));
+        assert!(!sim.history(remote).iter().any(|row| row.starts_with("skipped_offline")));
         assert_eq!(sim.failed_runs(), 0);
     }
 
