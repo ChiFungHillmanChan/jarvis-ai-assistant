@@ -1657,6 +1657,68 @@ pub(super) mod tests {
         assert_eq!(sim.handled(job).as_deref(), Some("2026-11-12T09:00:00+08:00"));
     }
 
+    /// The other order: the Mac sleeps under the first run, and JARVIS is
+    /// force-quit under the one that follows the wake. The run sleep cut
+    /// short does not count, so that exit is the slot's first and the slot
+    /// gets its one retry at the next launch.
+    #[tokio::test]
+    async fn a_crash_after_a_run_cut_short_by_sleep_still_gets_its_one_retry() {
+        let sim = Sim::start("2026-11-12T08:59:59+08:00");
+        let job = sim.add_job("deadline_monitor", DAILY_0900);
+        sim.next_run_is_cut_short_by_a_sleep_until("2026-11-12T09:20:00+08:00");
+        sim.awake_for(1).await;
+        assert_eq!(sim.history(job), ["interrupted scheduled 2026-11-12T09:00:00+08:00"]);
+
+        // Run again after the wake, and JARVIS is force-quit under that run.
+        sim.clock.pass(1);
+        assert_eq!(sim.engine.tick().len(), 1);
+        sim.clock.pass(30);
+        let sim = sim.relaunch();
+        sim.awake_for(600).await;
+
+        assert_eq!(
+            sim.history(job),
+            [
+                "interrupted scheduled 2026-11-12T09:00:00+08:00",
+                "interrupted retry_interrupted 2026-11-12T09:00:00+08:00",
+                "completed retry_interrupted 2026-11-12T09:00:00+08:00",
+            ]
+        );
+        assert_eq!(sim.errors(job)[0], SLEPT_DURING_RUN);
+        assert_ne!(sim.errors(job)[1], SLEPT_DURING_RUN, "the second run ended with an exit, not a sleep");
+        assert_eq!(sim.ran().len(), 2, "the run the Mac slept under, and the retry after the exit");
+        assert_eq!(sim.handled(job).as_deref(), Some("2026-11-12T09:00:00+08:00"));
+        assert_eq!(sim.failed_runs(), 0);
+    }
+
+    /// And the limit still holds in that order: a second exit ends the slot.
+    #[tokio::test]
+    async fn two_crashes_after_a_run_cut_short_by_sleep_end_the_slot() {
+        let mut sim = Sim::start("2026-11-12T08:59:59+08:00");
+        let job = sim.add_job("deadline_monitor", DAILY_0900);
+        sim.next_run_is_cut_short_by_a_sleep_until("2026-11-12T09:20:00+08:00");
+        sim.awake_for(1).await;
+        for _ in 0..2 {
+            sim.clock.pass(1);
+            assert_eq!(sim.engine.tick().len(), 1);
+            sim.clock.pass(30);
+            sim = sim.relaunch();
+        }
+        sim.awake_for(600).await;
+
+        assert_eq!(
+            sim.history(job),
+            [
+                "interrupted scheduled 2026-11-12T09:00:00+08:00",
+                "interrupted retry_interrupted 2026-11-12T09:00:00+08:00",
+                "failed retry_interrupted 2026-11-12T09:00:00+08:00",
+            ]
+        );
+        assert_eq!(sim.errors(job), [SLEPT_DURING_RUN, "Interrupted: JARVIS exited while this run was in flight", INTERRUPTED_TWICE]);
+        assert_eq!(sim.ran().len(), 1, "only the run the Mac slept under reached the job; there is no fourth start");
+        assert_eq!(sim.handled(job).as_deref(), Some("2026-11-12T09:00:00+08:00"));
+    }
+
     // Case: paused, then re-enabled.
     #[tokio::test]
     async fn re_enabling_a_paused_job_does_not_catch_up() {

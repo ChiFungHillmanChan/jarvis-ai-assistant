@@ -1164,6 +1164,39 @@ mod tests {
         }
     }
 
+    /// `BriefingService::speak` cannot run in a test: it needs the running
+    /// app, and the real voice makes a sound whatever voice it is given (`say`
+    /// falls back to the default voice for a name it does not know). The fake
+    /// host stands in for it everywhere else, so nothing above notices which
+    /// of the voice's calls the real one makes. This reads the source instead.
+    ///
+    /// The briefing may reach the voice only through `speak_while`, the call
+    /// that is cut when the Mac sleeps or the screen locks. `speak` runs an
+    /// utterance to its end whatever happens to the Mac meanwhile.
+    #[test]
+    fn the_briefing_reaches_the_voice_only_through_the_call_that_can_be_stopped() {
+        let shipped = include_str!("scheduled_briefing.rs").split("\n#[cfg(test)]\nmod tests {").next().unwrap();
+        // Every call of a method whose name begins with `speak`, with what it
+        // is called on.
+        let calls: Vec<&str> = shipped
+            .lines()
+            .map(str::trim)
+            .filter(|line| !line.starts_with("//"))
+            .flat_map(|line| {
+                line.match_indices(".speak").map(move |(dot, _)| {
+                    let from = line[..dot].rfind(|c: char| !(c.is_alphanumeric() || c == '_')).map_or(0, |at| at + 1);
+                    let to = line[dot..].find('(').map_or(line.len(), |at| dot + at);
+                    &line[from..to]
+                })
+            })
+            .collect();
+        assert_eq!(
+            calls,
+            ["host.speak", "tts.speak_while"],
+            "the briefing asks its host to speak, and the host speaks through `speak_while` and nothing else"
+        );
+    }
+
     /// Offline at briefing time: the local version is shown, and the AI
     /// summary replaces it in place when the network returns, with no second
     /// notification and no voice.
