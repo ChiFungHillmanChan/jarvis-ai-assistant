@@ -45,3 +45,32 @@ test('the app saves the language in use once the startup screen is known', () =>
   const app = source('../src/App.tsx');
   assert.match(app, /if \(localeReady && keepsLocaleInUse\(screen\)\) void keepUiLocaleInUse\(\);/);
 });
+
+// Usage history: the page offers the five periods and the four groupings,
+// and reads the table for the chosen ones.
+test('the usage panel has the period selector and the group-by control', () => {
+  const panel = source('../src/components/CostPanel.tsx');
+  assert.match(panel, /useState<PeriodDays>\(30\)/, 'the period starts at 30 days');
+  assert.match(panel, /useState<GroupBy>\("model"\)/, 'grouped by model first');
+  assert.match(panel, /aria-label=\{text\("Period", "期間"\)\}/);
+  assert.match(panel, /\{PERIODS\.map\(\(period\) => <option key=\{period\} value=\{String\(period\)\}>\{periodLabel\(period, text\)\}<\/option>\)\}/);
+  assert.match(panel, /aria-label=\{text\("Group by", "分組方式"\)\}/);
+  assert.match(panel, /\{GROUP_BYS\.map\(\(by\) => <option key=\{by\} value=\{by\}>\{groupByLabel\(by, text\)\}<\/option>\)\}/);
+  assert.match(panel, /useTauriCommand<CostStats>\("get_cost_stats", \{ days \}\)/);
+  assert.match(panel, /useTauriCommand<BlendedCost>\("get_blended_cost", \{ days \}\)/);
+  assert.match(panel, /useTauriCommand<UsageGroup\[\]>\("get_usage_groups", \{ days, groupBy \}\)/);
+  assert.match(panel, /groupRows\(groups, groupBy, text\)/);
+  assert.match(panel, /expensiveHeading\(data\.expensive_days, text\)/);
+  assert.match(panel, /historyLine\(data\.expensive_days, text\)/);
+});
+
+// The clean-up text says what happens to AI usage, in both languages, and
+// the report comes from the function its test checks.
+test('the Storage clean-up text and report say usage is kept as daily totals', () => {
+  const storage = between(settings, '{section === "storage" && (<>', 'Free up space');
+  assert.match(storage, /AI usage records are not deleted: .* combined into daily usage totals, which hold no prompts or mail and are kept for two years\./);
+  assert.match(storage, /AI 用量記錄不會被刪除：.*合併為每日用量總數；每日用量總數不含提示或郵件內容，保留兩年。/);
+  assert.doesNotMatch(storage, /related cached records|相關快取記錄/);
+  const sweep = between(settings, 'function handleSweep()', 'function handlePurge(');
+  assert.match(sweep, /return sweepSummary\(await runStorageSweep\(\), text\);/);
+});
