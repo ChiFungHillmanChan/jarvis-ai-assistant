@@ -12,7 +12,9 @@ export function cronStatusLabel(status: string, text: Text): string {
     case "failed": return text("Failed", "失敗");
     case "interrupted": return text("Interrupted", "已中斷");
     case "skipped_offline": return text("Waiting for the network", "等候網絡連線");
-    case "skipped_offline_final": return text("Not run: no network", "沒有執行：沒有網絡連線");
+    // True of both rows that carry it: a scheduled time that was never run,
+    // and a run started by hand that ran and could not finish.
+    case "skipped_offline_final": return text("Not completed: no network", "未能完成：沒有網絡連線");
     case "collapsed": return text("Missed", "已錯過");
     default: return status;
   }
@@ -75,7 +77,7 @@ const SCHEDULER_TEXT: Record<string, string> = {
   "Already shown today": "今天已顯示過簡報。",
   "Not shown: this briefing was for an earlier day": "沒有顯示：這次簡報屬於較早的日子。",
   "Briefing shown; AI summary added": "已顯示簡報，並已加入 AI 摘要。",
-  "Briefing shown from what is saved on this Mac; the AI summary follows when the network returns": "已根據此 Mac 上儲存的資料顯示簡報；恢復網絡連線後會加入 AI 摘要。",
+  "Briefing shown from what is saved on this Mac; the AI summary follows when the network is ready": "已根據此 Mac 上儲存的資料顯示簡報；網絡連線就緒後會加入 AI 摘要。",
   "Briefing shown from what is saved on this Mac; the Mac went to sleep before the AI summary arrived, so it is added afterwards": "已根據此 Mac 上儲存的資料顯示簡報；AI 摘要未送達，Mac 已進入睡眠，稍後會補上。",
   "Briefing shown; it was replaced or removed before the AI summary arrived": "已顯示簡報；AI 摘要送達前，該簡報已被取代或移除。",
 };

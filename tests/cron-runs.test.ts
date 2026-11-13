@@ -47,6 +47,10 @@ test('a run started by hand that ended offline does not promise another try', ()
   assert.doesNotMatch(cronRunNote(manual, en)!, /next scheduled time/);
   // A scheduled time that stayed offline keeps its own wording.
   assert.match(cronRunNote({ status: 'skipped_offline_final', result: null, trigger: null }, en)!, /until the next scheduled time/);
+  // The label above either note is shared by both, so it cannot say "not
+  // run": the run started by hand did run.
+  assert.doesNotMatch(cronStatusLabel('skipped_offline_final', en), /not run/i);
+  assert.doesNotMatch(cronStatusLabel('skipped_offline_final', zh), /沒有執行/);
 });
 
 test('the fixed sentences of the scheduler are shown in the interface language', () => {

@@ -384,7 +384,8 @@ const FOR_AN_EARLIER_DAY: &str = "Not shown: this briefing was for an earlier da
 #[derive(Debug, PartialEq)]
 enum SummaryStep {
     Added,
-    /// Still owed: there was no network. Added when it returns.
+    /// Still owed: the network was down, or was up and had not yet stayed up
+    /// for the settle time. Added once it is ready.
     OwedOffline,
     /// Still owed: the Mac slept before the answer came, and the connection
     /// died with the sleep. Added afterwards, like an offline one.
@@ -401,7 +402,7 @@ impl SummaryStep {
         match self {
             SummaryStep::Added => "Briefing shown; AI summary added".to_string(),
             SummaryStep::OwedOffline => {
-                "Briefing shown from what is saved on this Mac; the AI summary follows when the network returns".to_string()
+                "Briefing shown from what is saved on this Mac; the AI summary follows when the network is ready".to_string()
             }
             SummaryStep::OwedAfterSleep => {
                 "Briefing shown from what is saved on this Mac; the Mac went to sleep before the AI summary arrived, so it is added afterwards"
@@ -1171,7 +1172,7 @@ mod tests {
         let db = crate::db::test_database();
         let host = FakeHost::new(false);
         let report = run_with(&db, &host, on(Trigger::Scheduled), hk(MORNING)).await.unwrap();
-        assert!(report.contains("follows when the network returns"), "{report}");
+        assert!(report.contains("follows when the network is ready"), "{report}");
         assert_eq!(*host.asked_for_summary.lock().unwrap(), 0, "no AI call into a dead network");
         assert!(host.last_shown().summary_pending);
         assert_eq!(host.notifications.lock().unwrap().len(), 1);

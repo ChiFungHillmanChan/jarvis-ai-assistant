@@ -165,6 +165,14 @@ struct OfflineWait {
     not_before: Duration,
 }
 
+impl OfflineWait {
+    /// Whether the network was down at any tick of this wait. A wait can also
+    /// be nothing more than a network that is up being given time to settle.
+    fn saw_the_network_down<Z: TimeZone>(&self, moment: &Moment<Z>) -> bool {
+        moment.last_offline.is_some_and(|at| at >= self.since)
+    }
+}
+
 #[derive(Clone, Copy)]
 enum Network {
     Offline,
@@ -182,6 +190,8 @@ struct State {
     last_wake_or_launch: DateTime<Utc>,
     offset: FixedOffset,
     network: Network,
+    /// Awake time of the last tick that found the network down.
+    last_offline: Option<Duration>,
 }
 
 /// What one tick knows.
@@ -191,6 +201,10 @@ struct Moment<Z: TimeZone> {
     zone: Z,
     /// The network is up and has been for long enough to use.
     online: bool,
+    /// Awake time of the last tick that found the network down. "Not online"
+    /// is not that: it is also the few seconds a network that is up is given
+    /// to settle.
+    last_offline: Option<Duration>,
     last_wake_or_launch: DateTime<Utc>,
 }
 
@@ -494,6 +508,7 @@ impl<C: Clock> Engine<C> {
             // that comes back after a wake. JARVIS opens at login, when Wi-Fi
             // has associated a moment before DNS answers.
             network: if reachability.online() { Network::Settling(clock.awake()) } else { Network::Offline },
+            last_offline: None,
         };
         Engine { db, clock, reachability, runner, state: Mutex::new(state) }
     }
@@ -589,11 +604,15 @@ impl<C: Clock> Engine<C> {
             }
             (true, unchanged) => unchanged,
         };
+        if !reachable {
+            state.last_offline = Some(awake);
+        }
         let moment = Moment {
             now,
             awake,
             zone,
             online: matches!(state.network, Network::Online),
+            last_offline: state.last_offline,
             last_wake_or_launch: state.last_wake_or_launch,
         };
 
@@ -806,9 +825,12 @@ fn settle<Z: TimeZone>(conn: &Connection, job_id: i64, job: &mut Job, moment: &M
         let slot = missed.slot;
 
         // A slot that was waiting for the network and has been overtaken by a
-        // newer one: the newer one supersedes it.
+        // newer one: the newer one supersedes it. It goes into the history as
+        // "no network" only if there was none. One that was merely waiting
+        // for a network that was up to settle is counted, when the newer slot
+        // is handled, with the other slots that passed without a run.
         if let Some(overtaken) = job.wait.take_if(|wait| wait.slot != slot) {
-            if !overtaken.recorded {
+            if !overtaken.recorded && overtaken.saw_the_network_down(moment) {
                 record_skipped_offline(conn, job_id, &overtaken.slot)?;
             }
         }
@@ -1771,6 +1793,52 @@ pub(super) mod tests {
         assert_eq!(sim.ran(), ["scheduled 2026-11-12T10:00:00+08:00", "catch_up 2026-11-12T10:30:00+08:00"]);
         assert!(!sim.history(job).iter().any(|row| row.starts_with("skipped_offline")), "a few seconds of settling is not a wait worth recording");
         assert_eq!(sim.failed_runs(), 0);
+    }
+
+    // Case: a slot is waiting for the network to settle when the next one
+    // comes due. The network was up throughout, so the history must not say
+    // it was not: the older slot is counted with the ones that passed without
+    // a run, like any other.
+    #[tokio::test]
+    async fn a_slot_overtaken_while_the_network_settled_is_not_recorded_as_offline() {
+        let sim = Sim::start("2026-11-12T10:18:00+08:00");
+        let job = sim.add_job("email_sync", EVERY_5_MIN);
+        sim.awake_until("2026-11-12T10:20:30+08:00").await;
+
+        // Quit, and opened again three seconds before 10:30, with 10:25 owed.
+        sim.clock.pass(567);
+        let sim = sim.relaunch();
+        assert_eq!(sim.clock.now(), at("2026-11-12T10:29:57+08:00"));
+        sim.awake_until("2026-11-12T10:30:10+08:00").await;
+
+        let history = sim.history(job);
+        assert!(!history.iter().any(|row| row.starts_with("skipped_offline")), "the network was up throughout: {history:?}");
+        assert_eq!(sim.ran().len(), 2, "10:20, and then 10:30 once");
+        assert!(sim.ran()[1].ends_with("2026-11-12T10:30:00+08:00"));
+        assert_eq!(sim.collapsed(job).len(), 1);
+        assert_eq!(sim.collapsed(job)[0]["count"], 1, "10:25 is counted as a slot that passed without a run");
+        assert_eq!(sim.collapsed(job)[0]["to"], "2026-11-12T10:25:00+08:00");
+    }
+
+    /// The same launch, but the network drops before 10:30 comes: 10:25 was
+    /// kept from running by the network, and the history says so.
+    #[tokio::test]
+    async fn a_slot_overtaken_after_the_network_dropped_is_recorded_as_offline() {
+        let sim = Sim::start("2026-11-12T10:18:00+08:00");
+        let job = sim.add_job("email_sync", EVERY_5_MIN);
+        sim.awake_until("2026-11-12T10:20:30+08:00").await;
+
+        sim.clock.pass(567);
+        let sim = sim.relaunch();
+        sim.awake_until("2026-11-12T10:29:58+08:00").await;
+        sim.network.set(false);
+        sim.awake_until("2026-11-12T10:30:10+08:00").await;
+
+        assert_eq!(
+            sim.history(job),
+            ["completed scheduled 2026-11-12T10:20:00+08:00", "skipped_offline_final - 2026-11-12T10:25:00+08:00"]
+        );
+        assert!(sim.collapsed(job).is_empty());
     }
 
     // Case: the lid is closed inside the settle time and opened an hour later
