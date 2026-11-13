@@ -259,18 +259,21 @@ const OLD_GUESS: crate::ai::models::Price = crate::ai::models::Price {
 /// it is rounded, which is what the step compares with.
 const GUESS_ROUNDING_MICROS: i64 = 3;
 
-/// The first commit that stored Claude and Bedrock input with the cache
-/// included, as every other provider's is: d4b9631 ("各 AI 供應商的 token
-/// 用量按實際計費記錄"), authored 2026-10-31T01:02:08Z. It reached main
-/// rebased, with the commit time 2026-11-12T16:57:10Z, and shipped in
-/// v0.5.11. The author time is used: it is the earliest any build of that
-/// change could have run, so no row stored before it holds inclusive input.
-/// What it leaves uncorrected: the rows released builds up to v0.5.10
-/// stored between that time and the user's update to v0.5.11 or later whose
-/// input is at least their cache reads and writes; they are summed as
-/// stored, so their input, and the cost worked out from it, read low by the
-/// cache (DECISIONS.md, 2026-11-13: one constant to change).
-const INCLUSIVE_INPUT_SINCE: i64 = 1_793_408_528;
+/// Before this time no build stored Bedrock input with the cache included.
+/// The fix that started storing it that way, as every other provider's is,
+/// is d4b9631 ("各 AI 供應商的 token 用量按實際計費記錄", authored
+/// 2026-10-31T01:02:08Z; it reached main rebased, with the commit time
+/// 2026-11-12T16:57:10Z, and shipped in v0.5.11). It was written on top of
+/// a1e44e9 ("Merge #23"), main's head from 2026-10-29 until 2026-11-07,
+/// and this is a1e44e9's author time, 2026-10-29T21:20:41Z: no build of the
+/// fix, a development build of the uncommitted change included, can be
+/// older than the commit it was written on.
+/// What it leaves uncorrected: the Bedrock rows released builds up to
+/// v0.5.10 stored between that time and the user's update to v0.5.11 or
+/// later whose input is at least their cache reads and writes; they are
+/// summed as stored, so their input, and the cost worked out from it, read
+/// low by the cache (DECISIONS.md, 2026-11-13: one constant to change).
+const INCLUSIVE_INPUT_SINCE: i64 = 1_793_308_841; // a1e44e9: `git log -1 --format=%at a1e44e9`
 
 /// Written to user_preferences, in the same transaction as the corrections,
 /// once the old rows are corrected.
@@ -563,7 +566,7 @@ pub(crate) mod tests {
 
     /// 2025-11-12, before the cache fix.
     const OLD: i64 = 1_762_900_000;
-    /// A day after the cache fix's first commit.
+    /// A day after the cutoff.
     const NEW: i64 = INCLUSIVE_INPUT_SINCE + 86_400;
     const HAIKU: &str = "apac.anthropic.claude-haiku-4-5-20251001-v1:0";
 
@@ -703,8 +706,8 @@ pub(crate) mod tests {
     /// so is every Claude row, even one with cache figures and an old date.
     #[test]
     fn old_bedrock_input_gets_its_cache_back() {
-        // d4b9631's author time: `git log -1 --format=%aI d4b9631`.
-        assert_eq!(chrono::DateTime::from_timestamp(INCLUSIVE_INPUT_SINCE, 0).unwrap().to_rfc3339(), "2026-10-31T01:02:08+00:00");
+        // a1e44e9's author time: `git log -1 --format=%aI a1e44e9`.
+        assert_eq!(chrono::DateTime::from_timestamp(INCLUSIVE_INPUT_SINCE, 0).unwrap().to_rfc3339(), "2026-10-29T21:20:41+00:00");
         let today = crate::db::test_database();
         record_inference(&today, "bedrock", Feature::Chat, Workload::Tools, HAIKU, 1_320, 45, 800, 400, 40);
         let stored_today = tokens_and_cost(&today.conn.lock().unwrap());
