@@ -924,6 +924,26 @@ pub(crate) mod tests {
         assert_eq!(features(&db), vec!["tools", "briefing"]);
     }
 
+    /// P01's scheduled daily briefing gets its AI summary from
+    /// `generate_briefing`, which sends it as a briefing: its usage row is
+    /// stored under the provider and model that answered, with the feature
+    /// "briefing", and priced like any other request. Its speech goes
+    /// through the system voice (`speak_while`), which stores no usage.
+    #[test]
+    fn the_scheduled_briefing_is_stored_as_briefing_usage() {
+        let scheduled = include_str!("../scheduler/scheduled_briefing.rs");
+        // The service's own methods: the first bodies after the trait's declarations.
+        let summarise = &scheduled[scheduled.find("async fn summarise(&self) -> Result<String, String> {").expect("the briefing's AI summary")..];
+        let summarise = &summarise[..summarise.find("\n    }\n").unwrap()];
+        assert!(summarise.contains("crate::assistant::briefing::generate_briefing("), "{summarise}");
+        let briefing = include_str!("../assistant/briefing.rs");
+        assert!(briefing.contains("Workload::Tools, Feature::Briefing)"), "the summary is sent as a briefing");
+        assert_eq!(Feature::Briefing.as_str(), "briefing");
+        let speak = &scheduled[scheduled.find("async fn speak(&self, text: &str, may_go_on: &(dyn Fn() -> bool + Send + Sync)) {").expect("the briefing's voice")..];
+        let speak = &speak[..speak.find("\n    }\n").unwrap()];
+        assert!(speak.contains("tts.speak_while(") && !speak.contains("minimax"), "{speak}");
+    }
+
     #[test]
     fn every_feature_has_its_stored_name() {
         let all = [Feature::Chat, Feature::Tools, Feature::MailAnalysis, Feature::MailSort, Feature::Briefing, Feature::Stt, Feature::Tts, Feature::Memory, Feature::Other];

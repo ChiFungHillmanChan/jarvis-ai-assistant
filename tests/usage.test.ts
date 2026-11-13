@@ -214,6 +214,8 @@ test('providers, features and days read as people know them', () => {
   assert.equal(featureLabel('mail_sort', en), 'Mail sorting');
   assert.equal(featureLabel('tools', zh), '使用工具的對話');
   assert.equal(featureLabel('other', en), 'Other or not recorded');
+  // The scheduled daily briefing's AI summary (P01) is stored as 'briefing'.
+  assert.deepEqual([featureLabel('briefing', en), featureLabel('briefing', zh)], ['Briefing', '簡報']);
   assert.equal(timeLabel('2026-11-03', en), '3 Nov 2026');
   assert.equal(timeLabel('2026-11-03', zh), '2026年11月3日');
   assert.equal(timeLabel('2026-09', en), 'Sep 2026');

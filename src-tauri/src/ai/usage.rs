@@ -995,7 +995,8 @@ mod tests {
 
     /// At every open: the migrations, then the correction of old rows, then
     /// the roll-up, then the database is handed out; the Storage clean-up
-    /// runs after that.
+    /// runs after that, and the scheduler (P01), whose daily briefing makes
+    /// an AI call and so stores usage, starts only after the clean-up.
     #[test]
     fn the_roll_up_runs_on_open_after_the_correction_and_before_the_clean_up() {
         let db_rs = include_str!("../db.rs");
@@ -1010,7 +1011,9 @@ mod tests {
         let rolled = steps.find("crate::ai::usage::roll_up_on_open(conn);").unwrap();
         assert!(corrected < rolled);
         let lib_rs = include_str!("../lib.rs");
-        assert!(lib_rs.find("let db = match Database::new()").unwrap() < lib_rs.find("commands::storage::sweep_on_startup(&db);").unwrap());
+        let swept = lib_rs.find("commands::storage::sweep_on_startup(&db);").unwrap();
+        assert!(lib_rs.find("let db = match Database::new()").unwrap() < swept);
+        assert!(swept < lib_rs.find("scheduler::Scheduler::new(").unwrap(), "the scheduler starts after the usage is prepared");
     }
 
     /// From v0.5.11 (V32), and from P01's V33: requests 5, 40 and 80 days
