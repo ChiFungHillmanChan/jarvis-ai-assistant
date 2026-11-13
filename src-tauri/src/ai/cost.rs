@@ -9,7 +9,7 @@ fn workload_str(w: Workload) -> &'static str {
     }
 }
 
-/// What a usage row was spent on, stored in `inference_metrics.feature` (V33).
+/// What a usage row was spent on, stored in `inference_metrics.feature` (V34).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Feature {
     /// A chat turn, typed or spoken, that ran no tool.
@@ -241,7 +241,7 @@ fn insert_row(
     }
 }
 
-/// The rate builds before V33 billed a model missing from the price list at:
+/// The rate builds before V34 billed a model missing from the price list at:
 /// US$3 / US$15 per 1M, cache read US$0.30, cache write US$3.75
 /// (`UNKNOWN_PRICE` in ai/models.rs at 23058ce, and in ai/cost.rs from
 /// 214481b, 2026-08-07). Before that day an unknown model was billed at zero.
@@ -447,7 +447,7 @@ pub(crate) mod tests {
     /// and a file-backed fixture leaks its .db/-wal/-shm into $TMPDIR whenever an
     /// assertion fails before the cleanup line -- which is exactly the state the
     /// fixture is in while someone is iterating on it.
-    /// Mirrors the V33 inference_metrics DDL (minus id/NOT NULL/CHECK) --
+    /// Mirrors the V34 inference_metrics DDL (minus id/NOT NULL/CHECK) --
     /// update if that schema changes.
     pub(crate) fn temp_metrics_db(rows_sql: &str) -> crate::db::Database {
         use rusqlite::Connection;
@@ -596,7 +596,7 @@ pub(crate) mod tests {
         let llama = "us.meta.llama3-3-70b-instruct-v1:0";
         assert!(!crate::ai::models::price_known("bedrock", llama));
         insert(&conn, &[
-            // 1: Kimi, billed at the guess before V33. Rule 1.
+            // 1: Kimi, billed at the guess before V34. Rule 1.
             (OLD, "compat:api.moonshot.ai", "kimi-k2-0905-preview", 12_000, 800, 2_000, 0, Some(kimi), "chat", 0),
             // 2: a guessed turn of five requests on Qwen. Rule 1.
             (OLD, "compat:dashscope-intl.aliyuncs.com", "qwen3-max", 505, 0, 5, 0, Some(turn), "tools", 0),
@@ -619,7 +619,7 @@ pub(crate) mod tests {
             (OLD, "claude", "haiku-4-5-20251001", 12_000, 800, 2_000, 0, Some(14_200), "chat", 0),
             // 10: a local model, free. Untouched.
             (OLD, "local", "qwen3:4b", 12_000, 800, 0, 0, Some(0), "chat", 0),
-            // 11: stored since V33 with the price unknown. Untouched.
+            // 11: stored since V34 with the price unknown. Untouched.
             (NEW, "compat:api.moonshot.ai", "kimi-k2-0905-preview", 3_000, 10, 0, 0, None, "chat", 1),
             // 12: from before V16: no provider and no cost. Untouched.
             (OLD, "unknown", "qwen3:4b", 4_000, 900, 0, 0, Some(0), "other", 0),
@@ -767,17 +767,24 @@ pub(crate) mod tests {
         }
     }
 
-    /// N7. A database from the release before P02's migration (V32), with
-    /// rows labelled as those builds wrote them, through V33 and the step.
+    /// N7. A database from before P02's migration, with rows labelled as
+    /// old builds wrote them, through V34 and the step: from the last
+    /// release (v0.5.11, V32), and from P01's V33.
     #[test]
-    fn an_update_from_v32_corrects_the_rows_old_builds_wrote() {
+    fn an_update_corrects_the_rows_old_builds_wrote() {
+        for from in [32, 33] {
+            an_update_corrects_the_rows_old_builds_wrote_from(from);
+        }
+    }
+
+    fn an_update_corrects_the_rows_old_builds_wrote_from(from: i32) {
         let directory = std::env::temp_dir().join(format!("jarvis-usage-{}", uuid::Uuid::new_v4()));
         std::fs::create_dir(&directory).unwrap();
         let path = directory.join("usage.db");
         let sorted = guessed(3_000, 200, 0, 0);
         assert_eq!(sorted, 12_000);
         {
-            let db = crate::db::test_database_at_version(&path, 32);
+            let db = crate::db::test_database_at_version(&path, from);
             let conn = db.conn.lock().unwrap();
             for (provider, model, input, output, cache_read, cache_write, cost) in [
                 // v0.5.x on Kimi, billed at the guess.
@@ -968,16 +975,22 @@ pub(crate) mod tests {
         assert_eq!(usage_rows(&db), vec![UsageRow { provider: "minimax".into(), feature: "tts".into(), model_id: "speech-02-hd".into(), input_tokens: 12, output_tokens: 0, usd_cost_micro: None, price_unknown: true }]);
     }
 
-    /// V33 on a database with usage from v0.5.11: every row becomes 'other',
-    /// labels collapse to the provider id, costs are kept, and the new
-    /// columns hold an unknown price.
+    /// V34 on a database with usage from v0.5.11 (V32), or with P01's V33
+    /// as well: every row becomes 'other', labels collapse to the provider
+    /// id, costs are kept, and the new columns hold an unknown price.
     #[test]
-    fn v33_backfills_the_feature_and_normalises_provider_labels() {
+    fn v34_backfills_the_feature_and_normalises_provider_labels() {
+        for from in [32, 33] {
+            v34_backfills_the_feature_and_normalises_provider_labels_from(from);
+        }
+    }
+
+    fn v34_backfills_the_feature_and_normalises_provider_labels_from(from: i32) {
         let directory = std::env::temp_dir().join(format!("jarvis-usage-{}", uuid::Uuid::new_v4()));
         std::fs::create_dir(&directory).unwrap();
         let path = directory.join("usage.db");
         {
-            let db = crate::db::test_database_at_version(&path, 32);
+            let db = crate::db::test_database_at_version(&path, from);
             db.conn.lock().unwrap().execute_batch(
                 "INSERT INTO inference_metrics (ts, workload, model_id, input_tokens, output_tokens, latency_ms, provider, usd_cost_micro) VALUES
                     (1, 'tools', 'gpt-6-luna', 10, 1, 5, 'openai', 7),

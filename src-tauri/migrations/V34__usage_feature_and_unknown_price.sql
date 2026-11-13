@@ -21,7 +21,7 @@
 -- become 'local' and count in the local share. 'kimi' and 'qwen' are left
 -- alone: each has two hosts (global and China) and the row does not say
 -- which one answered.
-CREATE TABLE inference_metrics_v33 (
+CREATE TABLE inference_metrics_v34 (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     ts INTEGER NOT NULL,
     workload TEXT NOT NULL CHECK (workload IN ('volume', 'tools', 'premium', 'unknown')),
@@ -38,7 +38,7 @@ CREATE TABLE inference_metrics_v33 (
     CHECK (price_unknown = 0 OR usd_cost_micro IS NULL)
 );
 
-INSERT INTO inference_metrics_v33
+INSERT INTO inference_metrics_v34
     (id, ts, workload, model_id, input_tokens, output_tokens, cache_read_tokens,
      cache_write_tokens, latency_ms, provider, usd_cost_micro)
 SELECT id, ts, workload, model_id, input_tokens, output_tokens, cache_read_tokens,
@@ -53,7 +53,7 @@ SELECT id, ts, workload, model_id, input_tokens, output_tokens, cache_read_token
 FROM inference_metrics;
 
 DROP TABLE inference_metrics;
-ALTER TABLE inference_metrics_v33 RENAME TO inference_metrics;
+ALTER TABLE inference_metrics_v34 RENAME TO inference_metrics;
 
 CREATE INDEX idx_inference_metrics_ts ON inference_metrics(ts);
 CREATE INDEX idx_inference_metrics_provider_ts ON inference_metrics(provider, ts);

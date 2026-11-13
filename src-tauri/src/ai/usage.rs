@@ -1013,17 +1013,23 @@ mod tests {
         assert!(lib_rs.find("let db = match Database::new()").unwrap() < lib_rs.find("commands::storage::sweep_on_startup(&db);").unwrap());
     }
 
-    /// From v0.5.11 (V32): requests 5, 40 and 80 days old. After the
-    /// update's first open the 5-day one is still a request, the others are
-    /// daily totals, and 90 days shows all three.
+    /// From v0.5.11 (V32), and from P01's V33: requests 5, 40 and 80 days
+    /// old. After the update's first open the 5-day one is still a request,
+    /// the others are daily totals, and 90 days shows all three.
     #[test]
     fn an_update_moves_older_requests_into_the_daily_totals() {
+        for from in [32, 33] {
+            an_update_moves_older_requests_into_the_daily_totals_from(from);
+        }
+    }
+
+    fn an_update_moves_older_requests_into_the_daily_totals_from(from: i32) {
         let directory = std::env::temp_dir().join(format!("jarvis-usage-update-{}", uuid::Uuid::new_v4()));
         std::fs::create_dir(&directory).unwrap();
         let path = directory.join("usage.db");
         let now = chrono::Utc::now().timestamp();
         {
-            let db = crate::db::test_database_at_version(&path, 32);
+            let db = crate::db::test_database_at_version(&path, from);
             let conn = db.conn.lock().unwrap();
             for (back, cost) in [(5, 1_000), (40, 2_000), (80, 4_000)] {
                 conn.execute(
