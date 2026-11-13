@@ -1,6 +1,6 @@
 import { Fragment, useEffect, useId, useReducer, type CSSProperties } from "react";
 import { useUiLocale } from "../i18n";
-import { OTHER_MODEL, formPickerOptions, groupLabel, groupedOptions, initialPicker, listStatus, otherIdHelp, pickerOptions, pickerReducer, selectValue, type BedrockListState, type PickerPlace } from "../lib/bedrock-models";
+import { OTHER_MODEL, formPickerOptions, formRegionNote, groupLabel, groupedOptions, initialPicker, listStatus, otherIdHelp, pickerOptions, pickerReducer, selectValue, type BedrockListState, type PickerPlace } from "../lib/bedrock-models";
 
 /** Each place keeps its own look: Settings its classes and inline styles, the forms theirs. */
 const LOOK: Record<PickerPlace, { field: string; help: string }> = {
@@ -43,8 +43,9 @@ type Props = Shared & (
  * An id saved earlier that the list does not hold stays the current choice.
  * In Settings > Models a listed model or the default is saved at once, and
  * a typed id with "Save model". In the Mail dialog and the setup guide a
- * choice changes the form only, a model is required, and the form's own
- * button saves it.
+ * choice changes the form only, a model is required, the form's own button
+ * saves it, and a line says that a us., eu. or apac. profile is sent for the
+ * saved region (mail/analysis.rs send_to_bedrock, as chat).
  */
 export default function BedrockModelPicker(props: Props) {
   const { place, fallback, listState, onReload } = props;
@@ -100,6 +101,7 @@ export default function BedrockModelPicker(props: Props) {
         {listState.status === "idle" ? text("Load the list", "載入清單") : text("Load the list again", "重新載入清單")}
       </button>
       <p id={statusId} role="status" className={LOOK[place].help}>{listStatus(listState, text, place)}</p>
+      {props.place !== "settings" && <p className={LOOK[place].help}>{formRegionNote(props.place, text)}</p>}
       {state.other && (<>
         <label>
           <span>{text("Bedrock model ID", "Bedrock 模型 ID")}</span>

@@ -294,9 +294,10 @@ export function selectValue(state: PickerState, saved: string): string {
 
 /**
  * The help under the ID field of "Other (enter an ID)", true for where it is
- * shown. Chat points a us., eu. or apac. profile at the saved region when it
- * sends (ai/mod.rs apply_inference_profile); mail sends the id as saved
- * (mail/analysis.rs send_to_bedrock). A mail form cannot be left empty.
+ * shown. Chat and mail both point a us., eu. or apac. profile at the saved
+ * region when they send (ai/mod.rs apply_inference_profile, called by
+ * mail/analysis.rs send_to_bedrock too). A mail form cannot be left empty,
+ * and its region sentence is shown above the field (formRegionNote).
  */
 export function otherIdHelp(place: PickerPlace, fallback: string, text: Text): string {
   switch (place) {
@@ -306,14 +307,29 @@ export function otherIdHelp(place: PickerPlace, fallback: string, text: Text): s
         `可輸入 Bedrock 主控台的模型 ID 或推論設定檔 ID。us.、eu. 或 apac. 開頭的設定檔會按已儲存 AWS 憑證的地區發送，其他 ID 按輸入內容發送。留空即使用 ${fallback || "預設模型"}。用量按實際發送的 ID 記錄。`,
       );
     case 'mail':
-      return text(
-        'A model ID or an inference profile ID from the Bedrock console. Group analysis sends it as typed, and usage is recorded against it.',
-        '可輸入 Bedrock 主控台的模型 ID 或推論設定檔 ID。群組分析會按輸入內容發送此 ID，用量亦按此 ID 記錄。',
-      );
     case 'setup':
       return text(
-        'A model ID or an inference profile ID from the Bedrock console. The test and later mail analysis send it as typed, and usage is recorded against it.',
-        '可輸入 Bedrock 主控台的模型 ID 或推論設定檔 ID。測試及之後的電郵分析會按輸入內容發送此 ID，用量亦按此 ID 記錄。',
+        'A model ID or an inference profile ID from the Bedrock console. An ID without a us., eu. or apac. prefix is sent as typed. Usage is recorded against the ID that is sent.',
+        '可輸入 Bedrock 主控台的模型 ID 或推論設定檔 ID。沒有 us.、eu. 或 apac. 開頭的 ID 按輸入內容發送。用量按實際發送的 ID 記錄。',
       );
   }
+}
+
+/**
+ * The sentence the Mail dialog and the setup guide show under the picker,
+ * since a us., eu. or apac. id can always be chosen there (from either list,
+ * or typed under "Other"): mail sends it for the saved region, as chat does.
+ * In the setup guide new keys and their region are saved by the test button
+ * before it tests.
+ */
+export function formRegionNote(place: Exclude<PickerPlace, 'settings'>, text: Text): string {
+  return place === 'mail'
+    ? text(
+      'A us., eu. or apac. profile is sent for the region of your saved AWS credentials.',
+      'us.、eu. 或 apac. 開頭的設定檔會按已儲存 AWS 憑證的地區發送。',
+    )
+    : text(
+      'A us., eu. or apac. profile is sent for the region of your saved AWS credentials. When you enter new keys, “Test and use Bedrock for mail” saves them with their region before it tests.',
+      'us.、eu. 或 apac. 開頭的設定檔會按已儲存 AWS 憑證的地區發送。如輸入新的密鑰，「測試並以 Bedrock 處理電郵」會先儲存密鑰及其地區，然後才測試。',
+    );
 }
