@@ -62,7 +62,7 @@ test('the usage panel has the period selector and the group-by control', () => {
   assert.match(panel, /groupRows\(groups, groupBy, text\)/);
   assert.match(panel, /\{row\.input\}\s*\{row\.characters && <span style=\{styles\.detail\}>\{row\.characters\}<\/span>\}/, 'speech characters under the input, apart from the tokens');
   assert.match(panel, /expensiveHeading\(data\.expensive_days, text\)/);
-  assert.match(panel, /historyLine\(data\.expensive_days, text\)/);
+  assert.match(panel, /historyLine\(data\.per_request_days, text\)/, 'the history line says the window, the heading the days it covers');
 });
 
 // The clean-up text says what happens to AI usage, in both languages, and

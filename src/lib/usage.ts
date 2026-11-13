@@ -42,7 +42,13 @@ export interface CostStats {
   local_share_pct: number;
   /** Requests left out of the money figures because their price is unknown. */
   price_unknown_requests: number;
-  /** The UTC days the most expensive requests cover: the per-request window. */
+  /** How long each request keeps its own row on this Mac now, in days. */
+  per_request_days: number;
+  /**
+   * The UTC days the most expensive requests cover, today included: the
+   * per-request window, or fewer when some of its days are already daily
+   * totals (a clock that was ahead moved them early).
+   */
   expensive_days: number;
   top_expensive: ExpensiveTurn[];
 }
@@ -217,6 +223,7 @@ export function historyLine(perRequestDays: number, text: Text): string {
 
 /** The heading of the most expensive requests, which come from the per-request rows only. */
 export function expensiveHeading(days: number, text: Text): string {
+  if (days === 1) return text('Most expensive requests, today', '今日費用最高的請求');
   return text(`Most expensive requests, last ${days} days`, `最近 ${days} 日費用最高的請求`);
 }
 

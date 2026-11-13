@@ -307,11 +307,19 @@ pub struct Request {
     pub latency_ms: i64,
 }
 
-/// The `limit` requests with the highest known cost above zero over the
-/// last [`per_request_days`] UTC days, and that number of days. From the
+/// The `limit` requests with the highest known cost above zero, and the
+/// number of UTC days, today included, they are taken from. That is the last
+/// [`per_request_days`] days, unless some of those days are already daily
+/// totals (a clock that was ahead, or a shorter window, moved them early):
+/// then it is the days after the newest such total, today at least, so the
+/// number said with the list is always the days it covers. From the
 /// per-request level only; local requests are free and not listed.
 pub fn expensive_requests(conn: &Connection, now: i64, limit: usize) -> rusqlite::Result<(i64, Vec<Request>)> {
-    let days = per_request_days(conn);
+    let window = Period::ending(per_request_days(conn), now);
+    let today = utc_day(now);
+    let newest_total: Option<i64> = conn.query_row("SELECT MAX(day) FROM usage_daily WHERE day >= ?1", [window.first_day], |r| r.get(0))?;
+    let first_day = newest_total.map_or(window.first_day, |day| (day + 1).min(today));
+    let days = today - first_day + 1;
     let mut stmt = conn.prepare(
         "SELECT ts, provider, model_id, workload, feature, input_tokens, output_tokens,
                 cache_read_tokens, cache_write_tokens, usd_cost_micro, latency_ms
@@ -319,7 +327,7 @@ pub fn expensive_requests(conn: &Connection, now: i64, limit: usize) -> rusqlite
          WHERE ts >= ?1 AND price_unknown = 0 AND usd_cost_micro > 0
          ORDER BY usd_cost_micro DESC, ts DESC",
     )?;
-    let rows = stmt.query_map([Period::ending(days, now).first_day * DAY], |r| {
+    let rows = stmt.query_map([first_day * DAY], |r| {
         Ok(Request {
             ts: r.get(0)?,
             provider: r.get(1)?,
@@ -944,6 +952,32 @@ mod tests {
         assert_eq!(days, 30);
         assert_eq!(requests.iter().map(|r| r.usd_cost_micro).collect::<Vec<_>>(), [5_000, 100]);
         assert_eq!(expensive_requests(&conn, NOW, 1).unwrap().1.len(), 1);
+    }
+
+    /// U2. Requests moved early are daily totals and cannot be listed: here
+    /// a 7-day window moved them, as a clock that was ahead would. The list
+    /// then covers the days after the newest total, and says how many; with
+    /// today itself moved, it is today.
+    #[test]
+    fn the_most_expensive_requests_say_how_many_days_they_cover() {
+        let db = opened();
+        let conn = db.conn.lock().unwrap();
+        store(&conn, &[3, 10, 20].map(|back| req((TODAY - back) * DAY + 60, "openai", "gpt-6-luna", "chat", 1, 1, 0, 0, Some(1_000 * back))));
+        roll_up(&conn, NOW, 7).unwrap();
+        assert_eq!(daily_days(&conn), vec![TODAY - 20, TODAY - 10]);
+        assert_eq!(per_request_days(&conn), 30, "asked with 30");
+        let (days, requests) = expensive_requests(&conn, NOW, 5).unwrap();
+        assert_eq!(days, 10, "today and the nine days after the newest total");
+        assert_eq!(requests.iter().map(|r| r.usd_cost_micro).collect::<Vec<_>>(), [3_000]);
+
+        // A clock 40 days ahead moved everything, today's request too; the
+        // clock is right again and one more request comes in today.
+        store(&conn, &[req(NOW - 600, "openai", "gpt-6-luna", "chat", 1, 1, 0, 0, Some(9_000))]);
+        roll_up(&conn, NOW + 40 * DAY, 30).unwrap();
+        assert!(per_request(&conn).is_empty());
+        store(&conn, &[req(NOW + 60, "openai", "gpt-6-luna", "chat", 1, 1, 0, 0, Some(500))]);
+        let (days, requests) = expensive_requests(&conn, NOW + 120, 5).unwrap();
+        assert_eq!((days, requests.iter().map(|r| r.usd_cost_micro).collect::<Vec<_>>()), (1, vec![500]));
     }
 
     /// The read gate: once per UTC day. A request stored later for a day

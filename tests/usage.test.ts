@@ -18,6 +18,7 @@ function stats(change: Partial<CostStats>): CostStats {
     local_requests: 0,
     local_share_pct: 0,
     price_unknown_requests: 0,
+    per_request_days: 30,
     expensive_days: 30,
     top_expensive: [],
     ...change,
@@ -262,6 +263,7 @@ test('the history line and the expensive heading say how many days they cover', 
   assert.equal(historyLine(7, zh), '每次請求的記錄保留最近 7 日，之後以每日總數保留兩年，全部只存於此 Mac。日子按 UTC 計算。');
   assert.equal(expensiveHeading(30, en), 'Most expensive requests, last 30 days');
   assert.equal(expensiveHeading(14, zh), '最近 14 日費用最高的請求');
+  assert.deepEqual([expensiveHeading(1, en), expensiveHeading(1, zh)], ['Most expensive requests, today', '今日費用最高的請求']);
   for (const line of [historyLine(30, en), historyLine(30, zh), expensiveHeading(30, en)]) {
     assert.doesNotMatch(line, /\p{Extended_Pictographic}/u);
   }

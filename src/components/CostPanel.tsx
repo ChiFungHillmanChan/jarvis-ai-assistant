@@ -43,7 +43,7 @@ export default memo(function CostPanel() {
       </label>
     </div>
   );
-  const history = data && <div style={styles.note}>{historyLine(data.expensive_days, text)}</div>;
+  const history = data && <div style={styles.note}>{historyLine(data.per_request_days, text)}</div>;
 
   if (loading) {
     return <div style={styles.container}>{controls}<div style={styles.muted}>{text("Loading…", "載入中…")}</div></div>;

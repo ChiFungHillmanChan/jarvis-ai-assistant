@@ -40,8 +40,12 @@ pub struct CostStats {
     pub local_share_pct: f64,
     /// Requests left out of the money figures because their price is unknown.
     pub price_unknown_requests: i64,
-    /// The UTC days "Most expensive requests" covers: the per-request window,
-    /// whatever the period.
+    /// How long each request keeps its own row on this Mac now, in days
+    /// (`usage::per_request_days`).
+    pub per_request_days: i64,
+    /// The UTC days "Most expensive requests" covers, whatever the period:
+    /// the per-request window, or fewer when some of its days are already
+    /// daily totals (`usage::expensive_requests`).
     pub expensive_days: i64,
     /// From the per-request rows of those days only.
     pub top_expensive: Vec<ExpensiveTurn>,
@@ -74,6 +78,7 @@ fn stats_for(conn: &Connection, now: i64, days: i64) -> Result<CostStats, String
         local_requests: totals.local_requests,
         local_share_pct: if sums.requests > 0 { 100.0 * totals.local_requests as f64 / sums.requests as f64 } else { 0.0 },
         price_unknown_requests: sums.price_unknown_requests,
+        per_request_days: usage::per_request_days(conn),
         expensive_days,
         top_expensive: expensive
             .into_iter()
@@ -369,7 +374,8 @@ mod tests {
         assert!(stats_for(&conn, now, 3650).is_err());
         assert!(blended_for(&conn, now, 7).is_err());
         assert!(groups_for(&conn, now, 30, "model; DROP TABLE usage_daily").is_err());
-        assert_eq!(stats_for(&conn, now, 730).unwrap().expensive_days, 30);
+        let stats = stats_for(&conn, now, 730).unwrap();
+        assert_eq!((stats.per_request_days, stats.expensive_days), (30, 30));
         assert!(groups_for(&conn, now, 730, "time").unwrap().is_empty());
     }
 }
