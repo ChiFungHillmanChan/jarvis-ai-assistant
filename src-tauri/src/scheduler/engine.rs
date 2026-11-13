@@ -272,20 +272,42 @@ impl JobRow {
 /// Such a job continues from now, with nothing caught up. A slot that ran
 /// under the wrong clock therefore runs again when its real time comes.
 /// Returns the row as it now stands, and whether it was changed.
+///
+/// The runs of that time stay in the history, but the ones recorded for a
+/// slot that has not happened yet stop belonging to it. Otherwise they are
+/// found again when the slot's real time comes: an exit under the wrong clock
+/// would make the real occurrence a "retry", and two of them would close it
+/// as failed without running it.
 fn recover_from_clock_set_back(conn: &Connection, job_id: i64, mut row: JobRow, now: DateTime<Utc>) -> Result<(JobRow, bool), String> {
     let (handled_ahead, baseline_ahead) = slots::written_ahead_of(now, row.handled.as_ref(), row.baseline);
     if !handled_ahead && !baseline_ahead {
         return Ok((row, false));
     }
     log::warn!("Cron job {}: its records are dated later than now, so the clock was set back; continuing from now", job_id);
+    // Together or not at all. With the handled slot cleared and the old
+    // baseline still in place, nothing is ahead of now any more, so the next
+    // launch recovers nothing, finds the latest slot since that baseline owed,
+    // and runs it a second time.
+    let tx = conn.unchecked_transaction().map_err(db_err)?;
+    tx.execute(
+        "UPDATE cron_jobs SET handled_slot = CASE WHEN ?1 THEN NULL ELSE handled_slot END, baseline_at = ?2 WHERE id = ?3",
+        params![handled_ahead, format_baseline(now), job_id],
+    )
+    .map_err(db_err)?;
+    tx.execute(DETACH_RUNS_OF_LATER_SLOTS_QUERY, params![job_id, format_baseline(now)]).map_err(db_err)?;
+    tx.commit().map_err(db_err)?;
     if handled_ahead {
-        conn.execute("UPDATE cron_jobs SET handled_slot = NULL WHERE id = ?1", params![job_id]).map_err(db_err)?;
         row.handled = None;
     }
-    conn.execute("UPDATE cron_jobs SET baseline_at = ?1 WHERE id = ?2", params![format_baseline(now), job_id]).map_err(db_err)?;
     row.baseline = Some(now);
     Ok((row, true))
 }
+
+/// Take a job's run rows out of every slot later than `?2`. The rows are kept
+/// as history; with no slot, nothing that looks a slot's runs up finds them.
+/// `datetime()` reads the slot's own UTC offset, so instants are compared.
+const DETACH_RUNS_OF_LATER_SLOTS_QUERY: &str =
+    "UPDATE cron_runs SET slot = NULL WHERE job_id = ?1 AND slot IS NOT NULL AND datetime(slot) > datetime(?2)";
 
 /// Pause or resume a job. Pausing keeps `handled_slot`. Resuming moves the
 /// baseline to now, so nothing that came due while the job was paused is owed.
@@ -1820,6 +1842,91 @@ pub(super) mod tests {
         );
         assert_eq!(sim.history(frequent).last().map(String::as_str), Some("completed scheduled 2026-11-13T09:00:00+08:00"));
         assert_eq!(sim.failed_runs(), 0);
+    }
+
+    /// The recovery is one write. Half of it, the handled slot cleared and the
+    /// old baseline kept, reads at the next launch as a job with nothing ahead
+    /// of now that owes its latest slot: the 09:00 that already ran.
+    #[tokio::test]
+    async fn a_clock_recovery_is_written_whole_or_not_at_all() {
+        let sim = Sim::start("2026-11-12T08:58:00+08:00");
+        let daily = sim.add_job("deadline_monitor", DAILY_0900);
+        sim.awake_until("2026-11-12T09:01:00+08:00").await;
+        sim.clock.set("2026-12-12T09:04:00+08:00");
+        sim.awake_for(5).await;
+        assert_eq!(sim.handled(daily).as_deref(), Some("2026-12-12T09:00:00+08:00"), "caught up under the wrong clock");
+        let ran_so_far = sim.ran().len();
+
+        // The clock is put right, and the write of the new baseline fails.
+        let sql = |text: &str| sim.db.conn.lock().unwrap().execute_batch(text).unwrap();
+        sql("CREATE TRIGGER baseline_cannot_be_written BEFORE UPDATE OF baseline_at ON cron_jobs \
+             BEGIN SELECT RAISE(ABORT, 'disk full'); END;");
+        sim.clock.set("2026-11-12T09:07:00+08:00");
+        sim.tick().await;
+        assert_eq!(sim.handled(daily).as_deref(), Some("2026-12-12T09:00:00+08:00"), "not half recovered");
+
+        // The power fails. At the next launch the recovery is simply done again.
+        sql("DROP TRIGGER baseline_cannot_be_written;");
+        let sim = sim.relaunch();
+        sim.awake_for(120).await;
+        assert_eq!(sim.ran().len(), ran_so_far, "today's 09:00 has run and is not run a second time");
+        assert_eq!(sim.handled(daily), None);
+        assert_eq!(sim.column(daily, "next_run").as_deref(), Some("2026-11-13 01:00:00"));
+    }
+
+    /// Runs recorded under a clock that was ahead belong to slots that have
+    /// not happened yet. Left attached, two exits under the wrong clock would
+    /// be found on the real day and close that day's occurrence as failed
+    /// without running it. The rows stay in the history, without a slot.
+    #[tokio::test]
+    async fn runs_recorded_under_a_clock_that_was_ahead_are_not_found_again_on_the_real_day() {
+        let sim = Sim::start("2026-11-12T08:58:00+08:00");
+        let daily = sim.add_job("deadline_monitor", DAILY_0900);
+        sim.awake_until("2026-11-12T09:01:00+08:00").await;
+
+        // Two days ahead, a second before 09:00. The 13th is caught up, and
+        // JARVIS is force-quit under the 14th's run and under its retry.
+        sim.clock.set("2026-11-14T08:59:59+08:00");
+        assert_eq!(sim.tick().await, 1, "the 13th, caught up under the wrong clock");
+        sim.clock.pass(1);
+        assert_eq!(sim.engine.tick().len(), 1);
+        sim.clock.pass(30);
+        let sim = sim.relaunch();
+        sim.clock.pass(1);
+        assert_eq!(sim.engine.tick().len(), 1);
+        assert_eq!(
+            sim.history(daily),
+            [
+                "completed scheduled 2026-11-12T09:00:00+08:00",
+                "completed catch_up 2026-11-13T09:00:00+08:00",
+                "interrupted scheduled 2026-11-14T09:00:00+08:00",
+                "running retry_interrupted 2026-11-14T09:00:00+08:00",
+            ]
+        );
+
+        // The clock is put right while JARVIS is closed.
+        sim.clock.set("2026-11-12T09:10:00+08:00");
+        let sim = sim.relaunch();
+        assert_eq!(
+            sim.history(daily),
+            [
+                "completed scheduled 2026-11-12T09:00:00+08:00",
+                "completed catch_up -",
+                "interrupted scheduled -",
+                "interrupted retry_interrupted -",
+            ],
+            "every row is kept; the ones for the 13th and the 14th no longer belong to those days"
+        );
+
+        // The real 13th and 14th: each 09:00 runs on time, as a new occurrence.
+        let ran_so_far = sim.ran().len();
+        sim.clock.sleep_until("2026-11-13T08:59:30+08:00");
+        sim.awake_until("2026-11-13T09:00:30+08:00").await;
+        sim.clock.sleep_until("2026-11-14T08:59:30+08:00");
+        sim.awake_until("2026-11-14T09:00:30+08:00").await;
+        assert_eq!(sim.ran()[ran_so_far..], ["scheduled 2026-11-13T09:00:00+08:00", "scheduled 2026-11-14T09:00:00+08:00"]);
+        assert_eq!(sim.history(daily).last().map(String::as_str), Some("completed scheduled 2026-11-14T09:00:00+08:00"));
+        assert_eq!(sim.failed_runs(), 0, "nothing is closed as failed for exits that happened under the wrong clock");
     }
 
     /// The same when the clock was put right while JARVIS was closed: the

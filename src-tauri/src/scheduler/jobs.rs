@@ -347,7 +347,13 @@ fn missed_meetings_in_progress(db: &Database) -> Result<Vec<MeetingInProgress>, 
 /// genuine failures count: a run resolved as 'interrupted' by
 /// RECONCILE_INTERRUPTED_RUNS_QUERY means JARVIS was quit mid-run, which is not
 /// something to alert anybody about. Shared with the test below.
-const FAILED_RUNS_ALERT_QUERY: &str = "SELECT COUNT(*) FROM cron_runs WHERE status = 'failed' AND started_at > datetime('now', '-1 hour')";
+///
+/// "The last hour" has an end as well as a beginning. A run that failed while
+/// the Mac's clock was ahead is dated in the future, and with no upper bound it
+/// was "in the last hour" at every check until that date came. The minute of
+/// slack is for a clock the time server has just nudged back.
+const FAILED_RUNS_ALERT_QUERY: &str = "SELECT COUNT(*) FROM cron_runs WHERE status = 'failed' \
+     AND started_at > datetime('now', '-1 hour') AND started_at <= datetime('now', '+1 minute')";
 
 /// NotificationBanner renders whatever user_preferences.last_alerts holds, and
 /// the check only ever wrote the key. A check that finds nothing has to remove
@@ -1033,6 +1039,32 @@ mod tests {
         .unwrap();
         let alerted: i64 = conn.query_row(FAILED_RUNS_ALERT_QUERY, [], |r| r.get(0)).unwrap();
         assert_eq!(alerted, 1, "a real failure must still surface");
+    }
+
+    /// The clock was set a month ahead by mistake; under a wrong date TLS
+    /// fails, so a sync ended `failed`, dated next month. With the clock put
+    /// right, that row is not a failure "in the last hour", now or at any
+    /// check between now and next month.
+    #[test]
+    fn a_failure_dated_ahead_of_now_does_not_raise_a_failure_alert() {
+        let conn = cron_runs_db();
+        let alerted = || -> i64 { conn.query_row(FAILED_RUNS_ALERT_QUERY, [], |r| r.get(0)).unwrap() };
+        conn.execute(
+            "INSERT INTO cron_runs (job_id, status, started_at, finished_at, error) VALUES \
+             (1, 'failed', datetime('now', '+30 days'), datetime('now', '+30 days'), 'certificate is not valid yet')",
+            [],
+        )
+        .unwrap();
+        assert_eq!(alerted(), 0, "a run dated next month did not fail in the last hour");
+
+        // One the time server's correction left a few seconds ahead still counts.
+        conn.execute(
+            "INSERT INTO cron_runs (job_id, status, started_at, finished_at, error) VALUES \
+             (1, 'failed', datetime('now', '+5 seconds'), datetime('now', '+5 seconds'), 'Gmail API error: 500')",
+            [],
+        )
+        .unwrap();
+        assert_eq!(alerted(), 1, "a real failure must still surface");
     }
 
     /// A sync that the lid keeps closing on has not failed. However many
