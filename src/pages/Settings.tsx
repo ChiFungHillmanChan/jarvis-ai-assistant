@@ -59,12 +59,13 @@ import ChooseAi from "../components/ChooseAi";
 import { useAiModels } from "../lib/ai-models";
 import { aiServiceLabel, currentAi, type CurrentAi } from "../lib/ai-choice";
 import AccountPanel from "../components/AccountPanel";
+import BackgroundSettings from "../components/BackgroundSettings";
 import { UserRound } from "lucide-react";
 import { useWorkspace, useWorkspaceValue } from "../workspace/WorkspaceContext";
 import "./settings-workspace.css";
 import { MAX_ADDRESS_CHARS, MAX_INSTRUCTIONS_CHARS, PERSONA_CHOICES, personaLabel, personaValue, type PersonaKey } from "../lib/persona";
 import { canSwitchListening, voiceStateKind } from "../lib/always-listening";
-import { Cpu, Key, Globe, Gem, Mic, Bot, Palette, HardDrive, GithubMark, NotionMark } from "../components/icons";
+import { Cpu, Key, Globe, Gem, Mic, Bot, Palette, HardDrive, Power, GithubMark, NotionMark } from "../components/icons";
 
 const API_KEY_PROVIDERS = [
   { id: "gemini", label: "Google Gemini", help: "Gemini chat and speech-to-text" },
@@ -87,7 +88,6 @@ export default function Settings() {
   const { appearance, setAppearance, open } = useWorkspace();
   const { locale, setLocale, saveError: localeSaveError, retrySave: retryLocaleSave, t, text } = useUiLocale();
   const [aiProvider, setAiProvider] = useState("gemini_primary");
-  const [autoBriefing, setAutoBriefing] = useState(false);
   const [displayName, setDisplayName] = useState("");
   const [persona, setPersona] = useState<Record<string, string>>({});
   const [personaText, setPersonaText] = useState({ assistant_address: "", assistant_instructions: "" });
@@ -226,14 +226,13 @@ export default function Settings() {
   const [eraseConfirm, setEraseConfirm] = useState("");
   const [eraseError, setEraseError] = useState("");
   const [eraseLeft, setEraseLeft] = useState<string[]>([]);
+  const [eraseLeftAtLogin, setEraseLeftAtLogin] = useState(false);
 
   async function refreshSettings() {
     setLoadError(false);
     try {
       const s = await getSettings();
       setAiProvider(s.values["ai_provider"] || "gemini_primary");
-      // Same rule as the startup reader in lib.rs: an absent row means off.
-      setAutoBriefing(s.values["auto_briefing"] === "true");
       setDisplayName(s.values[DISPLAY_NAME_KEY] ?? "");
       setPersona(Object.fromEntries(Object.keys(PERSONA_CHOICES).map(key => [key, personaValue(key as PersonaKey, s.values[key] ?? null)])));
       setPersonaText({ assistant_address: s.values.assistant_address ?? "", assistant_instructions: s.values.assistant_instructions ?? "" });
@@ -331,9 +330,10 @@ export default function Settings() {
 
   async function handleDeleteAll() {
     if (storageBusy) return;
-    setStorageBusy(text("Deleting", "正在刪除")); setEraseError(""); setEraseLeft([]);
+    setStorageBusy(text("Deleting", "正在刪除")); setEraseError(""); setEraseLeft([]); setEraseLeftAtLogin(false);
     try {
-      setEraseLeft(await deleteAllData());
+      const left = await deleteAllData();
+      setEraseLeft(left.keychain); setEraseLeftAtLogin(left.openAtLogin);
     } catch (reason) {
       setEraseError(reason instanceof Error ? reason.message : String(reason));
     } finally {
@@ -735,6 +735,7 @@ export default function Settings() {
     { id: "obsidian", label: "Obsidian", icon: <Gem size={17} /> },
     { id: "voice", label: text("Voice", "語音"), icon: <Mic size={17} /> },
     { id: "assistant", label: t("navAssistant"), icon: <Bot size={17} /> },
+    { id: "background", label: t("backgroundSection"), icon: <Power size={17} /> },
     { id: "appearance", label: text("Appearance", "外觀"), icon: <Palette size={17} /> },
     { id: "storage", label: text("Storage", "儲存空間"), icon: <HardDrive size={17} /> },
   ];
@@ -1258,14 +1259,9 @@ export default function Settings() {
             }}>{personaSaved ? t("saved") : t("save")}</button>
             {personaError && <div style={styles.errorText}>{personaError}</div>}
           </div>
-          <div className="settings-panel">
-            <h2 className="settings-heading">{text('Briefing', '簡報')}</h2>
-            <label style={styles.option}>
-              <input type="checkbox" checked={autoBriefing} onChange={(e) => { setAutoBriefing(e.target.checked); void updateSetting("auto_briefing", String(e.target.checked)); }} style={styles.radio} />
-              <span style={styles.optionLabel}>{text('Speak morning briefing on startup (once per day)', '啟動時朗讀晨早簡報（每日一次）')}</span>
-            </label>
-          </div>
         </>)}
+
+        {section === "background" && <BackgroundSettings />}
 
         {section === "appearance" && (<>
           <div className="settings-panel">
@@ -1456,8 +1452,8 @@ export default function Settings() {
             <h2 className="settings-heading">{text('Delete all JARVIS data on this Mac', '刪除此 Mac 上的所有 JARVIS 資料')}</h2>
             <p style={styles.hint}>
               {text(
-                "Revokes JARVIS's access to Google, then deletes everything JARVIS keeps on this Mac: copies of your mail and calendar, chat history, memory, settings, downloaded models, backups, and every API key and sign-in JARVIS saved in the Keychain. JARVIS then restarts as a fresh install. Ollama and its models are not touched. Nothing in Gmail, Google Calendar, Notion or GitHub is deleted, and your JARVIS account stays open. This cannot be undone.",
-                "先撤銷 JARVIS 的 Google 存取權限，然後刪除 JARVIS 在此 Mac 上保存的所有資料：郵件及日曆副本、對話記錄、記憶、設定、已下載的模型、備份，以及 JARVIS 存放在鑰匙圈的所有 API 密鑰及登入資料。完成後 JARVIS 會以全新安裝狀態重新啟動。Ollama 及其中的模型不受影響。Gmail、Google 日曆、Notion 及 GitHub 中的內容不會刪除，你的 JARVIS 帳戶亦會保留。此操作無法復原。",
+                "Revokes JARVIS's access to Google, then deletes everything JARVIS keeps on this Mac: copies of your mail and calendar, chat history, memory, settings, downloaded models, backups, and every API key and sign-in JARVIS saved in the Keychain. Open at login is turned off. JARVIS then restarts as a fresh install. Ollama and its models are not touched. Nothing in Gmail, Google Calendar, Notion or GitHub is deleted, and your JARVIS account stays open. This cannot be undone.",
+                "先撤銷 JARVIS 的 Google 存取權限，然後刪除 JARVIS 在此 Mac 上保存的所有資料：郵件及日曆副本、對話記錄、記憶、設定、已下載的模型、備份，以及 JARVIS 存放在鑰匙圈的所有 API 密鑰及登入資料。「登入時開啟」亦會關閉。完成後 JARVIS 會以全新安裝狀態重新啟動。Ollama 及其中的模型不受影響。Gmail、Google 日曆、Notion 及 GitHub 中的內容不會刪除，你的 JARVIS 帳戶亦會保留。此操作無法復原。",
               )}
             </p>
             <p style={styles.privacyText}>
@@ -1486,6 +1482,12 @@ export default function Settings() {
               )}
               <ul>{eraseLeft.map(item => <li key={item}><code>{item}</code></li>)}</ul>
             </div>}
+            {eraseLeftAtLogin && <p role="alert" style={styles.errorText}>
+              {text(
+                "Your data was deleted, but JARVIS could not turn off Open at login, so this Mac will still open JARVIS when you log in. Turn JARVIS off in the login items settings under System Settings > General, then quit and reopen JARVIS.",
+                "資料已刪除，但 JARVIS 未能關閉「登入時開啟」，因此你登入此 Mac 時仍會開啟 JARVIS。請在「系統設定」>「一般」的登入項目設定中關閉 JARVIS，然後結束並重新開啟 JARVIS。",
+              )}
+            </p>}
           </div>
         </>)}
 

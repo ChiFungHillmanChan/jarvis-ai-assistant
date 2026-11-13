@@ -25,13 +25,13 @@ pub const CACHE_NOTE: &str =
 /// A mirror with no rows has never been synced. Google connect used to schedule
 /// nothing, so for up to five minutes -- until the first scheduler tick -- these
 /// were both false on a freshly connected account. Shared with the test below.
-const HAS_EMAIL_ROWS_QUERY: &str = "SELECT EXISTS(SELECT 1 FROM emails)";
-const HAS_CALENDAR_ROWS_QUERY: &str = "SELECT EXISTS(SELECT 1 FROM calendar_events)";
+pub(crate) const HAS_EMAIL_ROWS_QUERY: &str = "SELECT EXISTS(SELECT 1 FROM emails)";
+pub(crate) const HAS_CALENDAR_ROWS_QUERY: &str = "SELECT EXISTS(SELECT 1 FROM calendar_events)";
 
 /// Archived mail is excluded from the count and the sender list, so the
 /// assistant reports the same number the Email page shows. Shared with the test
 /// below so the V17 filter cannot drift out again.
-const UNREAD_COUNT_QUERY: &str = "SELECT COUNT(*) FROM emails WHERE is_read = 0 AND is_archived = 0";
+pub(crate) const UNREAD_COUNT_QUERY: &str = "SELECT COUNT(*) FROM emails WHERE is_read = 0 AND is_archived = 0";
 const UNREAD_SENDERS_QUERY: &str = "SELECT sender, subject FROM emails WHERE is_read = 0 AND is_archived = 0 ORDER BY received_at DESC LIMIT 3";
 
 /// "Today" is the user's local day. The predicate is shared with the Calendar
@@ -39,7 +39,7 @@ const UNREAD_SENDERS_QUERY: &str = "SELECT sender, subject FROM emails WHERE is_
 /// [CONTEXT] block and the page can never disagree about which events are
 /// today's; read the doc comment there for why the two storage shapes of
 /// start_time need different handling.
-fn todays_events_query() -> String {
+pub(crate) fn todays_events_query() -> String {
     format!(
         "SELECT summary, start_time, end_time, location FROM calendar_events WHERE {} ORDER BY datetime(start_time) ASC",
         crate::commands::calendar::TODAYS_EVENT_PREDICATE

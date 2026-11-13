@@ -2,6 +2,7 @@ pub mod account;
 pub mod ai_choice;
 pub mod assistant;
 pub mod aws;
+pub mod background;
 pub mod calendar;
 pub mod chat;
 pub mod cost;

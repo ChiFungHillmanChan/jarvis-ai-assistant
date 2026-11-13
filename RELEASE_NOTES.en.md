@@ -1,13 +1,21 @@
-JARVIS v0.5.11
+JARVIS v0.5.12
 
-This update improves how JARVIS answers questions, creates tasks and searches your conversations.
+This update makes automations dependable across restarts, sleep and quitting JARVIS. Nothing runs while your Mac is asleep; JARVIS catches up after it wakes.
+
+New
+- Open at login: JARVIS now opens when you log in to your Mac, so automations keep running after a restart. It turns on by itself once JARVIS is in your Applications folder. Turn it off in Settings > Background; once you turn it off, it stays off. "Delete all JARVIS data on this Mac" turns it off as well.
+- Daily briefing: turn it on in Settings > Background and choose a time (08:30 unless you change it). JARVIS shows a notification and a briefing on the Automation page with today's meetings, tasks and unread mail, and adds an AI summary when the network is available. It is read aloud only when it runs on time, with the Mac awake and the screen unlocked. If the Mac was asleep or JARVIS was closed at that time, the briefing is shown once later the same day and is not read aloud. Once that day is over it is not shown.
+- Keep awake on mains power (off unless you turn it on): while it is plugged in, the Mac does not go to sleep on its own. It does not help with the lid closed.
+- The Automations page has a Run now button, and the run history says whether a run was on time, caught up afterwards or started by hand.
 
 Fixed
-- When you ask "remind me at 3pm", JARVIS no longer promises a reminder at that time. Tasks have a date only, and JARVIS reminds you on that day; for an alarm at an exact time, use your phone.
-- When a question needs JARVIS to look in several places, it now answers from what it found, instead of replying only "I've completed the actions."
-- Creating a task or an event usually takes one fewer AI round trip, so replies come back faster.
-- Saying "search for ..." in chat now searches your earlier conversation instead of matching only what you just typed.
-- When you have several meetings today, JARVIS knows about all of them, not only the first, along with your tasks and unread senders.
-- Cantonese mixed with English (for example "有冇email") now also brings in today's information.
-- With OpenAI, a temporary error such as a rate limit is retried once automatically.
-- With Cantonese replies chosen, JARVIS's Cantonese sounds more natural, while task titles stay in written Chinese.
+- Automations missed while the Mac was asleep or JARVIS was closed: after waking or reopening, only the latest missed run is caught up. Earlier ones are not run one by one, and the same scheduled run never runs twice.
+- When the network is not back yet after waking, automations that need it (mail, calendar, Notion and GitHub sync) wait for it instead of failing, so "Scheduled jobs failed" no longer appears for that reason.
+- If JARVIS is force-quit in the middle of a run, that run is done once more when JARVIS reopens.
+- If the Mac goes to sleep in the middle of a run, the run is no longer counted as failed; JARVIS does it again after the Mac wakes.
+- After a time zone change or a daylight saving change, automations follow the new local time without reopening JARVIS.
+- After a long sleep, JARVIS refreshes an expired Google access token before syncing instead of using the old one.
+- If the Mac was asleep when a meeting reminder was due and the meeting is still going on, JARVIS shows one "Meeting in progress" notice.
+
+Changed
+- "Speak morning briefing on startup" is replaced by the daily briefing. If you had it on, the daily briefing is turned on for you at 08:30.

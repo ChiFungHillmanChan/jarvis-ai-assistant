@@ -25,6 +25,7 @@ export {
   Palette,
   CreditCard,
   HardDrive,
+  Power,
 } from "lucide-react";
 
 interface MarkProps { size?: number }

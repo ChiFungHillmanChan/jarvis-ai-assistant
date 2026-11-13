@@ -5,8 +5,9 @@ use std::sync::Arc;
 
 /// cron_runs is append-only otherwise: the seeded five-minute jobs add a row on
 /// every tick, including ticks that skip immediately, and nothing else prunes
-/// them. Keep a bounded history per job. Shared with the test below.
-const CRON_RUNS_RETENTION_QUERY: &str = "DELETE FROM cron_runs WHERE job_id = ?1 AND id NOT IN \
+/// them. Keep a bounded history per job. Shared with the engine, which runs it
+/// after every run, and with the test below.
+pub(super) const CRON_RUNS_RETENTION_QUERY: &str = "DELETE FROM cron_runs WHERE job_id = ?1 AND id NOT IN \
      (SELECT id FROM cron_runs WHERE job_id = ?1 ORDER BY id DESC LIMIT 200)";
 
 /// A cron_runs row still marked 'running' when the process starts cannot be
@@ -29,42 +30,18 @@ const RECONCILE_INTERRUPTED_RUNS_QUERY: &str = "UPDATE cron_runs SET status = 'i
      WHERE status = 'running'";
 
 /// Resolve runs orphaned by an unclean exit. Idempotent, and safe only before
-/// the first run of this process has inserted its own 'running' row.
+/// the first run of this process has inserted its own 'running' row: the
+/// engine calls it when it is built.
 pub fn reconcile_interrupted_runs(db: &Arc<Database>) -> Result<usize, String> {
     let conn = db.conn.lock().map_err(|e| e.to_string())?;
     conn.execute(RECONCILE_INTERRUPTED_RUNS_QUERY, []).map_err(|e| e.to_string())
 }
 
-pub async fn run_job(db: &Arc<Database>, auth: &Arc<GoogleAuth>, action_type: &str, job_id: i64) -> Result<String, String> {
-    // Once per process, before this run inserts its own row, so a live run is
-    // never mistaken for an orphan.
-    static RECONCILE_ONCE: std::sync::Once = std::sync::Once::new();
-    RECONCILE_ONCE.call_once(|| match reconcile_interrupted_runs(db) {
-        Ok(0) => {}
-        Ok(n) => log::info!("Resolved {} cron run(s) interrupted by an unclean exit", n),
-        Err(e) => log::warn!("Could not reconcile interrupted cron runs: {}", e),
-    });
-
-    {
-        let conn = db.conn.lock().map_err(|e| e.to_string())?;
-        // The scheduler registers jobs once at startup. Re-check the job's
-        // current status here so a pause or delete the user made in the
-        // dashboard takes effect immediately instead of only after a restart.
-        let status: Option<String> = conn
-            .query_row(
-                "SELECT status FROM cron_jobs WHERE id = ?1",
-                rusqlite::params![job_id],
-                |row| row.get(0),
-            )
-            .ok();
-        match status.as_deref() {
-            Some("active") => {}
-            _ => return Ok("Skipped: job paused or removed".to_string()),
-        }
-        conn.execute("INSERT INTO cron_runs (job_id, status) VALUES (?1, 'running')", rusqlite::params![job_id]).map_err(|e| e.to_string())?;
-    }
-
-    let result = match action_type {
+/// Does the work of one job. Everything around it (the `cron_runs` row, the
+/// handled slot, retention, whether the job is still active) belongs to the
+/// engine.
+pub async fn run_action(db: &Arc<Database>, auth: &Arc<GoogleAuth>, action_type: &str) -> Result<String, String> {
+    match action_type {
         job if waits_for_an_encrypted_database(job) => Ok("Skipped: the database is not encrypted".to_string()),
         "email_sync" => run_email_sync(db, auth).await,
         "mail_workspace_sync" => run_mail_workspace_sync(db).await,
@@ -75,23 +52,7 @@ pub async fn run_job(db: &Arc<Database>, auth: &Arc<GoogleAuth>, action_type: &s
         "auto_archive_emails" => run_auto_archive(db, auth).await,
         "proactive_check" => run_proactive_check(db).await,
         other => Err(format!("Unknown job type: {}", other)),
-    };
-
-    {
-        let conn = db.conn.lock().map_err(|e| e.to_string())?;
-        let (status, result_text, error_text) = match &result {
-            Ok(msg) => ("completed", Some(msg.as_str()), None),
-            Err(e) => ("failed", None, Some(e.as_str())),
-        };
-        conn.execute(
-            "UPDATE cron_runs SET finished_at = datetime('now'), status = ?1, result = ?2, error = ?3
-             WHERE id = (SELECT id FROM cron_runs WHERE job_id = ?4 AND status = 'running' ORDER BY id DESC LIMIT 1)",
-            rusqlite::params![status, result_text, error_text, job_id],
-        ).map_err(|e| e.to_string())?;
-        conn.execute("UPDATE cron_jobs SET last_run = datetime('now') WHERE id = ?1", rusqlite::params![job_id]).map_err(|e| e.to_string())?;
-        conn.execute(CRON_RUNS_RETENTION_QUERY, rusqlite::params![job_id]).map_err(|e| e.to_string())?;
     }
-    result
 }
 
 /// The main account's token, or why the job does nothing. A grant Google
@@ -261,8 +222,8 @@ async fn run_github_digest(db: &Arc<Database>) -> Result<String, String> {
 /// three definitions as assistant::context and commands::dashboard. Shared with
 /// the tests below.
 const DEADLINE_WINDOW_QUERY: &str = "SELECT id, title, deadline FROM tasks WHERE status != 'completed' AND deadline IS NOT NULL AND deadline <= date('now', 'localtime', '+3 days') ORDER BY deadline ASC";
-const OVERDUE_TASKS_QUERY: &str = "SELECT title FROM tasks WHERE status != 'completed' AND deadline IS NOT NULL AND deadline < date('now', 'localtime') ORDER BY deadline ASC, id ASC";
-const DUE_TODAY_QUERY: &str = "SELECT title FROM tasks WHERE status != 'completed' AND deadline = date('now', 'localtime') ORDER BY id ASC";
+pub(super) const OVERDUE_TASKS_QUERY: &str = "SELECT title FROM tasks WHERE status != 'completed' AND deadline IS NOT NULL AND deadline < date('now', 'localtime') ORDER BY deadline ASC, id ASC";
+pub(super) const DUE_TODAY_QUERY: &str = "SELECT title FROM tasks WHERE status != 'completed' AND deadline = date('now', 'localtime') ORDER BY id ASC";
 
 async fn run_deadline_monitor(db: &Arc<Database>) -> Result<String, String> {
     let warnings: Vec<(i64, String, String)> = {
@@ -287,11 +248,112 @@ async fn run_deadline_monitor(db: &Arc<Database>) -> Result<String, String> {
 /// Shared with the test below so it cannot drift back to a string compare.
 const UPCOMING_MEETING_QUERY: &str = "SELECT summary, description, attendees FROM calendar_events WHERE datetime(start_time) > datetime('now') AND datetime(start_time) <= datetime('now', '+15 minutes') ORDER BY datetime(start_time) ASC LIMIT 1";
 
+/// Every meeting whose 15-minute alert window is open: the window of
+/// UPCOMING_MEETING_QUERY without its LIMIT. A check that runs inside a
+/// meeting's window has not missed it, whether or not that meeting was the one
+/// the alert named.
+const MEETINGS_IN_ALERT_WINDOW_QUERY: &str = "SELECT id, start_time FROM calendar_events WHERE datetime(start_time) > datetime('now') AND datetime(start_time) <= datetime('now', '+15 minutes')";
+
+/// Meetings that have started and not ended, from the calendar saved on this
+/// Mac. An all-day event (a bare date, 10 characters; see
+/// commands::calendar::TODAYS_EVENT_PREDICATE) is not a meeting anyone walks
+/// into late, so it is left out.
+const MEETINGS_IN_PROGRESS_QUERY: &str = "SELECT id, start_time, summary, end_time FROM calendar_events WHERE length(start_time) > 10 AND datetime(start_time) <= datetime('now') AND datetime(end_time) > datetime('now') ORDER BY datetime(start_time) ASC, id ASC";
+
+/// The meetings a check has already seen, one token per line.
+const MEETINGS_SEEN_KEY: &str = "meeting_alerts_seen";
+
+/// A meeting at a particular start time. A meeting that is moved is a new one.
+fn meeting_token(id: i64, start_time: &str) -> String {
+    format!("{id}@{start_time}")
+}
+
+#[derive(Clone, Debug, PartialEq)]
+struct MeetingInProgress {
+    token: String,
+    summary: String,
+    end_time: String,
+}
+
+/// Which running meetings are owed an "in progress" notice, and the list to
+/// remember for the next check.
+///
+/// A meeting is owed one when no check ran inside its alert window: the Mac
+/// was asleep, or JARVIS was closed, from before the window opened until
+/// after the meeting began. It gets one notice, on the first check that finds
+/// it running. The list holds only meetings that are near or running, so a
+/// meeting that has ended drops out of it by itself and is never announced.
+fn meetings_to_announce<'a>(
+    seen: &std::collections::HashSet<&str>,
+    in_alert_window: &[String],
+    in_progress: &'a [MeetingInProgress],
+) -> (Vec<&'a MeetingInProgress>, Vec<String>) {
+    let announce = in_progress.iter().filter(|meeting| !seen.contains(meeting.token.as_str())).collect();
+    let remember = in_alert_window.iter().cloned().chain(in_progress.iter().map(|meeting| meeting.token.clone())).collect();
+    (announce, remember)
+}
+
+fn meeting_in_progress_line<Tz>(zh: bool, meeting: &MeetingInProgress, tz: &Tz) -> String
+where
+    Tz: chrono::TimeZone,
+    Tz::Offset: std::fmt::Display,
+{
+    let until = chrono::DateTime::parse_from_rfc3339(&meeting.end_time).ok().map(|end| end.with_timezone(tz).format("%H:%M").to_string());
+    one_line(&match (zh, until) {
+        (true, Some(until)) => format!("會議進行中：{}（至 {}）", meeting.summary, until),
+        (true, None) => format!("會議進行中：{}", meeting.summary),
+        (false, Some(until)) => format!("Meeting in progress: {} (until {})", meeting.summary, until),
+        (false, None) => format!("Meeting in progress: {}", meeting.summary),
+    })
+}
+
+/// Read the saved calendar, work out which running meetings were never
+/// alerted, and remember what this check saw.
+fn missed_meetings_in_progress(db: &Database) -> Result<Vec<MeetingInProgress>, String> {
+    let conn = db.conn.lock().map_err(|e| e.to_string())?;
+    let seen: String = conn
+        .query_row("SELECT value FROM user_preferences WHERE key = ?1", [MEETINGS_SEEN_KEY], |r| r.get(0))
+        .unwrap_or_default();
+    let in_alert_window: Vec<String> = {
+        let mut stmt = conn.prepare(MEETINGS_IN_ALERT_WINDOW_QUERY).map_err(|e| e.to_string())?;
+        let rows = stmt
+            .query_map([], |r| Ok(meeting_token(r.get(0)?, &r.get::<_, String>(1)?)))
+            .map_err(|e| e.to_string())?;
+        rows.collect::<Result<_, _>>().map_err(|e| e.to_string())?
+    };
+    let in_progress: Vec<MeetingInProgress> = {
+        let mut stmt = conn.prepare(MEETINGS_IN_PROGRESS_QUERY).map_err(|e| e.to_string())?;
+        let rows = stmt
+            .query_map([], |r| {
+                Ok(MeetingInProgress { token: meeting_token(r.get(0)?, &r.get::<_, String>(1)?), summary: r.get(2)?, end_time: r.get(3)? })
+            })
+            .map_err(|e| e.to_string())?;
+        rows.collect::<Result<_, _>>().map_err(|e| e.to_string())?
+    };
+    let (announce, remember) = meetings_to_announce(&seen.lines().collect(), &in_alert_window, &in_progress);
+    let announce: Vec<MeetingInProgress> = announce.into_iter().cloned().collect();
+    // Remembered before anything is shown, like last_alerts: a notice that
+    // fails to post is not repeated at every check.
+    conn.execute(
+        "INSERT INTO user_preferences (key, value, updated_at) VALUES (?1, ?2, datetime('now'))
+         ON CONFLICT(key) DO UPDATE SET value = ?2, updated_at = datetime('now')",
+        rusqlite::params![MEETINGS_SEEN_KEY, remember.join("\n")],
+    )
+    .map_err(|e| e.to_string())?;
+    Ok(announce)
+}
+
 /// What raises the "cron job(s) failed" alert the user actually sees. Only
 /// genuine failures count: a run resolved as 'interrupted' by
 /// RECONCILE_INTERRUPTED_RUNS_QUERY means JARVIS was quit mid-run, which is not
 /// something to alert anybody about. Shared with the test below.
-const FAILED_RUNS_ALERT_QUERY: &str = "SELECT COUNT(*) FROM cron_runs WHERE status = 'failed' AND started_at > datetime('now', '-1 hour')";
+///
+/// "The last hour" has an end as well as a beginning. A run that failed while
+/// the Mac's clock was ahead is dated in the future, and with no upper bound it
+/// was "in the last hour" at every check until that date came. The minute of
+/// slack is for a clock the time server has just nudged back.
+const FAILED_RUNS_ALERT_QUERY: &str = "SELECT COUNT(*) FROM cron_runs WHERE status = 'failed' \
+     AND started_at > datetime('now', '-1 hour') AND started_at <= datetime('now', '+1 minute')";
 
 /// NotificationBanner renders whatever user_preferences.last_alerts holds, and
 /// the check only ever wrote the key. A check that finds nothing has to remove
@@ -345,6 +407,22 @@ fn task_alert(locale: AlertLocale, kind: TaskAlert, titles: &[String]) -> Option
 fn alerts_to_notify<'a>(previous: Option<&str>, current: &'a [String]) -> Vec<&'a str> {
     let seen: std::collections::HashSet<&str> = previous.unwrap_or("").lines().collect();
     current.iter().map(String::as_str).filter(|line| !seen.contains(line)).collect()
+}
+
+/// The "meeting in progress" lines of the check.
+///
+/// If they cannot be worked out, the check goes on without them: the failed
+/// runs alert and the mail reminders come after this in the check, and the
+/// task alerts gathered before it are only sent at its end. An error here
+/// used to end the whole check and take all of those with it.
+fn meetings_in_progress_lines(db: &Database, zh: bool) -> Vec<String> {
+    match missed_meetings_in_progress(db) {
+        Ok(meetings) => meetings.iter().map(|meeting| meeting_in_progress_line(zh, meeting, &chrono::Local)).collect(),
+        Err(e) => {
+            log::warn!("Proactive check: the meeting-in-progress notice was skipped: {}", e);
+            Vec::new()
+        }
+    }
 }
 
 async fn run_proactive_check(db: &Arc<Database>) -> Result<String, String> {
@@ -401,6 +479,11 @@ async fn run_proactive_check(db: &Arc<Database>) -> Result<String, String> {
         }
         alerts.push(one_line(&prep));
     }
+
+    // A meeting whose alert window passed with nobody checking (the Mac was
+    // asleep, or JARVIS was closed) gets one notice while it is still going
+    // on. Nothing for a meeting that has already ended.
+    alerts.extend(meetings_in_progress_lines(db, zh));
 
     let failed: i64 = {
         let conn = db.conn.lock().map_err(|e| e.to_string())?;
@@ -663,6 +746,124 @@ mod tests {
         assert_eq!(ids, vec!["new".to_string()], "already-archived mail must not be sent to Gmail again");
     }
 
+    fn meeting(id: i64, start: &str, end: &str) -> MeetingInProgress {
+        MeetingInProgress { token: meeting_token(id, start), summary: "Mentor sync".to_string(), end_time: end.to_string() }
+    }
+
+    /// Woken at 10:05 with a 10:00-11:00 meeting nobody was alerted about: one
+    /// notice, on that check and no later one.
+    #[test]
+    fn a_meeting_whose_alert_window_was_slept_through_is_announced_once() {
+        let running = [meeting(7, "2026-11-12T10:00:00+08:00", "2026-11-12T11:00:00+08:00")];
+        let (announce, remember) = meetings_to_announce(&Default::default(), &[], &running);
+        assert_eq!(announce, [&running[0]]);
+        assert_eq!(remember, ["7@2026-11-12T10:00:00+08:00"]);
+
+        let seen = remember.iter().map(String::as_str).collect();
+        let (announce, remember) = meetings_to_announce(&seen, &[], &running);
+        assert!(announce.is_empty(), "the next check, five minutes later");
+        assert_eq!(remember.len(), 1);
+
+        // The meeting has ended: it is in neither list, and is forgotten.
+        let (announce, remember) = meetings_to_announce(&seen, &[], &[]);
+        assert!(announce.is_empty() && remember.is_empty());
+    }
+
+    /// Awake through the alert window: the ordinary "in 15 minutes" alert
+    /// covered it, so nothing more is said when the meeting starts.
+    #[test]
+    fn a_meeting_that_was_alerted_on_time_gets_no_second_notice() {
+        let start = "2026-11-12T10:00:00+08:00";
+        let (announce, remember) = meetings_to_announce(&Default::default(), &[meeting_token(7, start)], &[]);
+        assert!(announce.is_empty());
+
+        let seen = remember.iter().map(String::as_str).collect();
+        let running = [meeting(7, start, "2026-11-12T11:00:00+08:00")];
+        let (announce, _) = meetings_to_announce(&seen, &[], &running);
+        assert!(announce.is_empty());
+
+        // Moved to a new time, it is a new meeting.
+        let moved = [meeting(7, "2026-11-12T10:30:00+08:00", "2026-11-12T11:30:00+08:00")];
+        let (announce, _) = meetings_to_announce(&seen, &[], &moved);
+        assert_eq!(announce.len(), 1);
+    }
+
+    #[test]
+    fn the_in_progress_notice_names_the_meeting_and_when_it_ends() {
+        let hkt = chrono::FixedOffset::east_opt(8 * 3600).unwrap();
+        let running = meeting(7, "2026-11-12T02:00:00Z", "2026-11-12T03:00:00Z");
+        assert_eq!(meeting_in_progress_line(false, &running, &hkt), "Meeting in progress: Mentor sync (until 11:00)");
+        assert_eq!(meeting_in_progress_line(true, &running, &hkt), "會議進行中：Mentor sync（至 11:00）");
+        let odd = MeetingInProgress { end_time: "soon".to_string(), ..running };
+        assert_eq!(meeting_in_progress_line(false, &odd, &hkt), "Meeting in progress: Mentor sync");
+    }
+
+    /// The whole path against the saved calendar: only a meeting that is
+    /// running now is found, and it is announced once.
+    #[test]
+    fn only_a_running_meeting_is_announced_from_the_saved_calendar() {
+        let db = crate::db::test_database();
+        let add = |google_id: &str, summary: &str, start_minutes: i64, end_minutes: i64| {
+            let at = |minutes: i64| (chrono::Utc::now() + chrono::TimeDelta::minutes(minutes)).to_rfc3339();
+            db.conn
+                .lock()
+                .unwrap()
+                .execute(
+                    "INSERT INTO calendar_events (google_id, summary, start_time, end_time) VALUES (?1, ?2, ?3, ?4)",
+                    rusqlite::params![google_id, summary, at(start_minutes), at(end_minutes)],
+                )
+                .unwrap();
+        };
+        add("ended", "Ended already", -90, -30);
+        add("running", "Mentor sync", -5, 55);
+        add("soon", "Starts in ten minutes", 10, 40);
+        add("later", "This afternoon", 180, 240);
+        db.conn
+            .lock()
+            .unwrap()
+            .execute(
+                "INSERT INTO calendar_events (google_id, summary, start_time, end_time) VALUES ('allday', 'Company day', date('now'), date('now', '+1 day'))",
+                [],
+            )
+            .unwrap();
+
+        let announced = missed_meetings_in_progress(&db).unwrap();
+        assert_eq!(announced.iter().map(|m| m.summary.as_str()).collect::<Vec<_>>(), ["Mentor sync"]);
+        assert!(missed_meetings_in_progress(&db).unwrap().is_empty(), "once only");
+
+        let seen: String = db
+            .conn
+            .lock()
+            .unwrap()
+            .query_row("SELECT value FROM user_preferences WHERE key = 'meeting_alerts_seen'", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(seen.lines().count(), 2, "the running meeting and the one whose alert window is open: {seen}");
+    }
+
+    /// A calendar the notice cannot read costs the check its meeting lines
+    /// and nothing else: the task alerts, the failed-runs alert and the mail
+    /// reminders of the same check still go out.
+    #[test]
+    fn a_meeting_notice_that_cannot_be_worked_out_is_left_out_of_the_check() {
+        let db = crate::db::test_database();
+        let at = |minutes: i64| (chrono::Utc::now() + chrono::TimeDelta::minutes(minutes)).to_rfc3339();
+        db.conn
+            .lock()
+            .unwrap()
+            .execute(
+                "INSERT INTO calendar_events (google_id, summary, start_time, end_time) VALUES ('running', 'Mentor sync', ?1, ?2)",
+                rusqlite::params![at(-5), at(55)],
+            )
+            .unwrap();
+        let lines = meetings_in_progress_lines(&db, false);
+        assert_eq!(lines.len(), 1);
+        assert!(lines[0].starts_with("Meeting in progress: Mentor sync"), "{}", lines[0]);
+
+        db.conn.lock().unwrap().execute_batch("DROP TABLE calendar_events").unwrap();
+        assert!(missed_meetings_in_progress(&db).is_err(), "the notice itself cannot be worked out");
+        assert!(meetings_in_progress_lines(&db, false).is_empty(), "left out, and the check goes on");
+    }
+
     fn cron_runs_db() -> Connection {
         let conn = Connection::open_in_memory().unwrap();
         conn.execute_batch(
@@ -838,6 +1039,58 @@ mod tests {
         .unwrap();
         let alerted: i64 = conn.query_row(FAILED_RUNS_ALERT_QUERY, [], |r| r.get(0)).unwrap();
         assert_eq!(alerted, 1, "a real failure must still surface");
+    }
+
+    /// The clock was set a month ahead by mistake; under a wrong date TLS
+    /// fails, so a sync ended `failed`, dated next month. With the clock put
+    /// right, that row is not a failure "in the last hour", now or at any
+    /// check between now and next month.
+    #[test]
+    fn a_failure_dated_ahead_of_now_does_not_raise_a_failure_alert() {
+        let conn = cron_runs_db();
+        let alerted = || -> i64 { conn.query_row(FAILED_RUNS_ALERT_QUERY, [], |r| r.get(0)).unwrap() };
+        conn.execute(
+            "INSERT INTO cron_runs (job_id, status, started_at, finished_at, error) VALUES \
+             (1, 'failed', datetime('now', '+30 days'), datetime('now', '+30 days'), 'certificate is not valid yet')",
+            [],
+        )
+        .unwrap();
+        assert_eq!(alerted(), 0, "a run dated next month did not fail in the last hour");
+
+        // One the time server's correction left a few seconds ahead still counts.
+        conn.execute(
+            "INSERT INTO cron_runs (job_id, status, started_at, finished_at, error) VALUES \
+             (1, 'failed', datetime('now', '+5 seconds'), datetime('now', '+5 seconds'), 'Gmail API error: 500')",
+            [],
+        )
+        .unwrap();
+        assert_eq!(alerted(), 1, "a real failure must still surface");
+    }
+
+    /// A sync that the lid keeps closing on has not failed. However many
+    /// times sleep cuts one slot's run short, no row of it becomes `failed`,
+    /// so "Scheduled jobs failed in the last hour" is never posted for it.
+    /// The rows here are written by the real engine, on a simulated Mac.
+    #[tokio::test]
+    async fn a_run_that_sleep_keeps_cutting_short_does_not_raise_a_failure_alert() {
+        use crate::scheduler::engine::tests::Sim;
+        let alerted = |sim: &Sim| -> i64 { sim.db.conn.lock().unwrap().query_row(FAILED_RUNS_ALERT_QUERY, [], |r| r.get(0)).unwrap() };
+
+        let sim = Sim::start("2026-11-12T08:54:00+08:00");
+        let job = sim.add_job("notion_sync", "0 */10 * * * *");
+        sim.awake_until("2026-11-12T08:55:00+08:00").await;
+        sim.clock.sleep_until("2026-11-12T09:02:00+08:00");
+        sim.next_run_is_cut_short_by_a_sleep_until("2026-11-12T09:05:00+08:00");
+        sim.next_run_is_cut_short_by_a_sleep_until("2026-11-12T09:08:00+08:00");
+
+        // The third wake. Both attempts at the 09:00 slot are behind it.
+        sim.awake_until("2026-11-12T09:08:04+08:00").await;
+        assert_eq!(sim.history(job).len(), 2);
+        assert_eq!(alerted(&sim), 0, "two runs cut short by sleep are not a failure");
+
+        sim.awake_until("2026-11-12T09:09:00+08:00").await;
+        assert_eq!(sim.history(job).len(), 3, "the slot was run again and finished");
+        assert_eq!(alerted(&sim), 0);
     }
 
     /// An alert has to say which task it is about: "1 overdue task(s)" gave the
