@@ -312,16 +312,17 @@ pub struct Corrected {
 ///    figure, which leaves the cache out, and the cost then took the cache
 ///    out of it again. Proven old: stored before [`INCLUSIVE_INPUT_SINCE`],
 ///    or with input smaller than its cache reads and writes, which a row
-///    stored the new way can never be. The input becomes input + cache read
-///    + cache write, the convention new rows use; when the row's price is
-///    known today its cost becomes what a new row with those tokens gets
-///    (`models::usd_cost_micro`). Otherwise rules 1 and 2 have decided the
-///    cost. A row that cannot be proven old, and one without cache tokens
-///    (the bug did not touch it), is left alone. A turn row of several
-///    requests is priced as one request: the row does not say how many it
-///    took, so a long-context tier (today only Claude Haiku 5.5, above 100K
-///    input per request) can apply to its sum when it applied to none of its
-///    requests, and the turn is rounded once rather than per request.
+///    stored the new way can never be. The input becomes the sum of input,
+///    cache read and cache write, the convention new rows use; when the
+///    row's price is known today its cost becomes what a new row with those
+///    tokens gets (`models::usd_cost_micro`). Otherwise rules 1 and 2 have
+///    decided the cost. A row that cannot be proven old, and one without
+///    cache tokens (the bug did not touch it), is left alone. A turn row of
+///    several requests is priced as one request: the row does not say how
+///    many it took, so a long-context tier (today only Claude Haiku 5.5,
+///    above 100K input per request) can apply to its sum when it applied to
+///    none of its requests, and the turn is rounded once rather than per
+///    request.
 ///
 /// Rules 1 to 3 decide the cost on the tokens as stored, which is what the
 /// old guess was worked out on; rule 4 then corrects the input. A row that
@@ -399,7 +400,9 @@ pub fn correct_old_rows(conn: &rusqlite::Connection) -> rusqlite::Result<Correct
     }
 
     // Rule 4, after the costs above were decided on the stored tokens.
-    let rows: Vec<(i64, String, String, i64, i64, i64, i64, bool)> = {
+    // (id, provider, model, input, output, cache read, cache write, price unknown)
+    type Stored = (i64, String, String, i64, i64, i64, i64, bool);
+    let rows: Vec<Stored> = {
         let mut stmt = tx.prepare(
             "SELECT id, provider, model_id, input_tokens, output_tokens, cache_read_tokens, cache_write_tokens, price_unknown
              FROM inference_metrics
