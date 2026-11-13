@@ -128,6 +128,8 @@ impl Database {
         conn.execute_batch(CONNECTION_PRAGMAS)?;
         restrict_to_owner(&db_path);
         embedded::migrations::runner().run(&mut conn)?;
+        // Before anything reads the usage totals.
+        crate::ai::cost::clear_guessed_costs_on_open(&mut conn);
         #[cfg(feature = "native-qa")]
         crate::native_qa::seed_once(&mut conn)?;
         log::info!("Database initialized at {:?}", db_path);

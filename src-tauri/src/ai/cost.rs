@@ -241,6 +241,100 @@ fn insert_row(
     }
 }
 
+/// The rate builds before V33 billed a model missing from the price list at:
+/// US$3 / US$15 per 1M, cache read US$0.30, cache write US$3.75
+/// (`UNKNOWN_PRICE` in ai/models.rs at 23058ce, and in ai/cost.rs from
+/// 214481b, 2026-08-07). Before that day an unknown model was billed at zero.
+const OLD_GUESS: crate::ai::models::Price = crate::ai::models::Price {
+    input_per_million: 3.0,
+    output_per_million: 15.0,
+    cache_read_per_million: 0.30,
+    cache_write_per_million: 3.75,
+};
+
+/// A chat turn row adds up its requests, each rounded to the micro-USD on
+/// its own (`TurnUsage`, since d4b9631), and a turn takes at most five
+/// requests, so a guessed turn can be up to 2.5 micro-USD from the guess on
+/// its summed tokens.
+const GUESS_ROUNDING_MICROS: i64 = 3;
+
+/// Written to user_preferences once the guessed costs are cleared.
+const GUESSES_CLEARED_KEY: &str = "usage_guessed_costs_cleared";
+
+/// Rows stored before V33 for a model with no price kept the guessed cost,
+/// with price_unknown = 0, so the totals counted money nobody was charged.
+/// Once per database, straight after the migrations (db.rs) and so before
+/// anything reads the totals, such a row loses that cost: usd_cost_micro
+/// becomes NULL and price_unknown 1. Its tokens, time, provider, model,
+/// workload and feature are kept.
+///
+/// A row is cleared only when all of these hold:
+/// - price_unknown = 0, and a stored cost above zero (no money, no guess);
+/// - today's lookup has no price for it: the `usd_cost_micro` and
+///   `stored_cost` a new row goes through, so a local row (free) and a row
+///   whose model has a price today are never touched;
+/// - its stored cost is what the old guess gives for its tokens, within
+///   rounding. The price list once narrowed (7f9fd11, 2026-10-07:
+///   "sonnet-4-6" became "claude-sonnet-4-6", and the same for haiku-4-5,
+///   haiku-5-5, opus-5-5 and sonnet-5-5), so an id only the old pattern
+///   matched was stored at a real rate and has no price today. Such a row is
+///   kept unless its cost is the guess, which for Sonnet 4.6 it also was.
+///
+/// Rows billed at zero by the fallback before 214481b are not touched: rows
+/// from before V16 carry provider 'unknown' and a cost of zero too, and a
+/// free local row among them cannot be told apart.
+///
+/// Running it again changes nothing: the key returns at once, and without it
+/// a cleared row no longer qualifies. Returns how many rows were cleared.
+pub fn clear_guessed_costs(conn: &mut rusqlite::Connection) -> rusqlite::Result<usize> {
+    let done: bool = conn.query_row("SELECT EXISTS(SELECT 1 FROM user_preferences WHERE key = ?1)", [GUESSES_CLEARED_KEY], |r| r.get(0))?;
+    if done {
+        return Ok(0);
+    }
+    let tx = conn.transaction()?;
+    let models: Vec<(String, String)> = {
+        let mut stmt = tx.prepare("SELECT DISTINCT provider, model_id FROM inference_metrics WHERE price_unknown = 0 AND usd_cost_micro > 0")?;
+        let rows = stmt.query_map([], |r| Ok((r.get(0)?, r.get(1)?)))?;
+        rows.collect::<rusqlite::Result<_>>()?
+    };
+    let mut cleared = 0;
+    for (provider, model_id) in models {
+        // Asked once per model, the way record_inference asks for a new row.
+        if stored_cost(&provider, crate::ai::models::usd_cost_micro(&provider, &model_id, 0, 0, 0, 0)) != StoredCost::Unknown {
+            continue;
+        }
+        let rows: Vec<(i64, i64, i64, i64, i64, i64)> = {
+            let mut stmt = tx.prepare(
+                "SELECT id, input_tokens, output_tokens, cache_read_tokens, cache_write_tokens, usd_cost_micro
+                 FROM inference_metrics
+                 WHERE provider = ?1 AND model_id = ?2 AND price_unknown = 0 AND usd_cost_micro > 0",
+            )?;
+            let rows = stmt.query_map(rusqlite::params![provider, model_id], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?, r.get(5)?)))?;
+            rows.collect::<rusqlite::Result<_>>()?
+        };
+        for (id, input, output, cache_read, cache_write, stored) in rows {
+            let guess = crate::ai::models::cost_micro_at(OLD_GUESS, input, output, cache_read, cache_write);
+            if (stored - guess).abs() <= GUESS_ROUNDING_MICROS {
+                cleared += tx.execute("UPDATE inference_metrics SET usd_cost_micro = NULL, price_unknown = 1 WHERE id = ?1", [id])?;
+            }
+        }
+    }
+    tx.execute("INSERT OR REPLACE INTO user_preferences (key, value) VALUES (?1, 'true')", [GUESSES_CLEARED_KEY])?;
+    tx.commit()?;
+    Ok(cleared)
+}
+
+/// `clear_guessed_costs` as the app runs it when it opens the database. A
+/// failure is logged and tried again at the next start; it never stops
+/// JARVIS from opening.
+pub fn clear_guessed_costs_on_open(conn: &mut rusqlite::Connection) {
+    match clear_guessed_costs(conn) {
+        Ok(0) => {}
+        Ok(cleared) => log::info!("cost: {cleared} usage rows billed at the old guessed rate now count as price unknown"),
+        Err(e) => log::warn!("cost: could not clear the old guessed costs; trying again at the next start: {e}"),
+    }
+}
+
 /// Spend recorded since a time, from the rows whose price is known, and how
 /// much usage had no price.
 #[derive(Debug, PartialEq)]
@@ -402,6 +496,119 @@ pub(crate) mod tests {
         pub output_tokens: i64,
         pub usd_cost_micro: Option<i64>,
         pub price_unknown: bool,
+    }
+
+    /// Every column of one row: (id, ts, workload, model, input, output) and
+    /// (cache read, cache write, latency, provider, cost, feature, price unknown).
+    type Snapshot = ((i64, i64, String, String, i64, i64), (i64, i64, i64, String, Option<i64>, String, i64));
+
+    /// Every column of every row, in order, to compare before and after.
+    fn snapshot(conn: &rusqlite::Connection) -> Vec<Snapshot> {
+        let mut stmt = conn
+            .prepare("SELECT id, ts, workload, model_id, input_tokens, output_tokens, cache_read_tokens, cache_write_tokens, latency_ms, provider, usd_cost_micro, feature, price_unknown FROM inference_metrics ORDER BY id")
+            .unwrap();
+        let rows = stmt
+            .query_map([], |r| {
+                Ok((
+                    (r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?, r.get(5)?),
+                    (r.get(6)?, r.get(7)?, r.get(8)?, r.get(9)?, r.get(10)?, r.get(11)?, r.get(12)?),
+                ))
+            })
+            .unwrap();
+        rows.map(Result::unwrap).collect()
+    }
+
+    /// The old guess for one request, as main computed it.
+    fn guessed(input: i64, output: i64, cache_read: i64, cache_write: i64) -> i64 {
+        crate::ai::models::cost_micro_at(OLD_GUESS, input, output, cache_read, cache_write)
+    }
+
+    /// M2 / D5. A row an older build billed at the guessed rate for a model
+    /// that has no price today loses that cost and counts as price unknown;
+    /// every other row stays as it was, and a second run changes nothing.
+    #[test]
+    fn old_guessed_costs_become_price_unknown_once_and_nothing_else_changes() {
+        let db = crate::db::test_database();
+        let mut conn = db.conn.lock().unwrap();
+        // Five requests of one chat turn, each rounded on its own (TurnUsage):
+        // 1,500 stored, where the guess on the summed tokens is 1,502.
+        let turn: i64 = (0..5).map(|_| guessed(101, 0, 1, 0)).sum();
+        assert_eq!((turn, guessed(505, 0, 5, 0)), (1_500, 1_502), "the turn's rounding differs from the guess on its sums");
+        let kimi = guessed(12_000, 800, 2_000, 0);
+        assert_eq!(kimi, 42_600);
+        let rows = [
+            // 1: Kimi, billed at the guess before V33.
+            ("compat:api.moonshot.ai", "kimi-k2-0905-preview", 12_000, 800, 2_000, 0, Some(kimi), "chat", 0),
+            // 2: Claude Sonnet 4.6, whose real price is the guess rate: priced today.
+            ("claude", "claude-sonnet-4-6", 12_000, 800, 2_000, 0, Some(kimi), "chat", 0),
+            // 3: a local model, free.
+            ("local", "qwen3:4b", 12_000, 800, 0, 0, Some(0), "chat", 0),
+            // 4: a local provider that, whatever its cost, is never touched.
+            ("ollama", "llama3.2", 12_000, 800, 2_000, 0, Some(kimi), "mail_analysis", 0),
+            // 5: an id only the pre-7f9fd11 pattern "haiku-4-5" priced, at
+            // Haiku 4.5's real rate: no price today, and not the guess.
+            ("claude", "haiku-4-5-20251001", 12_000, 800, 2_000, 0, Some(14_200), "chat", 0),
+            // 6: a guessed turn of five requests on Qwen.
+            ("compat:dashscope-intl.aliyuncs.com", "qwen3-max", 505, 0, 5, 0, Some(turn), "tools", 0),
+            // 7: stored since V33 with the price unknown.
+            ("compat:api.moonshot.ai", "kimi-k2-0905-preview", 3_000, 10, 0, 0, None, "chat", 1),
+            // 8: from before V16: no provider and no cost.
+            ("unknown", "qwen3:4b", 4_000, 900, 0, 0, Some(0), "other", 0),
+        ];
+        for (provider, model, input, output, cache_read, cache_write, cost, feature, unknown) in rows {
+            conn.execute(
+                "INSERT INTO inference_metrics (ts, workload, model_id, input_tokens, output_tokens, cache_read_tokens, cache_write_tokens, latency_ms, provider, usd_cost_micro, feature, price_unknown)
+                 VALUES (1762900000, 'tools', ?1, ?2, ?3, ?4, ?5, 40, ?6, ?7, ?8, ?9)",
+                rusqlite::params![model, input, output, cache_read, cache_write, provider, cost, feature, unknown],
+            )
+            .unwrap();
+        }
+        let before = snapshot(&conn);
+
+        assert_eq!(clear_guessed_costs(&mut conn).unwrap(), 2);
+        let after = snapshot(&conn);
+        assert_eq!(after.len(), before.len());
+        for (i, (old, new)) in before.iter().zip(&after).enumerate() {
+            let row = i + 1;
+            if row == 1 || row == 6 {
+                // Only the cost and the flag change: tokens, time, provider,
+                // model, workload and feature are as they were.
+                let mut expected = old.clone();
+                expected.1 .4 = None;
+                expected.1 .6 = 1;
+                assert_eq!(new, &expected, "row {row}");
+            } else {
+                assert_eq!(new, old, "row {row} is not touched");
+            }
+        }
+
+        // A second run changes nothing, and neither does one without the key.
+        assert_eq!(clear_guessed_costs(&mut conn).unwrap(), 0);
+        assert_eq!(snapshot(&conn), after);
+        conn.execute("DELETE FROM user_preferences WHERE key = ?1", [GUESSES_CLEARED_KEY]).unwrap();
+        assert_eq!(clear_guessed_costs(&mut conn).unwrap(), 0);
+        assert_eq!(snapshot(&conn), after);
+    }
+
+    /// The step runs when the app opens its database: after the migrations,
+    /// before the database is handed to anything that reads the totals.
+    #[test]
+    fn the_guessed_costs_are_cleared_when_the_database_opens() {
+        let source = include_str!("../db.rs");
+        let open = &source[source.find("pub fn new()").expect("Database::new exists")..];
+        let open = &open[..open.find("fn db_path()").expect("db_path follows new")];
+        let migrated = open.find("embedded::migrations::runner().run(&mut conn)?;").expect("migrations run");
+        let cleared = open.find("crate::ai::cost::clear_guessed_costs_on_open(&mut conn);").expect("the step runs on open");
+        let handed_over = open.find("Ok(Database {").expect("the database is returned");
+        assert!(migrated < cleared && cleared < handed_over);
+    }
+
+    /// A failure is logged, never fatal: JARVIS still opens.
+    #[test]
+    fn a_failed_clearing_does_not_stop_the_database_opening() {
+        let mut conn = rusqlite::Connection::open_in_memory().unwrap();
+        assert!(clear_guessed_costs(&mut conn).is_err(), "no tables");
+        clear_guessed_costs_on_open(&mut conn);
     }
 
     /// (cache read, cache write) of each row, in order.

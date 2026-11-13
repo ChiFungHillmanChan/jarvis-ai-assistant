@@ -197,12 +197,18 @@ pub fn usd_cost_micro(provider: &str, model_id: &str, input_tokens: i64, output_
         Some(long) if input_tokens > long.above => long.price,
         _ => price_for(model_id)?,
     };
+    Some(cost_micro_at(p, input_tokens, output_tokens, cache_read_tokens, cache_write_tokens))
+}
+
+/// One request at one price, in micro-USD. `input_tokens` includes the cache
+/// reads and writes, which are billed at their own rates.
+pub(crate) fn cost_micro_at(p: Price, input_tokens: i64, output_tokens: i64, cache_read_tokens: i64, cache_write_tokens: i64) -> i64 {
     let billable_input = (input_tokens - cache_read_tokens - cache_write_tokens).max(0);
     let usd = (billable_input as f64) * p.input_per_million / 1_000_000.0
         + (output_tokens as f64) * p.output_per_million / 1_000_000.0
         + (cache_read_tokens as f64) * p.cache_read_per_million / 1_000_000.0
         + (cache_write_tokens as f64) * p.cache_write_per_million / 1_000_000.0;
-    Some((usd * 1_000_000.0).round() as i64)
+    (usd * 1_000_000.0).round() as i64
 }
 
 // ---------------------------------------------------------------------------
