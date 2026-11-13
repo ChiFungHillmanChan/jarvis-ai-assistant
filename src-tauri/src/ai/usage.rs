@@ -745,6 +745,74 @@ mod tests {
         assert!(roll_up(&conn, NOW, 30).unwrap().requests_moved > 0, "the next run moves them");
     }
 
+    /// U7.3. The writes after the requests are deleted fail in turn: the
+    /// expiry's delete of an old daily total, and the record of the run.
+    /// The same transaction leaves both tables and both markers as they were.
+    #[test]
+    fn a_failure_after_the_requests_are_deleted_changes_neither_table() {
+        let refusals = [
+            "CREATE TEMP TRIGGER refuse BEFORE DELETE ON usage_daily BEGIN SELECT RAISE(ABORT, 'disk full'); END;",
+            "CREATE TEMP TRIGGER refuse BEFORE INSERT ON user_preferences WHEN NEW.key = 'usage_rolled_up_day' BEGIN SELECT RAISE(ABORT, 'disk full'); END;",
+        ];
+        for refusal in refusals {
+            let db = opened();
+            let conn = db.conn.lock().unwrap();
+            store(&conn, &mixed());
+            // A total the expiry deletes at this run.
+            conn.execute(
+                "INSERT INTO usage_daily (day, provider, model_id, feature, price_unknown, requests, input_tokens, output_tokens, cache_read_tokens, cache_write_tokens, usd_cost_micro)
+                 VALUES (?1, 'openai', 'gpt-6-luna', 'chat', 0, 1, 1, 1, 0, 0, 1)",
+                [TODAY - 801],
+            )
+            .unwrap();
+            write_day(&conn, KEPT_FROM_KEY, TODAY - 801).unwrap();
+            let markers = |conn: &Connection| (read_day(conn, KEPT_FROM_KEY).unwrap(), read_day(conn, ROLLED_UP_DAY_KEY).unwrap());
+            let before = (per_request(&conn), daily(&conn), markers(&conn));
+            conn.execute_batch(refusal).unwrap();
+
+            assert!(roll_up(&conn, NOW, 30).is_err(), "{refusal}");
+            assert_eq!((per_request(&conn), daily(&conn), markers(&conn)), before, "{refusal}");
+
+            conn.execute_batch("DROP TRIGGER refuse;").unwrap();
+            let rolled = roll_up(&conn, NOW, 30).unwrap();
+            assert!(rolled.requests_moved > 0 && rolled.totals_expired == 1, "the next run does it all: {rolled:?}");
+        }
+    }
+
+    /// U7.2. What the roll-up carries: every column of a request is in its
+    /// daily total, or on the list of what a daily total does not keep, and
+    /// the totals have exactly their eleven columns, each written by the
+    /// roll-up. A column added to requests alone fails here instead of being
+    /// dropped without notice at 30 days.
+    #[test]
+    fn every_request_column_is_in_the_daily_totals_or_listed_as_dropped() {
+        // `ts` becomes `day`.
+        const DROPPED: [&str; 4] = ["id", "ts", "workload", "latency_ms"];
+        const DAILY: [&str; 11] = [
+            "day", "provider", "model_id", "feature", "price_unknown", "requests",
+            "input_tokens", "output_tokens", "cache_read_tokens", "cache_write_tokens", "usd_cost_micro",
+        ];
+        let db = crate::db::test_database();
+        let conn = db.conn.lock().unwrap();
+        let columns = |table: &str| -> Vec<String> {
+            let mut stmt = conn.prepare("SELECT name FROM pragma_table_info(?1) ORDER BY cid").unwrap();
+            stmt.query_map([table], |r| r.get(0)).unwrap().map(Result::unwrap).collect()
+        };
+        let daily = columns("usage_daily");
+        assert_eq!(daily, DAILY);
+        let requests = columns("inference_metrics");
+        assert!(requests.len() > DROPPED.len());
+        let lost: Vec<&String> = requests.iter().filter(|c| !DROPPED.contains(&c.as_str()) && !daily.contains(c)).collect();
+        assert!(lost.is_empty(), "add these to usage_daily and the roll-up, or to DROPPED: {lost:?}");
+
+        let source = include_str!("usage.rs");
+        let insert = &source[source.find("tx.execute(\n        \"INSERT INTO usage_daily").expect("the roll-up's insert")..];
+        let listed = &insert[insert.find('(').unwrap() + 1..];
+        let listed = &listed[listed.find('(').unwrap() + 1..listed.find(')').unwrap()];
+        let listed: Vec<&str> = listed.split(',').map(str::trim).collect();
+        assert_eq!(listed, DAILY, "the roll-up writes every column of the totals");
+    }
+
     /// A clean-up window under 30 days moves requests sooner, and they still
     /// count in the 30-day view. With clean-up off the window is 30 days.
     #[test]

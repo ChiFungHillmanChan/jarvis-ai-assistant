@@ -366,6 +366,24 @@ mod tests {
         assert!(groups_for(&conn, now, 90, "time").unwrap().iter().all(|g| g.from_day.is_none()), "days need no label");
     }
 
+    /// U7.1. Each of the page's three reads first runs the roll-up when the
+    /// UTC day has changed: JARVIS can stay open for days, and without it
+    /// neither the roll-up nor the expiry would run until the next launch.
+    #[test]
+    fn every_usage_read_rolls_up_first_when_the_day_has_changed() {
+        let source = include_str!("cost.rs");
+        for (command, read) in [
+            ("pub async fn get_cost_stats(", "stats_for(&conn, now, days)"),
+            ("pub async fn get_blended_cost(", "blended_for(&conn, now, days)"),
+            ("pub async fn get_usage_groups(", "groups_for(&conn, now, days, &group_by)"),
+        ] {
+            let body = &source[source.find(command).unwrap_or_else(|| panic!("{command}"))..];
+            let body = &body[..body.find("\n}\n").unwrap()];
+            let rolled = body.find("usage::roll_up_if_due(&conn, now);").unwrap_or_else(|| panic!("{command} rolls up"));
+            assert!(rolled < body.find(read).unwrap_or_else(|| panic!("{command} reads")), "{command}: before the read");
+        }
+    }
+
     #[test]
     fn only_the_offered_periods_and_groupings_are_read() {
         let db = crate::db::test_database();
