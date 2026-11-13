@@ -9,7 +9,7 @@ New
 - The Automations page has a Run now button, and the run history says whether a run was on time, caught up afterwards or started by hand.
 - Usage: Settings > Usage shows the AI usage recorded on this Mac. Choose the last 30 days, 90 days, 6 months, 1 year or 2 years, and group it by model, provider, feature or time. It shows requests, input, output and cache tokens, cost, the local model share and the most expensive requests. Gemini speech to text and MiniMax text to speech are recorded too, MiniMax speech in characters. Each request is kept for 30 days, then as daily totals for two years; the daily totals hold no prompts or mail. All of it stays on this Mac. Days are counted in UTC.
 - Bedrock model ID: in Settings > Models, under Provider priority, the Bedrock row takes a model ID or an inference profile ID from the Bedrock console; leave it empty for the default model. JARVIS uses the model saved there and no longer switches to another model depending on the kind of request. Usage is recorded under the ID actually sent. The "+ Bedrock Claude" button is now "+ Bedrock".
-- Mail analysis with the AI you chose, and AI sorting, can now use Bedrock instead of saying the feature is not supported. With Claude, AI sorting now asks Claude for a fixed-format answer.
+- Mail analysis with the AI you chose, and AI sorting, can now use Bedrock instead of saying the feature is not supported. In these two features Bedrock's error messages follow the interface language, English or Chinese, and when the saved AWS credentials cannot be read JARVIS asks you to save them again in Settings. With Claude, AI sorting now asks Claude for a fixed-format answer.
 
 Fixed
 - Automations missed while the Mac was asleep or JARVIS was closed: after waking or reopening, only the latest missed run is caught up. Earlier ones are not run one by one, and the same scheduled run never runs twice.
@@ -20,7 +20,6 @@ Fixed
 - After a long sleep, JARVIS refreshes an expired Google access token before syncing instead of using the old one.
 - If the Mac was asleep when a meeting reminder was due and the meeting is still going on, JARVIS shows one "Meeting in progress" notice.
 - Bedrock usage is recorded as AWS reports it for each request: input, output, cache read and cache write tokens. A reply AWS charged for but that has no content is recorded as well.
-- Bedrock error messages follow the interface language, English or Chinese. When the saved AWS credentials cannot be read, JARVIS asks you to save them again in Settings.
 - When Gemini returns an empty answer, the chat says that it was Gemini and suggests another model. If some actions were already completed, it says they were kept and will not be repeated.
 - Gemini replies can be as long as the chosen model allows, where JARVIS knows that model's limit; before, every Gemini reply was capped at 4,096 tokens. Tool descriptions sent to Gemini have the parts Gemini does not support removed first.
 - The clean-up report in English uses singular and plural correctly.
