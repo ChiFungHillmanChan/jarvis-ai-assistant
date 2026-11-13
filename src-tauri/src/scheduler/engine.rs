@@ -216,6 +216,9 @@ const INTERRUPTED_TWICE: &str = "Interrupted again on the retry; this occurrence
 /// each wake.
 const RETRIES_AFTER_AN_EXIT: i64 = 1;
 
+/// How long a job is left alone after its run's outcome could not be written.
+const PAUSE_AFTER_AN_UNRECORDED_OUTCOME_SECS: u64 = 60;
+
 fn db_err(e: rusqlite::Error) -> String {
     e.to_string()
 }
@@ -670,6 +673,7 @@ impl<C: Clock> Engine<C> {
             tx.execute(CRON_RUNS_RETENTION_QUERY, params![run.job_id]).map_err(db_err)?;
             tx.commit().map_err(db_err)
         });
+        let unrecorded = recorded.is_err();
         if let Err(e) = recorded {
             log::error!("Could not record the outcome of cron job {}: {}", run.job_id, e);
         }
@@ -693,6 +697,18 @@ impl<C: Clock> Engine<C> {
             _ => None,
         };
         job.next_check = None;
+        if unrecorded {
+            // The work was done, but the row still says `running` and the
+            // slot is still owed, so the next look at this job starts the slot
+            // again. Looked at on the next tick, a write that keeps failing
+            // repeated the job's work (a sync, a notification, an AI call)
+            // every second. It is left alone for a minute instead.
+            let pause = Duration::from_secs(PAUSE_AFTER_AN_UNRECORDED_OUTCOME_SECS);
+            job.next_check = Some(now + TimeDelta::seconds(PAUSE_AFTER_AN_UNRECORDED_OUTCOME_SECS as i64));
+            if let Some(wait) = job.wait.as_mut() {
+                wait.not_before = wait.not_before.max(awake + pause);
+            }
+        }
     }
 
     /// Start a manual run of a job, whatever its schedule says. It belongs to
@@ -2028,6 +2044,68 @@ pub(super) mod tests {
         assert_eq!(sim.history(job), ["running scheduled 2026-11-12T09:00:00+08:00"], "not half recorded");
         assert_eq!(sim.column(job, "last_run"), None);
         assert_eq!(sim.handled(job), None);
+    }
+
+    /// While that write keeps failing, the slot is still owed and its work
+    /// has been done. It is tried again a minute later, not on the next tick:
+    /// a second apart, the job's work was repeated for as long as the write
+    /// kept failing.
+    #[tokio::test]
+    async fn a_run_whose_outcome_cannot_be_written_is_not_started_again_on_the_next_tick() {
+        let sim = Sim::start("2026-11-12T08:59:00+08:00");
+        let job = sim.add_job("deadline_monitor", DAILY_0900);
+        sim.db
+            .conn
+            .lock()
+            .unwrap()
+            .execute_batch(
+                "CREATE TRIGGER handled_slot_cannot_be_written BEFORE UPDATE OF handled_slot ON cron_jobs \
+                 BEGIN SELECT RAISE(ABORT, 'disk full'); END;",
+            )
+            .unwrap();
+        sim.awake_until("2026-11-12T09:00:00+08:00").await;
+        assert_eq!(sim.ran(), ["scheduled 2026-11-12T09:00:00+08:00"]);
+
+        sim.awake_for(1).await;
+        assert_eq!(sim.ran().len(), 1, "not on the next tick");
+        sim.awake_until("2026-11-12T09:00:59+08:00").await;
+        assert_eq!(sim.ran().len(), 1, "nor on any tick of the next minute");
+        assert_eq!(sim.history(job), ["running scheduled 2026-11-12T09:00:00+08:00"]);
+
+        // A minute on it is tried once more, and then left alone again.
+        sim.awake_until("2026-11-12T09:01:59+08:00").await;
+        assert_eq!(sim.ran().len(), 2);
+    }
+
+    /// The same pause holds for a run that ended offline, whose own wait for
+    /// the network would otherwise let it start again sooner.
+    #[tokio::test]
+    async fn an_offline_run_whose_outcome_cannot_be_written_waits_the_minute_too() {
+        let sim = Sim::start("2026-11-12T09:59:00+08:00");
+        sim.add_job("email_sync", HOURLY);
+        sim.db
+            .conn
+            .lock()
+            .unwrap()
+            .execute_batch(
+                "CREATE TRIGGER last_run_cannot_be_written BEFORE UPDATE OF last_run ON cron_jobs \
+                 BEGIN SELECT RAISE(ABORT, 'disk full'); END;",
+            )
+            .unwrap();
+        let network = Arc::clone(&sim.network);
+        sim.jobs.next_run_will(move || {
+            network.set(false);
+            Err("Gmail request timed out".to_string())
+        });
+        sim.awake_until("2026-11-12T10:00:00+08:00").await;
+        assert_eq!(sim.ran().len(), 1);
+
+        // The network is back at once and has settled long before the minute is up.
+        sim.network.set(true);
+        sim.awake_until("2026-11-12T10:00:59+08:00").await;
+        assert_eq!(sim.ran().len(), 1, "not started again inside the minute");
+        sim.awake_until("2026-11-12T10:01:30+08:00").await;
+        assert_eq!(sim.ran().len(), 2);
     }
 
     #[test]
