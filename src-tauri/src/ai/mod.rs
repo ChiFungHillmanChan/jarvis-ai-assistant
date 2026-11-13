@@ -58,7 +58,7 @@ const INFERENCE_GEOGRAPHIES: [&str; 3] = ["apac", "us", "eu"];
 /// send an APAC inference profile to a US endpoint and get a
 /// ValidationException on every request. Ids prefixed `global.`, and ids
 /// with no geography prefix at all, are left untouched.
-fn apply_inference_profile(model: &str, profile: &str) -> String {
+pub(crate) fn apply_inference_profile(model: &str, profile: &str) -> String {
     match model.split_once('.') {
         Some((head, rest)) if INFERENCE_GEOGRAPHIES.contains(&head) && head != profile => {
             format!("{}.{}", profile, rest)

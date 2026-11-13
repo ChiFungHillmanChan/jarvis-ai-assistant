@@ -502,6 +502,7 @@ pub fn run() {
             commands::aws::set_aws_credentials,
             commands::aws::get_aws_credentials_status,
             commands::aws::clear_aws_credentials,
+            commands::aws::list_bedrock_models,
             commands::background::get_open_at_login,
             commands::background::set_open_at_login,
             commands::background::get_keep_awake,

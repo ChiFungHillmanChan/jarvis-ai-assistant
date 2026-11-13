@@ -66,6 +66,17 @@ pub async fn clear_aws_credentials(
     AwsCredsRepo::new(db.inner().clone()).clear().await
 }
 
+/// The Bedrock model picker's list: from the user's AWS account for the
+/// saved region, or the built-in list with the reason. Called by Settings
+/// when the Models section shows a Bedrock row, and when the user asks to
+/// load it again; never at start-up or in the background. Nothing is stored.
+#[tauri::command]
+pub async fn list_bedrock_models(
+    db: State<'_, Arc<Database>>,
+) -> Result<crate::aws::model_list::ModelList, String> {
+    Ok(crate::aws::model_list::list_for(db.inner(), crate::aws::model_list::LIST_TIME_LIMIT).await)
+}
+
 #[cfg(test)]
 mod tests {
     use super::inference_profile_for_region;

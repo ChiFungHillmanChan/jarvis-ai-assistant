@@ -165,6 +165,13 @@ pub fn price_for(model_id: &str) -> Option<Price> {
     found
 }
 
+/// The name this list gives a model id, matched as `price_for` matches it
+/// ("global.anthropic.claude-sonnet-4-6" is "Claude Sonnet 4.6"). None for an
+/// id it does not list and for a family pattern, which names no one model.
+pub fn label_for(model_id: &str) -> Option<&'static str> {
+    find(model_id).filter(|entry| !entry.family).map(|entry| entry.label)
+}
+
 /// Whether usage of this model can be turned into money: always for a local
 /// model (free), and for a cloud model only when CLOUD_MODELS prices it.
 pub fn price_known(provider: &str, model_id: &str) -> bool {
