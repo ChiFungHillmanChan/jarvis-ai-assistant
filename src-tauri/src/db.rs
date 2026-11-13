@@ -109,6 +109,15 @@ fn restrict_to_owner(db_path: &std::path::Path) {
     }
 }
 
+/// What every open does to the usage after the migrations, before anything
+/// reads it: the old guessed costs become "price unknown" (M2 / D5), then the
+/// requests older than the per-request window move into the daily totals
+/// (ai/usage.rs). Neither can stop JARVIS from opening.
+pub(crate) fn prepare_usage(conn: &Connection) {
+    crate::ai::cost::clear_guessed_costs_on_open(conn);
+    crate::ai::usage::roll_up_on_open(conn);
+}
+
 impl Database {
     pub fn new() -> Result<Self, Box<dyn std::error::Error>> {
         let db_path = Self::db_path()?;
@@ -129,7 +138,7 @@ impl Database {
         restrict_to_owner(&db_path);
         embedded::migrations::runner().run(&mut conn)?;
         // Before anything reads the usage totals.
-        crate::ai::cost::clear_guessed_costs_on_open(&mut conn);
+        prepare_usage(&conn);
         #[cfg(feature = "native-qa")]
         crate::native_qa::seed_once(&mut conn)?;
         log::info!("Database initialized at {:?}", db_path);

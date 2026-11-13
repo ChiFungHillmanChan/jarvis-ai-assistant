@@ -5,6 +5,7 @@ pub mod mail_policy;
 pub mod models;
 pub mod complete;
 pub mod cost;
+pub mod usage;
 pub mod gemini;
 pub mod local;
 pub mod openai;

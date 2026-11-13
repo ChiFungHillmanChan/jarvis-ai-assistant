@@ -264,7 +264,8 @@ const GUESSES_CLEARED_KEY: &str = "usage_guessed_costs_cleared";
 /// Rows stored before V33 for a model with no price kept the guessed cost,
 /// with price_unknown = 0, so the totals counted money nobody was charged.
 /// Once per database, straight after the migrations (db.rs) and so before
-/// anything reads the totals, such a row loses that cost: usd_cost_micro
+/// anything reads the totals or rolls a row into the daily totals
+/// (ai/usage.rs, which also runs this first), such a row loses that cost: usd_cost_micro
 /// becomes NULL and price_unknown 1. Its tokens, time, provider, model,
 /// workload and feature are kept.
 ///
@@ -286,12 +287,12 @@ const GUESSES_CLEARED_KEY: &str = "usage_guessed_costs_cleared";
 ///
 /// Running it again changes nothing: the key returns at once, and without it
 /// a cleared row no longer qualifies. Returns how many rows were cleared.
-pub fn clear_guessed_costs(conn: &mut rusqlite::Connection) -> rusqlite::Result<usize> {
+pub fn clear_guessed_costs(conn: &rusqlite::Connection) -> rusqlite::Result<usize> {
     let done: bool = conn.query_row("SELECT EXISTS(SELECT 1 FROM user_preferences WHERE key = ?1)", [GUESSES_CLEARED_KEY], |r| r.get(0))?;
     if done {
         return Ok(0);
     }
-    let tx = conn.transaction()?;
+    let tx = conn.unchecked_transaction()?;
     let models: Vec<(String, String)> = {
         let mut stmt = tx.prepare("SELECT DISTINCT provider, model_id FROM inference_metrics WHERE price_unknown = 0 AND usd_cost_micro > 0")?;
         let rows = stmt.query_map([], |r| Ok((r.get(0)?, r.get(1)?)))?;
@@ -327,47 +328,12 @@ pub fn clear_guessed_costs(conn: &mut rusqlite::Connection) -> rusqlite::Result<
 /// `clear_guessed_costs` as the app runs it when it opens the database. A
 /// failure is logged and tried again at the next start; it never stops
 /// JARVIS from opening.
-pub fn clear_guessed_costs_on_open(conn: &mut rusqlite::Connection) {
+pub fn clear_guessed_costs_on_open(conn: &rusqlite::Connection) {
     match clear_guessed_costs(conn) {
         Ok(0) => {}
         Ok(cleared) => log::info!("cost: {cleared} usage rows billed at the old guessed rate now count as price unknown"),
         Err(e) => log::warn!("cost: could not clear the old guessed costs; trying again at the next start: {e}"),
     }
-}
-
-/// Spend recorded since a time, from the rows whose price is known, and how
-/// much usage had no price.
-#[derive(Debug, PartialEq)]
-pub struct Blended {
-    /// Sum of usd_cost_micro: only rows whose price is known have one.
-    pub total_micro: i64,
-    /// Distinct UTC days with at least one row whose price is known. A day
-    /// with only unpriced usage is left out: counting it would lower the
-    /// daily average by spend that is not in the total.
-    pub active_days: i64,
-    /// Requests whose price is unknown. They are in neither figure above, so
-    /// the total is low by what they cost.
-    pub price_unknown_turns: i64,
-}
-
-/// Errors propagate so a telemetry failure never renders as a real "$0.00/mo".
-pub fn blended_cost_micro(db: &crate::db::Database, since_ts: i64) -> Result<Blended, String> {
-    let conn = db.conn.lock().map_err(|e| {
-        log::warn!("cost: db lock failed reading blended cost (since_ts={since_ts}): {e}");
-        format!("db lock failed: {e}")
-    })?;
-    conn.query_row(
-        "SELECT COALESCE(SUM(usd_cost_micro), 0),
-                COUNT(DISTINCT CASE WHEN COALESCE(price_unknown, 0) = 0 THEN CAST(ts / 86400 AS INTEGER) END),
-                COALESCE(SUM(COALESCE(price_unknown, 0)), 0)
-         FROM inference_metrics WHERE ts >= ?1",
-        rusqlite::params![since_ts],
-        |r| Ok(Blended { total_micro: r.get(0)?, active_days: r.get(1)?, price_unknown_turns: r.get(2)? }),
-    )
-    .map_err(|e| {
-        log::warn!("cost: blended cost query failed: {e}");
-        format!("blended cost query failed: {e}")
-    })
 }
 
 #[cfg(test)]
@@ -395,43 +361,6 @@ pub(crate) mod tests {
         ))
         .unwrap();
         crate::db::Database { conn: Mutex::new(conn) }
-    }
-
-    const SEED_ROWS: &str = "INSERT INTO inference_metrics (ts, usd_cost_micro) VALUES
-               (1000, 500000),        -- day A: 0.50 USD
-               (1500, 250000),        -- day A: 0.25 USD
-               (90000, 1000000);      -- day B: 1.00 USD";
-
-    #[test]
-    fn blended_sums_and_counts_active_days() {
-        let db = temp_metrics_db(SEED_ROWS);
-        let Blended { total_micro: total, active_days: days, .. } = blended_cost_micro(&db, 0).unwrap();
-        assert_eq!(total, 1_750_000); // 1.75 USD
-        assert_eq!(days, 2);          // 兩個唔同 UTC 日
-    }
-
-    /// Unpriced usage is counted, left out of the money, and does not add
-    /// days that would lower the average. Day A has priced and unpriced
-    /// rows, day B only unpriced ones.
-    #[test]
-    fn blended_counts_unpriced_usage_without_lowering_the_average() {
-        let db = temp_metrics_db(
-            "INSERT INTO inference_metrics (ts, usd_cost_micro, price_unknown) VALUES
-               (1000, 500000, 0),
-               (1500, NULL, 1),
-               (90000, NULL, 1),
-               (90500, NULL, 1);",
-        );
-        assert_eq!(blended_cost_micro(&db, 0).unwrap(), Blended { total_micro: 500_000, active_days: 1, price_unknown_turns: 3 });
-    }
-
-    #[test]
-    fn blended_since_ts_excludes_rows_before_window() {
-        let db = temp_metrics_db(SEED_ROWS);
-        // Window opens after both day-A rows: only the 90000-ts row counts.
-        let Blended { total_micro: total, active_days: days, .. } = blended_cost_micro(&db, 50_000).unwrap();
-        assert_eq!(total, 1_000_000);
-        assert_eq!(days, 1);
     }
 
     fn rows(db: &crate::db::Database) -> Vec<(i64, i64, i64, i64)> {
@@ -529,7 +458,7 @@ pub(crate) mod tests {
     #[test]
     fn old_guessed_costs_become_price_unknown_once_and_nothing_else_changes() {
         let db = crate::db::test_database();
-        let mut conn = db.conn.lock().unwrap();
+        let conn = db.conn.lock().unwrap();
         // Five requests of one chat turn, each rounded on its own (TurnUsage):
         // 1,500 stored, where the guess on the summed tokens is 1,502.
         let turn: i64 = (0..5).map(|_| guessed(101, 0, 1, 0)).sum();
@@ -565,7 +494,7 @@ pub(crate) mod tests {
         }
         let before = snapshot(&conn);
 
-        assert_eq!(clear_guessed_costs(&mut conn).unwrap(), 2);
+        assert_eq!(clear_guessed_costs(&conn).unwrap(), 2);
         let after = snapshot(&conn);
         assert_eq!(after.len(), before.len());
         for (i, (old, new)) in before.iter().zip(&after).enumerate() {
@@ -583,32 +512,36 @@ pub(crate) mod tests {
         }
 
         // A second run changes nothing, and neither does one without the key.
-        assert_eq!(clear_guessed_costs(&mut conn).unwrap(), 0);
+        assert_eq!(clear_guessed_costs(&conn).unwrap(), 0);
         assert_eq!(snapshot(&conn), after);
         conn.execute("DELETE FROM user_preferences WHERE key = ?1", [GUESSES_CLEARED_KEY]).unwrap();
-        assert_eq!(clear_guessed_costs(&mut conn).unwrap(), 0);
+        assert_eq!(clear_guessed_costs(&conn).unwrap(), 0);
         assert_eq!(snapshot(&conn), after);
     }
 
     /// The step runs when the app opens its database: after the migrations,
-    /// before the database is handed to anything that reads the totals.
+    /// first of the usage steps, before the database is handed to anything
+    /// that reads the totals (the roll-up's order: ai/usage.rs).
     #[test]
     fn the_guessed_costs_are_cleared_when_the_database_opens() {
         let source = include_str!("../db.rs");
         let open = &source[source.find("pub fn new()").expect("Database::new exists")..];
         let open = &open[..open.find("fn db_path()").expect("db_path follows new")];
         let migrated = open.find("embedded::migrations::runner().run(&mut conn)?;").expect("migrations run");
-        let cleared = open.find("crate::ai::cost::clear_guessed_costs_on_open(&mut conn);").expect("the step runs on open");
+        let prepared = open.find("prepare_usage(&conn);").expect("the usage steps run on open");
         let handed_over = open.find("Ok(Database {").expect("the database is returned");
-        assert!(migrated < cleared && cleared < handed_over);
+        assert!(migrated < prepared && prepared < handed_over);
+        let steps = &source[source.find("pub(crate) fn prepare_usage(conn: &Connection) {").expect("the usage steps")..];
+        let first = steps.lines().nth(1).unwrap_or_default().trim();
+        assert_eq!(first, "crate::ai::cost::clear_guessed_costs_on_open(conn);");
     }
 
     /// A failure is logged, never fatal: JARVIS still opens.
     #[test]
     fn a_failed_clearing_does_not_stop_the_database_opening() {
-        let mut conn = rusqlite::Connection::open_in_memory().unwrap();
-        assert!(clear_guessed_costs(&mut conn).is_err(), "no tables");
-        clear_guessed_costs_on_open(&mut conn);
+        let conn = rusqlite::Connection::open_in_memory().unwrap();
+        assert!(clear_guessed_costs(&conn).is_err(), "no tables");
+        clear_guessed_costs_on_open(&conn);
     }
 
     /// (cache read, cache write) of each row, in order.
@@ -777,13 +710,6 @@ pub(crate) mod tests {
         drop(conn);
         drop(db);
         std::fs::remove_dir_all(&directory).unwrap();
-    }
-
-    #[test]
-    fn blended_empty_table_returns_zero_zero() {
-        let db = temp_metrics_db("");
-        let Blended { total_micro: total, active_days: days, .. } = blended_cost_micro(&db, 0).unwrap();
-        assert_eq!((total, days), (0, 0));
     }
 
     /// The shipped model ids must still be served by Google, not merely priced by

@@ -193,14 +193,18 @@ fn line(db: &Database, turn_begins: bool) -> Withheld {
     // AI has answered here: then nothing saved came from an AI that read email.
     let was_allowed = match recorded.as_deref() {
         Some(value) => value == "true",
-        None => conn
-            .query_row(
+        None => {
+            // Both levels of the usage: a request already moved into the
+            // daily totals still says another AI answered here.
+            let other_ai = crate::ai::usage::any_usage_except(&conn, "gemini").unwrap_or(true);
+            conn.query_row(
                 "SELECT (EXISTS(SELECT 1 FROM emails) OR EXISTS(SELECT 1 FROM mail_messages) OR EXISTS(SELECT 1 FROM calendar_events)) \
-                 AND (?1 = 0 OR EXISTS(SELECT 1 FROM inference_metrics WHERE provider <> 'gemini'))",
-                [gemini_only],
+                 AND (?1 = 0 OR ?2)",
+                [gemini_only, other_ai],
                 |row| row.get::<_, bool>(0),
             )
-            .unwrap_or(true),
+            .unwrap_or(true)
+        }
     };
     if was_allowed {
         let newest = |table: &str| conn.query_row(&format!("SELECT COALESCE(MAX(id), 0) FROM {table}"), [], |row| row.get::<_, i64>(0));
@@ -461,6 +465,28 @@ mod tests {
                 .unwrap();
             assert_eq!(withheld_as_turn_begins(&db), Withheld { conversations: 1, memories: 1, tasks: 1 });
         }
+    }
+
+    /// The same answer once it has been moved into the daily totals: the
+    /// check reads both levels of the usage.
+    #[test]
+    fn an_answer_already_in_the_daily_totals_still_counts() {
+        let db = db_with(&[("gemini", None, None)], &[]);
+        save_a_turn(&db, "Kenny owes HK$12,000");
+        add_a_calendar_event(&db);
+        let now = chrono::Utc::now().timestamp();
+        {
+            let conn = db.conn.lock().unwrap();
+            conn.execute(
+                "INSERT INTO inference_metrics(ts, workload, model_id, input_tokens, output_tokens, latency_ms, provider) VALUES (?1, 'volume', 'gpt-5', 1, 1, 1, 'openai')",
+                [now - 40 * 86_400],
+            )
+            .unwrap();
+            assert_eq!(crate::ai::usage::roll_up(&conn, now, 30).unwrap().requests_moved, 1);
+            let left: i64 = conn.query_row("SELECT COUNT(*) FROM inference_metrics", [], |r| r.get(0)).unwrap();
+            assert_eq!(left, 0, "the answer is only in the daily totals now");
+        }
+        assert_eq!(withheld_as_turn_begins(&db), Withheld { conversations: 1, memories: 1, tasks: 1 });
     }
 
     /// Ollama on this Mac forwards a "-cloud" model's prompt to ollama.com, so

@@ -51,3 +51,26 @@ ALTER TABLE inference_metrics_v33 RENAME TO inference_metrics;
 
 CREATE INDEX idx_inference_metrics_ts ON inference_metrics(ts);
 CREATE INDEX idx_inference_metrics_provider_ts ON inference_metrics(provider, ts);
+
+-- Daily totals of the usage older than the per-request window. ai/usage.rs
+-- moves those requests here and deletes them from inference_metrics in one
+-- transaction, so each request is in exactly one of the two tables, and
+-- deletes totals older than two years. One row per UTC day (ts / 86400),
+-- provider, model, feature and price-known flag. input_tokens includes the
+-- cache reads and writes, as in inference_metrics. The cost is NULL when the
+-- price is unknown, and only then. No prompt, reply, mail, key or latency.
+CREATE TABLE usage_daily (
+    day INTEGER NOT NULL,
+    provider TEXT NOT NULL,
+    model_id TEXT NOT NULL,
+    feature TEXT NOT NULL,
+    price_unknown INTEGER NOT NULL CHECK (price_unknown IN (0, 1)),
+    requests INTEGER NOT NULL CHECK (requests > 0),
+    input_tokens INTEGER NOT NULL,
+    output_tokens INTEGER NOT NULL,
+    cache_read_tokens INTEGER NOT NULL,
+    cache_write_tokens INTEGER NOT NULL,
+    usd_cost_micro INTEGER,
+    CHECK ((price_unknown = 0) = (usd_cost_micro IS NOT NULL)),
+    PRIMARY KEY (day, provider, model_id, feature, price_unknown)
+) WITHOUT ROWID;

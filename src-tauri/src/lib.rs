@@ -470,6 +470,7 @@ pub fn run() {
             commands::chat::list_chat_sessions,
             commands::cost::get_cost_stats,
             commands::cost::get_blended_cost,
+            commands::cost::get_usage_groups,
             commands::dashboard::get_dashboard_data,
             commands::email::get_emails,
             commands::email::sync_emails,
