@@ -96,6 +96,8 @@ export function WorkspaceProvider({ children }: { children: ReactNode }) {
 }
 export function useWorkspace() { const value = useContext(WorkspaceContext); if (!value) throw new Error('WorkspaceProvider is required'); return value; }
 export function WorkspaceTabScope({ id, children }: { id: string; children: ReactNode }) { return <TabContext.Provider value={id}>{children}</TabContext.Provider>; }
+/** Whether the tab this component renders in is the one on screen. */
+export function useIsActiveTab(): boolean { const { state } = useWorkspace(); const tab = useContext(TabContext); return state.activeId === tab; }
 export function useWorkspaceValue<T>(key: string, initial: T): [T, Dispatch<SetStateAction<T>>] {
   const { readValue, writeValue, subscribe } = useWorkspace();
   const tab = useContext(TabContext);

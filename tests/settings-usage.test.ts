@@ -31,8 +31,8 @@ test('Settings lists a Usage section that shows the usage panel', () => {
 test('the Bedrock model field shows its own save error', () => {
   const field = between(settings, 'function BedrockModelField(', 'function formatBytes(');
   assert.match(field, /onSave: \(model: string\) => Promise<string \| null>/);
-  assert.match(field, /setError\(await onSave\(draft\.trim\(\)\)\)/);
-  assert.match(field, /\{error && <p role="alert" className="settings-bedrock-model-error">\{error\}<\/p>\}/);
+  assert.match(field, /dispatch\(\{ type: "saved", error: await onSave\(value\) \}\);/);
+  assert.match(field, /\{state\.error && <p role="alert" className="settings-bedrock-model-error">\{state\.error\}<\/p>\}/);
   const handler = between(settings, 'async function handleSetBedrockModel(', 'async function handleToggleChainEntry(');
   assert.doesNotMatch(handler, /setLlmError/, 'the error is not sent to the top of the page');
   assert.match(handler, /return String\(e\);/);

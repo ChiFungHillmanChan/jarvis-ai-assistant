@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState } from "react";
+import { Fragment, useEffect, useId, useReducer, useRef, useState } from "react";
 import {
   accountStatus,
   getSettings,
@@ -32,6 +32,7 @@ import {
   setAwsCredentials,
   getAwsCredentialsStatus,
   clearAwsCredentials,
+  listBedrockModels,
   getPreference,
   setPreference,
   setApiKey,
@@ -63,7 +64,9 @@ import CostPanel from "../components/CostPanel";
 import { sweepSummary } from "../lib/storage-report";
 import BackgroundSettings from "../components/BackgroundSettings";
 import { UserRound } from "lucide-react";
-import { useWorkspace, useWorkspaceValue } from "../workspace/WorkspaceContext";
+import { useIsActiveTab, useWorkspace, useWorkspaceValue } from "../workspace/WorkspaceContext";
+import { OTHER_MODEL, groupLabel, groupedOptions, initialPicker, listStatus, pickerOptions, pickerReducer, selectValue, type BedrockListState } from "../lib/bedrock-models";
+import { useUserHasActed } from "../lib/user-activity";
 import "./settings-workspace.css";
 import { MAX_ADDRESS_CHARS, MAX_INSTRUCTIONS_CHARS, PERSONA_CHOICES, personaLabel, personaValue, type PersonaKey } from "../lib/persona";
 import { canSwitchListening, voiceStateKind } from "../lib/always-listening";
@@ -276,6 +279,36 @@ export default function Settings() {
     listLocalEndpoints().then(setEndpoints).catch(() => {});
     getProviderChain().then(setChain).catch(() => {});
   }, []);
+
+  // The Bedrock model picker's list (lib/bedrock-models.ts). Asked for once
+  // each time the Models section comes on screen with a Bedrock row, again
+  // when the user loads it again or saves or removes AWS credentials, and
+  // only after someone has used this window: a Settings tab restored at
+  // launch, or one in the background, asks nothing. Kept in memory while the
+  // section stays open; the request runs at most once per opening, StrictMode's
+  // second effect run included.
+  const tabActive = useIsActiveTab();
+  const userActed = useUserHasActed();
+  const bedrockOnScreen = tabActive && section === "ai" && chain.some((entry) => entry.provider_type === "bedrock");
+  const [bedrockList, setBedrockList] = useState<BedrockListState>({ status: "idle" });
+  const [bedrockAsk, setBedrockAsk] = useState(0);
+  const bedrockAsked = useRef<number | null>(null);
+  const bedrockRequest = useRef(0);
+  useEffect(() => {
+    if (!bedrockOnScreen) {
+      bedrockAsked.current = null;
+      bedrockRequest.current += 1;
+      setBedrockList({ status: "idle" });
+      return;
+    }
+    if (!userActed || bedrockAsked.current === bedrockAsk) return;
+    bedrockAsked.current = bedrockAsk;
+    const request = ++bedrockRequest.current;
+    setBedrockList({ status: "loading" });
+    listBedrockModels()
+      .then((list) => { if (bedrockRequest.current === request) setBedrockList({ status: "ready", list }); })
+      .catch(() => { if (bedrockRequest.current === request) setBedrockList({ status: "error" }); });
+  }, [bedrockOnScreen, userActed, bedrockAsk]);
 
   // Reading the storage report walks the models and cache directories, so it is
   // deferred until the panel is actually opened rather than run on every mount.
@@ -817,7 +850,7 @@ export default function Settings() {
                   <button aria-label={`${text("Remove from priority", "從優先次序移除")} ${label}`} onClick={() => handleRemoveFromChain(i)} style={{ ...styles.saveBtn, fontSize: 12, padding: "1px 5px", borderColor: "var(--accent-urgent)", color: "var(--accent-urgent)" }}>{text('Remove', '移除')}</button>
                 </div>
                 {entry.provider_type === "bedrock" && (
-                  <BedrockModelField saved={entry.model_id ?? ""} fallback={models?.defaults.bedrock ?? ""} onSave={(model) => handleSetBedrockModel(i, model)} />
+                  <BedrockModelField saved={entry.model_id ?? ""} fallback={models?.defaults.bedrock ?? ""} listState={bedrockList} onReload={() => setBedrockAsk((n) => n + 1)} onSave={(model) => handleSetBedrockModel(i, model)} />
                 )}
                 </div>
               );
@@ -1120,6 +1153,7 @@ export default function Settings() {
                   await setAwsCredentials(awsAccessKey, awsSecret, awsRegion);
                   setAwsAccessKey(""); setAwsSecret("");
                   setAwsStatus(await getAwsCredentialsStatus());
+                  setBedrockAsk((n) => n + 1);
                 } catch (e) {
                   setAwsError(String(e));
                 }
@@ -1128,6 +1162,7 @@ export default function Settings() {
                 <button onClick={async () => {
                   await clearAwsCredentials();
                   setAwsStatus({ configured: false, region: null });
+                  setBedrockAsk((n) => n + 1);
                 }} style={{ ...styles.saveBtn, borderColor: "var(--accent-urgent)", color: "var(--accent-urgent)" }}>{text("Remove key", "移除密鑰")}</button>
               )}
             </div>
@@ -1524,38 +1559,65 @@ export default function Settings() {
 }
 
 /**
- * The model a Bedrock row runs. Either id the Bedrock console shows can be
- * typed: a model id, or an inference profile id. Requests and their usage
- * rows use the id that is sent (ai/mod.rs apply_inference_profile).
+ * The model a Bedrock row runs, picked by name from the list the Models
+ * section loaded (lib/bedrock-models.ts): AWS's list for the saved region,
+ * or the built-in list, with a line saying which. Picking a listed model or
+ * the default saves it at once. "Other (enter an ID)" shows the ID field and
+ * its check as before. An id saved earlier that the list does not hold stays
+ * the current choice. Requests and their usage rows use the id that is sent
+ * (ai/mod.rs apply_inference_profile).
  */
-function BedrockModelField({ saved, fallback, onSave }: { saved: string; fallback: string; onSave: (model: string) => Promise<string | null> }) {
+function BedrockModelField({ saved, fallback, listState, onReload, onSave }: { saved: string; fallback: string; listState: BedrockListState; onReload: () => void; onSave: (model: string) => Promise<string | null> }) {
   const { text } = useUiLocale();
-  const [draft, setDraft] = useState(saved);
-  const [busy, setBusy] = useState(false);
-  const [error, setError] = useState<string | null>(null);
-  useEffect(() => { setDraft(saved); }, [saved]);
-  const changed = draft.trim() !== saved;
-  async function save() {
-    setBusy(true);
-    try { setError(await onSave(draft.trim())); } finally { setBusy(false); }
+  const [state, dispatch] = useReducer(pickerReducer, saved, initialPicker);
+  useEffect(() => { dispatch({ type: "synced", saved }); }, [saved]);
+  const statusId = useId();
+  const options = pickerOptions(listState.status === "ready" ? listState.list : null, saved, fallback, text);
+  const busy = state.pending !== null;
+  const changed = state.draft.trim() !== saved;
+  async function save(value: string) {
+    dispatch({ type: "saving", value });
+    dispatch({ type: "saved", error: await onSave(value) });
+  }
+  function choose(value: string) {
+    dispatch({ type: "choose", value, saved });
+    if (value !== OTHER_MODEL && value !== saved) void save(value);
   }
   return (
     <div className="settings-bedrock-model">
       <label>
-        <span>{text("Bedrock model ID", "Bedrock 模型 ID")}</span>
-        <input value={draft} placeholder={fallback} spellCheck={false} autoCapitalize="off" autoCorrect="off" disabled={busy}
-          onChange={(e) => setDraft(e.target.value)}
-          onKeyDown={(e) => { if (e.key === "Enter" && changed && !busy) void save(); }}
-          style={{ ...styles.tokenInput, fontFamily: "var(--font-mono)" }} />
+        <span>{text("Bedrock model", "Bedrock 模型")}</span>
+        <select value={selectValue(state, saved)} disabled={busy} aria-describedby={statusId} onChange={(e) => choose(e.target.value)} style={styles.select}>
+          {groupedOptions(options).map((run, index) => {
+            const heading = groupLabel(run.group, text);
+            const items = run.options.map((option) => <option key={option.value} value={option.value}>{option.label}</option>);
+            return heading ? <optgroup key={index} label={heading}>{items}</optgroup> : <Fragment key={index}>{items}</Fragment>;
+          })}
+        </select>
       </label>
-      <button disabled={!changed || busy} onClick={() => void save()} style={styles.saveBtn}>{text("Save model", "儲存模型")}</button>
-      {error && <p role="alert" className="settings-bedrock-model-error">{error}</p>}
-      <p className="settings-help">
-        {text(
-          `A model ID or an inference profile ID from the Bedrock console. A us., eu. or apac. profile is sent for the region of your saved AWS credentials; other IDs are sent as typed. Leave it empty for ${fallback || "the default model"}. Usage is recorded against the ID that is sent.`,
-          `可輸入 Bedrock 主控台的模型 ID 或推論設定檔 ID。us.、eu. 或 apac. 開頭的設定檔會按已儲存 AWS 憑證的地區發送，其他 ID 按輸入內容發送。留空即使用 ${fallback || "預設模型"}。用量按實際發送的 ID 記錄。`,
-        )}
-      </p>
+      <button disabled={listState.status === "loading" || busy} onClick={onReload} style={styles.saveBtn}>
+        {listState.status === "idle" ? text("Load the list", "載入清單") : text("Load the list again", "重新載入清單")}
+      </button>
+      <p id={statusId} role="status" className="settings-help">{listStatus(listState, text)}</p>
+      {state.other && (<>
+        <label>
+          <span>{text("Bedrock model ID", "Bedrock 模型 ID")}</span>
+          <input value={state.draft} placeholder={fallback} spellCheck={false} autoCapitalize="off" autoCorrect="off" disabled={busy}
+            onChange={(e) => dispatch({ type: "type", draft: e.target.value })}
+            onKeyDown={(e) => { if (e.key === "Enter" && changed && !busy) void save(state.draft.trim()); }}
+            style={{ ...styles.tokenInput, fontFamily: "var(--font-mono)" }} />
+        </label>
+        <button disabled={!changed || busy} onClick={() => void save(state.draft.trim())} style={styles.saveBtn}>{text("Save model", "儲存模型")}</button>
+      </>)}
+      {state.error && <p role="alert" className="settings-bedrock-model-error">{state.error}</p>}
+      {state.other && (
+        <p className="settings-help">
+          {text(
+            `A model ID or an inference profile ID from the Bedrock console. A us., eu. or apac. profile is sent for the region of your saved AWS credentials; other IDs are sent as typed. Leave it empty for ${fallback || "the default model"}. Usage is recorded against the ID that is sent.`,
+            `可輸入 Bedrock 主控台的模型 ID 或推論設定檔 ID。us.、eu. 或 apac. 開頭的設定檔會按已儲存 AWS 憑證的地區發送，其他 ID 按輸入內容發送。留空即使用 ${fallback || "預設模型"}。用量按實際發送的 ID 記錄。`,
+          )}
+        </p>
+      )}
     </div>
   );
 }
