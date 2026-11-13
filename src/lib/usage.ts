@@ -237,9 +237,9 @@ export function expensiveHeading(days: number, text: Text): string {
  * any. Stored input includes the cache, so the cache is taken out here; the
  * stored figures do not change. A row whose stored input is smaller than its
  * cache cannot include it, so its input is shown as stored: never a negative
- * or clamped figure. (Older Bedrock and Claude rows stored input without the
- * cache; the one-time correction in src-tauri/src/ai/cost.rs gives them the
- * cache back, so this is a guard.)
+ * or clamped figure. (Older Bedrock rows stored input without the cache; the
+ * one-time correction in src-tauri/src/ai/cost.rs gives them the cache back,
+ * and no release stored a Claude row with cache figures, so this is a guard.)
  */
 export function tokenFigures(
   row: { input_tokens: number; output_tokens: number; cache_read_tokens: number; cache_write_tokens: number },
