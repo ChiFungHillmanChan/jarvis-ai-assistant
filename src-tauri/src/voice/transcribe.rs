@@ -109,6 +109,7 @@ impl Transcriber {
             .timeout(std::time::Duration::from_secs(90))
             .build()
             .map_err(|e| format!("Gemini STT client: {}", e))?;
+        let started = std::time::Instant::now();
         let resp = client
             .post(&url)
             .header("x-goog-api-key", &self.api_key)
@@ -125,6 +126,7 @@ impl Transcriber {
         }
 
         let result: serde_json::Value = resp.json().await.map_err(|e| e.to_string())?;
+        record_gemini_stt(db, &result, started.elapsed().as_millis() as i64);
 
         let text = result["candidates"]
             .as_array()
@@ -139,6 +141,16 @@ impl Transcriber {
         log::info!("Transcribed {} characters", text.chars().count());
         Ok(text)
     }
+}
+
+/// Store one Gemini transcription. The audio is billed at Gemini's audio
+/// input rate, which ai/models.rs does not carry, so the tokens are kept and
+/// the cost is left unknown rather than priced as text.
+fn record_gemini_stt(db: &crate::db::Database, result: &serde_json::Value, latency_ms: i64) {
+    let count = |field: &str| result["usageMetadata"][field].as_i64().unwrap_or(0);
+    // Thinking is billed as output; candidatesTokenCount leaves it out.
+    let output = count("candidatesTokenCount") + count("thoughtsTokenCount");
+    crate::ai::cost::record_unpriced(db, "gemini", crate::ai::cost::Feature::Stt, crate::ai::models::GEMINI_FLASH, count("promptTokenCount"), output, latency_ms);
 }
 
 /// What the speaker said, without Whisper's notes about sound that is not
@@ -274,6 +286,30 @@ impl LocalTranscriber {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A Gemini transcription is stored as speech-to-text with its tokens,
+    /// thinking included, and the cost unknown: audio input has its own rate.
+    #[test]
+    fn a_gemini_transcription_is_recorded_as_stt() {
+        let db = crate::ai::cost::tests::temp_metrics_db("");
+        let reply = serde_json::json!({
+            "candidates": [{"content": {"parts": [{"text": "聽日三點開會"}]}, "finishReason": "STOP"}],
+            "usageMetadata": {"promptTokenCount": 480, "candidatesTokenCount": 12, "thoughtsTokenCount": 30}
+        });
+        record_gemini_stt(&db, &reply, 900);
+        assert_eq!(
+            crate::ai::cost::tests::usage_rows(&db),
+            vec![crate::ai::cost::tests::UsageRow {
+                provider: "gemini".into(),
+                feature: "stt".into(),
+                model_id: crate::ai::models::GEMINI_FLASH.into(),
+                input_tokens: 480,
+                output_tokens: 42,
+                usd_cost_micro: None,
+                price_unknown: true,
+            }]
+        );
+    }
 
     #[test]
     fn the_wake_profile_is_light_and_requests_keep_the_defaults() {

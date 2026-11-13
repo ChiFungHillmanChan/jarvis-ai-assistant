@@ -28,7 +28,7 @@ use super::{
     openai::{self, Endpoint as OpenAiEndpoint},
     store::{self, NewItem, TriageInput},
 };
-use crate::{ai::Workload, db::Database};
+use crate::{ai::{cost::Feature, Workload}, db::Database};
 use chrono::{DateTime, FixedOffset, Local, NaiveDate, NaiveTime, TimeZone};
 use futures_util::{stream, StreamExt};
 use serde_json::{json, Value};
@@ -523,6 +523,8 @@ pub fn parse_luna<Tz: TimeZone>(value: &Value, subject: &str, text: &str, receiv
 struct Outcome {
     /// None while only local models ran: they are free.
     cost_micro: Option<i64>,
+    /// A cloud request whose price is unknown; its cost is not in cost_micro.
+    price_unknown: bool,
     triaged: bool,
     summarized: bool,
     items: usize,
@@ -530,6 +532,19 @@ struct Outcome {
     luna_input: i64,
     luna_output: i64,
     error: Option<String>,
+}
+
+/// Store Jev's classification as mail sorting and return its cost.
+fn record_jev(db: &Database, answers: &JevAnswers, latency_ms: i64) -> Option<i64> {
+    crate::ai::cost::record_inference(db, "typesafe", Feature::MailSort, Workload::Volume, &answers.model, answers.input_tokens, 0, 0, 0, latency_ms);
+    crate::ai::models::usd_cost_micro("typesafe", &answers.model, answers.input_tokens, 0, 0, 0)
+}
+
+/// Store a summary request made with the OpenAI key (Settings > Mail) as
+/// mail sorting, under the provider id "openai", and return its cost.
+fn record_openai_sort(db: &Database, model: &str, usage: &openai::Usage, latency_ms: i64) -> Option<i64> {
+    crate::ai::cost::record_inference(db, "openai", Feature::MailSort, Workload::Volume, model, usage.input_tokens, usage.output_tokens, usage.cached_tokens, 0, latency_ms);
+    crate::ai::models::usd_cost_micro("openai", model, usage.input_tokens, usage.output_tokens, usage.cached_tokens, 0)
 }
 
 /// Add a request's cost; a local request (None) adds nothing.
@@ -598,7 +613,7 @@ fn json_object(text: &str) -> Option<Value> {
 /// `parse_luna` validates what comes back.
 async fn ask_chosen_ai(router: &crate::ai::AiRouter, db: &Database, instructions: &str, input: &str, schema: Value) -> Result<(Value, crate::ai::complete::Completion), String> {
     let system = format!("{instructions}\n\nReply with only one JSON object that matches this JSON Schema, with every field present:\n{schema}");
-    let done = crate::ai::complete::complete(router, db, crate::ai::complete::Request { system: &system, user: input, json: true, max_tokens: 4_096 }).await?;
+    let done = crate::ai::complete::complete(router, db, crate::ai::complete::Request { system: &system, user: input, json: true, max_tokens: 4_096, feature: Feature::MailSort }).await?;
     let value = json_object(&done.text).ok_or_else(|| format!("{} 回覆的格式無效，請稍後重試。", done.provider))?;
     Ok((value, done))
 }
@@ -611,7 +626,7 @@ async fn triage_one(
     language: &str,
     message: TriageInput,
 ) -> Outcome {
-    let mut outcome = Outcome { cost_micro: None, triaged: false, summarized: false, items: 0, jev_input: 0, luna_input: 0, luna_output: 0, error: None };
+    let mut outcome = Outcome { cost_micro: None, price_unknown: false, triaged: false, summarized: false, items: 0, jev_input: 0, luna_input: 0, luna_output: 0, error: None };
     let sent = sent_by_owner(&message.sender, owners);
     let replied_later = match message.thread_id.as_deref() {
         Some(thread) if !sent => store::later_senders_in_thread(db, thread, &message.received_at)
@@ -656,9 +671,9 @@ async fn triage_one(
             let started = Instant::now();
             match ask_jev(client, key, jev_state(&message, owners)).await {
                 Ok(answers) => {
-                    crate::ai::cost::record_inference(db, "typesafe", Workload::Volume, &answers.model, answers.input_tokens, 0, 0, 0, started.elapsed().as_millis() as i64);
                     outcome.jev_input = answers.input_tokens;
-                    add_cost(&mut outcome.cost_micro, crate::ai::models::usd_cost_micro("typesafe", &answers.model, answers.input_tokens, 0, 0, 0));
+                    add_cost(&mut outcome.cost_micro, record_jev(db, &answers, started.elapsed().as_millis() as i64));
+                    outcome.price_unknown |= !crate::ai::models::price_known("typesafe", &answers.model);
                     answers
                 }
                 Err(error) => {
@@ -673,6 +688,7 @@ async fn triage_one(
                 outcome.luna_input = done.input_tokens;
                 outcome.luna_output = done.output_tokens;
                 add_cost(&mut outcome.cost_micro, done.cost_micro);
+                outcome.price_unknown |= done.price_unknown;
                 let extraction = parse_luna(&value, &message.subject, &text, received_date, &Local, &known_ids)?;
                 Ok((parse_combined(&value, &extraction.category), extraction, format!("{} · {}", done.provider, done.model)))
             });
@@ -718,10 +734,10 @@ async fn triage_one(
         let answer: Option<Result<(Value, String), String>> = if let Some(openai_key) = keys.openai.as_deref() {
             let started = Instant::now();
             Some(openai::send_json(openai_key, &keys.openai_model, &instructions, &input, "mail_triage", luna_schema(), OpenAiEndpoint::Production).await.map(|(value, usage)| {
-                crate::ai::cost::record_inference(db, "openai-mail", Workload::Volume, &keys.openai_model, usage.input_tokens, usage.output_tokens, usage.cached_tokens, 0, started.elapsed().as_millis() as i64);
                 outcome.luna_input = usage.input_tokens;
                 outcome.luna_output = usage.output_tokens;
-                add_cost(&mut outcome.cost_micro, crate::ai::models::usd_cost_micro("openai-mail", &keys.openai_model, usage.input_tokens, usage.output_tokens, usage.cached_tokens, 0));
+                add_cost(&mut outcome.cost_micro, record_openai_sort(db, &keys.openai_model, &usage, started.elapsed().as_millis() as i64));
+                outcome.price_unknown |= !crate::ai::models::price_known("openai", &keys.openai_model);
                 (value, keys.openai_model.clone())
             }))
         } else if let Some(router) = keys.assistant.as_ref() {
@@ -729,6 +745,7 @@ async fn triage_one(
                 outcome.luna_input = done.input_tokens;
                 outcome.luna_output = done.output_tokens;
                 add_cost(&mut outcome.cost_micro, done.cost_micro);
+                outcome.price_unknown |= done.price_unknown;
                 (value, format!("{} · {}", done.provider, done.model))
             }))
         } else {
@@ -820,6 +837,7 @@ pub async fn run(db: &Database, keys: TriageKeys, language: &str) -> Result<Mail
     let mut cost_micro = None;
     for outcome in outcomes {
         add_cost(&mut cost_micro, outcome.cost_micro);
+        run.price_unknown |= outcome.price_unknown;
         run.triaged += outcome.triaged as usize;
         run.summarized += outcome.summarized as usize;
         run.items += outcome.items;
@@ -846,6 +864,22 @@ mod tests {
 
     fn answers(category: &str, confidence: f64, reply: f64, action: f64, date: f64, importance: f64) -> JevAnswers {
         JevAnswers { category: category.into(), category_confidence: confidence, needs_reply: reply, action_required: action, has_date: date, importance, model: "jev-1.13.0".into(), input_tokens: 1000 }
+    }
+
+    /// Both sorting requests outside complete() are stored as mail_sort: Jev
+    /// under "typesafe", the OpenAI key under "openai" (it was "openai-mail").
+    #[test]
+    fn sorting_usage_is_stored_as_mail_sort_with_provider_ids() {
+        let db = crate::ai::cost::tests::temp_metrics_db("");
+        record_jev(&db, &answers("work", 0.9, 0.1, 0.1, 0.1, 0.5), 1);
+        let usage = openai::Usage { input_tokens: 2_000, output_tokens: 100, cached_tokens: 0 };
+        assert_eq!(record_openai_sort(&db, "gpt-6-luna", &usage, 1), Some(250));
+        assert_eq!(record_openai_sort(&db, "gpt-unlisted-1", &usage, 1), None);
+        let rows: Vec<(String, String, Option<i64>, bool)> = crate::ai::cost::tests::usage_rows(&db).into_iter().map(|row| (row.provider, row.feature, row.usd_cost_micro, row.price_unknown)).collect();
+        assert_eq!(rows[0].0, "typesafe");
+        assert_eq!(rows[0].1, "mail_sort");
+        assert_eq!(rows[1], ("openai".to_string(), "mail_sort".to_string(), Some(250), false));
+        assert_eq!(rows[2], ("openai".to_string(), "mail_sort".to_string(), None, true));
     }
 
     #[test]

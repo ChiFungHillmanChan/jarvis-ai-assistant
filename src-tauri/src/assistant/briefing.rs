@@ -1,4 +1,4 @@
-use crate::ai::{AiRouter, Workload};
+use crate::ai::{cost::Feature, AiRouter, Workload};
 use crate::assistant::context::DayContext;
 use crate::db::Database;
 use std::sync::Arc;
@@ -26,7 +26,7 @@ pub async fn generate_briefing(
     // tainted here, or a stranger's subject line could ask for the tools that
     // otherwise wait for a click after an untrusted read.
     let briefing_text = router
-        .send_with_untrusted_context(messages, db, google_auth, app_handle, None, Workload::Tools)
+        .send_with_untrusted_context(messages, db, google_auth, app_handle, None, Workload::Tools, Feature::Briefing)
         .await?;
 
     Ok(BriefingResult {

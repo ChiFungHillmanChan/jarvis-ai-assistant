@@ -100,5 +100,11 @@ pub fn seed_once(conn: &mut Connection) -> Result<(), rusqlite::Error> {
             tx.execute("INSERT OR REPLACE INTO user_preferences(key,value) VALUES (?1,?2)", params![key,value])?;
         }
     }
-    tx.commit()
+    // AI usage of several ages and kinds (ai/usage.rs), then the roll-up the
+    // launch already ran before this seed, so the first QA launch shows both
+    // the requests and the daily totals.
+    crate::ai::usage::seed_for_qa(&tx, chrono::Utc::now().timestamp())?;
+    tx.commit()?;
+    crate::ai::usage::roll_up_on_open(conn);
+    Ok(())
 }

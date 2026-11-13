@@ -1,4 +1,4 @@
-use crate::ai::{AiRouter, Workload};
+use crate::ai::{cost::Feature, AiRouter, Workload};
 use crate::db::Database;
 use crate::scheduler::engine::{format_baseline, write_status};
 use crate::scheduler::slots::parse_schedule;
@@ -102,7 +102,7 @@ pub async fn preview_custom_cron(
     let router = router.lock().map_err(|e| e.to_string())?.clone();
     let _guard = crate::chat_session::FOREGROUND.try_lock().map_err(|_| "另一個助理任務進行中，請等完成後再試。".to_string())?;
     let response = crate::chat_session::TOOL_EXECUTION_DISABLED.scope(true,
-        router.send(messages, &db, &google_auth, &app_handle, None, Workload::Volume)).await?;
+        router.send(messages, &db, &google_auth, &app_handle, None, Workload::Volume, Feature::Other)).await?;
 
     parse_interpretation(&response)
 }

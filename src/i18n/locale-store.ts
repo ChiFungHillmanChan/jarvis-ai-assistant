@@ -33,6 +33,27 @@ export function createLocaleStore(initialLocale: UiLocale, read: () => Promise<s
         if (choiceVersion === startingVersion) update({ loadError: true, ready: false });
       }
     },
+    /**
+     * Saves the language in use when no choice was ever saved, so messages
+     * written by the backend (it reads the saved ui_locale) match the
+     * interface. Only for someone past the language step: on first launch
+     * the suggestion stays a suggestion until the user picks. A choice made
+     * meanwhile wins, and a failed write changes nothing on screen.
+     */
+    keepLocaleInUse(): Promise<boolean> {
+      if (!snapshot.ready || snapshot.hasSavedChoice || snapshot.saving) return Promise.resolve(false);
+      const startingVersion = choiceVersion;
+      const locale = snapshot.locale;
+      const kept = pendingWrite.then(() => {
+        if (choiceVersion !== startingVersion) return false;
+        return write(locale).then(() => {
+          if (choiceVersion === startingVersion) update({ hasSavedChoice: true });
+          return true;
+        }, () => false);
+      });
+      pendingWrite = kept.then(() => {});
+      return kept;
+    },
     setLocale(locale: UiLocale): Promise<boolean> {
       const saveVersion = ++choiceVersion;
       update({ locale, ready: true, saving: true, saveError: false, loadError: false });

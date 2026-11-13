@@ -1,4 +1,4 @@
-use crate::ai::{AiRouter, Workload};
+use crate::ai::{cost::Feature, AiRouter, Workload};
 use crate::assistant::{briefing, context::DayContext};
 use crate::auth::google::GoogleAuth;
 use crate::db::Database;
@@ -147,7 +147,7 @@ pub async fn ask_jarvis(
     // subjects and today's event titles, none of it through a tool call, so
     // the turn is tainted before the model sees it.
     router
-        .send_with_untrusted_context(messages, &db, &google_auth, &app_handle, None, Workload::Tools)
+        .send_with_untrusted_context(messages, &db, &google_auth, &app_handle, None, Workload::Tools, Feature::Chat)
         .await
 }
 
@@ -181,5 +181,5 @@ pub async fn search_conversations(
 
     let messages = vec![("user".to_string(), prompt)];
     let router = router.lock().map_err(|e| e.to_string())?.clone();
-    router.send_with_untrusted_context(messages, &db, &google_auth, &app_handle, None, Workload::Tools).await
+    router.send_with_untrusted_context(messages, &db, &google_auth, &app_handle, None, Workload::Tools, Feature::Chat).await
 }

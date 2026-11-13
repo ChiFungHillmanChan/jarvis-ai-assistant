@@ -25,6 +25,7 @@ export {
   Palette,
   CreditCard,
   HardDrive,
+  BarChart3,
   Power,
 } from "lucide-react";
 

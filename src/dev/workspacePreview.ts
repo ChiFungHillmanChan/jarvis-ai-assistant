@@ -89,7 +89,7 @@ export function installWorkspacePreview() {
       case 'mail_list_items': return mailItems.filter(i => (args.messageId ? i.message_id === args.messageId : i.status === 'open'));
       case 'mail_update_item': { mailItems = mailItems.map(i => i.id === args.itemId ? { ...i, status: args.status, remind_at: args.remindAt ?? null } : i); return mailItems.find(i => i.id === args.itemId); }
       case 'mail_item_to_calendar': { mailItems = mailItems.map(i => i.id === args.itemId ? { ...i, calendar_event_id: 'preview' } : i); return mailItems.find(i => i.id === args.itemId); }
-      case 'mail_triage_run': return { triaged: 3, summarized: 2, items: 1, failed: 0, remaining: 0, jev_input_tokens: 4200, luna_input_tokens: 2600, luna_output_tokens: 300, cost_usd: 0.0006, warning: null };
+      case 'mail_triage_run': return { triaged: 3, summarized: 2, items: 1, failed: 0, remaining: 0, jev_input_tokens: 4200, luna_input_tokens: 2600, luna_output_tokens: 300, cost_usd: 0.0006, price_unknown: false, warning: null };
       case 'mail_get_message': return messages.find(m => m.id === args.messageId);
       case 'mail_analyze_group': return { text: 'Two customer conversations need follow-up.\n\n- Confirm the project review date.\n- Send feedback on the proposal.', mode: 'local', model: 'Preview only', source_ids: [1, 2], omitted_messages: 0 };
       case 'get_api_key_status': return { gemini: false, claude: false, openai: false };

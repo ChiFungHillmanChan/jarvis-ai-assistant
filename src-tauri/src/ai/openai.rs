@@ -59,9 +59,9 @@ impl Target<'_> {
         }
     }
 
-    /// Provider name in the cost table.
+    /// Provider id in the cost table.
     fn provider(&self) -> String {
-        self.base_url.map(|b| super::compat::label(b).to_lowercase()).unwrap_or_else(|| "openai".into())
+        super::cost::provider_id("openai", self.base_url)
     }
 
     fn request(&self, model: String, messages: Vec<OpenAIMessage>, tools: Vec<serde_json::Value>, final_round: bool) -> OpenAIRequest {

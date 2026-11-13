@@ -1,4 +1,4 @@
-use crate::ai::{AiRouter, Workload};
+use crate::ai::{cost::Feature, AiRouter, Workload};
 use crate::db::Database;
 use crate::voice::tts::StreamingTts;
 use crate::voice::{VoiceEngine, VoiceState};
@@ -180,7 +180,7 @@ pub async fn stop_listening(
 
     let router = router.lock().map_err(|e| e.to_string())?.clone();
     let response = match router
-        .send(messages, &db, &google_auth, &app_handle, tts_tx, Workload::Tools)
+        .send(messages, &db, &google_auth, &app_handle, tts_tx, Workload::Tools, Feature::Chat)
         .await
     {
         Ok(response) => response,

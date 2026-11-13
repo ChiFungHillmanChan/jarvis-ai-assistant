@@ -11,7 +11,7 @@ import ToolApproval from './components/ToolApproval';
 import ErrorBoundary from './components/ErrorBoundary';
 import PaywallGate from './components/PaywallGate';
 import { checkOnboardingStatus, getOptionalPreference, stopSpeaking, listChatSessions } from './lib/commands';
-import { readStartupScreen, type StartupScreen } from './lib/onboarding-flow';
+import { keepsLocaleInUse, readStartupScreen, type StartupScreen } from './lib/onboarding-flow';
 import { useVoiceState } from './hooks/useVoiceState';
 import ToastContainer, { showToast } from './components/Toast';
 import WindowControls from './components/WindowControls';
@@ -25,7 +25,7 @@ import { useAssistantActivity } from './workspace/useAssistantActivity';
 import { shouldFocusResult, viewName, displayTabTitle, type WorkspaceTab, type WorkspaceView } from './workspace/model';
 import { resultIdentity, resultTitle, validResult } from './workspace/results';
 import './styles/workspace.css';
-import { useUiLocale } from './i18n';
+import { keepUiLocaleInUse, useUiLocale } from './i18n';
 const Settings = lazy(() => import('./pages/Settings'));
 const CronDashboard = lazy(() => import('./pages/CronDashboard'));
 const EmailPage = lazy(() => import('./pages/EmailPage'));
@@ -180,6 +180,11 @@ function AppGate() {
     void readStartupScreen(checkOnboardingStatus, () => getOptionalPreference('onboarding_intro_complete')).then(value => { if (active) setScreen(value); }).catch(() => { if (active) setLoadError(true); });
     return () => { active = false; };
   }, [attempt]);
+  // The backend writes some messages itself and reads the saved language for
+  // them; someone who never saved one gets the language on screen saved.
+  useEffect(() => {
+    if (localeReady && keepsLocaleInUse(screen)) void keepUiLocaleInUse();
+  }, [localeReady, screen]);
   if (loadError || localeError) return <div className="setup-screen"><header className="setup-titlebar" data-tauri-drag-region><WindowControls /><span>JARVIS</span></header><main className="setup-content"><p className="setup-error" role="alert">{text('Could not read your startup settings. Retry to continue.', '未能讀取啟動設定，請重試以繼續。')}</p><button onClick={() => { if (localeError) retryLoad(); setAttempt(value => value + 1); }}>{text('Retry', '重試')}</button></main></div>;
   if (!localeReady || screen === null) return <div className="workspace-loading" role="status">{text("Opening JARVIS…", "正在開啟 JARVIS…")}</div>;
   // In a billing build the gate comes before everything else, so no Google

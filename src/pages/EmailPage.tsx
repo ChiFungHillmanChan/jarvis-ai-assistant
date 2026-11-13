@@ -8,6 +8,7 @@ import { CategoryTag, MailAgenda, MailAiCard } from "../components/mail/MailItem
 import { analysisSource, backendUtc, categoryLabel, decodeEntities, fileSize, formatDue, MAIL_CATEGORIES, mailSourceUrl, parseSender, readableBody, revealMailSource } from "../lib/mail-presentation";
 import { openUrl } from "../lib/commands";
 import { useAiModels } from "../lib/ai-models";
+import { cloudModelFor, formatRate } from "../lib/ai-catalog";
 import { useUiLocale } from "../i18n";
 import "./email-workspace.css";
 
@@ -24,6 +25,14 @@ const storedState = (data: MailWorkspace) => JSON.stringify([data.accounts.map(a
 
 export default function EmailPage({ onSetup }: { onSetup?: () => void }) {
   const models = useAiModels();
+  // The rate comes from ai/models.rs; a model without a price gets no figure.
+  const openAiPriceHint = (model: string) => {
+    const priced = cloudModelFor(models, model);
+    const rate = priced ? formatRate(priced.price.input_per_million) : null;
+    return rate
+      ? text(`Uses the OpenAI key saved in Settings. Your OpenAI account pays; ${model} costs about US$${rate} per million input tokens.`, `使用設定頁儲存的 OpenAI 密鑰，費用由你的 OpenAI 帳戶支付；${model} 每百萬輸入 token 約 US$${rate}。`)
+      : text("Uses the OpenAI key saved in Settings. Your OpenAI account pays.", "使用設定頁儲存的 OpenAI 密鑰，費用由你的 OpenAI 帳戶支付。");
+  };
   const { text, locale } = useUiLocale();
   const dateTime = (value: string | null) => value ? backendUtc(value).toLocaleString(locale, { month: "numeric", day: "numeric", hour: "2-digit", minute: "2-digit" }) : text("Not synced", "未同步");
   const [workspace, setWorkspace] = useState<MailWorkspace | null>(null);
@@ -220,9 +229,12 @@ export default function EmailPage({ onSetup }: { onSetup?: () => void }) {
     for (let i = 0; i < runs; i++) {
       const result = await mail.mailTriageRun(locale === "zh-HK" ? "zh-HK" : "en");
       // Local models are free (cost_usd is null): show the tokens they used.
+      // A model without a price shows its tokens too, never as free.
       const tokens = (result.jev_input_tokens + result.luna_input_tokens + result.luna_output_tokens).toLocaleString();
       const usd = result.cost_usd === null ? "" : result.cost_usd < 0.01 ? "< US$0.01" : `US$${result.cost_usd.toFixed(2)}`;
-      const cost = result.cost_usd === null ? text(`local model, free, ${tokens} tokens`, `本機模型免費，使用 ${tokens} tokens`) : text(`AI cost ${usd}`, `AI 費用 ${usd}`);
+      const cost = result.price_unknown
+        ? (result.cost_usd === null ? text(`price unknown, ${tokens} tokens`, `價格未知，使用 ${tokens} tokens`) : text(`AI cost ${usd} plus usage with price unknown`, `AI 費用 ${usd}，另有價格未知的用量`))
+        : result.cost_usd === null ? text(`local model, free, ${tokens} tokens`, `本機模型免費，使用 ${tokens} tokens`) : text(`AI cost ${usd}`, `AI 費用 ${usd}`);
       summary = text(
         `Sorted ${result.triaged} emails, wrote ${result.summarized} summaries and found ${result.items} follow-ups (${cost}).${result.remaining ? ` ${result.remaining} still to sort.` : ""}`,
         `已整理 ${result.triaged} 封郵件，撰寫 ${result.summarized} 則摘要，找到 ${result.items} 項待辦（${cost}）。${result.remaining ? `尚有 ${result.remaining} 封未整理。` : ""}`)
@@ -434,7 +446,7 @@ export default function EmailPage({ onSetup }: { onSetup?: () => void }) {
             <p className="mail-hint">{text("Install and start Ollama in Settings → Local AI first.", "請先在設定的「本機 AI」安裝並啟動 Ollama。")}</p>
           </> : editor.input.processing_mode === "openai" ? <>
             <label>{text("OpenAI model", "OpenAI 模型")}<input required value={editor.input.openai_model} onChange={e => setEditor({ ...editor, input: { ...editor.input, openai_model: e.target.value } })} placeholder={models?.defaults.openai} /></label>
-            <p className="mail-hint">{text("Uses the OpenAI key saved in Settings. Your OpenAI account pays; gpt-6-luna costs about US$0.10 per million input tokens.", "使用設定頁儲存的 OpenAI 密鑰，費用由你的 OpenAI 帳戶支付；gpt-6-luna 每百萬輸入 token 約 US$0.10。")}</p>
+            <p className="mail-hint">{openAiPriceHint(editor.input.openai_model.trim() || models?.defaults.openai || "")}</p>
             <label className="mail-consent"><input type="checkbox" required checked={editor.consent} onChange={e => setEditor({ ...editor, consent: e.target.checked })} />{text("I understand that analysis sends the group's emails, instructions and active memories to OpenAI.", "我明白分析時，群組郵件、指示及有效記憶會傳送至 OpenAI。")}</label>
           </> : <>
             <label>{text("Bedrock model ID", "Bedrock 模型 ID")}<input required value={editor.input.bedrock_model} onChange={e => setEditor({ ...editor, input: { ...editor.input, bedrock_model: e.target.value } })} /></label>

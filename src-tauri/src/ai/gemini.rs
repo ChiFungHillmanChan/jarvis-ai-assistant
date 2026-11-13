@@ -142,7 +142,7 @@ pub async fn send(
             "tools": gemini_tools,
             "systemInstruction": system_instruction,
             "generationConfig": {
-                "maxOutputTokens": 4096
+                "maxOutputTokens": output_cap(model)
             }
         });
         if final_round {
@@ -316,7 +316,11 @@ pub async fn send(
                     Some(fc) => fc,
                     None => continue,
                 };
-                let args_str = serde_json::to_string(&fc.args).unwrap_or_default();
+                let mut args = fc.args.clone();
+                if let Some(tool) = tool_defs.iter().find(|t| t.name == fc.name) {
+                    restore_json_text(&tool.parameters, &mut args);
+                }
+                let args_str = serde_json::to_string(&args).unwrap_or_default();
                 let call_key = crate::ai::tool_call_key(&fc.name, &args_str);
                 let is_duplicate = executed_tools.contains(&call_key);
                 if is_duplicate {
@@ -399,7 +403,7 @@ pub async fn send(
             first_chunk_sample
         );
         turn.record(db, workload, started_at.elapsed().as_millis() as i64);
-        return Err(format!("Gemini returned no text (finish_reason={:?})", finish_reason).into());
+        return Err(empty_reply_error(model, finish_reason.as_deref()).into());
     }
 
     let _ = app_handle.emit("chat-token", json!({"token": "", "done": true}));
@@ -411,21 +415,122 @@ pub async fn send(
 /// Map persisted `(role, content)` rows to Gemini contents. Rows whose content
 /// is empty or whitespace are dropped: Gemini rejects an empty text part with
 /// 400, so one such row would fail every later turn until "New chat".
+/// Dropping one leaves the turns on either side with the same role, so each
+/// run of one role becomes one content with a text part per row, as
+/// `bedrock::merge_history` does for Converse.
 fn history_contents(messages: Vec<(String, String)>) -> Vec<GeminiContent> {
-    messages
-        .into_iter()
-        .filter(|(_, content)| !content.trim().is_empty())
-        .map(|(role, content)| {
-            let gemini_role = if role == "assistant" { "model" } else { &role };
-            GeminiContent {
-                role: gemini_role.to_string(),
-                parts: vec![GeminiPart {
-                    text: Some(content),
-                    ..Default::default()
-                }],
+    let mut contents: Vec<GeminiContent> = Vec::new();
+    for (role, content) in messages {
+        if content.trim().is_empty() {
+            continue;
+        }
+        let role = if role == "assistant" { "model".to_string() } else { role };
+        let part = GeminiPart { text: Some(content), ..Default::default() };
+        match contents.last_mut() {
+            Some(last) if last.role == role => last.parts.push(part),
+            _ => contents.push(GeminiContent { role, parts: vec![part] }),
+        }
+    }
+    contents
+}
+
+/// The output cap for a chat request: the model's own limit from
+/// ai/models.rs. Thinking counts against it, so the old fixed 4,096 could be
+/// spent before any answer. A model the list does not know keeps 4,096.
+fn output_cap(model: &str) -> u32 {
+    crate::ai::models::max_output_tokens(model).unwrap_or(4_096)
+}
+
+/// A reply that ended without text or a tool call. The router retries on
+/// "returned no text" (`classify_provider_error`), and the chat shows it as a
+/// zh-HK/en message naming Gemini and suggesting another model
+/// (src/lib/chat-error.ts).
+fn empty_reply_error(model: &str, finish_reason: Option<&str>) -> String {
+    format!("Gemini ({model}) returned no text (finish_reason={})", finish_reason.unwrap_or("none"))
+}
+
+/// Function declarations take an OpenAPI subset, not JSON Schema: these are
+/// the Schema fields the Gemini API documents. Anything else is dropped.
+const SCHEMA_FIELDS: &[&str] = &[
+    "type", "format", "title", "description", "nullable", "enum", "maxItems", "minItems", "properties", "required",
+    "minProperties", "maxProperties", "minLength", "maxLength", "pattern", "example", "anyOf", "propertyOrdering",
+    "default", "items", "minimum", "maximum",
+];
+
+/// Added to the description of a field Gemini is asked to send as JSON text.
+const JSON_TEXT_NOTE: &str = "Give this value as one JSON object written as a string.";
+
+/// An object with no listed properties: JSON Schema's "any object".
+fn is_open_object(schema: &serde_json::Map<String, serde_json::Value>) -> bool {
+    schema.get("type").and_then(serde_json::Value::as_str) == Some("object")
+        && schema.get("properties").and_then(serde_json::Value::as_object).is_none_or(|p| p.is_empty())
+}
+
+/// A tool's parameters in a shape Gemini accepts. Gemini refuses an object
+/// field with no properties ("should be non-empty for OBJECT type") and has
+/// no way to say "any object", so such a field is asked for as JSON text and
+/// `restore_json_text` turns it back into the object before the tool runs.
+/// The top level is left an object: system_info and list_memories take no
+/// arguments and have shipped with empty properties.
+pub(crate) fn sanitize_schema(schema: &serde_json::Value) -> serde_json::Value {
+    sanitize_node(schema, true)
+}
+
+fn sanitize_node(schema: &serde_json::Value, top_level: bool) -> serde_json::Value {
+    use serde_json::Value;
+    let Some(fields) = schema.as_object() else { return schema.clone() };
+    if !top_level && is_open_object(fields) {
+        let description = fields.get("description").and_then(Value::as_str).unwrap_or_default();
+        return json!({"type": "string", "description": format!("{description} {JSON_TEXT_NOTE}").trim()});
+    }
+    let mut out = serde_json::Map::new();
+    for (key, value) in fields.iter().filter(|(key, _)| SCHEMA_FIELDS.contains(&key.as_str())) {
+        let value = match key.as_str() {
+            "properties" => Value::Object(value.as_object().map(|p| p.iter().map(|(name, field)| (name.clone(), sanitize_node(field, false))).collect()).unwrap_or_default()),
+            "items" => sanitize_node(value, false),
+            "anyOf" => Value::Array(value.as_array().map(|options| options.iter().map(|option| sanitize_node(option, false)).collect()).unwrap_or_default()),
+            _ => value.clone(),
+        };
+        out.insert(key.clone(), value);
+    }
+    // A required name that is not a property is another 400.
+    if let Some(Value::Array(required)) = out.get("required") {
+        let listed = out.get("properties").and_then(Value::as_object);
+        let kept: Vec<Value> = required.iter().filter(|name| name.as_str().is_some_and(|n| listed.is_some_and(|p| p.contains_key(n)))).cloned().collect();
+        out.insert("required".into(), Value::Array(kept));
+    }
+    Value::Object(out)
+}
+
+/// Undo `sanitize_schema` on the arguments Gemini sent: a field asked for as
+/// JSON text goes back to the object the tool expects. A field Gemini sent
+/// as an object anyway, or text that is not a JSON object, is left as it is.
+pub(crate) fn restore_json_text(schema: &serde_json::Value, value: &mut serde_json::Value) {
+    use serde_json::Value;
+    let Some(fields) = schema.as_object() else { return };
+    if is_open_object(fields) {
+        if let Some(Ok(parsed @ Value::Object(_))) = value.as_str().map(serde_json::from_str::<Value>) {
+            *value = parsed;
+        }
+        return;
+    }
+    match value {
+        Value::Object(args) => {
+            if let Some(properties) = fields.get("properties").and_then(Value::as_object) {
+                for (name, arg) in args.iter_mut() {
+                    if let Some(field) = properties.get(name) {
+                        restore_json_text(field, arg);
+                    }
+                }
             }
-        })
-        .collect()
+        }
+        Value::Array(items) => {
+            if let Some(item) = fields.get("items") {
+                items.iter_mut().for_each(|value| restore_json_text(item, value));
+            }
+        }
+        _ => {}
+    }
 }
 
 #[cfg(test)]
@@ -461,6 +566,154 @@ mod tests {
     fn stream_chunk_tolerates_missing_usage_metadata() {
         let sse: StreamChunk = serde_json::from_str(r#"{"candidates":[]}"#).unwrap();
         assert!(sse.usage_metadata.is_none());
+    }
+
+    /// Dropping an empty assistant row leaves two user turns side by side;
+    /// each run of one role is sent as one content, as Bedrock does.
+    #[test]
+    fn consecutive_same_role_turns_are_merged() {
+        let contents = history_contents(vec![
+            ("user".to_string(), "what is on today".to_string()),
+            ("assistant".to_string(), String::new()),
+            ("user".to_string(), "and tomorrow".to_string()),
+            ("assistant".to_string(), "checking".to_string()),
+            ("assistant".to_string(), "two meetings".to_string()),
+            ("user".to_string(), "thanks".to_string()),
+        ]);
+        let shape: Vec<(&str, Vec<&str>)> = contents
+            .iter()
+            .map(|content| (content.role.as_str(), content.parts.iter().map(|part| part.text.as_deref().unwrap()).collect()))
+            .collect();
+        assert_eq!(
+            shape,
+            vec![
+                ("user", vec!["what is on today", "and tomorrow"]),
+                ("model", vec!["checking", "two meetings"]),
+                ("user", vec!["thanks"]),
+            ]
+        );
+    }
+
+    fn tool_parameters(name: &str) -> serde_json::Value {
+        crate::ai::tools::get_tool_definitions().into_iter().find(|tool| tool.name == name).unwrap().parameters
+    }
+
+    /// render_chart and render_status take `data` as any object, which
+    /// Gemini's schema cannot say ("should be non-empty for OBJECT type"); it
+    /// is asked for as JSON text instead.
+    #[test]
+    fn the_two_open_data_fields_are_asked_for_as_json_text() {
+        assert_eq!(
+            sanitize_schema(&tool_parameters("render_chart")),
+            json!({
+                "type": "object",
+                "properties": {
+                    "chart_type": {"type": "string", "enum": ["line", "pie", "bar"], "description": "Type of chart to render"},
+                    "data": {"type": "string", "description": format!("Chart data. For line/bar: {{labels: string[], series: [{{name: string, data: number[]}}]}}. For pie: {{segments: [{{label: string, value: number}}]}} {JSON_TEXT_NOTE}")}
+                },
+                "required": ["chart_type", "data"]
+            })
+        );
+        assert_eq!(
+            sanitize_schema(&tool_parameters("render_status")),
+            json!({
+                "type": "object",
+                "properties": {
+                    "status_type": {
+                        "type": "string",
+                        "enum": ["task_created", "task_completed", "email_synced", "calendar_synced", "cron_created", "action_completed"],
+                        "description": "Type of status to display"
+                    },
+                    "data": {"type": "string", "description": format!("Status data. Fields vary by type: task_created needs name/priority/due, email_synced needs count/folder, etc. {JSON_TEXT_NOTE}")}
+                },
+                "required": ["status_type", "data"]
+            })
+        );
+    }
+
+    #[test]
+    fn keywords_gemini_does_not_take_are_dropped() {
+        let schema = json!({
+            "type": "object",
+            "$schema": "http://json-schema.org/draft-07/schema#",
+            "additionalProperties": false,
+            "properties": {
+                "ids": {"type": "array", "items": {"type": "integer", "const": 3, "minimum": 1}},
+                "when": {"type": "string", "format": "date-time", "examples": ["2026-11-12"]}
+            },
+            "required": ["ids", "missing"]
+        });
+        assert_eq!(
+            sanitize_schema(&schema),
+            json!({
+                "type": "object",
+                "properties": {
+                    "ids": {"type": "array", "items": {"type": "integer", "minimum": 1}},
+                    "when": {"type": "string", "format": "date-time"}
+                },
+                "required": ["ids"]
+            })
+        );
+    }
+
+    /// Every declaration sent to Gemini is free of open objects and of
+    /// keywords outside its subset.
+    #[test]
+    fn every_tool_declaration_fits_the_gemini_subset() {
+        fn check(schema: &serde_json::Value, top_level: bool, path: &str) {
+            let fields = schema.as_object().unwrap();
+            for key in fields.keys() {
+                assert!(SCHEMA_FIELDS.contains(&key.as_str()), "{path}: {key}");
+            }
+            if !top_level && fields.get("type").and_then(serde_json::Value::as_str) == Some("object") {
+                assert!(fields.get("properties").and_then(serde_json::Value::as_object).is_some_and(|p| !p.is_empty()), "{path} is an open object");
+            }
+            for (name, field) in fields.get("properties").and_then(serde_json::Value::as_object).into_iter().flatten() {
+                check(field, false, &format!("{path}.{name}"));
+            }
+            if let Some(items) = fields.get("items") {
+                check(items, false, &format!("{path}[]"));
+            }
+        }
+        let tools = crate::ai::tools::to_gemini_format(&crate::ai::tools::get_tool_definitions());
+        for declaration in tools[0]["functionDeclarations"].as_array().unwrap() {
+            check(&declaration["parameters"], true, declaration["name"].as_str().unwrap());
+        }
+    }
+
+    /// What Gemini sends back as JSON text reaches the tool as the object it
+    /// expects; anything else is left for the tool to reject.
+    #[test]
+    fn json_text_arguments_are_turned_back_into_objects() {
+        let schema = tool_parameters("render_chart");
+        let mut args = json!({"chart_type": "pie", "data": "{\"segments\": [{\"label\": \"a\", \"value\": 1}]}"});
+        restore_json_text(&schema, &mut args);
+        assert_eq!(args, json!({"chart_type": "pie", "data": {"segments": [{"label": "a", "value": 1}]}}));
+
+        let mut already = json!({"chart_type": "pie", "data": {"segments": []}});
+        restore_json_text(&schema, &mut already);
+        assert_eq!(already, json!({"chart_type": "pie", "data": {"segments": []}}));
+
+        let mut broken = json!({"chart_type": "pie", "data": "not json"});
+        restore_json_text(&schema, &mut broken);
+        assert_eq!(broken["data"], "not json");
+    }
+
+    #[test]
+    fn the_output_cap_is_the_models_own_limit() {
+        assert_eq!(output_cap(crate::ai::models::GEMINI_FLASH), 65_536);
+        assert_eq!(output_cap(crate::ai::models::GEMINI_PRO), 65_536);
+        assert_eq!(output_cap("gemini-unlisted"), 4_096);
+    }
+
+    /// The router retries on "returned no text", and the chat names Gemini
+    /// (src/lib/chat-error.ts reads the same words).
+    #[test]
+    fn an_empty_reply_names_gemini_and_the_model() {
+        let error = empty_reply_error("gemini-3.6-flash", Some("STOP"));
+        assert_eq!(error, "Gemini (gemini-3.6-flash) returned no text (finish_reason=STOP)");
+        assert_eq!(crate::ai::classify_provider_error(&error), crate::ai::ErrorDisposition::Retry);
+        assert_eq!(empty_reply_error("m", None), "Gemini (m) returned no text (finish_reason=none)");
     }
 
     /// A persisted assistant row with no text must not reach the model:

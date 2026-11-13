@@ -3,6 +3,7 @@ import type { CheckoutPage, PaymentPage } from "./types";
 import type { UiLocale } from "../i18n/catalog";
 import type { MailAccount } from "./mail";
 import { beginAccountSessionChange, finishAccountSessionChange } from "./account.ts";
+import type { BedrockModelList } from "./bedrock-models.ts";
 import type { Task, ChatMessage, DashboardData, Settings, EmailSummary, EmailStats, CalendarEventView, CronJobView, CronRunView, DailyBrief, DailyBriefingSettings, KeepAwakeView, NotionPageView, GitHubItemView, GitHubStats, VoiceState, VoiceSettings, WakeWordStatus, EmailRule, BriefingResult, LocalEndpoint, LocalModel, ProviderChainEntry, EndpointHealth, SystemCompatibility, PrerequisiteCheck, RecommendedModel, LaunchReadiness, BetaTesterInput, BetaTesterView, BetaFeedbackInput, AwsCredsStatus, StorageUsage, SweepReport, StorageScope, AccountStatus } from "./types";
 
 // Tauri v2 commands default to rename_all = "camelCase", so a Rust parameter named
@@ -257,6 +258,10 @@ export async function setAwsCredentials(
 }
 export async function getAwsCredentialsStatus(): Promise<AwsCredsStatus> {
   return await invoke<AwsCredsStatus>("get_aws_credentials_status");
+}
+/** The Bedrock model picker's list; asks AWS only when credentials are saved. */
+export async function listBedrockModels(): Promise<BedrockModelList> {
+  return await invoke<BedrockModelList>("list_bedrock_models");
 }
 export async function clearAwsCredentials(): Promise<void> {
   await invoke("clear_aws_credentials");

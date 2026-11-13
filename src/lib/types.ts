@@ -394,7 +394,8 @@ export interface SweepReport {
   mailBodiesCleared: number;
   conversationsDeleted: number;
   emailsDeleted: number;
-  metricsDeleted: number;
+  /** AI usage requests combined into the daily totals, which are kept two years: not removed. */
+  usageRowsRolledUp: number;
   briefingsDeleted: number;
 }
 

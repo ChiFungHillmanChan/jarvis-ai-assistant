@@ -48,6 +48,10 @@
 .settings-info-row p { flex: 1; color: var(--text-secondary); font-size: 13px; line-height: 1.6; }
 .settings-chain-row { display: grid; grid-template-columns: 16px minmax(0, 1fr) auto auto auto auto; align-items: center; gap: 8px; margin: 10px 0; }
 .settings-chain-row button { min-height: 30px; }
+.settings-bedrock-model { display: grid; grid-template-columns: minmax(0, 1fr) auto; align-items: end; gap: 8px; margin: 0 0 14px 24px; }
+.settings-bedrock-model label { display: flex; flex-direction: column; gap: 4px; font-size: 12px; color: var(--text-secondary); }
+.settings-bedrock-model .settings-help { grid-column: 1 / -1; margin: 0; font-size: 12px; max-width: 72ch; }
+.settings-bedrock-model-error { grid-column: 1 / -1; margin: 0; font-size: 13px; line-height: 1.5; color: var(--accent-urgent); overflow-wrap: anywhere; }
 .settings-workspace button:focus-visible,
 .settings-workspace input:focus-visible,
 .settings-workspace select:focus-visible,

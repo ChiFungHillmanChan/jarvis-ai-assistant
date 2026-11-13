@@ -1,4 +1,4 @@
-use crate::ai::{AiRouter, Workload};
+use crate::ai::{cost::Feature, AiRouter, Workload};
 use crate::auth::google::GoogleAuth;
 use crate::db::Database;
 use crate::voice::model_manager;
@@ -446,7 +446,7 @@ async fn handle_wake_word_detection(
     // Read per turn, so a key or chain saved after launch is in force on the
     // very next "Hey Jarvis" rather than after a relaunch.
     let router = current_router(&app_handle)?;
-    let response = match router.send(messages, &db, &auth, &app_handle, tts_tx, Workload::Tools).await {
+    let response = match router.send(messages, &db, &auth, &app_handle, tts_tx, Workload::Tools, Feature::Chat).await {
         Ok(r) => r,
         Err(e) => {
             let _ = app_handle.emit("chat-voice-active", json!({"active": false}));

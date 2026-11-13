@@ -52,6 +52,8 @@ struct OllamaOptions {
 struct OllamaResponse {
     message: OllamaResponseMessage,
     done_reason: Option<String>,
+    prompt_eval_count: Option<i64>,
+    eval_count: Option<i64>,
 }
 
 #[derive(Deserialize)]
@@ -133,7 +135,7 @@ async fn analyze_with_endpoints(
             let done = crate::ai::complete::complete(
                 &route.router,
                 &route.db,
-                crate::ai::complete::Request { system: "", user: &prepared.prompt, json: false, max_tokens: 4_096 },
+                crate::ai::complete::Request { system: "", user: &prepared.prompt, json: false, max_tokens: 4_096, feature: crate::ai::cost::Feature::MailAnalysis },
             )
             .await?;
             prepared.model = format!("{} · {}", done.provider, done.model);
@@ -141,14 +143,13 @@ async fn analyze_with_endpoints(
             // caller does not record it twice.
             (done.text, openai::Usage::default())
         }
-        "local" => (
-            send_to_ollama(&prepared.model, &prepared.prompt, ollama_port).await?,
-            openai::Usage::default(),
-        ),
+        "local" => send_to_ollama(&prepared.model, &prepared.prompt, ollama_port).await?,
         "bedrock" => send_to_bedrock(
             creds.ok_or_else(|| "未設定 AWS 憑證，無法使用 Bedrock。".to_string())?,
             &prepared.model,
             &prepared.prompt,
+            metrics,
+            started,
         )
         .await?,
         "openai" => {
@@ -162,14 +163,16 @@ async fn analyze_with_endpoints(
         _ => return Err("分析模式無效，只支援本機、Bedrock、OpenAI 或所選 AI。".into()),
     };
     // The reply is billed whatever it says, so it is stored before the checks
-    // below can reject it. complete() stores "assistant"; "local" is free.
-    let billed_as = match prepared.mode.as_str() {
-        "openai" => Some("openai-mail"),
-        "bedrock" => Some("bedrock"),
+    // below can reject it. "assistant" went through complete(), which stores
+    // its own row, and "bedrock" stored its own in send_to_bedrock; "local"
+    // is stored free, with its tokens.
+    let recorded_as = match prepared.mode.as_str() {
+        "openai" => Some("openai"),
+        "local" => Some("local"),
         _ => None,
     };
-    if let (Some(db), Some(provider)) = (metrics, billed_as) {
-        crate::ai::cost::record_inference(db, provider, crate::ai::Workload::Volume, &prepared.model, usage.input_tokens, usage.output_tokens, usage.cached_tokens, 0, started.elapsed().as_millis() as i64);
+    if let (Some(db), Some(provider)) = (metrics, recorded_as) {
+        crate::ai::cost::record_inference(db, provider, crate::ai::cost::Feature::MailAnalysis, crate::ai::Workload::Volume, &prepared.model, usage.input_tokens, usage.output_tokens, usage.cached_tokens, 0, started.elapsed().as_millis() as i64);
     }
     if text.trim().is_empty() {
         return Err("AI 沒有回覆，請檢查模型設定後重試。".into());
@@ -405,7 +408,7 @@ fn truncate_chars(value: &str, limit: usize) -> (String, bool) {
     (truncated, was_truncated)
 }
 
-async fn send_to_ollama(model: &str, prompt: &str, port: u16) -> Result<String, String> {
+async fn send_to_ollama(model: &str, prompt: &str, port: u16) -> Result<(String, openai::Usage), String> {
     let client = reqwest::Client::builder()
         .no_proxy()
         .redirect(reqwest::redirect::Policy::none())
@@ -458,16 +461,21 @@ async fn send_to_ollama(model: &str, prompt: &str, port: u16) -> Result<String, 
         .json()
         .await
         .map_err(|_| "Ollama 回覆格式無效。".to_string())?;
+    let usage = openai::Usage {
+        input_tokens: response.prompt_eval_count.unwrap_or(0),
+        output_tokens: response.eval_count.unwrap_or(0),
+        cached_tokens: 0,
+    };
     let text = response.message.content;
     if text.trim().is_empty() {
         return Err("AI 沒有回覆，請檢查模型設定後重試。".into());
     }
     if response.done_reason.as_deref() == Some("length") {
-        Ok(format!(
+        Ok((format!(
             "資料限制：本機模型回覆因長度上限已截斷。\n\n{text}"
-        ))
+        ), usage))
     } else {
-        Ok(text)
+        Ok((text, usage))
     }
 }
 
@@ -575,22 +583,41 @@ fn validate_local_model(model: &str, tags: &OllamaTagsResponse) -> Result<String
     }
 }
 
+/// The usage row is stored here rather than by the caller, because
+/// openai::Usage has no place for the cache write: it holds the figures AWS
+/// returned for this request, against the model id that was sent. A failed
+/// request, or a reply without usage, stores nothing.
 async fn send_to_bedrock(
     creds: AwsCredentials,
     model: &str,
     prompt: &str,
+    metrics: Option<&crate::db::Database>,
+    started: std::time::Instant,
 ) -> Result<(String, openai::Usage), String> {
     let mut creds = creds;
     creds.inference_profile = inference_profile_for_region(&creds.region).to_string();
     let (text, usage) = crate::ai::bedrock::send_simple(&creds, model, prompt)
         .await
-        .map_err(|_| "Bedrock 分析失敗，請檢查 AWS 憑證、區域及模型權限。".to_string())?;
-    let usage = usage
-        .map(|u| openai::Usage {
-            input_tokens: crate::ai::bedrock::inclusive_input(&u),
-            output_tokens: u.output_tokens() as i64,
-            cached_tokens: u.cache_read_input_tokens().unwrap_or(0) as i64,
-        })
+        .map_err(|_| "Bedrock 分析失敗，請檢查 AWS 憑證、地區及模型權限。".to_string())?;
+    let stored = usage.as_ref().and_then(crate::ai::bedrock::StoredUsage::from_aws);
+    match (metrics, stored) {
+        (Some(db), Some(s)) => crate::ai::cost::record_inference(
+            db,
+            "bedrock",
+            crate::ai::cost::Feature::MailAnalysis,
+            crate::ai::Workload::Volume,
+            model,
+            s.input,
+            s.output,
+            s.cache_read,
+            s.cache_write,
+            started.elapsed().as_millis() as i64,
+        ),
+        (_, None) => log::warn!("Bedrock reply carried no usage figures; no usage row stored"),
+        (None, Some(_)) => {}
+    }
+    let usage = stored
+        .map(|s| openai::Usage { input_tokens: s.input, output_tokens: s.output, cached_tokens: s.cache_read })
         .unwrap_or_default();
     Ok((text, usage))
 }
@@ -1159,11 +1186,89 @@ mod tests {
         .unwrap()
         .expect_err("a reply without citations is rejected");
         assert!(error.contains("引用"), "{error}");
-        let stored: (String, i64, i64) = db.conn.lock().unwrap()
-            .query_row("SELECT provider, input_tokens, output_tokens FROM inference_metrics", [], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)))
+        let stored: (String, String, i64, i64) = db.conn.lock().unwrap()
+            .query_row("SELECT provider, feature, input_tokens, output_tokens FROM inference_metrics", [], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)))
             .unwrap();
-        assert_eq!(stored, ("openai-mail".to_string(), 500, 50));
+        assert_eq!(stored, ("openai".to_string(), "mail_analysis".to_string(), 500, 50));
         assert_eq!(server.finish().await.len(), 1);
+    }
+
+    /// A group set to "Your AWS Bedrock account" sends its own request. Its
+    /// row holds the four figures AWS returned, against the model id that was
+    /// sent, and is stored once (not again by the caller); a refused request
+    /// stores nothing.
+    #[tokio::test]
+    async fn a_bedrock_analysis_stores_the_usage_aws_returned_once() {
+        let db = crate::ai::cost::tests::temp_metrics_db("");
+        let creds = crate::ai::bedrock::tests::fixture_creds("ap-southeast-1");
+        let server = crate::ai::bedrock::tests::aws_loopback(200, None, crate::ai::bedrock::tests::converse_json("星期五前回覆合約。[郵件 #42]")).await;
+        let result = analyze_with_endpoints(context("bedrock", "apac.amazon.nova-pro-v1:0", vec![message(42, "正文")]), Some(creds.clone()), None, None, OLLAMA_PORT, OpenAiEndpoint::Production, Some(&db))
+            .await
+            .expect("valid Bedrock analysis");
+        assert_eq!(server.await.unwrap().path, "/model/apac.amazon.nova-pro-v1:0/converse");
+        assert_eq!((result.input_tokens, result.output_tokens, result.cached_tokens), (1_320, 45, 800));
+        let rows = crate::ai::cost::tests::usage_rows(&db);
+        assert_eq!(rows.len(), 1, "stored once");
+        assert_eq!(
+            (rows[0].provider.as_str(), rows[0].feature.as_str(), rows[0].model_id.as_str(), rows[0].input_tokens, rows[0].output_tokens),
+            ("bedrock", "mail_analysis", "apac.amazon.nova-pro-v1:0", 1_320, 45)
+        );
+        assert_eq!(crate::ai::cost::tests::cache_tokens(&db), vec![(800, 400)]);
+
+        let server = crate::ai::bedrock::tests::aws_loopback(400, Some("ValidationException"), serde_json::json!({"message": "PRIVATE-MAIL-CANARY"})).await;
+        let error = analyze_with_endpoints(context("bedrock", "apac.amazon.nova-pro-v1:0", vec![message(42, "正文")]), Some(creds), None, None, OLLAMA_PORT, OpenAiEndpoint::Production, Some(&db))
+            .await
+            .unwrap_err();
+        server.await.unwrap();
+        assert!(!error.contains("PRIVATE"), "{error}");
+        assert_eq!(crate::ai::cost::tests::usage_rows(&db).len(), 1, "nothing stored for the refused request");
+    }
+
+    /// AWS bills a reply that holds no message. Its usage is stored, and the
+    /// empty answer is then rejected.
+    #[tokio::test]
+    async fn a_billed_bedrock_reply_without_a_message_is_stored_then_rejected() {
+        let db = crate::ai::cost::tests::temp_metrics_db("");
+        let creds = crate::ai::bedrock::tests::fixture_creds("ap-southeast-1");
+        let mut reply = crate::ai::bedrock::tests::converse_json("");
+        reply.as_object_mut().unwrap().remove("output");
+        let server = crate::ai::bedrock::tests::aws_loopback(200, None, reply).await;
+        let error = analyze_with_endpoints(context("bedrock", "apac.amazon.nova-pro-v1:0", vec![message(42, "正文")]), Some(creds), None, None, OLLAMA_PORT, OpenAiEndpoint::Production, Some(&db))
+            .await
+            .unwrap_err();
+        server.await.unwrap();
+        assert_eq!(error, "AI 沒有回覆，請檢查模型設定後重試。");
+        let rows = crate::ai::cost::tests::usage_rows(&db);
+        assert_eq!(rows.len(), 1, "the billed reply is stored");
+        assert_eq!((rows[0].model_id.as_str(), rows[0].input_tokens, rows[0].output_tokens), ("apac.amazon.nova-pro-v1:0", 1_320, 45));
+        assert_eq!(crate::ai::cost::tests::cache_tokens(&db), vec![(800, 400)]);
+    }
+
+    /// A local analysis is stored too: free, with Ollama's token counts.
+    #[tokio::test]
+    async fn a_local_analysis_is_recorded_free_with_its_tokens() {
+        let db = crate::ai::cost::tests::temp_metrics_db("");
+        let server = HttpFixture::start(vec![
+            HttpReply::json(local_tags()),
+            HttpReply::json(local_show()),
+            chat_reply("星期五前回覆合約。[郵件 #42]", "stop"),
+        ])
+        .await;
+        let result = tokio::time::timeout(
+            Duration::from_secs(5),
+            analyze_with_endpoints(context("local", "qwen3", vec![message(42, "正文")]), None, None, None, server.port, OpenAiEndpoint::Production, Some(&db)),
+        )
+        .await
+        .unwrap()
+        .expect("valid local analysis");
+        assert_eq!((result.input_tokens, result.output_tokens), (500, 20));
+        let rows = crate::ai::cost::tests::usage_rows(&db);
+        assert_eq!(rows.len(), 1);
+        assert_eq!(
+            (rows[0].provider.as_str(), rows[0].feature.as_str(), rows[0].input_tokens, rows[0].output_tokens, rows[0].usd_cost_micro, rows[0].price_unknown),
+            ("local", "mail_analysis", 500, 20, Some(0), false)
+        );
+        server.finish().await;
     }
 
     #[tokio::test]

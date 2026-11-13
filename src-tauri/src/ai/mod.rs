@@ -5,6 +5,7 @@ pub mod mail_policy;
 pub mod models;
 pub mod complete;
 pub mod cost;
+pub mod usage;
 pub mod gemini;
 pub mod local;
 pub mod openai;
@@ -52,18 +53,44 @@ const INFERENCE_GEOGRAPHIES: [&str; 3] = ["apac", "us", "eu"];
 
 /// Retarget a Bedrock model id at the geography the credentials were saved for.
 ///
-/// The `workload_routing` seed pins the volume tier to `apac.amazon.nova-micro-v1:0`
-/// (V13), so a user on `us-east-1` would otherwise send an APAC inference
-/// profile to a US endpoint and get a ValidationException on every volume-tier
-/// request. Ids prefixed `global.`, and ids with no geography prefix at all,
-/// are left untouched.
-fn apply_inference_profile(model: &str, profile: &str) -> String {
+/// A saved model id can carry a fixed geography (the V13 seed used
+/// `apac.amazon.nova-micro-v1:0`), so a user on `us-east-1` would otherwise
+/// send an APAC inference profile to a US endpoint and get a
+/// ValidationException on every request. Ids prefixed `global.`, and ids
+/// with no geography prefix at all, are left untouched.
+pub(crate) fn apply_inference_profile(model: &str, profile: &str) -> String {
     match model.split_once('.') {
         Some((head, rest)) if INFERENCE_GEOGRAPHIES.contains(&head) && head != profile => {
             format!("{}.{}", profile, rest)
         }
         _ => model.to_string(),
     }
+}
+
+/// The Bedrock model a chain row runs: the one saved with it, else the
+/// default. Chat and plain completions both use this.
+fn bedrock_model(entry: &ProviderChainEntry) -> String {
+    entry.model_id.clone().filter(|m| !m.trim().is_empty()).unwrap_or_else(bedrock::default_model)
+}
+
+/// The Bedrock model id typed in Settings, as it is saved: trimmed, and None
+/// (the default model) when empty. Both forms the Bedrock console shows are
+/// kept as typed: a model id (`anthropic.claude-haiku-4-5-20251001-v1:0`) or
+/// an inference profile id (`us.`, `eu.`, `apac.` or `global.` in front).
+/// When a request is sent, a `us.`, `eu.` or `apac.` prefix is pointed at
+/// the saved region (`apply_inference_profile`), as for every saved id.
+pub(crate) fn bedrock_model_to_save(typed: Option<&str>, language: bedrock::UiLanguage) -> Result<Option<String>, String> {
+    let Some(model) = typed.map(str::trim).filter(|m| !m.is_empty()) else {
+        return Ok(None);
+    };
+    // AWS takes up to 2,048 characters, none of them spaces.
+    if model.len() > 2048 || model.chars().any(|c| c.is_whitespace() || c.is_control()) {
+        return Err(language.pick(
+            "This is not a Bedrock model ID. Copy the model ID or inference profile ID from the Bedrock console.",
+            "這不是 Bedrock 模型 ID，請從 Bedrock 主控台複製模型 ID 或推論設定檔 ID。",
+        ));
+    }
+    Ok(Some(model.to_string()))
 }
 
 /// Keychain service holding the provider API keys the user pastes in
@@ -687,6 +714,7 @@ impl AiRouter {
         self.local_endpoints.iter().find(|e| e.id == endpoint_id)
     }
 
+    #[allow(clippy::too_many_arguments)]
     pub async fn send(
         &self,
         messages: Vec<(String, String)>,
@@ -695,6 +723,7 @@ impl AiRouter {
         app_handle: &tauri::AppHandle,
         tts_tx: Option<tokio::sync::mpsc::Sender<TtsCommand>>,
         workload: Workload,
+        feature: cost::Feature,
     ) -> Result<String, String> {
         self.send_with_ledger(
             messages,
@@ -703,6 +732,7 @@ impl AiRouter {
             app_handle,
             tts_tx,
             workload,
+            feature,
             SideEffectLedger::new(),
         )
         .await
@@ -715,6 +745,7 @@ impl AiRouter {
     /// arrives through a tool call, so the ledger would otherwise report a
     /// clean turn and a stranger's subject line could move a meeting or wipe
     /// a memory without the user's click.
+    #[allow(clippy::too_many_arguments)]
     pub async fn send_with_untrusted_context(
         &self,
         messages: Vec<(String, String)>,
@@ -723,6 +754,7 @@ impl AiRouter {
         app_handle: &tauri::AppHandle,
         tts_tx: Option<tokio::sync::mpsc::Sender<TtsCommand>>,
         workload: Workload,
+        feature: cost::Feature,
     ) -> Result<String, String> {
         self.send_with_ledger(
             messages,
@@ -731,6 +763,7 @@ impl AiRouter {
             app_handle,
             tts_tx,
             workload,
+            feature,
             SideEffectLedger::untrusted(),
         )
         .await
@@ -744,23 +777,29 @@ impl AiRouter {
         app_handle: &tauri::AppHandle,
         tts_tx: Option<tokio::sync::mpsc::Sender<TtsCommand>>,
         workload: Workload,
+        feature: cost::Feature,
         ledger: SideEffectLedger,
     ) -> Result<String, String> {
         let streaming_tts = tts_tx.is_some();
-        finish_request_with_hud(
-            self.run_provider_chain(
-                messages,
-                db,
-                google_auth,
-                app_handle,
-                tts_tx,
-                workload,
-                ledger,
+        // The providers record usage deep in their loops; this is how the
+        // row learns what the request was for.
+        cost::with_feature(
+            feature,
+            finish_request_with_hud(
+                self.run_provider_chain(
+                    messages,
+                    db,
+                    google_auth,
+                    app_handle,
+                    tts_tx,
+                    workload,
+                    ledger,
+                ),
+                streaming_tts,
+                |event, payload| {
+                    let _ = app_handle.emit(event, payload);
+                },
             ),
-            streaming_tts,
-            |event, payload| {
-                let _ = app_handle.emit(event, payload);
-            },
         )
         .await
     }
@@ -798,13 +837,7 @@ impl AiRouter {
                     let model = entry.model_id.as_deref().unwrap_or("unknown");
                     format!("{} (local)", model)
                 }
-                "bedrock" => {
-                    let model = entry
-                        .model_id
-                        .clone()
-                        .unwrap_or_else(bedrock::default_model);
-                    format!("bedrock ({})", model)
-                }
+                "bedrock" => format!("bedrock ({})", bedrock_model(entry)),
                 "openai" if entry.base_url.is_some() => format!(
                     "{} ({})",
                     compat::label(entry.base_url.as_deref().unwrap_or_default()),
@@ -950,33 +983,14 @@ impl AiRouter {
                         inference_profile: profile,
                     };
 
-                    // Look up the model id for this workload tier.  Falls back to
-                    // the chain-entry model_id (or the legacy default) if the
-                    // workload_routing table is missing the requested row.
-                    let workload_key = match workload {
-                        Workload::Volume => "volume",
-                        Workload::Tools => "tools",
-                        Workload::Premium => "premium",
-                    };
-                    let model = {
-                        let conn = match db.conn.lock() {
-                            Ok(c) => c,
-                            Err(e) => {
-                                errors.push(format!("bedrock db lock: {e}"));
-                                continue;
-                            }
-                        };
-                        conn.query_row(
-                            "SELECT model_id FROM workload_routing \
-                             WHERE workload = ?1 AND enabled = 1",
-                            rusqlite::params![workload_key],
-                            |r| r.get::<_, String>(0),
-                        )
-                        .ok()
-                        .or_else(|| entry.model_id.clone())
-                        .unwrap_or_else(bedrock::default_model)
-                    };
-                    // The routing rows carry a fixed geography prefix; point it
+                    // The model the user saved in the chain, as for every other
+                    // provider. The V13 `workload_routing` table (Nova Micro /
+                    // Haiku 4.5 / Sonnet 4.6 per tier) used to override it here,
+                    // so Bedrock silently ran a different model from the one
+                    // chosen. The table is kept as history and no longer read;
+                    // per-feature defaults come from the model registry (P05).
+                    let model = bedrock_model(entry);
+                    // A saved id can carry another geography's prefix; point it
                     // at the region these credentials were saved for.
                     let model = apply_inference_profile(&model, &creds.inference_profile);
                     log::info!(
@@ -1167,6 +1181,78 @@ impl AiRouter {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn bedrock_entry(model_id: Option<&str>) -> ProviderChainEntry {
+        ProviderChainEntry { position: 0, provider_type: "bedrock".into(), endpoint_id: None, model_id: model_id.map(Into::into), enabled: true, base_url: None }
+    }
+
+    /// A typed id is saved trimmed, or refused when it cannot be a Bedrock
+    /// id; what goes out for it follows the saved region only for a us.,
+    /// eu. or apac. profile.
+    #[test]
+    fn a_typed_bedrock_model_id_is_saved_trimmed_and_sent_for_the_saved_region() {
+        use super::bedrock::UiLanguage::En;
+        assert_eq!(bedrock_model_to_save(Some("  anthropic.claude-haiku-4-5-20251001-v1:0\n"), En), Ok(Some("anthropic.claude-haiku-4-5-20251001-v1:0".into())));
+        assert_eq!(bedrock_model_to_save(Some("   "), En), Ok(None), "empty is the default model");
+        assert_eq!(bedrock_model_to_save(None, En), Ok(None));
+        assert!(bedrock_model_to_save(Some("claude haiku"), En).is_err());
+        assert!(bedrock_model_to_save(Some(&"a".repeat(2_049)), En).is_err());
+        let arn = "arn:aws:bedrock:ap-southeast-1:123456789012:application-inference-profile/abc123";
+        assert_eq!(bedrock_model_to_save(Some(arn), En), Ok(Some(arn.into())));
+
+        // What goes out for each, with credentials saved for Singapore.
+        let sent = |typed: &str| apply_inference_profile(&bedrock_model(&bedrock_entry(bedrock_model_to_save(Some(typed), En).unwrap().as_deref())), "apac");
+        assert_eq!(sent("anthropic.claude-haiku-4-5-20251001-v1:0"), "anthropic.claude-haiku-4-5-20251001-v1:0", "a bare model id as typed");
+        assert_eq!(sent("us.anthropic.claude-haiku-4-5-20251001-v1:0"), "apac.anthropic.claude-haiku-4-5-20251001-v1:0", "a profile id follows the saved region");
+        assert_eq!(sent("global.anthropic.claude-sonnet-4-6"), "global.anthropic.claude-sonnet-4-6");
+        assert_eq!(sent(arn), arn);
+    }
+
+    /// The model saved in the chain is the one Bedrock runs; the V13
+    /// workload_routing rows (Nova Micro, Haiku 4.5, Sonnet 4.6) no longer
+    /// replace it.
+    #[test]
+    fn bedrock_runs_the_model_saved_in_the_chain() {
+        assert_eq!(bedrock_model(&bedrock_entry(Some("amazon.nova-pro-v1:0"))), "amazon.nova-pro-v1:0");
+        assert_eq!(bedrock_model(&bedrock_entry(Some("  "))), bedrock::default_model());
+        assert_eq!(bedrock_model(&bedrock_entry(None)), bedrock::default_model());
+        assert_eq!(apply_inference_profile(&bedrock_model(&bedrock_entry(Some("anthropic.claude-sonnet-4-6"))), "apac"), apply_inference_profile("anthropic.claude-sonnet-4-6", "apac"));
+    }
+
+    /// Every chat, voice and briefing row gets its feature from this wrapper:
+    /// the providers record deep in the chain, where only the task-local is in
+    /// reach. A refactor that dropped it would store them all as "other" and
+    /// leave every other test green.
+    #[test]
+    fn send_with_ledger_runs_the_chain_under_its_feature() {
+        let source = include_str!("mod.rs");
+        let start = source.find("async fn send_with_ledger(").expect("send_with_ledger exists");
+        let body = &source[start..];
+        let body = &body[..body.find("\n    }\n").expect("end of send_with_ledger")];
+        let body = body.split_whitespace().collect::<Vec<_>>().join(" ");
+        assert!(
+            body.contains("cost::with_feature( feature, finish_request_with_hud( self.run_provider_chain("),
+            "send_with_ledger must run the provider chain inside cost::with_feature: {body}"
+        );
+    }
+
+    /// The table stays as history (P05 replaces it with the registry), but
+    /// the request paths no longer read it, directly or through
+    /// routing::WorkloadRouter (constructed only in its own tests).
+    #[test]
+    fn no_request_path_reads_workload_routing() {
+        let sources = [
+            ("ai/mod.rs", include_str!("mod.rs")),
+            ("ai/bedrock.rs", include_str!("bedrock.rs")),
+            ("ai/complete.rs", include_str!("complete.rs")),
+        ];
+        for (name, source) in sources {
+            let runtime = source.split("#[cfg(test)]").next().unwrap();
+            for read in [["FROM ", "workload_routing"].concat(), ["Workload", "Router"].concat()] {
+                assert!(!runtime.contains(&read), "{name} reads workload_routing at runtime ({read})");
+            }
+        }
+    }
 
     #[test]
     fn plain_http_endpoints_off_this_mac_are_not_used() {

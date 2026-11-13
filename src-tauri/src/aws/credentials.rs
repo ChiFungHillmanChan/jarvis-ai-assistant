@@ -36,6 +36,46 @@ pub fn inference_profile_for_region(region: &str) -> &'static str {
     }
 }
 
+/// The saved credentials, or None when none are saved. Reads the Keychain
+/// after releasing the database lock.
+pub fn load_from(db: &Database) -> Result<Option<AwsCredentials>, String> {
+    let conn = db.conn.lock().map_err(|e| format!("db lock: {e}"))?;
+    let row = conn.query_row(
+        "SELECT access_key_id, region, inference_profile FROM aws_credentials WHERE id = 1",
+        [],
+        |r| {
+            Ok((
+                r.get::<_, String>(0)?,
+                r.get::<_, String>(1)?,
+                r.get::<_, String>(2)?,
+            ))
+        },
+    );
+    let (akid, region, stored_profile) = match row {
+        Ok(t) => t,
+        Err(rusqlite::Error::QueryReturnedNoRows) => return Ok(None),
+        Err(e) => return Err(format!("db load: {e}")),
+    };
+    // Drop the lock before calling keychain (no mutex held across FFI boundary)
+    drop(conn);
+    let secret = KeychainStore::get(KEYCHAIN_SERVICE, KEYCHAIN_ACCOUNT)?;
+    let profile = inference_profile_for_region(&region);
+    if profile != stored_profile {
+        log::warn!(
+            "aws_credentials.inference_profile '{}' does not match region '{}'; using '{}'",
+            stored_profile,
+            region,
+            profile
+        );
+    }
+    Ok(Some(AwsCredentials {
+        access_key_id: akid,
+        secret_access_key: secret,
+        region,
+        inference_profile: profile.to_string(),
+    }))
+}
+
 impl AwsCredsRepo {
     pub fn new(db: Arc<Database>) -> Self {
         Self { db }
@@ -65,41 +105,7 @@ impl AwsCredsRepo {
     }
 
     pub async fn load(&self) -> Result<Option<AwsCredentials>, String> {
-        let conn = self.db.conn.lock().map_err(|e| format!("db lock: {e}"))?;
-        let row = conn.query_row(
-            "SELECT access_key_id, region, inference_profile FROM aws_credentials WHERE id = 1",
-            [],
-            |r| {
-                Ok((
-                    r.get::<_, String>(0)?,
-                    r.get::<_, String>(1)?,
-                    r.get::<_, String>(2)?,
-                ))
-            },
-        );
-        let (akid, region, stored_profile) = match row {
-            Ok(t) => t,
-            Err(rusqlite::Error::QueryReturnedNoRows) => return Ok(None),
-            Err(e) => return Err(format!("db load: {e}")),
-        };
-        // Drop the lock before calling keychain (no mutex held across FFI boundary)
-        drop(conn);
-        let secret = KeychainStore::get(KEYCHAIN_SERVICE, KEYCHAIN_ACCOUNT)?;
-        let profile = inference_profile_for_region(&region);
-        if profile != stored_profile {
-            log::warn!(
-                "aws_credentials.inference_profile '{}' does not match region '{}'; using '{}'",
-                stored_profile,
-                region,
-                profile
-            );
-        }
-        Ok(Some(AwsCredentials {
-            access_key_id: akid,
-            secret_access_key: secret,
-            region,
-            inference_profile: profile.to_string(),
-        }))
+        load_from(&self.db)
     }
 
     pub async fn clear(&self) -> Result<(), String> {
@@ -114,7 +120,7 @@ impl AwsCredsRepo {
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
     use rusqlite::Connection;
     use std::sync::Mutex;
@@ -126,7 +132,7 @@ mod tests {
     /// Under `cfg(test)` the keychain backend is a process-global map, and every
     /// test here writes the same (service, account) entry and then clears it.
     /// Without this, two of them running concurrently delete each other's secret.
-    static KEYCHAIN_GUARD: Mutex<()> = Mutex::new(());
+    pub(crate) static KEYCHAIN_GUARD: Mutex<()> = Mutex::new(());
 
     fn fresh_conn() -> Connection {
         // In-memory, not a temp file: this fixture exercises no file-backed

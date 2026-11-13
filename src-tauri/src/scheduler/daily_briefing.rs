@@ -1,4 +1,4 @@
-use crate::ai::{AiRouter, Workload};
+use crate::ai::{cost::Feature, AiRouter, Workload};
 use crate::auth::google::GoogleAuth;
 use crate::db::Database;
 use crate::integrations::gmail::{self, GmailMessage};
@@ -228,7 +228,7 @@ async fn classify_with_nova(
     // The prompt quotes strangers' subjects and snippets, which can ask for
     // tool calls; classifying needs none.
     let response = crate::chat_session::TOOL_EXECUTION_DISABLED
-        .scope(true, router.send_with_untrusted_context(chat_messages, db, auth, app_handle, None, Workload::Volume))
+        .scope(true, router.send_with_untrusted_context(chat_messages, db, auth, app_handle, None, Workload::Volume, Feature::Briefing))
         .await
         .map_err(|e| format!("nova classify: {e}"))?;
 
@@ -319,7 +319,7 @@ async fn summarize_with_haiku(
     // Same as classifying: the suggested actions come back as JSON, not as
     // tool calls.
     let response = crate::chat_session::TOOL_EXECUTION_DISABLED
-        .scope(true, router.send_with_untrusted_context(chat_messages, db, auth, app_handle, None, Workload::Tools))
+        .scope(true, router.send_with_untrusted_context(chat_messages, db, auth, app_handle, None, Workload::Tools, Feature::Briefing))
         .await
         .map_err(|e| format!("haiku summarize: {e}"))?;
 
@@ -409,7 +409,7 @@ async fn speak_briefing_via_router(
                 _ => "English_FriendlyMan",
             };
             let client = crate::voice::minimax::MinimaxClient::new(api_key);
-            let mut rx = client.stream_speak(text, voice_id).await?;
+            let mut rx = client.stream_speak(text, voice_id, db).await?;
             // Drain stream — audio playback wiring is post-B9.
             while let Some(_chunk) = rx.recv().await {}
             log::info!(

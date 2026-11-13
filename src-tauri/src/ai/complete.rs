@@ -5,6 +5,7 @@
 //!
 //! Error bodies can echo the request (mail text), so they are never
 //! surfaced: only the provider and the HTTP status are.
+use super::cost::Feature;
 use super::{compat, gemini, AiRouter, ProviderChainEntry, Workload};
 use crate::db::Database;
 use serde_json::{json, Value};
@@ -21,6 +22,8 @@ pub struct Request<'a> {
     /// must still say so, because not every provider has a JSON mode.
     pub json: bool,
     pub max_tokens: u32,
+    /// What the request is for, stored with its usage row.
+    pub feature: Feature,
 }
 
 #[derive(Debug)]
@@ -34,8 +37,18 @@ pub struct Completion {
     pub output_tokens: i64,
     /// Read from the provider's cache, billed at its cached rate.
     pub cached_tokens: i64,
-    /// From models::usd_cost_micro; None for a local model, which is free.
+    /// Written to the provider's cache; only Bedrock reports it. Included in
+    /// `input_tokens`.
+    pub cache_write_tokens: i64,
+    /// The reply carried no usage figures (only Bedrock can tell), so no row
+    /// is stored for it rather than one of zeros.
+    pub usage_missing: bool,
+    /// From models::usd_cost_micro; None for a local model, which is free,
+    /// and for a cloud model without a price.
     pub cost_micro: Option<i64>,
+    /// A cloud model the price list does not know: `cost_micro` is None but
+    /// the request was not free.
+    pub price_unknown: bool,
 }
 
 /// The chosen AI, tried in chain order. An empty chain means the user has not
@@ -48,22 +61,57 @@ pub async fn complete(router: &AiRouter, db: &Database, request: Request<'_>) ->
     let mut errors = Vec::new();
     for entry in entries {
         let started = Instant::now();
-        match complete_one(router, db, entry, &request).await {
-            Ok(mut done) => {
-                let provider = if entry.provider_type == "local" { "local".to_string() } else { done.provider.to_lowercase() };
-                record(db, &provider, &mut done, started.elapsed().as_millis() as i64);
-                return Ok(done);
-            }
+        let answered = complete_one(router, db, entry, &request).await;
+        match answered.and_then(|done| store_then_check(db, entry, &request, done, started.elapsed().as_millis() as i64)) {
+            Ok(done) => return Ok(done),
             Err(error) => errors.push(error),
         }
     }
     Err(errors.join("；"))
 }
 
+/// Store the completion, then check it. The row comes first because the
+/// provider bills a reply whatever it says, as mail analysis does: an empty
+/// Bedrock reply, or one that is not the JSON asked for, is stored and then
+/// rejected.
+fn store_then_check(db: &Database, entry: &ProviderChainEntry, request: &Request<'_>, mut done: Completion, latency_ms: i64) -> Result<Completion, String> {
+    let provider = super::cost::provider_id(&entry.provider_type, entry.base_url.as_deref());
+    if done.usage_missing {
+        // Nothing to store: AWS sent no figures, and none are made up. What
+        // the request cost is not known.
+        log::warn!("{provider} reply carried no usage figures; no usage row stored");
+        done.price_unknown = true;
+    } else {
+        record(db, &provider, request.feature, &mut done, latency_ms);
+    }
+    if entry.provider_type == "bedrock" {
+        let language = super::bedrock::UiLanguage::read(db);
+        if done.text.trim().is_empty() {
+            return Err(language.pick(
+                format!("Bedrock ({}) returned no answer. Try again, or choose another model.", done.model),
+                format!("Bedrock（{}）沒有回覆內容，請重試或改用其他模型。", done.model),
+            ));
+        }
+        // Bedrock has no JSON mode: the object was asked for in words
+        // (bedrock::JSON_INSTRUCTION), so the reply must be checked for one,
+        // without code fences or prose around it.
+        if request.json {
+            done.text = json_object_text(&done.text).ok_or_else(|| {
+                language.pick(
+                    format!("Bedrock ({}) did not reply with valid JSON. Try again, or choose another model.", done.model),
+                    format!("Bedrock（{}）回覆的不是有效 JSON，請重試或改用其他模型。", done.model),
+                )
+            })?;
+        }
+    }
+    Ok(done)
+}
+
 /// Price the completion and store it as one Volume row.
-fn record(db: &Database, provider: &str, done: &mut Completion, latency_ms: i64) {
-    done.cost_micro = super::models::usd_cost_micro(provider, &done.model, done.input_tokens, done.output_tokens, done.cached_tokens, 0);
-    super::cost::record_inference(db, provider, Workload::Volume, &done.model, done.input_tokens, done.output_tokens, done.cached_tokens, 0, latency_ms);
+fn record(db: &Database, provider: &str, feature: Feature, done: &mut Completion, latency_ms: i64) {
+    done.cost_micro = super::models::usd_cost_micro(provider, &done.model, done.input_tokens, done.output_tokens, done.cached_tokens, done.cache_write_tokens);
+    done.price_unknown = !super::models::price_known(provider, &done.model);
+    super::cost::record_inference(db, provider, feature, Workload::Volume, &done.model, done.input_tokens, done.output_tokens, done.cached_tokens, done.cache_write_tokens, latency_ms);
 }
 
 async fn complete_one(router: &AiRouter, db: &Database, entry: &ProviderChainEntry, request: &Request<'_>) -> Result<Completion, String> {
@@ -134,27 +182,108 @@ async fn complete_one(router: &AiRouter, db: &Database, entry: &ProviderChainEnt
         "claude" => {
             let key = router.claude_key.clone().ok_or("尚未設定 Claude API 密鑰。")?;
             let model = entry.model_id.clone().unwrap_or_else(|| crate::ai::models::CLAUDE_DEFAULT.to_string());
-            let mut body = json!({
-                "model": model,
-                "max_tokens": request.max_tokens,
-                "messages": [{"role": "user", "content": request.user}],
-            });
-            if !request.system.is_empty() {
-                body["system"] = json!(request.system);
-            }
+            let body = claude_body(&model, request);
             let value = post(&client, "https://api.anthropic.com/v1/messages", "Claude", |r| r.header("x-api-key", &key).header("anthropic-version", "2023-06-01"), &body).await?;
-            let text = value
-                .get("content")
-                .and_then(Value::as_array)
-                .map(|blocks| blocks.iter().filter_map(|b| b.get("text").and_then(Value::as_str)).collect::<String>())
-                .unwrap_or_default();
-            done(text, "Claude".into(), model, value.pointer("/usage/input_tokens"), value.pointer("/usage/output_tokens"))
+            claude_result(&value, model)
         }
-        other => {
-            let _ = db;
-            Err(format!("{other} 暫不支援這項功能，請在設定中改用其他 AI。"))
+        "bedrock" => {
+            let language = super::bedrock::UiLanguage::read(db);
+            // A saved row whose Keychain item is gone (after a restore, say)
+            // fails here. The user is asked to save the credentials again;
+            // the Keychain or database text goes to the log only.
+            let creds = crate::aws::credentials::load_from(db)
+                .map_err(|e| {
+                    log::warn!("Bedrock completion: the saved AWS credentials could not be read: {e}");
+                    language.pick(
+                        "JARVIS could not read your saved AWS credentials. Save them again in Settings and try again.",
+                        "JARVIS 未能讀取已儲存的 AWS 憑證，請在設定中重新儲存後重試。",
+                    )
+                })?
+                .ok_or_else(|| {
+                    language.pick("AWS credentials are not set up. Add them in Settings and try again.", "尚未設定 AWS 憑證，請在設定中加入後重試。")
+                })?;
+            // The chain row's model, pointed at the inference profile of the
+            // saved region (load_from derives it from the region; chat reads
+            // the stored profile, and the two agree). This id is the one sent
+            // and the one its row is stored against.
+            let model = super::apply_inference_profile(&super::bedrock_model(entry), &creds.inference_profile);
+            let plain = super::bedrock::plain_request(request.system, request.user, request.json, request.max_tokens, language)?;
+            let output = super::bedrock::converse_plain(&creds, &model, plain, language).await?;
+            Ok(bedrock_result(&output, model))
         }
+        other => Err(format!("{other} 暫不支援這項功能，請在設定中改用其他 AI。")),
     }
+}
+
+/// The one tool a JSON request to Claude is made to call. Claude has no
+/// JSON switch on every model; a forced tool call always arrives as a JSON
+/// object, so the shape is guaranteed by the API rather than asked for in
+/// words. The schema is open because the instructions carry the real one.
+const CLAUDE_JSON_TOOL: &str = "json_reply";
+
+fn claude_body(model: &str, request: &Request<'_>) -> Value {
+    let mut body = json!({
+        "model": model,
+        "max_tokens": request.max_tokens,
+        "messages": [{"role": "user", "content": request.user}],
+    });
+    if !request.system.is_empty() {
+        body["system"] = json!(request.system);
+    }
+    if request.json {
+        body["tools"] = json!([{
+            "name": CLAUDE_JSON_TOOL,
+            "description": "Give your whole answer as this tool's input: one JSON object in the shape the instructions describe.",
+            "input_schema": {"type": "object"},
+        }]);
+        body["tool_choice"] = json!({"type": "tool", "name": CLAUDE_JSON_TOOL});
+    }
+    body
+}
+
+/// A JSON answer is the forced tool call's input; anything else is the text
+/// blocks.
+fn claude_result(value: &Value, model: String) -> Result<Completion, String> {
+    let blocks = value.get("content").and_then(Value::as_array).cloned().unwrap_or_default();
+    let tool_input = blocks
+        .iter()
+        .find(|b| b.get("type").and_then(Value::as_str) == Some("tool_use") && b.get("name").and_then(Value::as_str) == Some(CLAUDE_JSON_TOOL))
+        .and_then(|b| b.get("input"))
+        .filter(|input| input.as_object().is_some_and(|fields| !fields.is_empty()));
+    let text = match tool_input {
+        Some(input) => input.to_string(),
+        None => blocks.iter().filter_map(|b| b.get("text").and_then(Value::as_str)).collect::<String>(),
+    };
+    done(text, "Claude".into(), model, value.pointer("/usage/input_tokens"), value.pointer("/usage/output_tokens"))
+}
+
+/// The reply as Bedrock wrote it, with the usage AWS returned for it. An
+/// empty reply and a JSON request are checked after the row is stored
+/// (`store_then_check`).
+fn bedrock_result(output: &aws_sdk_bedrockruntime::operation::converse::ConverseOutput, model: String) -> Completion {
+    let (text, usage) = super::bedrock::plain_result(output);
+    let usage_missing = usage.is_none();
+    let usage = usage.unwrap_or_default();
+    Completion {
+        text,
+        provider: "Bedrock".into(),
+        model,
+        input_tokens: usage.input,
+        output_tokens: usage.output,
+        cached_tokens: usage.cache_read,
+        cache_write_tokens: usage.cache_write,
+        usage_missing,
+        cost_micro: None,
+        price_unknown: false,
+    }
+}
+
+/// The JSON object in a reply, without code fences or prose around it.
+fn json_object_text(text: &str) -> Option<String> {
+    let start = text.find('{')?;
+    let end = text.rfind('}')?;
+    let value: Value = serde_json::from_str(text.get(start..=end)?).ok()?;
+    value.is_object().then(|| value.to_string())
 }
 
 /// OpenAI Chat Completions body. api.openai.com takes
@@ -205,7 +334,10 @@ fn done(text: String, provider: String, model: String, input: Option<&Value>, ou
         input_tokens: input.and_then(Value::as_i64).unwrap_or(0),
         output_tokens: output.and_then(Value::as_i64).unwrap_or(0),
         cached_tokens: 0,
+        cache_write_tokens: 0,
+        usage_missing: false,
         cost_micro: None,
+        price_unknown: false,
     })
 }
 
@@ -248,7 +380,7 @@ pub(crate) mod tests {
 
     #[test]
     fn chat_completions_bodies_follow_each_service() {
-        let request = Request { system: "rules", user: "hi", json: true, max_tokens: 100 };
+        let request = Request { system: "rules", user: "hi", json: true, max_tokens: 100, feature: Feature::Other };
         let official = chat_completions_body("gpt-6-luna", &request, true);
         assert_eq!(official["max_completion_tokens"], 100);
         assert!(official.get("max_tokens").is_none());
@@ -295,8 +427,8 @@ pub(crate) mod tests {
     fn a_completion_is_priced_and_stored_with_its_cached_tokens() {
         let db = crate::ai::cost::tests::temp_metrics_db("");
         let mut done = chat_completions_result(&luna_cache_hit(), "OpenAI".into(), "gpt-6-luna".into()).unwrap();
-        record(&db, "openai", &mut done, 1);
-        assert_eq!(done.cost_micro, Some(331));
+        record(&db, "openai", Feature::MailAnalysis, &mut done, 1);
+        assert_eq!((done.cost_micro, done.price_unknown), (Some(331), false));
         let stored: (i64, i64) = db.conn.lock().unwrap().query_row("SELECT cache_read_tokens, usd_cost_micro FROM inference_metrics", [], |r| Ok((r.get(0)?, r.get(1)?))).unwrap();
         assert_eq!(stored, (19_824, 331));
     }
@@ -311,6 +443,307 @@ pub(crate) mod tests {
         let done = gemini_result(&value, crate::ai::models::GEMINI_FLASH.into()).unwrap();
         assert_eq!(done.text, "OK");
         assert_eq!((done.input_tokens, done.output_tokens, done.cached_tokens), (1_000, 1_000, 300));
+    }
+
+    fn sort_request(json: bool) -> Request<'static> {
+        Request { system: "Sort this email.", user: "From: a@example.com", json, max_tokens: 2_048, feature: Feature::MailSort }
+    }
+
+    /// Claude's JSON mode is one forced tool call, so the object arrives as
+    /// structured input rather than text that may carry fences or prose.
+    #[test]
+    fn a_claude_json_request_forces_the_reply_tool() {
+        let body = claude_body("claude-sonnet-4-6", &sort_request(true));
+        assert_eq!(body["model"], "claude-sonnet-4-6");
+        assert_eq!(body["max_tokens"], 2_048);
+        assert_eq!(body["system"], "Sort this email.");
+        assert_eq!(body["messages"], json!([{"role": "user", "content": "From: a@example.com"}]));
+        assert_eq!(body["tools"].as_array().unwrap().len(), 1);
+        assert_eq!(body["tools"][0]["name"], CLAUDE_JSON_TOOL);
+        assert_eq!(body["tools"][0]["input_schema"], json!({"type": "object"}));
+        assert_eq!(body["tool_choice"], json!({"type": "tool", "name": CLAUDE_JSON_TOOL}));
+
+        let plain = claude_body("claude-sonnet-4-6", &Request { system: "", ..sort_request(false) });
+        assert!(plain.get("tools").is_none() && plain.get("tool_choice").is_none());
+        assert!(plain.get("system").is_none(), "no empty system prompt");
+    }
+
+    /// A Messages API reply to a forced tool call (stop_reason tool_use).
+    fn claude_tool_reply() -> Value {
+        json!({
+            "id": "msg_fixture", "type": "message", "role": "assistant", "model": "claude-sonnet-4-6",
+            "content": [{"type": "tool_use", "id": "toolu_fixture", "name": "json_reply", "input": {"category": "action", "summary": "Reply by Friday"}}],
+            "stop_reason": "tool_use",
+            "usage": {"input_tokens": 812, "output_tokens": 64}
+        })
+    }
+
+    #[test]
+    fn a_claude_json_reply_is_the_tool_input() {
+        let done = claude_result(&claude_tool_reply(), "claude-sonnet-4-6".into()).unwrap();
+        let parsed: Value = serde_json::from_str(&done.text).unwrap();
+        assert_eq!(parsed, json!({"category": "action", "summary": "Reply by Friday"}));
+        assert_eq!((done.provider.as_str(), done.input_tokens, done.output_tokens), ("Claude", 812, 64));
+    }
+
+    #[test]
+    fn a_plain_claude_reply_is_its_text() {
+        let value = json!({"content": [{"type": "text", "text": "Reply "}, {"type": "text", "text": "by Friday"}], "usage": {"input_tokens": 10, "output_tokens": 4}});
+        assert_eq!(claude_result(&value, "m".into()).unwrap().text, "Reply by Friday");
+        let empty_tool = json!({"content": [{"type": "tool_use", "name": "json_reply", "input": {}}], "usage": {}});
+        assert!(claude_result(&empty_tool, "m".into()).is_err(), "an empty object is no answer");
+    }
+
+    #[test]
+    fn a_bedrock_json_request_asks_for_one_object() {
+        use aws_sdk_bedrockruntime::types::{ContentBlock, ConversationRole, SystemContentBlock};
+        let request = super::super::bedrock::plain_request("Sort this email.", "From: a@example.com", true, 2_048, super::super::bedrock::UiLanguage::En).unwrap();
+        assert_eq!(request.system.len(), 1);
+        let SystemContentBlock::Text(system) = &request.system[0] else { panic!("a text system block") };
+        assert_eq!(system, &format!("Sort this email.\n\n{}", super::super::bedrock::JSON_INSTRUCTION));
+        assert_eq!(request.messages.len(), 1);
+        assert_eq!(*request.messages[0].role(), ConversationRole::User);
+        assert_eq!(request.messages[0].content(), &[ContentBlock::Text("From: a@example.com".into())]);
+        assert_eq!(request.inference.max_tokens(), Some(2_048));
+
+        let plain = super::super::bedrock::plain_request("", "hi", false, 10, super::super::bedrock::UiLanguage::En).unwrap();
+        assert!(plain.system.is_empty(), "no empty system block");
+        let json_only = super::super::bedrock::plain_request("", "hi", true, 10, super::super::bedrock::UiLanguage::En).unwrap();
+        assert_eq!(json_only.system, vec![SystemContentBlock::Text(super::super::bedrock::JSON_INSTRUCTION.into())]);
+    }
+
+    /// A Converse reply, as the SDK hands it back.
+    fn converse_reply(text: &str) -> aws_sdk_bedrockruntime::operation::converse::ConverseOutput {
+        use aws_sdk_bedrockruntime::types::{ContentBlock, ConversationRole, ConverseMetrics, ConverseOutput as Output, Message, StopReason, TokenUsage};
+        aws_sdk_bedrockruntime::operation::converse::ConverseOutput::builder()
+            .output(Output::Message(Message::builder().role(ConversationRole::Assistant).content(ContentBlock::Text(text.into())).build().unwrap()))
+            .stop_reason(StopReason::EndTurn)
+            .usage(TokenUsage::builder().input_tokens(700).output_tokens(40).total_tokens(1_040).cache_read_input_tokens(300).build().unwrap())
+            .metrics(ConverseMetrics::builder().latency_ms(5).build().unwrap())
+            .build()
+            .unwrap()
+    }
+
+    fn bedrock_entry() -> ProviderChainEntry {
+        ProviderChainEntry { position: 0, provider_type: "bedrock".into(), endpoint_id: None, model_id: None, enabled: true, base_url: None }
+    }
+
+    #[test]
+    fn a_bedrock_reply_carries_its_text_and_usage() {
+        let done = bedrock_result(&converse_reply("```json\n{\"category\": \"action\"}\n```"), "us.amazon.nova-pro-v1:0".into());
+        assert_eq!(done.text, "```json\n{\"category\": \"action\"}\n```", "checked later, after the row is stored");
+        // inputTokens leaves the cache read out; the row counts it in.
+        assert_eq!((done.input_tokens, done.output_tokens, done.cached_tokens, done.cache_write_tokens), (1_000, 40, 300, 0));
+        assert!(!done.usage_missing);
+        assert_eq!(done.provider, "Bedrock");
+    }
+
+    #[test]
+    fn a_bedrock_json_reply_is_one_object_without_fences() {
+        let db = crate::ai::cost::tests::temp_metrics_db("");
+        let done = bedrock_result(&converse_reply("```json\n{\"category\": \"action\"}\n```"), "us.amazon.nova-pro-v1:0".into());
+        let done = store_then_check(&db, &bedrock_entry(), &sort_request(true), done, 1).unwrap();
+        assert_eq!(done.text, r#"{"category":"action"}"#);
+        assert_eq!(crate::ai::cost::tests::usage_rows(&db).len(), 1);
+    }
+
+    /// AWS bills a reply that is not JSON, so its row is stored before the
+    /// check rejects it.
+    #[test]
+    fn a_bedrock_reply_that_is_not_json_is_stored_then_rejected() {
+        let db = crate::ai::cost::tests::temp_metrics_db("");
+        let prose = bedrock_result(&converse_reply("The email asks for a reply."), "us.amazon.nova-pro-v1:0".into());
+        let error = store_then_check(&db, &bedrock_entry(), &sort_request(true), prose, 1).unwrap_err();
+        assert_eq!(error, "Bedrock (us.amazon.nova-pro-v1:0) did not reply with valid JSON. Try again, or choose another model.");
+        let rows = crate::ai::cost::tests::usage_rows(&db);
+        assert_eq!(rows.len(), 1, "the billed reply is stored");
+        assert_eq!((rows[0].provider.as_str(), rows[0].feature.as_str(), rows[0].input_tokens, rows[0].output_tokens), ("bedrock", "mail_sort", 1_000, 40));
+
+        let array = bedrock_result(&converse_reply("[1, 2]"), "m".into());
+        assert!(store_then_check(&db, &bedrock_entry(), &sort_request(true), array, 1).is_err(), "an array is not the object asked for");
+        let plain = bedrock_result(&converse_reply("The email asks for a reply."), "m".into());
+        assert_eq!(store_then_check(&db, &bedrock_entry(), &sort_request(false), plain, 1).unwrap().text, "The email asks for a reply.");
+    }
+
+    /// No AWS credentials saved: Bedrock asks for them instead of saying it is
+    /// not supported. (No credentials row, so the Keychain is never read.)
+    #[tokio::test]
+    async fn bedrock_without_credentials_asks_for_them() {
+        let db = crate::db::test_database();
+        let mut router = AiRouter::new("gemini_primary");
+        router.set_provider_chain(vec![ProviderChainEntry { position: 0, provider_type: "bedrock".into(), endpoint_id: None, model_id: None, enabled: true, base_url: None }]);
+        let error = complete(&router, &db, sort_request(true)).await.unwrap_err();
+        assert_eq!(error, "AWS credentials are not set up. Add them in Settings and try again.");
+        db.conn.lock().unwrap().execute("INSERT OR REPLACE INTO user_preferences (key, value) VALUES ('ui_locale', 'zh-HK')", []).unwrap();
+        let error = complete(&router, &db, sort_request(true)).await.unwrap_err();
+        assert_eq!(error, "尚未設定 AWS 憑證，請在設定中加入後重試。");
+    }
+
+    /// The new Bedrock messages of a completion are in the interface
+    /// language: the not-JSON one here, the empty-reply one below, the rest
+    /// in bedrock.rs.
+    #[test]
+    fn bedrock_completion_errors_follow_the_interface_language() {
+        let db = crate::db::test_database();
+        db.conn.lock().unwrap().execute("INSERT OR REPLACE INTO user_preferences (key, value) VALUES ('ui_locale', 'zh-HK')", []).unwrap();
+        let prose = bedrock_result(&converse_reply("The email asks for a reply."), "us.amazon.nova-pro-v1:0".into());
+        let error = store_then_check(&db, &bedrock_entry(), &sort_request(true), prose, 1).unwrap_err();
+        assert_eq!(error, "Bedrock（us.amazon.nova-pro-v1:0）回覆的不是有效 JSON，請重試或改用其他模型。");
+        let empty = bedrock_result(&converse_reply(""), "us.amazon.nova-pro-v1:0".into());
+        let error = store_then_check(&db, &bedrock_entry(), &sort_request(false), empty, 1).unwrap_err();
+        assert_eq!(error, "Bedrock（us.amazon.nova-pro-v1:0）沒有回覆內容，請重試或改用其他模型。");
+        assert_eq!(crate::ai::cost::tests::usage_rows(&db).len(), 2, "both billed replies are stored");
+    }
+
+    /// AWS bills an empty reply, so it is stored before it is rejected.
+    #[test]
+    fn an_empty_bedrock_reply_is_stored_then_rejected() {
+        let db = crate::ai::cost::tests::temp_metrics_db("");
+        let empty = bedrock_result(&converse_reply("  "), "apac.amazon.nova-micro-v1:0".into());
+        let error = store_then_check(&db, &bedrock_entry(), &sort_request(false), empty, 1).unwrap_err();
+        assert_eq!(error, "Bedrock (apac.amazon.nova-micro-v1:0) returned no answer. Try again, or choose another model.");
+        let rows = crate::ai::cost::tests::usage_rows(&db);
+        assert_eq!(rows.len(), 1);
+        assert_eq!((rows[0].model_id.as_str(), rows[0].input_tokens, rows[0].output_tokens), ("apac.amazon.nova-micro-v1:0", 1_000, 40));
+    }
+
+    /// A reply without usage figures is not stored as a row of zeros, and
+    /// its cost is unknown.
+    #[test]
+    fn a_bedrock_reply_without_usage_stores_nothing() {
+        use aws_sdk_bedrockruntime::types::{ContentBlock, ConversationRole, ConverseOutput as Output, Message, StopReason};
+        let output = aws_sdk_bedrockruntime::operation::converse::ConverseOutput::builder()
+            .output(Output::Message(Message::builder().role(ConversationRole::Assistant).content(ContentBlock::Text("OK".into())).build().unwrap()))
+            .stop_reason(StopReason::EndTurn)
+            .build()
+            .unwrap();
+        let db = crate::ai::cost::tests::temp_metrics_db("");
+        let done = bedrock_result(&output, "us.amazon.nova-pro-v1:0".into());
+        assert!(done.usage_missing);
+        let done = store_then_check(&db, &bedrock_entry(), &sort_request(false), done, 1).unwrap();
+        assert_eq!((done.text.as_str(), done.cost_micro, done.price_unknown), ("OK", None, true));
+        assert!(crate::ai::cost::tests::usage_rows(&db).is_empty());
+    }
+
+    /// A Bedrock completion goes out to a stand-in for AWS. The model id the
+    /// user typed carries the US geography and the credentials were saved for
+    /// Singapore, so the request goes out as the APAC profile, and the row is
+    /// stored against that id with the four figures AWS returned, including
+    /// the cache write.
+    #[test]
+    fn a_bedrock_completion_stores_the_usage_aws_returned_for_the_model_it_sent() {
+        let _keychain = crate::aws::credentials::tests::KEYCHAIN_GUARD.lock().unwrap_or_else(|e| e.into_inner());
+        let runtime = tokio::runtime::Builder::new_current_thread().enable_all().build().unwrap();
+        runtime.block_on(async {
+            let db = std::sync::Arc::new(crate::db::test_database());
+            let creds = crate::ai::bedrock::tests::fixture_creds("ap-southeast-1");
+            crate::aws::credentials::AwsCredsRepo::new(db.clone()).save(&creds).await.unwrap();
+            let mut router = AiRouter::new("gemini_primary");
+            router.set_provider_chain(vec![ProviderChainEntry { position: 0, provider_type: "bedrock".into(), endpoint_id: None, model_id: Some("us.anthropic.claude-haiku-4-5-20251001-v1:0".into()), enabled: true, base_url: None }]);
+
+            let server = crate::ai::bedrock::tests::aws_loopback(200, None, crate::ai::bedrock::tests::converse_json("{\"category\": \"action\"}")).await;
+            let done = complete(&router, &db, sort_request(true)).await.unwrap();
+            let received = server.await.unwrap();
+            assert_eq!(received.path, "/model/apac.anthropic.claude-haiku-4-5-20251001-v1:0/converse");
+            assert!(received.body.contains(super::super::bedrock::JSON_INSTRUCTION), "a JSON request asks for one object");
+            assert_eq!(done.text, r#"{"category":"action"}"#);
+            assert_eq!(done.model, "apac.anthropic.claude-haiku-4-5-20251001-v1:0");
+
+            let rows = crate::ai::cost::tests::usage_rows(&db);
+            assert_eq!(rows.len(), 1);
+            assert_eq!((rows[0].provider.as_str(), rows[0].feature.as_str(), rows[0].model_id.as_str()), ("bedrock", "mail_sort", "apac.anthropic.claude-haiku-4-5-20251001-v1:0"));
+            assert_eq!((rows[0].input_tokens, rows[0].output_tokens), (1_320, 45));
+            assert_eq!(crate::ai::cost::tests::cache_tokens(&db), vec![(800, 400)]);
+
+            // A request AWS refuses stores nothing, and says why in the
+            // interface language.
+            let server = crate::ai::bedrock::tests::aws_loopback(403, Some("AccessDeniedException"), json!({"message": "PRIVATE-MAIL-CANARY"})).await;
+            let error = complete(&router, &db, sort_request(true)).await.unwrap_err();
+            server.await.unwrap();
+            assert_eq!(error, "Bedrock refused the AWS credentials or access to the model. Check them in Settings and try again.");
+            assert_eq!(crate::ai::cost::tests::usage_rows(&db).len(), 1, "nothing stored for the refused request");
+        });
+        let _ = crate::security::keychain::KeychainStore::delete("com.jarvis.aws", "secret_access_key");
+    }
+
+    /// Credentials saved on this Mac whose Keychain item is gone: the user is
+    /// asked to save them again, in the interface language, and sees no
+    /// Keychain text. Nothing is sent, so nothing is stored.
+    #[test]
+    fn bedrock_credentials_that_cannot_be_read_ask_to_be_saved_again() {
+        let _keychain = crate::aws::credentials::tests::KEYCHAIN_GUARD.lock().unwrap_or_else(|e| e.into_inner());
+        let runtime = tokio::runtime::Builder::new_current_thread().enable_all().build().unwrap();
+        runtime.block_on(async {
+            let db = std::sync::Arc::new(crate::db::test_database());
+            crate::aws::credentials::AwsCredsRepo::new(db.clone()).save(&crate::ai::bedrock::tests::fixture_creds("ap-southeast-1")).await.unwrap();
+            crate::security::keychain::KeychainStore::delete("com.jarvis.aws", "secret_access_key").unwrap();
+            let mut router = AiRouter::new("gemini_primary");
+            router.set_provider_chain(vec![ProviderChainEntry { position: 0, provider_type: "bedrock".into(), endpoint_id: None, model_id: None, enabled: true, base_url: None }]);
+
+            let error = complete(&router, &db, sort_request(true)).await.unwrap_err();
+            assert_eq!(error, "JARVIS could not read your saved AWS credentials. Save them again in Settings and try again.");
+            db.conn.lock().unwrap().execute("INSERT OR REPLACE INTO user_preferences (key, value) VALUES ('ui_locale', 'zh-HK')", []).unwrap();
+            let error = complete(&router, &db, sort_request(true)).await.unwrap_err();
+            assert_eq!(error, "JARVIS 未能讀取已儲存的 AWS 憑證，請在設定中重新儲存後重試。");
+            assert!(!error.to_lowercase().contains("keychain"));
+            assert!(crate::ai::cost::tests::usage_rows(&db).is_empty());
+        });
+    }
+
+    /// One loopback HTTP reply, for a request that would go to a service.
+    async fn one_reply(body: Value) -> (u16, tokio::task::JoinHandle<String>) {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        let listener = tokio::net::TcpListener::bind((std::net::Ipv4Addr::LOCALHOST, 0)).await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let task = tokio::spawn(async move {
+            let (mut stream, _) = listener.accept().await.unwrap();
+            let mut request = Vec::new();
+            let mut buffer = [0; 4096];
+            loop {
+                let count = stream.read(&mut buffer).await.unwrap();
+                request.extend_from_slice(&buffer[..count]);
+                let text = String::from_utf8_lossy(&request).to_string();
+                if let Some(end) = text.find("\r\n\r\n") {
+                    let length = text[..end].lines().find_map(|line| line.to_lowercase().strip_prefix("content-length:").map(|n| n.trim().parse::<usize>().unwrap())).unwrap_or(0);
+                    if request.len() >= end + 4 + length || count == 0 {
+                        break;
+                    }
+                }
+            }
+            let body = body.to_string();
+            let reply = format!("HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}", body.len());
+            stream.write_all(reply.as_bytes()).await.unwrap();
+            String::from_utf8_lossy(&request).to_string()
+        });
+        (port, task)
+    }
+
+    /// The row says what the completion was for and names the service by its
+    /// provider id; a model without a price is stored with the cost unknown.
+    #[tokio::test]
+    async fn a_completion_is_stored_with_its_feature_and_provider_id() {
+        let (port, server) = one_reply(json!({"choices": [{"message": {"content": "{\"category\": \"action\"}"}}], "usage": {"prompt_tokens": 300, "completion_tokens": 20}})).await;
+        let base = format!("http://127.0.0.1:{port}/v1");
+        let mut router = AiRouter::new("gemini_primary");
+        router.set_compat_key(&base, "sk-fixture-not-a-real-key");
+        router.set_provider_chain(vec![ProviderChainEntry { position: 0, provider_type: "openai".into(), endpoint_id: None, model_id: Some("unlisted-chat-1".into()), enabled: true, base_url: Some(base) }]);
+        let db = crate::ai::cost::tests::temp_metrics_db("");
+        let done = complete(&router, &db, sort_request(true)).await.unwrap();
+        assert_eq!((done.cost_micro, done.price_unknown), (None, true));
+        let request = server.await.unwrap();
+        assert!(request.starts_with("POST /v1/chat/completions"), "{request}");
+        assert_eq!(
+            crate::ai::cost::tests::usage_rows(&db),
+            vec![crate::ai::cost::tests::UsageRow {
+                provider: "compat:127.0.0.1".into(),
+                feature: "mail_sort".into(),
+                model_id: "unlisted-chat-1".into(),
+                input_tokens: 300,
+                output_tokens: 20,
+                usd_cost_micro: None,
+                price_unknown: true,
+            }]
+        );
     }
 
     /// Gemini's OpenAI-compatible endpoint stands in for Kimi and Qwen: a
@@ -349,11 +782,11 @@ pub(crate) mod tests {
         compatible.set_provider_chain(vec![entry("openai", Some(crate::ai::models::GEMINI_FLASH), Some(GEMINI_COMPAT))]);
         cases.push(("compatible", compatible));
         for (name, router) in cases {
-            let done = complete(&router, &db, Request { system: "Answer in one word.", user: "Reply with the single word OK.", json: false, max_tokens: 1_024 }).await;
+            let done = complete(&router, &db, Request { system: "Answer in one word.", user: "Reply with the single word OK.", json: false, max_tokens: 1_024, feature: Feature::Other }).await;
             println!("{name}: {done:?}");
             let done = done.unwrap_or_else(|e| panic!("{name}: {e}"));
             assert!(done.text.to_uppercase().contains("OK"), "{name}: {}", done.text);
-            let json = complete(&router, &db, Request { system: "", user: "Return a JSON object with one field \"ok\" set to true.", json: true, max_tokens: 1_024 }).await.unwrap();
+            let json = complete(&router, &db, Request { system: "", user: "Return a JSON object with one field \"ok\" set to true.", json: true, max_tokens: 1_024, feature: Feature::Other }).await.unwrap();
             let parsed: Value = serde_json::from_str(json.text.trim().trim_start_matches("```json").trim_end_matches("```").trim()).unwrap_or_else(|_| panic!("{name} JSON: {}", json.text));
             assert_eq!(parsed["ok"], true, "{name}");
         }
@@ -367,7 +800,7 @@ pub(crate) mod tests {
         let db = crate::db::test_database();
         let mut router = AiRouter::new("gemini_primary");
         router.set_provider_chain(Vec::new());
-        let error = complete(&router, &db, Request { system: "", user: "hi", json: false, max_tokens: 10 }).await.unwrap_err();
+        let error = complete(&router, &db, Request { system: "", user: "hi", json: false, max_tokens: 10, feature: Feature::Other }).await.unwrap_err();
         assert!(error.contains("尚未選擇 AI"), "{error}");
     }
 }

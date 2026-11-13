@@ -31,7 +31,9 @@ pub struct SweepReport {
     pub mail_bodies_cleared: usize,
     pub conversations_deleted: usize,
     pub emails_deleted: usize,
-    pub metrics_deleted: usize,
+    /// AI usage requests moved into the daily totals (ai/usage.rs), not
+    /// deleted: the totals are kept two years.
+    pub usage_rows_rolled_up: usize,
     pub briefings_deleted: usize,
 }
 
@@ -40,7 +42,7 @@ impl SweepReport {
         self.mail_bodies_cleared
             + self.conversations_deleted
             + self.emails_deleted
-            + self.metrics_deleted
+            + self.usage_rows_rolled_up
             + self.briefings_deleted
     }
 }
@@ -133,6 +135,12 @@ fn read_pref(conn: &Connection, key: &str) -> Option<String> {
 
 /// Drop content that is older than the retention window.
 ///
+/// AI usage is not deleted here. The roll-up runs first and moves the
+/// requests older than the per-request window, which is never longer than
+/// the retention window, into the daily totals (ai/usage.rs); those hold no
+/// prompts or mail and are kept two years. A roll-up that fails leaves the
+/// usage as it was and does not stop the rest of the clean-up.
+///
 /// Mail bodies are nulled rather than deleted so the message row, its subject,
 /// sender and snippet survive -- the workspace list and any citation that
 /// points at the message keep working. Messages the user filed into a group are
@@ -146,6 +154,15 @@ pub fn sweep(conn: &Connection, retention_days: i64) -> Result<SweepReport, Stri
     }
     let text_cutoff = format!("-{retention_days} days");
     let err = |e: rusqlite::Error| e.to_string();
+
+    let per_request_days = crate::ai::usage::per_request_days_for(Some(retention_days));
+    let usage_rows_rolled_up = match crate::ai::usage::roll_up(conn, chrono::Utc::now().timestamp(), per_request_days) {
+        Ok(rolled) => rolled.requests_moved,
+        Err(e) => {
+            log::warn!("storage: usage roll-up failed, usage left as it was: {e}");
+            0
+        }
+    };
 
     let mail_bodies_cleared = conn
         .execute(
@@ -171,16 +188,9 @@ pub fn sweep(conn: &Connection, retention_days: i64) -> Result<SweepReport, Stri
         )
         .map_err(err)?;
 
-    // inference_metrics.ts and daily_briefings.created_at are unix seconds
-    // (chrono::Utc::now().timestamp()), not the datetime() text the tables
-    // above use, so they need strftime rather than a string comparison.
-    let metrics_deleted = conn
-        .execute(
-            "DELETE FROM inference_metrics WHERE ts < strftime('%s', 'now', ?1)",
-            [&text_cutoff],
-        )
-        .map_err(err)?;
-
+    // daily_briefings.created_at is unix seconds, not the datetime() text
+    // the tables above use, so it needs strftime rather than a string
+    // comparison.
     let briefings_deleted = conn
         .execute(
             "DELETE FROM daily_briefings WHERE created_at < strftime('%s', 'now', ?1)",
@@ -192,7 +202,7 @@ pub fn sweep(conn: &Connection, retention_days: i64) -> Result<SweepReport, Stri
         mail_bodies_cleared,
         conversations_deleted,
         emails_deleted,
-        metrics_deleted,
+        usage_rows_rolled_up,
         briefings_deleted,
     })
 }
@@ -470,15 +480,52 @@ mod tests {
         let db = test_database();
         let conn = db.conn.lock().unwrap();
         seed(&conn);
+        conn.execute(
+            "INSERT INTO daily_briefings(date_hkt, summary_md, actions_json, created_at) VALUES
+                ('2020-01-01', 'old', '[]', strftime('%s','now','-200 days')), ('2026-01-01', 'new', '[]', strftime('%s','now'))",
+            [],
+        )
+        .unwrap();
 
         let report = sweep(&conn, 90).unwrap();
         assert_eq!(report.conversations_deleted, 1);
-        assert_eq!(report.metrics_deleted, 1, "ts is unix seconds, not text");
+        assert_eq!(report.briefings_deleted, 1, "created_at is unix seconds, not text");
 
         let conversations: i64 = conn
             .query_row("SELECT COUNT(*) FROM conversations", [], |r| r.get(0))
             .unwrap();
         assert_eq!(conversations, 1, "the recent turn is kept");
+    }
+
+    /// The clean-up deletes no AI usage: the 200-day-old request is moved
+    /// into the daily totals and still counts, and the recent one stays a
+    /// request. Under 30 days, the clean-up window is the per-request one.
+    #[test]
+    fn sweep_moves_old_usage_into_the_daily_totals_instead_of_deleting_it() {
+        let db = test_database();
+        let conn = db.conn.lock().unwrap();
+        seed(&conn);
+        let now = chrono::Utc::now().timestamp();
+        let year = crate::ai::usage::Period::last(365, now).unwrap();
+        let before = crate::ai::usage::totals(&conn, year).unwrap();
+        assert_eq!(before.sums.requests, 2);
+
+        let report = sweep(&conn, 90).unwrap();
+        assert_eq!(report.usage_rows_rolled_up, 1);
+        assert_eq!(crate::ai::usage::totals(&conn, year).unwrap(), before, "moved, not lost");
+        let (requests, totals): (i64, i64) = conn
+            .query_row("SELECT (SELECT COUNT(*) FROM inference_metrics), (SELECT COUNT(*) FROM usage_daily)", [], |r| Ok((r.get(0)?, r.get(1)?)))
+            .unwrap();
+        assert_eq!((requests, totals), (1, 1));
+
+        conn.execute(
+            "INSERT INTO inference_metrics(ts,workload,model_id,input_tokens,output_tokens,latency_ms) VALUES (strftime('%s','now','-10 days'),'volume','m',1,1,1)",
+            [],
+        )
+        .unwrap();
+        assert_eq!(sweep(&conn, 7).unwrap().usage_rows_rolled_up, 1, "a 7-day clean-up moves a 10-day-old request");
+        let month = crate::ai::usage::Period::last(30, now).unwrap();
+        assert_eq!(crate::ai::usage::totals(&conn, month).unwrap().sums.requests, 2, "and the 30-day view still shows it");
     }
 
     #[test]

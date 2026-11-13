@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState } from "react";
+import { Fragment, useEffect, useId, useReducer, useRef, useState } from "react";
 import {
   accountStatus,
   getSettings,
@@ -32,6 +32,7 @@ import {
   setAwsCredentials,
   getAwsCredentialsStatus,
   clearAwsCredentials,
+  listBedrockModels,
   getPreference,
   setPreference,
   setApiKey,
@@ -59,13 +60,17 @@ import ChooseAi from "../components/ChooseAi";
 import { useAiModels } from "../lib/ai-models";
 import { aiServiceLabel, currentAi, type CurrentAi } from "../lib/ai-choice";
 import AccountPanel from "../components/AccountPanel";
+import CostPanel from "../components/CostPanel";
+import { sweepSummary } from "../lib/storage-report";
 import BackgroundSettings from "../components/BackgroundSettings";
 import { UserRound } from "lucide-react";
-import { useWorkspace, useWorkspaceValue } from "../workspace/WorkspaceContext";
+import { useIsActiveTab, useWorkspace, useWorkspaceValue } from "../workspace/WorkspaceContext";
+import { OTHER_MODEL, groupLabel, groupedOptions, initialPicker, listStatus, pickerOptions, pickerReducer, selectValue, type BedrockListState } from "../lib/bedrock-models";
+import { useUserHasActed } from "../lib/user-activity";
 import "./settings-workspace.css";
 import { MAX_ADDRESS_CHARS, MAX_INSTRUCTIONS_CHARS, PERSONA_CHOICES, personaLabel, personaValue, type PersonaKey } from "../lib/persona";
 import { canSwitchListening, voiceStateKind } from "../lib/always-listening";
-import { Cpu, Key, Globe, Gem, Mic, Bot, Palette, HardDrive, Power, GithubMark, NotionMark } from "../components/icons";
+import { Cpu, Key, Globe, Gem, Mic, Bot, Palette, HardDrive, BarChart3, Power, GithubMark, NotionMark } from "../components/icons";
 
 const API_KEY_PROVIDERS = [
   { id: "gemini", label: "Google Gemini", help: "Gemini chat and speech-to-text" },
@@ -275,6 +280,36 @@ export default function Settings() {
     getProviderChain().then(setChain).catch(() => {});
   }, []);
 
+  // The Bedrock model picker's list (lib/bedrock-models.ts). Asked for once
+  // each time the Models section comes on screen with a Bedrock row, again
+  // when the user loads it again or saves or removes AWS credentials, and
+  // only after someone has used this window: a Settings tab restored at
+  // launch, or one in the background, asks nothing. Kept in memory while the
+  // section stays open; the request runs at most once per opening, StrictMode's
+  // second effect run included.
+  const tabActive = useIsActiveTab();
+  const userActed = useUserHasActed();
+  const bedrockOnScreen = tabActive && section === "ai" && chain.some((entry) => entry.provider_type === "bedrock");
+  const [bedrockList, setBedrockList] = useState<BedrockListState>({ status: "idle" });
+  const [bedrockAsk, setBedrockAsk] = useState(0);
+  const bedrockAsked = useRef<number | null>(null);
+  const bedrockRequest = useRef(0);
+  useEffect(() => {
+    if (!bedrockOnScreen) {
+      bedrockAsked.current = null;
+      bedrockRequest.current += 1;
+      setBedrockList({ status: "idle" });
+      return;
+    }
+    if (!userActed || bedrockAsked.current === bedrockAsk) return;
+    bedrockAsked.current = bedrockAsk;
+    const request = ++bedrockRequest.current;
+    setBedrockList({ status: "loading" });
+    listBedrockModels()
+      .then((list) => { if (bedrockRequest.current === request) setBedrockList({ status: "ready", list }); })
+      .catch(() => { if (bedrockRequest.current === request) setBedrockList({ status: "error" }); });
+  }, [bedrockOnScreen, userActed, bedrockAsk]);
+
   // Reading the storage report walks the models and cache directories, so it is
   // deferred until the panel is actually opened rather than run on every mount.
   useEffect(() => {
@@ -307,15 +342,7 @@ export default function Settings() {
 
   function handleSweep() {
     void runStorageAction(text("Sweeping", "正在清理"), async () => {
-      const report = await runStorageSweep();
-      const rows = report.mailBodiesCleared + report.conversationsDeleted
-        + report.emailsDeleted + report.metricsDeleted + report.briefingsDeleted;
-      return rows === 0
-        ? text("Nothing was old enough to remove.", "沒有超過保留期限的資料。")
-        : text(
-            `Removed ${rows} item(s): ${report.mailBodiesCleared} mail bodies, ${report.conversationsDeleted} chat turns, ${report.emailsDeleted} cached emails.`,
-            `已清理 ${rows} 項：郵件內文 ${report.mailBodiesCleared}、對話記錄 ${report.conversationsDeleted}、快取郵件 ${report.emailsDeleted}。`,
-          );
+      return sweepSummary(await runStorageSweep(), text);
     });
   }
 
@@ -477,6 +504,21 @@ export default function Settings() {
       await updateProviderChain(reindexed);
     } catch (e) {
       setLlmError(String(e));
+    }
+  }
+
+  // The backend saves the id trimmed, or the default model when empty, and
+  // refuses one that cannot be a Bedrock id; the list is read back so the row
+  // shows what was saved. The error goes back to the field, which shows it
+  // beside the input.
+  async function handleSetBedrockModel(index: number, model: string): Promise<string | null> {
+    const updated = chain.map((c, i) => i === index ? { ...c, model_id: model || undefined } : c);
+    try {
+      await updateProviderChain(updated);
+      setChain(await getProviderChain());
+      return null;
+    } catch (e) {
+      return String(e);
     }
   }
 
@@ -728,6 +770,7 @@ export default function Settings() {
   const SECTIONS = [
     { id: "account", label: t("accountSection"), icon: <UserRound size={17} /> },
     { id: "ai", label: text("Models", "模型"), icon: <Cpu size={17} /> },
+    { id: "usage", label: text("Usage", "用量"), icon: <BarChart3 size={17} /> },
     { id: "keys", label: t("apiKeys"), icon: <Key size={17} /> },
     { id: "google", label: text("Assistant Google", "助手 Google"), icon: <Globe size={17} /> },
     { id: "notion", label: "Notion", icon: <NotionMark size={17} /> },
@@ -795,7 +838,8 @@ export default function Settings() {
                 ? `Bedrock (${entry.model_id || text("default", "預設")})`
                 : entry.provider_type;
               return (
-                <div key={i} className="settings-chain-row">
+                <div key={i}>
+                <div className="settings-chain-row">
                   <span style={{ color: "var(--text-muted)", fontSize: 12, fontFamily: "var(--font-mono)", width: 16 }}>{i + 1}.</span>
                   <span style={{ color: entry.enabled ? "var(--text-primary)" : "var(--text-secondary)", fontSize: 13, minWidth: 0, overflowWrap: "anywhere" }}>{label}</span>
                   <button aria-label={`${text("Move", "上移")} ${label}`} onClick={() => handleMoveChainEntry(i, "up")} disabled={i === 0} style={{ ...styles.saveBtn, fontSize: 12, padding: "1px 5px" }}>↑</button>
@@ -804,6 +848,10 @@ export default function Settings() {
                     <input type="checkbox" aria-label={`${text("Enable", "啟用")} ${label}`} checked={entry.enabled} onChange={() => handleToggleChainEntry(i)} style={styles.radio} />
                   </label>
                   <button aria-label={`${text("Remove from priority", "從優先次序移除")} ${label}`} onClick={() => handleRemoveFromChain(i)} style={{ ...styles.saveBtn, fontSize: 12, padding: "1px 5px", borderColor: "var(--accent-urgent)", color: "var(--accent-urgent)" }}>{text('Remove', '移除')}</button>
+                </div>
+                {entry.provider_type === "bedrock" && (
+                  <BedrockModelField saved={entry.model_id ?? ""} fallback={models?.defaults.bedrock ?? ""} listState={bedrockList} onReload={() => setBedrockAsk((n) => n + 1)} onSave={(model) => handleSetBedrockModel(i, model)} />
+                )}
                 </div>
               );
             })}
@@ -817,7 +865,7 @@ export default function Settings() {
               <button disabled={!models} onClick={() => models && handleAddToChain("gemini", undefined, models.defaults.gemini_flash)} style={styles.saveBtn}>+ Gemini Flash</button>
               <button onClick={() => handleAddToChain("claude")} style={styles.saveBtn}>+ Claude</button>
               <button onClick={() => handleAddToChain("openai")} style={styles.saveBtn}>+ OpenAI</button>
-              <button disabled={!models} onClick={() => models && handleAddToChain("bedrock", undefined, models.defaults.bedrock)} style={styles.saveBtn}>+ Bedrock Claude</button>
+              <button disabled={!models} onClick={() => models && handleAddToChain("bedrock", undefined, models.defaults.bedrock)} style={styles.saveBtn}>+ Bedrock</button>
             </div>
           </div>
 
@@ -1105,6 +1153,7 @@ export default function Settings() {
                   await setAwsCredentials(awsAccessKey, awsSecret, awsRegion);
                   setAwsAccessKey(""); setAwsSecret("");
                   setAwsStatus(await getAwsCredentialsStatus());
+                  setBedrockAsk((n) => n + 1);
                 } catch (e) {
                   setAwsError(String(e));
                 }
@@ -1113,6 +1162,7 @@ export default function Settings() {
                 <button onClick={async () => {
                   await clearAwsCredentials();
                   setAwsStatus({ configured: false, region: null });
+                  setBedrockAsk((n) => n + 1);
                 }} style={{ ...styles.saveBtn, borderColor: "var(--accent-urgent)", color: "var(--accent-urgent)" }}>{text("Remove key", "移除密鑰")}</button>
               )}
             </div>
@@ -1327,6 +1377,18 @@ export default function Settings() {
           </div>
         </>)}
 
+        {section === "usage" && (
+          <div className="settings-panel">
+            <h2 className="settings-heading">{text("Usage recorded on this Mac", "此 Mac 記錄的用量")}</h2>
+            <p className="settings-help" style={{ marginBottom: 14, maxWidth: "72ch" }}>
+              {text(
+                "The AI requests JARVIS sent from this Mac, recorded only on this Mac. Costs are worked out from list prices where JARVIS knows them, so your provider's bill is the final figure. Token counts show input without the cache, output, and cache reads and writes when there are any. For AWS Bedrock these are the figures AWS returned for each request (input is AWS's inputTokens), and your AWS bill is the final figure.",
+                "JARVIS 在此 Mac 發出的 AI 請求，只記錄在此 Mac。費用按 JARVIS 已知的公開價目計算，實際收費以供應商帳單為準。token 數目分開顯示不含快取的輸入、輸出，以及快取讀取及寫入（如有）。AWS Bedrock 的數字是 AWS 就每次請求回報的數字（輸入即 AWS 的 inputTokens），實際收費以你的 AWS 帳單為準。",
+              )}
+            </p>
+            <CostPanel />
+          </div>
+        )}
         {section === "storage" && (<>
           <div className="settings-panel">
             <h2 className="settings-heading">{text('On this Mac', '本機用量')}</h2>
@@ -1372,8 +1434,8 @@ export default function Settings() {
             <h2 className="settings-heading">{text('Automatic clean-up', '自動清理')}</h2>
             <p style={styles.hint}>
               {text(
-                "When enabled, clean-up runs on launch or when you choose Clean up now. Ungrouped mail is aged from its last local save: only its text is removed, while subjects, senders and previews remain. Grouped mail is kept. Old conversations and related cached records are also removed.",
-                "啟用後，JARVIS 會在啟動或按「立即清理」時執行清理。未分組郵件以最近儲存日期計算期限，只移除內文，保留主旨、寄件人及預覽；已分組的郵件會保留。超過期限的對話及相關快取記錄亦會移除。",
+                "When enabled, clean-up runs on launch or when you choose Clean up now. Ungrouped mail is aged from its last local save: only its text is removed, while subjects, senders and previews remain. Grouped mail is kept. Old conversations, cached emails and briefings are also removed. AI usage records are not deleted: after 30 days they are combined into daily usage totals, which hold no prompts or mail and are kept for two years.",
+                "啟用後，JARVIS 會在啟動或按「立即清理」時執行清理。未分組郵件以最近儲存日期計算期限，只移除內文，保留主旨、寄件人及預覽；已分組的郵件會保留。超過期限的對話、快取郵件及簡報亦會移除。AI 用量記錄不會被刪除：30 日後會合併為每日用量總數；每日用量總數不含提示或郵件內容，保留兩年。",
               )}
             </p>
             <label style={styles.option}>
@@ -1492,6 +1554,70 @@ export default function Settings() {
         </>)}
 
       </div>
+    </div>
+  );
+}
+
+/**
+ * The model a Bedrock row runs, picked by name from the list the Models
+ * section loaded (lib/bedrock-models.ts): AWS's list for the saved region,
+ * or the built-in list, with a line saying which. Picking a listed model or
+ * the default saves it at once. "Other (enter an ID)" shows the ID field and
+ * its check as before. An id saved earlier that the list does not hold stays
+ * the current choice. Requests and their usage rows use the id that is sent
+ * (ai/mod.rs apply_inference_profile).
+ */
+function BedrockModelField({ saved, fallback, listState, onReload, onSave }: { saved: string; fallback: string; listState: BedrockListState; onReload: () => void; onSave: (model: string) => Promise<string | null> }) {
+  const { text } = useUiLocale();
+  const [state, dispatch] = useReducer(pickerReducer, saved, initialPicker);
+  useEffect(() => { dispatch({ type: "synced", saved }); }, [saved]);
+  const statusId = useId();
+  const options = pickerOptions(listState.status === "ready" ? listState.list : null, saved, fallback, text);
+  const busy = state.pending !== null;
+  const changed = state.draft.trim() !== saved;
+  async function save(value: string) {
+    dispatch({ type: "saving", value });
+    dispatch({ type: "saved", error: await onSave(value) });
+  }
+  function choose(value: string) {
+    dispatch({ type: "choose", value, saved });
+    if (value !== OTHER_MODEL && value !== saved) void save(value);
+  }
+  return (
+    <div className="settings-bedrock-model">
+      <label>
+        <span>{text("Bedrock model", "Bedrock 模型")}</span>
+        <select value={selectValue(state, saved)} disabled={busy} aria-describedby={statusId} onChange={(e) => choose(e.target.value)} style={styles.select}>
+          {groupedOptions(options).map((run, index) => {
+            const heading = groupLabel(run.group, text);
+            const items = run.options.map((option) => <option key={option.value} value={option.value}>{option.label}</option>);
+            return heading ? <optgroup key={index} label={heading}>{items}</optgroup> : <Fragment key={index}>{items}</Fragment>;
+          })}
+        </select>
+      </label>
+      <button disabled={listState.status === "loading" || busy} onClick={onReload} style={styles.saveBtn}>
+        {listState.status === "idle" ? text("Load the list", "載入清單") : text("Load the list again", "重新載入清單")}
+      </button>
+      <p id={statusId} role="status" className="settings-help">{listStatus(listState, text)}</p>
+      {state.other && (<>
+        <label>
+          <span>{text("Bedrock model ID", "Bedrock 模型 ID")}</span>
+          <input value={state.draft} placeholder={fallback} spellCheck={false} autoCapitalize="off" autoCorrect="off" disabled={busy}
+            onChange={(e) => dispatch({ type: "type", draft: e.target.value })}
+            onKeyDown={(e) => { if (e.key === "Enter" && changed && !busy) void save(state.draft.trim()); }}
+            style={{ ...styles.tokenInput, fontFamily: "var(--font-mono)" }} />
+        </label>
+        <button disabled={!changed || busy} onClick={() => void save(state.draft.trim())} style={styles.saveBtn}>{text("Save model", "儲存模型")}</button>
+      </>)}
+      {state.error && <p role="alert" className="settings-bedrock-model-error">{state.error}</p>}
+      {state.other && (
+        <p className="settings-help">
+          {text(
+            `A model ID or an inference profile ID from the Bedrock console. A us., eu. or apac. profile is sent for the region of your saved AWS credentials; other IDs are sent as typed. Leave it empty for ${fallback || "the default model"}. Usage is recorded against the ID that is sent.`,
+            `可輸入 Bedrock 主控台的模型 ID 或推論設定檔 ID。us.、eu. 或 apac. 開頭的設定檔會按已儲存 AWS 憑證的地區發送，其他 ID 按輸入內容發送。留空即使用 ${fallback || "預設模型"}。用量按實際發送的 ID 記錄。`,
+          )}
+        </p>
+      )}
     </div>
   );
 }
