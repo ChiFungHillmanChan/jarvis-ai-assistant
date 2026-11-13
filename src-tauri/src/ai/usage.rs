@@ -122,9 +122,10 @@ pub struct Sums {
     /// Input without the cache, the way AWS reports inputTokens, worked out
     /// row by row (a request, or a day's total) and then added up. A row
     /// whose input is smaller than its cache reads and writes cannot hold
-    /// the cache (ai/cost.rs `correct_old_rows` corrects every such Claude
-    /// and Bedrock row before anything reads them), so its input counts as
-    /// stored: the figure is never below zero, and nothing is clamped away.
+    /// the cache (ai/cost.rs `correct_old_rows` corrects every such Bedrock
+    /// row before anything reads them, and no release stored a Claude row
+    /// with cache figures), so its input counts as stored: the figure is
+    /// never below zero, and nothing is clamped away.
     pub input_without_cache: i64,
     /// Characters of MiniMax speech ([`BILLED_BY_CHARACTER`]); none of them
     /// is in the token figures above.

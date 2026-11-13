@@ -285,7 +285,7 @@ pub struct Corrected {
     pub billed_at_zero: usize,
     /// 3: a local model's row that held a cost; now free.
     pub local_made_free: usize,
-    /// 4: Claude and Bedrock input stored without the cache; now with it.
+    /// 4: Bedrock input stored without the cache; now with it.
     pub cache_added: usize,
 }
 
@@ -312,22 +312,23 @@ pub struct Corrected {
 /// 3. A local model's row with a cost above zero (stored as 'ollama' or
 ///    '本機 ai' by v0.5.0 to v0.5.4, which priced only 'local' as free): the
 ///    cost becomes 0 with price_unknown 0. Local work is free, not unknown.
-/// 4. A Claude or Bedrock row with cache tokens that is proven to be from
-///    before the cache fix. Up to v0.5.10 both stored the provider's input
-///    figure, which leaves the cache out, and the cost then took the cache
-///    out of it again. Proven old: stored before [`INCLUSIVE_INPUT_SINCE`],
+/// 4. A Bedrock row with cache tokens that is proven to be from before the
+///    cache fix. Up to v0.5.10 Bedrock stored AWS's inputTokens, which leaves
+///    the cache out, and the cost then took the cache out of it again, so the
+///    cost was too low. Proven old: stored before [`INCLUSIVE_INPUT_SINCE`],
 ///    or with input smaller than its cache reads and writes, which a row
 ///    stored the new way can never be. The input becomes the sum of input,
 ///    cache read and cache write, the convention new rows use; when the
 ///    row's price is known today its cost becomes what a new row with those
 ///    tokens gets (`models::usd_cost_micro`). Otherwise rules 1 and 2 have
 ///    decided the cost. A row that cannot be proven old, and one without
-///    cache tokens (the bug did not touch it), is left alone. A turn row of
-///    several requests is priced as one request: the row does not say how
-///    many it took, so a long-context tier (today only Claude Haiku 5.5,
-///    above 100K input per request) can apply to its sum when it applied to
-///    none of its requests, and the turn is rounded once rather than per
-///    request.
+///    cache tokens (the bug did not touch it), is left alone. Every release
+///    stored one Bedrock row per request, so the price, a long-context tier
+///    included, applies to one request, as it does to a new row.
+///    A Claude row is never changed by this rule, whatever it holds. No
+///    release asked Anthropic to cache (`cache_control` is in no release's
+///    ai/claude.rs), so the Claude rows releases stored hold no cache
+///    figures and their costs were right.
 ///
 /// Rules 1 to 3 decide the cost on the tokens as stored, which is what the
 /// old guess was worked out on; rule 4 then corrects the input. A row that
@@ -411,7 +412,7 @@ pub fn correct_old_rows(conn: &rusqlite::Connection) -> rusqlite::Result<Correct
         let mut stmt = tx.prepare(
             "SELECT id, provider, model_id, input_tokens, output_tokens, cache_read_tokens, cache_write_tokens, price_unknown
              FROM inference_metrics
-             WHERE provider IN ('claude', 'bedrock') AND cache_read_tokens + cache_write_tokens > 0
+             WHERE provider = 'bedrock' AND cache_read_tokens + cache_write_tokens > 0
                AND (ts < ?1 OR input_tokens < cache_read_tokens + cache_write_tokens)",
         )?;
         let rows = stmt.query_map([INCLUSIVE_INPUT_SINCE], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?, r.get(5)?, r.get(6)?, r.get(7)?)))?;
@@ -438,7 +439,7 @@ pub fn correct_old_rows_on_open(conn: &rusqlite::Connection) {
     match correct_old_rows(conn) {
         Ok(corrected) if corrected == Corrected::default() => {}
         Ok(Corrected { guessed, billed_at_zero, local_made_free, cache_added }) => log::info!(
-            "cost: old usage rows corrected: {guessed} billed at the guessed rate and {billed_at_zero} billed at zero now count as price unknown, {local_made_free} local rows are free, {cache_added} Claude and Bedrock rows now count their cache in the input"
+            "cost: old usage rows corrected: {guessed} billed at the guessed rate and {billed_at_zero} billed at zero now count as price unknown, {local_made_free} local rows are free, {cache_added} Bedrock rows now count their cache in the input"
         ),
         Err(e) => log::warn!("cost: could not correct the old usage rows; trying again at the next start: {e}"),
     }
@@ -611,8 +612,9 @@ pub(crate) mod tests {
             (OLD, "openai", "gpt-unlisted-1", 3_000, 40, 0, 0, Some(0), "mail_sort", 0),
             // 5: a local model billed at the guess (v0.5.0 to v0.5.4). Rule 3.
             (OLD, "local", "llama3.2", 12_000, 800, 2_000, 0, Some(kimi), "mail_analysis", 0),
-            // 6: Claude Sonnet 4.6 before the cache fix, priced today. Rule 4.
-            (OLD, "claude", "claude-sonnet-4-6", 12_000, 800, 2_000, 0, Some(kimi), "chat", 0),
+            // 6: Bedrock Haiku 4.5 before the cache fix, priced today: AWS's
+            // inputTokens 120, stored at 805 micro-USD by v0.5.10. Rule 4.
+            (OLD, "bedrock", HAIKU, 120, 45, 800, 400, Some(805), "chat", 0),
             // 7: an unpriced model on Bedrock before the cache fix, billed at
             // the guess. Rules 1 and 4.
             (OLD, "bedrock", llama, 120, 45, 800, 400, Some(guessed(120, 45, 800, 400)), "chat", 0),
@@ -620,7 +622,8 @@ pub(crate) mod tests {
             (OLD, "bedrock", llama, 120, 45, 800, 400, Some(0), "chat", 0),
             // 9: an id only the pre-7f9fd11 pattern "haiku-4-5" priced, at
             // Haiku 4.5's real rate: no price today and not the guess, so the
-            // cost stays; rule 4 still corrects the input.
+            // cost stays. A Claude row with cache figures: rule 4 never
+            // changes a Claude row. Untouched.
             (OLD, "claude", "haiku-4-5-20251001", 12_000, 800, 2_000, 0, Some(14_200), "chat", 0),
             // 10: a local model, free. Untouched.
             (OLD, "local", "qwen3:4b", 12_000, 800, 0, 0, Some(0), "chat", 0),
@@ -635,7 +638,7 @@ pub(crate) mod tests {
         ]);
         let before = snapshot(&conn);
 
-        assert_eq!(correct_old_rows(&conn).unwrap(), Corrected { guessed: 3, billed_at_zero: 3, local_made_free: 1, cache_added: 4 });
+        assert_eq!(correct_old_rows(&conn).unwrap(), Corrected { guessed: 3, billed_at_zero: 3, local_made_free: 1, cache_added: 3 });
         assert!(marked(&conn));
         let unknown = |row: &Snapshot| {
             let mut row = row.clone();
@@ -654,7 +657,7 @@ pub(crate) mod tests {
             row
         };
         let b = &before;
-        assert_eq!(crate::ai::models::usd_cost_micro("claude", "claude-sonnet-4-6", 14_000, 800, 2_000, 0), Some(48_600));
+        assert_eq!(crate::ai::models::usd_cost_micro("bedrock", HAIKU, 1_320, 45, 800, 400), Some(925));
         let after = snapshot(&conn);
         assert_eq!(
             after,
@@ -664,10 +667,10 @@ pub(crate) mod tests {
                 unknown(&b[2]),
                 unknown(&b[3]),
                 cost(&b[4], 0),
-                cost(&input(&b[5], 14_000), 48_600),
+                cost(&input(&b[5], 1_320), 925),
                 unknown(&input(&b[6], 1_320)),
                 unknown(&input(&b[7], 1_320)),
-                input(&b[8], 14_000),
+                b[8].clone(),
                 b[9].clone(),
                 b[10].clone(),
                 b[11].clone(),
@@ -683,7 +686,7 @@ pub(crate) mod tests {
         // would add the cache to the old rows a second time: exactly once
         // rests on the marker written with the corrections.
         conn.execute("DELETE FROM user_preferences WHERE key = ?1", [OLD_ROWS_CORRECTED_KEY]).unwrap();
-        assert_eq!(correct_old_rows(&conn).unwrap(), Corrected { guessed: 0, billed_at_zero: 0, local_made_free: 0, cache_added: 4 });
+        assert_eq!(correct_old_rows(&conn).unwrap(), Corrected { guessed: 0, billed_at_zero: 0, local_made_free: 0, cache_added: 3 });
     }
 
     /// (input, output, cache read, cache write, cost) of each row, in order.
@@ -696,28 +699,24 @@ pub(crate) mod tests {
     /// Rule 4. AWS returned inputTokens 120, outputTokens 45, cache read 800
     /// and cache write 400, and v0.5.10 stored input 120 at 805 micro-USD.
     /// The row gets the input and the cost a new row with those tokens gets.
-    /// A Claude turn of three requests gets what the same turn gets today.
-    /// A row that cannot be proven old, or has no cache, is left alone.
+    /// A row that cannot be proven old, or has no cache, is left alone, and
+    /// so is every Claude row, even one with cache figures and an old date.
     #[test]
-    fn old_claude_and_bedrock_input_gets_its_cache_back() {
+    fn old_bedrock_input_gets_its_cache_back() {
         // d4b9631's author time: `git log -1 --format=%aI d4b9631`.
         assert_eq!(chrono::DateTime::from_timestamp(INCLUSIVE_INPUT_SINCE, 0).unwrap().to_rfc3339(), "2026-10-31T01:02:08+00:00");
-        // Anthropic's input_tokens of three tool rounds, without the cache.
-        let rounds = [(2_400, 250, 6_400, 0), (300, 120, 8_800, 0), (50, 400, 9_100, 120)];
         let today = crate::db::test_database();
         record_inference(&today, "bedrock", Feature::Chat, Workload::Tools, HAIKU, 1_320, 45, 800, 400, 40);
-        let mut turn = TurnUsage::new("claude", "claude-sonnet-4-6");
-        for (input, output, cache_read, cache_write) in rounds {
-            turn.add_request(input + cache_read + cache_write, output, cache_read, cache_write);
-        }
-        turn.record(&today, Workload::Tools, 40);
         let stored_today = tokens_and_cost(&today.conn.lock().unwrap());
-        assert_eq!(stored_today, vec![(1_320, 45, 800, 400, Some(925)), (27_170, 770, 24_300, 120, Some(27_540))]);
+        assert_eq!(stored_today, vec![(1_320, 45, 800, 400, Some(925))]);
 
         let db = crate::db::test_database();
         let conn = db.conn.lock().unwrap();
-        let sonnet = |input, output, cache_read, cache_write| crate::ai::models::cost_micro_at(crate::ai::models::price_for("claude-sonnet-4-6").unwrap(), input, output, cache_read, cache_write);
-        let (input, output, cache_read, cache_write) = rounds.iter().fold((0, 0, 0, 0), |sum, r| (sum.0 + r.0, sum.1 + r.1, sum.2 + r.2, sum.3 + r.3));
+        // A Claude row with cache figures, input below its cache and an old
+        // date: what rule 4 would take for proven old on Bedrock. No release
+        // stored one (no release asked Anthropic to cache), and rule 4 never
+        // changes a Claude row.
+        let sonnet = crate::ai::models::cost_micro_at(crate::ai::models::price_for("claude-sonnet-4-6").unwrap(), 2_750, 770, 24_300, 120);
         insert(&conn, &[
             // Before the cutoff, input below its cache: corrected.
             (OLD, "bedrock", HAIKU, 120, 45, 800, 400, Some(805), "chat", 0),
@@ -729,15 +728,17 @@ pub(crate) mod tests {
             // No cache: the bug did not touch it. Stored at an earlier
             // rate, so a recomputed cost would show.
             (OLD, "claude", "claude-sonnet-4-6", 5_000, 100, 0, 0, Some(15_000), "chat", 0),
-            // One row for a turn of three requests, as v0.5.10 summed it.
-            (OLD, "claude", "claude-sonnet-4-6", input, output, cache_read, cache_write, Some(sonnet(input, output, cache_read, cache_write)), "tools", 0),
+            // Claude with cache figures before the cutoff: left as stored.
+            (OLD, "claude", "claude-sonnet-4-6", 2_750, 770, 24_300, 120, Some(sonnet), "tools", 0),
         ]);
-        assert_eq!(correct_old_rows(&conn).unwrap().cache_added, 3);
+        let before = snapshot(&conn);
+        assert_eq!(correct_old_rows(&conn).unwrap().cache_added, 2);
         let after = tokens_and_cost(&conn);
         assert_eq!(
             after,
-            vec![stored_today[0], (1_320, 45, 800, 400, Some(925)), stored_today[0], (5_000, 100, 0, 0, Some(15_000)), stored_today[1]]
+            vec![stored_today[0], (1_320, 45, 800, 400, Some(925)), stored_today[0], (5_000, 100, 0, 0, Some(15_000)), (2_750, 770, 24_300, 120, Some(sonnet))]
         );
+        assert_eq!(snapshot(&conn)[4], before[4], "the Claude row, every column");
         assert_eq!(correct_old_rows(&conn).unwrap(), Corrected::default(), "a second run changes nothing");
         assert_eq!(tokens_and_cost(&conn), after);
     }

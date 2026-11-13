@@ -15,7 +15,7 @@
 -- (ai/cost.rs correct_old_rows) then corrects the ones earlier builds got
 -- wrong: the guessed US$3/US$15 per 1M an unknown model was billed at, an
 -- unknown model billed at zero, a local model's row that holds a cost, and
--- Claude and Bedrock input stored without the cache.
+-- Bedrock input stored without the cache.
 --
 -- provider: openai, claude, gemini, bedrock, local, typesafe, minimax, or
 -- compat:<host> for an OpenAI-compatible service. 'openai-mail' was OpenAI
