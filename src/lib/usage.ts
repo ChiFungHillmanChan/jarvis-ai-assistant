@@ -12,7 +12,11 @@ export interface ExpensiveTurn {
   output_tokens: number;
   cache_read_tokens: number;
   cache_write_tokens: number;
-  /** null for a local model, and when the price is unknown. */
+  /**
+   * Always a number: the backend lists only requests whose price is known
+   * and above zero (src-tauri/src/commands/cost.rs), so a local or unpriced
+   * request is never here.
+   */
   usd_cost: number | null;
   price_unknown: boolean;
   latency_ms: number;

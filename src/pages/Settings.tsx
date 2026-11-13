@@ -1399,8 +1399,8 @@ export default function Settings() {
             <h2 className="settings-heading">{text('Automatic clean-up', '自動清理')}</h2>
             <p style={styles.hint}>
               {text(
-                "When enabled, clean-up runs on launch or when you choose Clean up now. Ungrouped mail is aged from its last local save: only its text is removed, while subjects, senders and previews remain. Grouped mail is kept. Old conversations, cached emails and briefings are also removed. AI usage records are not deleted: after 30 days, or after the clean-up window if that is shorter, they are combined into daily usage totals, which hold no prompts or mail and are kept for two years.",
-                "啟用後，JARVIS 會在啟動或按「立即清理」時執行清理。未分組郵件以最近儲存日期計算期限，只移除內文，保留主旨、寄件人及預覽；已分組的郵件會保留。超過期限的對話、快取郵件及簡報亦會移除。AI 用量記錄不會被刪除：30 日後（如清理期限較短，則按清理期限）會合併為每日用量總數；每日用量總數不含提示或郵件內容，保留兩年。",
+                "When enabled, clean-up runs on launch or when you choose Clean up now. Ungrouped mail is aged from its last local save: only its text is removed, while subjects, senders and previews remain. Grouped mail is kept. Old conversations, cached emails and briefings are also removed. AI usage records are not deleted: after 30 days they are combined into daily usage totals, which hold no prompts or mail and are kept for two years.",
+                "啟用後，JARVIS 會在啟動或按「立即清理」時執行清理。未分組郵件以最近儲存日期計算期限，只移除內文，保留主旨、寄件人及預覽；已分組的郵件會保留。超過期限的對話、快取郵件及簡報亦會移除。AI 用量記錄不會被刪除：30 日後會合併為每日用量總數；每日用量總數不含提示或郵件內容，保留兩年。",
               )}
             </p>
             <label style={styles.option}>

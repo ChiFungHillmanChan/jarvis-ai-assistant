@@ -12,8 +12,14 @@ export function sweepSummary(report: SweepReport, text: Text): string {
   const combined = report.usageRowsRolledUp;
   const parts: string[] = [];
   if (removed > 0) {
+    const items = [
+      count(report.mailBodiesCleared, 'mail body', 'mail bodies'),
+      count(report.conversationsDeleted, 'chat turn', 'chat turns'),
+      count(report.emailsDeleted, 'cached email', 'cached emails'),
+      count(report.briefingsDeleted, 'briefing', 'briefings'),
+    ].join(', ');
     parts.push(text(
-      `Removed ${removed} item(s): ${report.mailBodiesCleared} mail bodies, ${report.conversationsDeleted} chat turns, ${report.emailsDeleted} cached emails, ${report.briefingsDeleted} briefings.`,
+      `Removed ${count(removed, 'item', 'items')}: ${items}.`,
       `已清理 ${removed} 項：郵件內文 ${report.mailBodiesCleared}、對話記錄 ${report.conversationsDeleted}、快取郵件 ${report.emailsDeleted}、簡報 ${report.briefingsDeleted}。`,
     ));
   }
@@ -24,4 +30,9 @@ export function sweepSummary(report: SweepReport, text: Text): string {
     ));
   }
   return parts.length > 0 ? parts.join(' ') : text('Nothing was old enough to remove.', '沒有超過保留期限的資料。');
+}
+
+/** "1 mail body", "2 mail bodies", "0 mail bodies". */
+function count(n: number, one: string, many: string): string {
+  return `${n} ${n === 1 ? one : many}`;
 }

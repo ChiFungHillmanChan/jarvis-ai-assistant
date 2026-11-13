@@ -72,6 +72,9 @@ test('the Storage clean-up text and report say usage is kept as daily totals', (
   assert.match(storage, /AI usage records are not deleted: .* combined into daily usage totals, which hold no prompts or mail and are kept for two years\./);
   assert.match(storage, /AI 用量記錄不會被刪除：.*合併為每日用量總數；每日用量總數不含提示或郵件內容，保留兩年。/);
   assert.doesNotMatch(storage, /related cached records|相關快取記錄/);
+  // U8.1: Settings offers no clean-up window under 30 days.
+  assert.match(storage, /after 30 days they are combined into daily usage totals/);
+  assert.doesNotMatch(storage, /if that is shorter|如清理期限較短/);
   const sweep = between(settings, 'function handleSweep()', 'function handlePurge(');
   assert.match(sweep, /return sweepSummary\(await runStorageSweep\(\), text\);/);
 });
