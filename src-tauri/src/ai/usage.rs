@@ -898,7 +898,7 @@ mod tests {
         let db = opened();
         let conn = db.conn.lock().unwrap();
         let old = req((TODAY - 40) * DAY, "openai", "gpt-6-luna", "chat", 10, 1, 0, 0, Some(3));
-        store(&conn, &[old.clone()]);
+        store(&conn, std::slice::from_ref(&old));
         roll_up_if_due(&conn, NOW);
         assert!(per_request(&conn).is_empty());
 
