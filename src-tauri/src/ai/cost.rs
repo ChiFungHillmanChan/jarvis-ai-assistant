@@ -1011,6 +1011,15 @@ pub(crate) mod tests {
         let path = directory.join("usage.db");
         {
             let db = crate::db::test_database_at_version(&path, from);
+            // U9.2: the cost column every old row comes from is NOT NULL (V16),
+            // so each row satisfies V34's two-way CHECK and the copy cannot stop.
+            let not_null: bool = db
+                .conn
+                .lock()
+                .unwrap()
+                .query_row("SELECT \"notnull\" FROM pragma_table_info('inference_metrics') WHERE name = 'usd_cost_micro'", [], |r| r.get(0))
+                .unwrap();
+            assert!(not_null, "V{from}: usd_cost_micro is NOT NULL");
             db.conn.lock().unwrap().execute_batch(
                 "INSERT INTO inference_metrics (ts, workload, model_id, input_tokens, output_tokens, latency_ms, provider, usd_cost_micro) VALUES
                     (1, 'tools', 'gpt-6-luna', 10, 1, 5, 'openai', 7),
@@ -1042,6 +1051,10 @@ pub(crate) mod tests {
         assert!(
             conn.execute("INSERT INTO inference_metrics (ts, workload, model_id, input_tokens, output_tokens, latency_ms, usd_cost_micro, price_unknown) VALUES (1, 'tools', 'x', 1, 1, 1, 5, 1)", []).is_err(),
             "a row cannot carry both a cost and an unknown price"
+        );
+        assert!(
+            conn.execute("INSERT INTO inference_metrics (ts, workload, model_id, input_tokens, output_tokens, latency_ms, usd_cost_micro, price_unknown) VALUES (1, 'tools', 'x', 1, 1, 1, NULL, 0)", []).is_err(),
+            "nor a known price without a cost: both tables hold the same rule"
         );
         let indexes: i64 = conn
             .query_row("SELECT COUNT(*) FROM sqlite_master WHERE type = 'index' AND name IN ('idx_inference_metrics_ts', 'idx_inference_metrics_provider_ts')", [], |r| r.get(0))

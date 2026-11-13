@@ -7,8 +7,11 @@
 -- Rows from before this migration cannot be attributed and become 'other'.
 --
 -- price_unknown = 1 marks a cloud model missing from the price list; its cost
--- is NULL. Older rows are copied with the cost they were stored with and
--- price_unknown = 0. The step that runs once after the migrations
+-- is NULL, and only then, the same rule as usage_daily below. Older rows are
+-- copied with the cost they were stored with and price_unknown = 0. Every one
+-- of them has a cost: V16 added the column as NOT NULL DEFAULT 0, the only
+-- migration that defines it in every release from v0.1.3 to v0.5.11, so no
+-- row can stop this copy. The step that runs once after the migrations
 -- (ai/cost.rs correct_old_rows) then corrects the ones earlier builds got
 -- wrong: the guessed US$3/US$15 per 1M an unknown model was billed at, an
 -- unknown model billed at zero, a local model's row that holds a cost, and
@@ -35,7 +38,7 @@ CREATE TABLE inference_metrics_v34 (
     usd_cost_micro INTEGER DEFAULT 0,
     feature TEXT NOT NULL DEFAULT 'other',
     price_unknown INTEGER NOT NULL DEFAULT 0 CHECK (price_unknown IN (0, 1)),
-    CHECK (price_unknown = 0 OR usd_cost_micro IS NULL)
+    CHECK ((price_unknown = 0) = (usd_cost_micro IS NOT NULL))
 );
 
 INSERT INTO inference_metrics_v34

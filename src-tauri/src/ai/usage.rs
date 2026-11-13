@@ -34,7 +34,8 @@
 //! - [`any_usage_except`]: whether usage from any other provider than one is
 //!   on record, in either level.
 //! - [`roll_up_on_open`] and [`roll_up_if_due`] keep the levels; [`roll_up`]
-//!   is the step itself, and [`per_request_days`] its window.
+//!   is the step itself (inside this crate only), and [`per_request_days`]
+//!   its window.
 
 use rusqlite::{Connection, OptionalExtension};
 
@@ -47,6 +48,10 @@ pub const PERIODS: [i64; 5] = [30, 90, 180, 365, 730];
 /// How long each request keeps its own row, unless a shorter Storage
 /// clean-up window asks for less.
 pub const PER_REQUEST_DAYS: i64 = 30;
+
+/// The shortest per-request window. Settings offers no clean-up window under
+/// 30 days; one set shorter by hand is held to this.
+pub const MIN_PER_REQUEST_DAYS: i64 = 7;
 
 /// How long the daily totals are kept.
 pub const DAILY_TOTALS_DAYS: i64 = 730;
@@ -375,10 +380,11 @@ pub fn any_usage_except(conn: &Connection, provider: &str) -> rusqlite::Result<b
     )
 }
 
-/// The per-request window for a Storage clean-up window (None: clean-up off).
+/// The per-request window for a Storage clean-up window (None: clean-up
+/// off): 7 to 30 days.
 pub fn per_request_days_for(clean_up_days: Option<i64>) -> i64 {
     match clean_up_days {
-        Some(days) if days < PER_REQUEST_DAYS => days,
+        Some(days) if days < PER_REQUEST_DAYS => days.max(MIN_PER_REQUEST_DAYS),
         _ => PER_REQUEST_DAYS,
     }
 }
@@ -415,11 +421,16 @@ pub struct RolledUp {
 /// run, and never back. A clock set two years ahead deletes one day of the
 /// oldest totals per run, not two years. Moving requests early under such a
 /// clock loses nothing: each stays under its own day.
-pub fn roll_up(conn: &Connection, now: i64, per_request_days: i64) -> rusqlite::Result<RolledUp> {
+///
+/// A window outside [`MIN_PER_REQUEST_DAYS`] to [`PER_REQUEST_DAYS`] is held
+/// to the nearer end, so no caller can move nearly every request, or keep
+/// requests one by one past 30 days.
+pub(crate) fn roll_up(conn: &Connection, now: i64, per_request_days: i64) -> rusqlite::Result<RolledUp> {
     crate::ai::cost::correct_old_rows(conn)?;
     let today = utc_day(now);
-    // The day before this one ended at least `per_request_days` days ago.
-    let first_kept_ts = (today - per_request_days.max(1)) * DAY;
+    let window = per_request_days.clamp(MIN_PER_REQUEST_DAYS, PER_REQUEST_DAYS);
+    // The day before this one ended at least `window` days ago.
+    let first_kept_ts = (today - window) * DAY;
     let tx = conn.unchecked_transaction()?;
     tx.execute(
         "INSERT INTO usage_daily
@@ -753,6 +764,8 @@ mod tests {
 
         set_pref(&conn, "storage_retention_days", "29");
         assert_eq!(per_request_days(&conn), 29);
+        set_pref(&conn, "storage_retention_days", "3");
+        assert_eq!(per_request_days(&conn), 30, "a clean-up window under 7 is refused (commands/storage.rs), so off");
         for days in ["30", "90", "365"] {
             set_pref(&conn, "storage_retention_days", days);
             assert_eq!(per_request_days(&conn), 30);
@@ -760,6 +773,19 @@ mod tests {
         set_pref(&conn, "storage_retention_days", "7");
         set_pref(&conn, "storage_retention_enabled", "0");
         assert_eq!(per_request_days(&conn), 30, "clean-up off");
+    }
+
+    /// U9.1. A window outside 7 to 30 days is held to the nearer end: 1
+    /// moves what 7 moves, and 90 what 30 moves.
+    #[test]
+    fn the_roll_up_window_is_held_between_7_and_30_days() {
+        for (asked, moved) in [(1, 3), (7, 3), (30, 1), (90, 1)] {
+            let db = opened();
+            let conn = db.conn.lock().unwrap();
+            store(&conn, &[3, 10, 20, 40].map(|back| req((TODAY - back) * DAY + 60, "openai", "gpt-6-luna", "chat", 10, 1, 0, 0, Some(back))));
+            assert_eq!(roll_up(&conn, NOW, asked).unwrap().requests_moved, moved, "asked for {asked} days");
+        }
+        assert_eq!([0, 3, 7, 29, 30, 365].map(|days| per_request_days_for(Some(days))), [7, 7, 7, 29, 30, 30]);
     }
 
     /// A day's total goes once all of the day is older than 730 days.
