@@ -55,6 +55,21 @@ export function stepAnchor(view: CalendarView, anchor: string, direction: 1 | -1
   return dayKey(new Date(y, m - 1 + direction, Math.min(d, lastDay)));
 }
 
+/** A read of the visible range, as useTauriCommand returns it. */
+export interface RangeRead<T> { data: T[] | null; error: string | null; loading: boolean }
+
+/**
+ * The events the Calendar page draws for the visible range. While the next
+ * range loads, the last events it drew stay: each is placed by its own dates,
+ * so none is drawn on a wrong day, and a selected event stays selected and
+ * shown. The reply for the new range replaces them, an empty one included. A
+ * failed read keeps nothing, as before, and its error is shown.
+ */
+export function eventsWhileLoading<T>(read: RangeRead<T>, last: T[] | null): T[] | null {
+  if (read.data !== null) return read.data;
+  return read.loading && read.error === null ? last : null;
+}
+
 /** Calendar events plus dated email follow-ups that are not yet in Google. */
 export function toEntries(events: CalendarEventView[], mailItems: MailItem[]): CalendarEntry[] {
   const fromEvents = events.map((event): CalendarEntry => {

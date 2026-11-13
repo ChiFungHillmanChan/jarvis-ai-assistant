@@ -1,4 +1,4 @@
-import { FormEvent, useEffect, useMemo, useState } from "react";
+import { FormEvent, useEffect, useMemo, useRef, useState } from "react";
 import * as mail from "../lib/mail";
 import type { MailItem } from "../lib/mail";
 import { MailItemRow } from "../components/mail/MailItems";
@@ -9,7 +9,7 @@ import { createEvent, getTasks, syncCalendar } from "../lib/commands";
 import { useWorkspaceValue } from "../workspace/WorkspaceContext";
 import "./tool-pages.css";
 import { useUiLocale } from "../i18n";
-import { addDays, dayKey, dayStart, stepAnchor, toEntries, todaySummary, viewRange, type CalendarEntry, type CalendarView } from "../lib/calendar-layout";
+import { addDays, dayKey, dayStart, eventsWhileLoading, stepAnchor, toEntries, todaySummary, viewRange, type CalendarEntry, type CalendarView } from "../lib/calendar-layout";
 import TimeGrid from "../components/calendar/TimeGrid";
 import MonthGrid from "../components/calendar/MonthGrid";
 import TodayPanel from "../components/calendar/TodayPanel";
@@ -42,6 +42,10 @@ export default function CalendarPage() {
   const range = useMemo(() => viewRange(view, anchor), [view, anchor]);
   const visible = useTauriCommand<CalendarEventView[]>("get_events", { dateFrom: addDays(range.from, -LOOKBACK_DAYS), dateTo: range.to });
   const todays = useTauriCommand<CalendarEventView[]>("get_events", { dateFrom: addDays(today, -LOOKBACK_DAYS), dateTo: today });
+  // The events drawn last, kept while the next range loads (eventsWhileLoading).
+  const lastVisible = useRef<CalendarEventView[] | null>(null);
+  const visibleEvents = eventsWhileLoading(visible, lastVisible.current);
+  useEffect(() => { lastVisible.current = visibleEvents; });
 
   useEffect(() => {
     const timer = window.setInterval(() => setNow(new Date()), 60_000);
@@ -55,9 +59,9 @@ export default function CalendarPage() {
     return () => { current = false; };
   }, [notice]);
 
-  const entries = useMemo(() => toEntries(visible.data ?? [], mailItems), [visible.data, mailItems]);
+  const entries = useMemo(() => toEntries(visibleEvents ?? [], mailItems), [visibleEvents, mailItems]);
   const summary = useMemo(() => todaySummary(todays.data ?? [], mailItems, tasks, now), [todays.data, mailItems, tasks, now]);
-  const allEvents = [...(visible.data ?? []), ...(todays.data ?? [])];
+  const allEvents = [...(visibleEvents ?? []), ...(todays.data ?? [])];
   const selectedEvent = selection?.startsWith("event-") ? allEvents.find(event => `event-${event.id}` === selection) ?? null : null;
   const selectedMail = selection?.startsWith("mail-") ? mailItems.find(item => `mail-${item.id}` === selection) ?? null : null;
   const loadError = visible.error || todays.error;
