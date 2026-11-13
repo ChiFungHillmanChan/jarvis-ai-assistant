@@ -523,6 +523,45 @@ pub fn roll_up_if_due(conn: &Connection, now: i64) {
     }
 }
 
+/// The native QA build's usage, so the Usage page can be checked in a real
+/// window with both levels filled. Compiled only into tests and the
+/// `native-qa` build (native_qa.rs seeds once, then rolls up), never into a
+/// normal one. Requests 0, 5, 40, 80, 200 and 400 days old on a priced
+/// cloud model, a model with no known price, a local model and a Bedrock
+/// model with cache tokens, priced by the built-in list as a request of
+/// this build would be, and one MiniMax speech request.
+#[cfg(any(test, feature = "native-qa"))]
+pub(crate) fn seed_for_qa(conn: &Connection, now: i64) -> rusqlite::Result<()> {
+    use crate::ai::models::{is_local, usd_cost_micro};
+    // provider, model, feature, workload, input (cache included), output, cache read, cache write
+    let kinds = [
+        ("openai", crate::ai::models::OPENAI_DEFAULT, "chat", "tools", 1_200, 300, 200, 0),
+        ("compat:api.moonshot.ai", "kimi-k2-0905-preview", "mail_sort", "volume", 3_000, 40, 0, 0),
+        ("local", "qwen3:4b", "mail_analysis", "volume", 4_000, 900, 0, 0),
+        ("bedrock", "apac.anthropic.claude-haiku-4-5-20251001-v1:0", "tools", "tools", 1_320, 45, 800, 400),
+    ];
+    let mut rows = Vec::new();
+    for back in [0, 5, 40, 80, 200, 400] {
+        let ts = now - back * DAY - 60;
+        for (provider, model, feature, workload, input, output, cache_read, cache_write) in kinds {
+            let cost = usd_cost_micro(provider, model, input, output, cache_read, cache_write).or(is_local(provider).then_some(0));
+            rows.push((ts, provider, model, feature, workload, input, output, cache_read, cache_write, cost));
+        }
+    }
+    // MiniMax bills characters, stored in the input column (ai/cost.rs record_unpriced).
+    rows.push((now - 5 * DAY - 120, BILLED_BY_CHARACTER, "speech-02-hd", "tts", "volume", 1_234, 0, 0, 0, None));
+    for (ts, provider, model, feature, workload, input, output, cache_read, cache_write, cost) in rows {
+        conn.execute(
+            "INSERT INTO inference_metrics
+                (ts, workload, model_id, input_tokens, output_tokens, cache_read_tokens, cache_write_tokens,
+                 latency_ms, provider, usd_cost_micro, feature, price_unknown)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, 900, ?8, ?9, ?10, ?11)",
+            rusqlite::params![ts, workload, model, input, output, cache_read, cache_write, provider, cost, feature, cost.is_none()],
+        )?;
+    }
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1130,6 +1169,37 @@ mod tests {
         store(&conn, &[req(NOW + 60, "openai", "gpt-6-luna", "chat", 1, 1, 0, 0, Some(500))]);
         let (days, requests) = expensive_requests(&conn, NOW + 120, 5).unwrap();
         assert_eq!((days, requests.iter().map(|r| r.usd_cost_micro).collect::<Vec<_>>()), (1, vec![500]));
+    }
+
+    /// What the QA seed leaves once the QA launch has rolled up: the 0- and
+    /// 5-day requests one by one, the 40- to 400-day ones as daily totals,
+    /// every kind priced as this build prices it, and each period showing
+    /// what it should. native_qa.rs seeds inside its first-run transaction
+    /// and rolls up after it.
+    #[test]
+    fn the_qa_seed_fills_both_levels_after_its_roll_up() {
+        let db = opened();
+        let conn = db.conn.lock().unwrap();
+        seed_for_qa(&conn, NOW).unwrap();
+        assert_eq!(per_request(&conn).len(), 25, "all seeded as requests");
+        roll_up(&conn, NOW, 30).unwrap();
+
+        let ages: Vec<i64> = per_request(&conn).iter().map(|((_, ts, ..), _)| TODAY - utc_day(*ts)).collect();
+        assert_eq!((ages.len(), ages.iter().all(|age| *age <= 5)), (9, true), "{ages:?}");
+        assert_eq!(daily_days(&conn), vec![TODAY - 400, TODAY - 200, TODAY - 80, TODAY - 40]);
+        let flags: Vec<(String, i64, Option<i64>)> = daily(&conn).into_iter().filter(|((day, ..), _)| *day == TODAY - 40).map(|((_, provider, _, _, unknown), (.., cost))| (provider, unknown, cost.map(|c| c.signum()))).collect();
+        assert_eq!(flags, [("bedrock".into(), 0, Some(1)), ("compat:api.moonshot.ai".into(), 1, None), ("local".into(), 0, Some(0)), ("openai".into(), 0, Some(1))]);
+
+        let requests: Vec<i64> = PERIODS.iter().map(|days| totals(&conn, Period::last(*days, NOW).unwrap()).unwrap().sums.requests).collect();
+        assert_eq!(requests, [9, 17, 17, 21, 25]);
+        let month = totals(&conn, Period::last(30, NOW).unwrap()).unwrap();
+        assert_eq!((month.sums.speech_characters, month.sums.price_unknown_requests, month.local_requests), (1_234, 3, 2));
+
+        let qa = include_str!("../native_qa.rs");
+        let seeded = qa.find("crate::ai::usage::seed_for_qa(&tx, chrono::Utc::now().timestamp())?;").expect("the QA seed stores the usage");
+        let committed = qa.find("tx.commit()?;").expect("in its transaction");
+        let rolled = qa.find("crate::ai::usage::roll_up_on_open(conn);").expect("and rolls up after it");
+        assert!(seeded < committed && committed < rolled);
     }
 
     /// The read gate: once per UTC day. A request stored later for a day
