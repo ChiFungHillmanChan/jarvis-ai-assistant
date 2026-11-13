@@ -547,15 +547,20 @@ pub(crate) fn seed_for_qa(conn: &Connection, now: i64) -> rusqlite::Result<()> {
         ("bedrock", "apac.anthropic.claude-haiku-4-5-20251001-v1:0", "tools", "tools", 1_320, 45, 800, 400),
     ];
     let mut rows = Vec::new();
-    for back in [0, 5, 40, 80, 200, 400] {
+    // 179 and 364 days back are the first days of the 6-month and the 1-year
+    // period, so the time view shows a part-month row with its first day.
+    for back in [0, 5, 40, 80, 179, 200, 364, 400] {
         let ts = now - back * DAY - 60;
         for (provider, model, feature, workload, input, output, cache_read, cache_write) in kinds {
             let cost = usd_cost_micro(provider, model, input, output, cache_read, cache_write).or(is_local(provider).then_some(0));
             rows.push((ts, provider, model, feature, workload, input, output, cache_read, cache_write, cost));
         }
     }
-    // MiniMax bills characters, stored in the input column (ai/cost.rs record_unpriced).
-    rows.push((now - 5 * DAY - 120, BILLED_BY_CHARACTER, "speech-02-hd", "tts", "volume", 1_234, 0, 0, 0, None));
+    // MiniMax bills characters, stored in the input column (ai/cost.rs
+    // record_unpriced): one request kept as it is, one in a daily total.
+    for back in [5, 40] {
+        rows.push((now - back * DAY - 120, BILLED_BY_CHARACTER, "speech-02-hd", "tts", "volume", 1_234, 0, 0, 0, None));
+    }
     for (ts, provider, model, feature, workload, input, output, cache_read, cache_write, cost) in rows {
         conn.execute(
             "INSERT INTO inference_metrics
@@ -1179,27 +1184,39 @@ mod tests {
 
     /// What the QA seed leaves once the QA launch has rolled up: the 0- and
     /// 5-day requests one by one, the 40- to 400-day ones as daily totals,
-    /// every kind priced as this build prices it, and each period showing
-    /// what it should. native_qa.rs seeds inside its first-run transaction
+    /// speech in both, every kind priced as this build prices it, each period
+    /// showing what it should, and a part-month row in the 6-month and the
+    /// 1-year time view. native_qa.rs seeds inside its first-run transaction
     /// and rolls up after it.
     #[test]
     fn the_qa_seed_fills_both_levels_after_its_roll_up() {
         let db = opened();
         let conn = db.conn.lock().unwrap();
         seed_for_qa(&conn, NOW).unwrap();
-        assert_eq!(per_request(&conn).len(), 25, "all seeded as requests");
+        assert_eq!(per_request(&conn).len(), 34, "all seeded as requests");
         roll_up(&conn, NOW, 30).unwrap();
 
         let ages: Vec<i64> = per_request(&conn).iter().map(|((_, ts, ..), _)| TODAY - utc_day(*ts)).collect();
         assert_eq!((ages.len(), ages.iter().all(|age| *age <= 5)), (9, true), "{ages:?}");
-        assert_eq!(daily_days(&conn), vec![TODAY - 400, TODAY - 200, TODAY - 80, TODAY - 40]);
+        assert_eq!(daily_days(&conn), vec![TODAY - 400, TODAY - 364, TODAY - 200, TODAY - 179, TODAY - 80, TODAY - 40]);
         let flags: Vec<(String, i64, Option<i64>)> = daily(&conn).into_iter().filter(|((day, ..), _)| *day == TODAY - 40).map(|((_, provider, _, _, unknown), (.., cost))| (provider, unknown, cost.map(|c| c.signum()))).collect();
-        assert_eq!(flags, [("bedrock".into(), 0, Some(1)), ("compat:api.moonshot.ai".into(), 1, None), ("local".into(), 0, Some(0)), ("openai".into(), 0, Some(1))]);
+        assert_eq!(flags, [("bedrock".into(), 0, Some(1)), ("compat:api.moonshot.ai".into(), 1, None), ("local".into(), 0, Some(0)), ("minimax".into(), 1, None), ("openai".into(), 0, Some(1))]);
 
         let requests: Vec<i64> = PERIODS.iter().map(|days| totals(&conn, Period::last(*days, NOW).unwrap()).unwrap().sums.requests).collect();
-        assert_eq!(requests, [9, 17, 17, 21, 25]);
+        assert_eq!(requests, [9, 18, 22, 30, 34]);
         let month = totals(&conn, Period::last(30, NOW).unwrap()).unwrap();
         assert_eq!((month.sums.speech_characters, month.sums.price_unknown_requests, month.local_requests), (1_234, 3, 2));
+        // Speech in a daily total too: the 90-day period adds the 40-day one.
+        let speech = totals(&conn, Period::last(90, NOW).unwrap()).unwrap().sums.speech_characters;
+        assert_eq!(speech, 2_468);
+
+        // U1 in the window: the 6-month and the 1-year time views each have a
+        // part-month row that says from which day it counts.
+        let part_months = |days| -> Vec<(String, Option<String>)> {
+            groups(&conn, Period::last(days, NOW).unwrap(), GroupBy::Time).unwrap().into_iter().filter(|g| g.from_day.is_some()).map(|g| (g.key, g.from_day)).collect()
+        };
+        assert_eq!(part_months(180), [("2026-05".into(), Some("2026-05-18".into()))]);
+        assert_eq!(part_months(365), [("2025-11".into(), Some("2025-11-14".into()))]);
 
         let qa = include_str!("../native_qa.rs");
         let seeded = qa.find("crate::ai::usage::seed_for_qa(&tx, chrono::Utc::now().timestamp())?;").expect("the QA seed stores the usage");
