@@ -539,6 +539,30 @@ mod tests {
         assert!(synthetic_facts_present(&result.text), "synthetic facts failed: {}", result.text);
     }
 
+    /// P02b: the setup guide's test (`test_mail_ai_connection`) sends its
+    /// synthetic mail through `analysis::analyze(synthetic_context(settings),
+    /// ...)`, the same Bedrock path as group analysis. "Test and use Bedrock
+    /// for mail" saves typed keys and their region first, so an id shown for
+    /// another geography is sent for the region just saved.
+    #[tokio::test]
+    async fn the_setup_test_sends_the_bedrock_id_for_the_saved_region() {
+        let db = crate::ai::cost::tests::temp_metrics_db("");
+        let settings = MailSettings {
+            processing_mode: "bedrock".into(),
+            local_model: String::new(),
+            bedrock_model: "apac.amazon.nova-micro-v1:0".into(),
+            openai_model: String::new(),
+        };
+        let answer = r#"{"deadline":"2026-10-15","currency":"HKD","budget":1000,"paymentRequired":false,"citation":"[郵件 #1]"}"#;
+        let server = crate::ai::bedrock::tests::aws_loopback(200, None, crate::ai::bedrock::tests::converse_json(answer)).await;
+        let result = analysis::analyze(synthetic_context(settings), Some(crate::ai::bedrock::tests::fixture_creds("eu-west-2")), None, None, Some(&db))
+            .await
+            .expect("the synthetic test reaches the stand-in");
+        assert!(synthetic_facts_present(&result.text), "{}", result.text);
+        assert_eq!(server.await.unwrap().path, "/model/eu.amazon.nova-micro-v1:0/converse");
+        assert_eq!(crate::ai::cost::tests::usage_rows(&db)[0].model_id, "eu.amazon.nova-micro-v1:0");
+    }
+
     #[test]
     fn synthetic_probe_rejects_missing_date_currency_or_payment_negation() {
         let valid = r#"{"deadline":"2026-10-15","currency":"HKD","budget":1000,"paymentRequired":false,"citation":"[郵件 #1]"}"#;
