@@ -44,8 +44,9 @@ type Props = Shared & (
  * In Settings > Models a listed model or the default is saved at once, and
  * a typed id with "Save model". In the Mail dialog and the setup guide a
  * choice changes the form only, a model is required, the form's own button
- * saves it, and a line says that a us., eu. or apac. profile is sent for the
- * saved region (mail/analysis.rs send_to_bedrock, as chat).
+ * saves it, and a line (or, under "Other", the ID field's help) says that a
+ * us., eu. or apac. profile is sent for the saved region
+ * (mail/analysis.rs send_to_bedrock, as chat).
  */
 export default function BedrockModelPicker(props: Props) {
   const { place, fallback, listState, onReload } = props;
@@ -101,7 +102,7 @@ export default function BedrockModelPicker(props: Props) {
         {listState.status === "idle" ? text("Load the list", "載入清單") : text("Load the list again", "重新載入清單")}
       </button>
       <p id={statusId} role="status" className={LOOK[place].help}>{listStatus(listState, text, place)}</p>
-      {props.place !== "settings" && <p className={LOOK[place].help}>{formRegionNote(props.place, text)}</p>}
+      {props.place !== "settings" && !state.other && <p className={LOOK[place].help}>{formRegionNote(props.place, text)}</p>}
       {state.other && (<>
         <label>
           <span>{text("Bedrock model ID", "Bedrock 模型 ID")}</span>

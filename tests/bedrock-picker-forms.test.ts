@@ -195,9 +195,13 @@ test('every other line is the same in each place, with the region and refusal se
   assert.equal(listStatus({ status: 'ready', list: awsList }, en, 'mail'), listStatus({ status: 'ready', list: awsList }, en, 'settings'));
 });
 
-// Requirement 9: the help under "Other" is true where it is shown. A mail
-// form cannot be left empty, so only Settings says to leave it empty for the
-// default. Breaks if a form says it may be left empty, or Settings' text changes.
+// Requirement 9: the help under "Other" is true where it is shown. Every place
+// says, in Settings' words, that a us., eu. or apac. profile is sent for the
+// saved region (option A); none says the id is sent as typed without that. A
+// mail form cannot be left empty, so only Settings says to leave it empty for
+// the default; the setup guide adds that its button saves new keys and their
+// region first. Breaks if a form says it may be left empty, drops the region
+// sentence or the button clause, or Settings' text changes.
 test('the help under Other is true in each place', () => {
   assert.equal(
     otherIdHelp('settings', DEFAULT, en),
@@ -207,18 +211,24 @@ test('the help under Other is true in each place', () => {
   for (const place of ['mail', 'setup'] as const) {
     assert.doesNotMatch(otherIdHelp(place, DEFAULT, en), /empty|default/i, place);
     assert.doesNotMatch(otherIdHelp(place, DEFAULT, zh), /留空|預設/, place);
-    assert.equal(otherIdHelp(place, DEFAULT, en), 'A model ID or an inference profile ID from the Bedrock console. An ID without a us., eu. or apac. prefix is sent as typed. Usage is recorded against the ID that is sent.');
-    assert.equal(otherIdHelp(place, DEFAULT, zh), '可輸入 Bedrock 主控台的模型 ID 或推論設定檔 ID。沒有 us.、eu. 或 apac. 開頭的 ID 按輸入內容發送。用量按實際發送的 ID 記錄。');
+    assert.ok(otherIdHelp(place, DEFAULT, en).includes('A us., eu. or apac. profile is sent for the region of your saved AWS credentials; other IDs are sent as typed.'), place);
+    assert.ok(otherIdHelp(place, DEFAULT, zh).includes('us.、eu. 或 apac. 開頭的設定檔會按已儲存 AWS 憑證的地區發送，其他 ID 按輸入內容發送。'), place);
   }
+  assert.equal(otherIdHelp('mail', DEFAULT, en), 'A model ID or an inference profile ID from the Bedrock console. A us., eu. or apac. profile is sent for the region of your saved AWS credentials; other IDs are sent as typed. Usage is recorded against the ID that is sent.');
+  assert.equal(otherIdHelp('mail', DEFAULT, zh), '可輸入 Bedrock 主控台的模型 ID 或推論設定檔 ID。us.、eu. 或 apac. 開頭的設定檔會按已儲存 AWS 憑證的地區發送，其他 ID 按輸入內容發送。用量按實際發送的 ID 記錄。');
+  assert.equal(otherIdHelp('setup', DEFAULT, en), 'A model ID or an inference profile ID from the Bedrock console. A us., eu. or apac. profile is sent for the region of your saved AWS credentials; other IDs are sent as typed. When you enter new keys, “Test and use Bedrock for mail” saves them with their region before it tests. Usage is recorded against the ID that is sent.');
+  assert.equal(otherIdHelp('setup', DEFAULT, zh), '可輸入 Bedrock 主控台的模型 ID 或推論設定檔 ID。us.、eu. 或 apac. 開頭的設定檔會按已儲存 AWS 憑證的地區發送，其他 ID 按輸入內容發送。如輸入新的密鑰，「測試並以 Bedrock 處理電郵」會先儲存密鑰及其地區，然後才測試。用量按實際發送的 ID 記錄。');
 });
 
 // Founder decision (option A) and requirement 10: mail sends a us., eu. or
 // apac. profile for the saved region, as chat does (mail/analysis.rs
-// send_to_bedrock). Such an id can always be chosen in a mail form, from
-// either list or under "Other", so the forms always say so, in words true
-// there: in the setup guide new keys and their region are saved by the test
-// button before it tests. Breaks if the line goes, is shown in Settings
-// (which has the sentence under "Other" already), or loses its words.
+// send_to_bedrock). Such an id can be chosen in a mail form from either list,
+// so the forms say so under the picker, in words true there: in the setup
+// guide new keys and their region are saved by the test button before it
+// tests. While "Other" is chosen the help under the ID field says it instead
+// (test above), so it is shown once. Breaks if the line goes, is shown in
+// Settings (which has the sentence under "Other" already), stays shown next
+// to the Other help, or loses its words.
 test('the mail forms say a us., eu. or apac. profile is sent for the saved region', () => {
   assert.equal(formRegionNote('mail', en), 'A us., eu. or apac. profile is sent for the region of your saved AWS credentials.');
   assert.equal(formRegionNote('mail', zh), 'us.、eu. 或 apac. 開頭的設定檔會按已儲存 AWS 憑證的地區發送。');
@@ -228,7 +238,8 @@ test('the mail forms say a us., eu. or apac. profile is sent for the saved regio
   assert.ok(otherIdHelp('settings', DEFAULT, en).includes(formRegionNote('mail', en).slice(0, -1)));
   assert.ok(otherIdHelp('settings', DEFAULT, zh).includes('us.、eu. 或 apac. 開頭的設定檔會按已儲存 AWS 憑證的地區發送'));
   const picker = source('../src/components/BedrockModelPicker.tsx');
-  assert.match(picker, /\{props\.place !== "settings" && <p className=\{LOOK\[place\]\.help\}>\{formRegionNote\(props\.place, text\)\}<\/p>\}/);
+  assert.match(picker, /\{props\.place !== "settings" && !state\.other && <p className=\{LOOK\[place\]\.help\}>\{formRegionNote\(props\.place, text\)\}<\/p>\}/);
+  assert.match(picker, /\{state\.other && <p className=\{LOOK\[place\]\.help\}>\{otherIdHelp\(place, fallback, text\)\}<\/p>\}/, 'under Other the help says it');
 });
 
 // ---------------------------------------------------------------------------
