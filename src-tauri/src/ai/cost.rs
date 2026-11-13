@@ -265,6 +265,11 @@ const GUESS_ROUNDING_MICROS: i64 = 3;
 /// rebased, with the commit time 2026-11-12T16:57:10Z, and shipped in
 /// v0.5.11. The author time is used: it is the earliest any build of that
 /// change could have run, so no row stored before it holds inclusive input.
+/// What it leaves uncorrected: the rows released builds up to v0.5.10
+/// stored between that time and the user's update to v0.5.11 or later whose
+/// input is at least their cache reads and writes; they are summed as
+/// stored, so their input, and the cost worked out from it, read low by the
+/// cache (DECISIONS.md, 2026-11-13: one constant to change).
 const INCLUSIVE_INPUT_SINCE: i64 = 1_793_408_528;
 
 /// Written to user_preferences, in the same transaction as the corrections,
