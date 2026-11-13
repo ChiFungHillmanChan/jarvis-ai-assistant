@@ -8,6 +8,7 @@ Cloud control plane for JARVIS. Deploys to account `759626151650` in `ap-southea
 - `Jarvis-<env>-Data` -- S3 sync bucket + DynamoDB user meta + plugin registry
 - `Jarvis-<env>-Observability` -- CloudWatch dashboard + budget alarms + SNS
 - `Jarvis-<env>-Payment` -- control-plane HTTP API: Stripe webhook, JWT-authorised `/checkout`, `/portal` and `/me`
+- `Jarvis-<env>-Registry` -- signed model registry: private S3 bucket, GitHub OIDC publisher role, public `GET /v1/registry` on the Payment stack's HTTP API
 
 Only Auth, Data and Payment are deployed in sandbox; Observability and Audit are not.
 
@@ -91,6 +92,36 @@ aws s3api put-bucket-policy --bucket jarvis-releases \
 The update *manifest* (`latest.json`) that the app reads is NOT here — it is
 served publicly from the website at `https://jarvis-automation.com/latest.json`.
 This bucket only serves the binaries (and an optional mirror of the manifest).
+
+## 模型註冊表（Registry stack）
+
+`Jarvis-<env>-Registry` 提供 `registry/registry.json`（見 repository 根目錄的 `registry/README.md` 及 `registry/schema.json`）的發佈位置及讀取端點。註冊表是公開資料，**絕不可包含任何金鑰、密碼、憑證或使用者資料**。
+
+- **Bucket** `jarvis-registry-<env>-<account>`：私人、S3 管理加密、只接受 TLS、啟用版本控制；舊的 `latest.json` 版本一年後到期。prod 刪除 stack 時保留 bucket。
+- **發佈角色** `jarvis-<env>-registry-publisher`：只信任 GitHub OIDC，`sub` 必須為 `repo:ChiFungHillmanChan/jarvis-ai-assistant:environment:registry-<env>`；權限只有 `registry/*` 的 `s3:GetObject`、`s3:PutObject`，以及前綴 `registry/` 的 `s3:ListBucket`。repository 由 `cdk.json` 的 `jarvis.githubRepo` 設定。GitHub OIDC provider 每個帳戶只可有一個，由擁有人在 CDK 以外建立一次（見 `registry/README.md`）。
+- **讀取 Lambda** `jarvis-<env>-registry-read`：Node.js 24、256 MB、5 秒；只可讀取 `registry/latest.json`。
+- **路由** `GET /v1/registry`：加在 Payment stack 的 HTTP API 上，不需登入。API id 取自 Payment stack 現有的 export `Jarvis-<env>-ApiBaseUrl`，因此 Payment stack 的範本不變；但部署 Registry stack 前，該 env 的 Payment stack 必須已部署。路由沿用 `$default` stage 的全域限流（每秒 10 次、burst 20）。
+- **獨立 stack 而非加入 Data stack**：路由在 Payment stack 的 API 上，而 Payment 已依賴 Data，由 Data 加路由會形成循環依賴；把 CI 可寫入的公開內容與使用者資料的 stack 分開，亦令發佈角色的影響範圍一目了然。
+
+### 讀取端點契約
+
+| 情況 | 回應 |
+| --- | --- |
+| 已發佈 | `200`，body 為 `latest.json` 的原始位元組（`Content-Type: application/json`），`X-Registry-Signature`（base64 Ed25519 簽章）、強 `ETag`、`Cache-Control: public, max-age=300` |
+| `If-None-Match` 相符（包括 `W/` 及 `*`） | `304`，沒有 body，附相同 `ETag` 及 `Cache-Control` |
+| 未有發佈內容、object 沒有有效簽章，或任何讀取錯誤 | `503` `{"error":"registry_unavailable"}`，`Cache-Control: no-store`；記錄只寫錯誤名稱，不寫 stack trace |
+
+簽章保存在 `latest.json` 的 object metadata（`signature`、`version`），一次讀取即取得互相對應的內容與簽章；bucket 內另有 `registry/latest.json.sig` 及每個版本的 `registry/v<version>.json`、`.sig`。讀取端須先以 App 內置的公鑰驗證收到的原始位元組，然後才解析。
+
+### 部署
+
+```bash
+cd infra && npm ci && (cd lambda/registry && npm ci) && npm run build
+npx cdk diff   --context env=dev --profile jarvis-deploy --exclusively Jarvis-dev-Registry
+npx cdk deploy --context env=dev --profile jarvis-deploy --exclusively Jarvis-dev-Registry
+```
+
+`--exclusively` 令 CDK 不會連帶部署 Payment 等依賴的 stack。部署後的 GitHub 設定（environment、變數、簽署 secret）見 `registry/README.md`。
 
 ## 付款設定與 sandbox 驗證（2026-09-23；live 未啟用）
 
