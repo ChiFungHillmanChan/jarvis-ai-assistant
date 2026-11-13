@@ -11,6 +11,15 @@
 //! level, and every read here adds the two: nothing is counted twice, and
 //! nothing is missed at the boundary.
 //!
+//! What expiry gives up, by design. The first day kept moves forward by at
+//! most one day per roll-up, so that a wrong clock cannot delete the
+//! history; where the roll-up runs less than once a day (JARVIS left open
+//! for weeks, the Usage page seldom opened) totals are kept somewhat longer
+//! than two years. And a request stored while the clock was more than two
+//! years back is dated before the first day kept, which never moves back:
+//! the roll-up that moves it deletes it with the oldest totals (pinned by
+//! `a_request_stored_under_a_clock_two_years_back_is_deleted_when_rolled_up`).
+//!
 //! Days are UTC days (`ts / 86400`) in both levels, so a period is exact to
 //! the day. Nothing here leaves the Mac, and the log gets counts only.
 //!
@@ -443,11 +452,16 @@ fn expire(tx: &Connection, today: i64) -> rusqlite::Result<usize> {
     let due = today - DAILY_TOTALS_DAYS;
     let from = match read_day(tx, KEPT_FROM_KEY)? {
         Some(day) => day,
-        None => match tx.query_row("SELECT MIN(day) FROM usage_daily", [], |r| r.get::<_, Option<i64>>(0))? {
-            // The first run with totals starts no later than the oldest.
-            Some(oldest) => oldest.min(due),
-            None => return Ok(0),
-        },
+        None => {
+            // The first run with totals only records where they start, no
+            // later than the oldest, and deletes nothing: with the clock two
+            // years ahead at that run, the first day of real usage would
+            // otherwise go although it is weeks old.
+            if let Some(oldest) = tx.query_row("SELECT MIN(day) FROM usage_daily", [], |r| r.get::<_, Option<i64>>(0))? {
+                write_day(tx, KEPT_FROM_KEY, oldest.min(due))?;
+            }
+            return Ok(0);
+        }
     };
     let kept_from = from.max(due.min(from + 1));
     let expired = tx.execute("DELETE FROM usage_daily WHERE day < ?1", [kept_from])?;
@@ -756,7 +770,9 @@ mod tests {
         let requests = [731, 730, 729, 5].map(|back| req((TODAY - back) * DAY + 60, "openai", "gpt-6-luna", "chat", 1_000, back, 0, 0, Some(back)));
         store(&conn, &requests);
 
-        assert_eq!(roll_up(&conn, NOW, 30).unwrap(), RolledUp { requests_moved: 3, totals_expired: 1 });
+        assert_eq!(roll_up(&conn, NOW, 30).unwrap(), RolledUp { requests_moved: 3, totals_expired: 0 }, "the first run only records where the totals start");
+        assert_eq!(read_day(&conn, KEPT_FROM_KEY).unwrap(), Some(TODAY - 731));
+        assert_eq!(roll_up(&conn, NOW, 30).unwrap(), RolledUp { requests_moved: 0, totals_expired: 1 });
         assert_eq!(daily_days(&conn), vec![TODAY - 730, TODAY - 729]);
         let two_years = totals(&conn, Period::last(730, NOW).unwrap()).unwrap();
         assert_eq!(two_years.sums, brute(&requests, |r| utc_day(r.ts) >= TODAY - 729));
@@ -792,6 +808,48 @@ mod tests {
         }
         assert_eq!(daily_days(&conn), vec![TODAY - 400, TODAY - 2]);
         assert_eq!(totals(&conn, Period::last(30, NOW).unwrap()).unwrap().sums, brute(&requests, |r| r.ts > (TODAY - 3) * DAY));
+    }
+
+    /// U4. The first launch after the update, with the clock two years
+    /// ahead: every request is moved early under its own day, and the run
+    /// that first records where the totals start deletes none of them. Each
+    /// later run under that clock may delete one day, the bound above.
+    #[test]
+    fn the_first_run_with_totals_only_records_where_they_start() {
+        let db = opened();
+        let conn = db.conn.lock().unwrap();
+        let requests = [40, 20, 3].map(|back| req((TODAY - back) * DAY + 60, "openai", "gpt-6-luna", "chat", 1_000, back, 0, 0, Some(back)));
+        store(&conn, &requests);
+        assert_eq!(read_day(&conn, KEPT_FROM_KEY).unwrap(), None);
+
+        let ahead = NOW + 730 * DAY;
+        assert_eq!(roll_up(&conn, ahead, 30).unwrap(), RolledUp { requests_moved: 3, totals_expired: 0 });
+        assert_eq!(read_day(&conn, KEPT_FROM_KEY).unwrap(), Some(TODAY - 40), "no later than the oldest total");
+        assert_eq!(daily_days(&conn), vec![TODAY - 40, TODAY - 20, TODAY - 3]);
+        assert_eq!(roll_up(&conn, ahead, 30).unwrap().totals_expired, 1, "the next run: one day");
+        assert_eq!(daily_days(&conn), vec![TODAY - 20, TODAY - 3]);
+    }
+
+    /// U5. A Mac whose clock reset to 1 January 2001: local requests stored
+    /// then are dated before the first day kept, so the roll-up that moves
+    /// them deletes them with the oldest totals. They are in no figure
+    /// afterwards; the module comment says so.
+    #[test]
+    fn a_request_stored_under_a_clock_two_years_back_is_deleted_when_rolled_up() {
+        let db = opened();
+        let conn = db.conn.lock().unwrap();
+        store(&conn, &[req((TODAY - 40) * DAY + 60, "openai", "gpt-6-luna", "chat", 10, 1, 0, 0, Some(3))]);
+        roll_up(&conn, NOW, 30).unwrap();
+        assert_eq!(read_day(&conn, KEPT_FROM_KEY).unwrap(), Some(TODAY - 730));
+        // 2001-01-01.
+        let reset = 11_323;
+        assert_eq!(chrono::DateTime::from_timestamp(reset * DAY, 0).unwrap().format("%Y-%m-%d").to_string(), "2001-01-01");
+        store(&conn, &vec![req(reset * DAY + 60, "local", "qwen3:4b", "chat", 4_000, 900, 0, 0, Some(0)); 20]);
+
+        assert_eq!(roll_up(&conn, NOW, 30).unwrap(), RolledUp { requests_moved: 20, totals_expired: 1 });
+        assert!(per_request(&conn).is_empty());
+        assert_eq!(daily_days(&conn), vec![TODAY - 40], "the 20 requests of 2001 are gone");
+        assert_eq!(totals(&conn, Period::last(730, NOW).unwrap()).unwrap().sums.requests, 1);
     }
 
     /// Each period is the brute-force sum of the requests on its days, over
