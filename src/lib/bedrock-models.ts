@@ -119,6 +119,17 @@ export function listStatus(state: BedrockListState, text: Text): string {
       `清單來自你的 AWS 帳戶（地區：${region}）。如帳戶未獲某個模型的存取權限，即使該模型在清單中，AWS 仍可能拒絕。`,
     );
   }
+  return `${fallbackReason(list, text)}${text(` ${BUILT_IN_REGION_NOTE[0]}`, BUILT_IN_REGION_NOTE[1])}`;
+}
+
+/**
+ * The last sentence of every built-in list line: its ids are the ones the
+ * app ships, and AWS's own pages do not show each of them for every region
+ * (Nova Micro's APAC profile, for one).
+ */
+export const BUILT_IN_REGION_NOTE = ['AWS may not offer every model in this list in your region.', 'AWS 未必在你的地區提供此清單內的每個模型。'] as const;
+
+function fallbackReason(list: BedrockModelList, text: Text): string {
   switch (list.reason) {
     case 'no_credentials':
       return text('Built-in list: no AWS credentials are saved. Save them under AWS Bedrock below to load the list from your AWS account.', '內置清單：尚未儲存 AWS 憑證。請在下方「AWS Bedrock」儲存憑證，即可從你的 AWS 帳戶載入清單。');

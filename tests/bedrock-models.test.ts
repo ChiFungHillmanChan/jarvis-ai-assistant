@@ -2,7 +2,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import { readFileSync, readdirSync } from 'node:fs';
 import {
-  OTHER_MODEL, groupLabel, groupedOptions, initialPicker, listStatus, pickerOptions, pickerReducer, selectValue,
+  BUILT_IN_REGION_NOTE, OTHER_MODEL, groupLabel, groupedOptions, initialPicker, listStatus, pickerOptions, pickerReducer, selectValue,
   type BedrockModelList,
 } from '../src/lib/bedrock-models.ts';
 import { ACTIVITY_EVENTS, activityGate, userHasActed, watchUserActivity } from '../src/lib/user-activity.ts';
@@ -109,11 +109,11 @@ test('the line under the picker says which list it shows and why', () => {
   assert.doesNotMatch(listStatus({ status: 'ready', list: awsList }, en), /you can use|available to you|your account can use/i);
   assert.equal(
     listStatus({ status: 'ready', list: builtIn }, en),
-    'Built-in list: your AWS key is not allowed to list models. To load the list from your account, allow bedrock:ListInferenceProfiles and bedrock:ListFoundationModels in IAM.',
+    'Built-in list: your AWS key is not allowed to list models. To load the list from your account, allow bedrock:ListInferenceProfiles and bedrock:ListFoundationModels in IAM. AWS may not offer every model in this list in your region.',
   );
   assert.equal(
     listStatus({ status: 'ready', list: builtIn }, zh),
-    '內置清單：你的 AWS 密鑰無權列出模型。如要從帳戶載入清單，請在 IAM 允許 bedrock:ListInferenceProfiles 及 bedrock:ListFoundationModels。',
+    '內置清單：你的 AWS 密鑰無權列出模型。如要從帳戶載入清單，請在 IAM 允許 bedrock:ListInferenceProfiles 及 bedrock:ListFoundationModels。AWS 未必在你的地區提供此清單內的每個模型。',
   );
   const reasons = ['no_credentials', 'unreadable_credentials', 'credentials_refused', 'offline', 'timed_out', 'failed'] as const;
   const lines = new Set<string>();
@@ -155,6 +155,21 @@ test('Other opens the ID field on the saved id; a save closes it', () => {
   assert.deepEqual([saved.other, saved.pending], [false, null]);
   const picking = pickerReducer(initialPicker(''), { type: 'saving', value: 'amazon.nova-micro-v1:0' });
   assert.equal(selectValue(picking, ''), 'amazon.nova-micro-v1:0', 'the choice shows while it saves');
+});
+
+// Round 8, R7-4: every built-in list line ends with the same sentence, in
+// both languages, and the AWS line does not carry it. Breaks if listStatus
+// stops appending BUILT_IN_REGION_NOTE, or a reason returns early.
+test('every built-in list line says AWS may not offer each listed model in the region', () => {
+  assert.deepEqual([...BUILT_IN_REGION_NOTE], ['AWS may not offer every model in this list in your region.', 'AWS 未必在你的地區提供此清單內的每個模型。']);
+  const reasons = ['no_credentials', 'unreadable_credentials', 'credentials_refused', 'not_allowed', 'offline', 'timed_out', 'failed'] as const;
+  for (const reason of reasons) {
+    const list = { ...builtIn, reason };
+    assert.ok(listStatus({ status: 'ready', list }, en).endsWith('. AWS may not offer every model in this list in your region.'), reason);
+    assert.ok(listStatus({ status: 'ready', list }, zh).endsWith('。AWS 未必在你的地區提供此清單內的每個模型。'), reason);
+  }
+  assert.doesNotMatch(listStatus({ status: 'ready', list: awsList }, en), /may not offer/);
+  assert.doesNotMatch(listStatus({ status: 'ready', list: awsList }, zh), /未必/);
 });
 
 // Requirement 8: the request waits for someone to use the window. Round 8,
