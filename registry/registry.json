@@ -2033,7 +2033,7 @@
     ],
     "hkd_per_usd": 7.8,
     "credit_expiry_months": 12,
-    "per_user_daily_cap_usd_micros": 2000000,
+    "per_user_daily_cap": 2000000,
     "daily_cap_time_zone": "Asia/Hong_Kong",
     "global_daily_ceiling": "entitled_users_x_per_user_daily_cap",
     "budget_alert_percent": [

@@ -202,6 +202,10 @@ test('JARVIS AI settings follow DECISIONS.md and the Tokyo price list', () => {
   assert.deepEqual(m.allowances_usd_micros, { pro: 20_000_000, team: 40_000_000, grant: 20_000_000 });
   assert.deepEqual(m.top_up_packs_hkd, [50, 100, 200]);
   assert.equal(m.credit_expiry_months, 12);
+  // DECISIONS.md 2026-11-13: US$2.00 billed per user per day; HK$7.80 per US$.
+  assert.equal(m.per_user_daily_cap, 2_000_000);
+  assert.equal(m.hkd_per_usd, 7.8);
+  assert.equal(m.global_daily_ceiling, 'entitled_users_x_per_user_daily_cap');
   assert.deepEqual(m.budget_alert_percent, [50, 80, 100]);
   assert.equal(m.budget_kill_percent, 150);
   assert.equal(m.workload_map.chat, 'qwen.qwen3-32b-v1:0');

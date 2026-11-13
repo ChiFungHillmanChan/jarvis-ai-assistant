@@ -99,7 +99,7 @@
       "description": "JARVIS AI (managed Bedrock through the JARVIS proxy): commercial settings and the proxy's models. Money is integer US$ micros (1000000 = US$1) billed to the user, unless the name says HKD.",
       "type": "object",
       "additionalProperties": false,
-      "required": ["paused", "markup", "allowances_usd_micros", "top_up_packs_hkd", "hkd_per_usd", "credit_expiry_months", "per_user_daily_cap_usd_micros", "daily_cap_time_zone", "global_daily_ceiling", "budget_alert_percent", "budget_kill_percent", "bedrock_region", "workload_map", "fallback", "default_output_tokens", "max_output_tokens"],
+      "required": ["paused", "markup", "allowances_usd_micros", "top_up_packs_hkd", "hkd_per_usd", "credit_expiry_months", "per_user_daily_cap", "daily_cap_time_zone", "global_daily_ceiling", "budget_alert_percent", "budget_kill_percent", "bedrock_region", "workload_map", "fallback", "default_output_tokens", "max_output_tokens"],
       "properties": {
         "paused": { "description": "Kill switch: true stops every JARVIS AI request.", "type": "boolean" },
         "markup": { "description": "Billed = AWS cost x markup.", "type": "number", "minimum": 1 },
@@ -117,7 +117,7 @@
         "top_up_packs_hkd": { "type": "array", "minItems": 1, "uniqueItems": true, "items": { "type": "integer", "minimum": 1 } },
         "hkd_per_usd": { "type": "number", "exclusiveMinimum": 0 },
         "credit_expiry_months": { "type": "integer", "minimum": 1 },
-        "per_user_daily_cap_usd_micros": { "$ref": "#/$defs/micros" },
+        "per_user_daily_cap": { "description": "US$ micros billed per user per day (the day in daily_cap_time_zone).", "$ref": "#/$defs/micros" },
         "daily_cap_time_zone": { "type": "string", "minLength": 1 },
         "global_daily_ceiling": {
           "description": "The global daily ceiling is the number of active entitled users times the per-user daily cap.",
