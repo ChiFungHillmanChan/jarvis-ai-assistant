@@ -125,7 +125,12 @@ pub struct Sums {
     /// the cache (ai/cost.rs `correct_old_rows` corrects every such Bedrock
     /// row before anything reads them, and no release stored a Claude row
     /// with cache figures), so its input counts as stored: the figure is
-    /// never below zero, and nothing is clamped away.
+    /// never below zero, and nothing is clamped away. So a group's figure
+    /// changes when its requests are rolled into a day's total if one of them
+    /// has input below its cache (input 100 with 300 cached and 1,000 with
+    /// 200 give 900 one by one and 600 as one day), which after the
+    /// correction only a service reporting more cached tokens than input
+    /// could store.
     pub input_without_cache: i64,
     /// Characters of MiniMax speech ([`BILLED_BY_CHARACTER`]); none of them
     /// is in the token figures above.
