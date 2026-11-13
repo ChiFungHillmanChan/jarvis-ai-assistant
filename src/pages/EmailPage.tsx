@@ -2,7 +2,7 @@ import { useEffect, useRef, useState, type ReactNode } from "react";
 import { Paperclip } from "lucide-react";
 import * as mail from "../lib/mail";
 import type { MailAccount, MailAnalysis, MailItem, MailMemory, MailMemoryInput, MailMessage, MailPage, MailSettings, MailView, MailWorkspace } from "../lib/mail";
-import { useWorkspaceValue } from "../workspace/WorkspaceContext";
+import { useIsActiveTab, useWorkspaceValue } from "../workspace/WorkspaceContext";
 import ReadableContent from "../components/content/ReadableContent";
 import { CategoryTag, MailAgenda, MailAiCard } from "../components/mail/MailItems";
 import { analysisSource, backendUtc, categoryLabel, decodeEntities, fileSize, formatDue, MAIL_CATEGORIES, mailSourceUrl, parseSender, readableBody, revealMailSource } from "../lib/mail-presentation";
@@ -10,6 +10,9 @@ import { openUrl } from "../lib/commands";
 import { useAiModels } from "../lib/ai-models";
 import { cloudModelFor, formatRate } from "../lib/ai-catalog";
 import { useUiLocale } from "../i18n";
+import BedrockModelPicker from "../components/BedrockModelPicker";
+import { useBedrockModelList } from "../hooks/useBedrockModelList";
+import { modelChosen } from "../lib/bedrock-models";
 import "./email-workspace.css";
 
 type Editor =
@@ -61,6 +64,10 @@ export default function EmailPage({ onSetup }: { onSetup?: () => void }) {
   const connectCancelled = useRef(false);
   const stored = useRef("");
   const dialog = useRef<HTMLDialogElement>(null);
+  // The Bedrock model list, asked for only while Analysis settings is open
+  // on this tab with "Your AWS Bedrock account" chosen (hooks/useBedrockModelList.ts).
+  const tabActive = useIsActiveTab();
+  const bedrockList = useBedrockModelList(tabActive && editor?.type === "settings" && editor.input.processing_mode === "bedrock");
   const reader = useRef<HTMLElement>(null);
   const requestedSource = useRef<number | null>(null);
   const group = workspace?.groups.find(item => item.id === groupId);
@@ -449,7 +456,7 @@ export default function EmailPage({ onSetup }: { onSetup?: () => void }) {
             <p className="mail-hint">{openAiPriceHint(editor.input.openai_model.trim() || models?.defaults.openai || "")}</p>
             <label className="mail-consent"><input type="checkbox" required checked={editor.consent} onChange={e => setEditor({ ...editor, consent: e.target.checked })} />{text("I understand that analysis sends the group's emails, instructions and active memories to OpenAI.", "我明白分析時，群組郵件、指示及有效記憶會傳送至 OpenAI。")}</label>
           </> : <>
-            <label>{text("Bedrock model ID", "Bedrock 模型 ID")}<input required value={editor.input.bedrock_model} onChange={e => setEditor({ ...editor, input: { ...editor.input, bedrock_model: e.target.value } })} /></label>
+            <BedrockModelPicker place="mail" value={editor.input.bedrock_model} stored={workspace?.settings.bedrock_model ?? ""} fallback={models?.defaults.bedrock ?? ""} listState={bedrockList.list} onReload={bedrockList.reload} onChange={model => setEditor({ ...editor, input: { ...editor.input, bedrock_model: model } })} />
             <p className="mail-hint">{text("Add your AWS credentials and region in Settings → Models first. Your AWS account pays.", "請先在設定的「模型」頁面填入 AWS 憑證及地區；費用由你的 AWS 帳戶支付。")}</p>
             <label className="mail-consent"><input type="checkbox" required checked={editor.consent} onChange={e => setEditor({ ...editor, consent: e.target.checked })} />{text("I understand that analysis sends the group's emails, instructions and active memories to AWS Bedrock.", "我明白分析時，群組郵件、指示及有效記憶會傳送至 AWS Bedrock。")}</label>
           </>}
@@ -459,7 +466,7 @@ export default function EmailPage({ onSetup }: { onSetup?: () => void }) {
       {error && <p role="alert" className="mail-alert">{error}</p>}
       <footer className="mail-actions">
         <button type="button" onClick={() => setEditor(null)}>{editor.type === "account" ? text("Close", "關閉") : text("Cancel", "取消")}</button>
-        {editor.type !== "account" && <button type="submit" className={editor.type === "delete" ? "mail-danger" : "mail-primary"} disabled={(editor.type === "group" && !editor.name.trim()) || (editor.type === "memory" && !editor.input.content.trim())}>{busy ? text("Working…", "處理中…") : editor.type === "delete" ? text("Delete", "刪除") : text("Save", "儲存")}</button>}
+        {editor.type !== "account" && <button type="submit" className={editor.type === "delete" ? "mail-danger" : "mail-primary"} disabled={(editor.type === "group" && !editor.name.trim()) || (editor.type === "memory" && !editor.input.content.trim()) || (editor.type === "settings" && editor.input.processing_mode === "bedrock" && !modelChosen(editor.input.bedrock_model))}>{busy ? text("Working…", "處理中…") : editor.type === "delete" ? text("Delete", "刪除") : text("Save", "儲存")}</button>}
       </footer>
     </fieldset></form></dialog>}
   </div>;

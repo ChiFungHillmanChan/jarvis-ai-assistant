@@ -1,0 +1,425 @@
+import test from 'node:test';
+import assert from 'node:assert/strict';
+import { readFileSync } from 'node:fs';
+import { document } from './dom.ts';
+import { StrictMode, createElement } from 'react';
+import { flushSync } from 'react-dom';
+import { createRoot } from 'react-dom/client';
+import { mockIPC } from '@tauri-apps/api/mocks';
+import {
+  BUILT_IN_REGION_NOTE, OTHER_MODEL, formPickerOptions, groupLabel, groupedOptions, listStatus, modelChosen, otherIdHelp, selectValue, initialPicker,
+  type BedrockListReason, type BedrockListState, type BedrockModelList,
+} from '../src/lib/bedrock-models.ts';
+
+// P02b: the Bedrock model picker in the Mail page's Analysis settings and in
+// the setup guide's company Bedrock option. The options, the wording per
+// place and the required rule are pure functions; the request rule is the
+// hook's, rendered for real with the Tauri bridge replaced; the pages are
+// JSX that imports CSS, so their wiring is checked in the source.
+
+const en = (english: string) => english;
+const zh = (_english: string, chinese: string) => chinese;
+const source = (path: string) => readFileSync(new URL(path, import.meta.url), 'utf8');
+const DEFAULT = 'global.anthropic.claude-sonnet-4-6';
+
+const awsList: BedrockModelList = {
+  source: 'aws',
+  region: 'ap-southeast-1',
+  reason: null,
+  missing_permissions: [],
+  default_model: { id: DEFAULT, name: 'Claude Sonnet 4.6' },
+  models: [
+    { id: 'apac.amazon.nova-micro-v1:0', name: 'APAC Nova Micro', kind: 'profile' },
+    { id: 'amazon.nova-micro-v1:0', name: 'Nova Micro', kind: 'model' },
+  ],
+};
+
+const builtIn: BedrockModelList = {
+  source: 'fallback',
+  region: 'us-east-1',
+  reason: 'no_credentials',
+  missing_permissions: [],
+  default_model: { id: DEFAULT, name: 'Claude Sonnet 4.6' },
+  models: [
+    { id: DEFAULT, name: 'Claude Sonnet 4.6', kind: 'profile' },
+    { id: 'us.amazon.nova-micro-v1:0', name: 'Amazon Nova Micro', kind: 'profile' },
+  ],
+};
+
+// Requirement 5: there is no empty "use the default" choice in a mail form.
+// A form that opens with no id shows "Choose a model", which cannot be
+// picked, and nothing reads as the default. Breaks if formPickerOptions
+// offers an empty value that can be chosen, or labels anything "Default".
+test('a mail form has no "use the default" entry; with no id it asks for a choice', () => {
+  for (const list of [awsList, builtIn, null]) {
+    for (const chosen of ['', DEFAULT, 'amazon.nova-micro-v1:0']) {
+      const options = formPickerOptions(list, chosen, '', DEFAULT, en);
+      assert.ok(options.every((option) => option.value !== '' || option.disabled), `no empty choice that can be picked (${chosen || 'empty'})`);
+      assert.ok(options.every((option) => !/^Default/.test(option.label)), 'nothing is labelled Default');
+      assert.ok(formPickerOptions(list, chosen, '', DEFAULT, zh).every((option) => !option.label.startsWith('預設')), '沒有「預設」');
+    }
+  }
+  const empty = formPickerOptions(builtIn, '', '', DEFAULT, en);
+  assert.deepEqual(empty[0], { value: '', group: 'choose', label: 'Choose a model', disabled: true });
+  assert.equal(formPickerOptions(builtIn, '', '', DEFAULT, zh)[0].label, '選擇模型');
+  assert.equal(selectValue(initialPicker(''), ''), '', 'the select shows "Choose a model"');
+  assert.equal(groupLabel('choose', en), null);
+  // Once an id is chosen, "Choose a model" is gone.
+  assert.ok(!formPickerOptions(builtIn, DEFAULT, '', DEFAULT, en).some((option) => option.group === 'choose'));
+});
+
+// Requirement 5: the app's default model is an ordinary choice, by name,
+// and its id is what the form holds. Breaks if the default is left out when
+// the list lacks it, offered twice when the list holds it, or offered with
+// an empty value.
+test('the default model is offered by name with its id', () => {
+  // AWS's list does not hold it: it comes first, by name, valued with its id.
+  const aws = formPickerOptions(awsList, '', '', DEFAULT, en);
+  assert.deepEqual(aws.slice(1, 2), [{ value: DEFAULT, group: 'default', label: `Claude Sonnet 4.6 (${DEFAULT})` }]);
+  assert.equal(formPickerOptions(awsList, '', '', DEFAULT, zh)[1].label, `Claude Sonnet 4.6（${DEFAULT}）`);
+  // The built-in list holds it: it is offered once, in that list.
+  const listed = formPickerOptions(builtIn, DEFAULT, '', DEFAULT, en);
+  assert.equal(listed.filter((option) => option.value === DEFAULT).length, 1);
+  assert.deepEqual(listed.find((option) => option.value === DEFAULT), { value: DEFAULT, group: 'built-in', label: `Claude Sonnet 4.6 (${DEFAULT})` });
+  // Before the list arrives, the app's default id is offered.
+  assert.deepEqual(formPickerOptions(null, '', '', DEFAULT, en).map((option) => [option.group, option.value]), [['choose', ''], ['default', DEFAULT], ['other', OTHER_MODEL]]);
+  // The same groups and order as Settings after that: AWS's profiles, its models, Other last.
+  assert.deepEqual(groupedOptions(aws).map((run) => run.group), ['choose', 'default', 'profiles', 'models', 'other']);
+  assert.deepEqual(groupedOptions(listed).map((run) => run.group), ['built-in', 'other']);
+});
+
+// Requirement 6: an id saved earlier that the list does not hold is the
+// current choice, and stays offered after the user picks something else,
+// until the form is saved. Breaks if the saved id is dropped or swapped.
+test('a saved id outside the list is kept as the current choice', () => {
+  const saved = 'eu.anthropic.fixture-saved-v1:0';
+  const options = formPickerOptions(awsList, saved, saved, DEFAULT, en);
+  assert.deepEqual(options.find((option) => option.value === saved), { value: saved, group: 'saved', label: `Saved: ${saved}` });
+  assert.equal(formPickerOptions(awsList, saved, saved, DEFAULT, zh).find((option) => option.value === saved)!.label, `已儲存：${saved}`);
+  assert.equal(selectValue(initialPicker(saved), saved), saved, 'the select shows it');
+  assert.ok(!options.some((option) => option.group === 'choose'));
+  // The user picks a listed model: the saved id is still there to go back to.
+  const picked = formPickerOptions(awsList, 'amazon.nova-micro-v1:0', saved, DEFAULT, en);
+  assert.ok(picked.some((option) => option.value === saved && option.group === 'saved'));
+  // While "Other" holds the id, no extra option follows the typing.
+  assert.equal(formPickerOptions(awsList, null, saved, DEFAULT, en).filter((option) => option.group === 'saved').length, 1);
+  // An id picked from a list that was loaded again since, and not saved, stays offered.
+  const earlier = formPickerOptions(awsList, 'us.amazon.nova-micro-v1:0', saved, DEFAULT, en);
+  assert.deepEqual(earlier.find((option) => option.value === 'us.amazon.nova-micro-v1:0'), { value: 'us.amazon.nova-micro-v1:0', group: 'saved', label: 'Chosen: us.amazon.nova-micro-v1:0' });
+  assert.equal(formPickerOptions(awsList, 'us.amazon.nova-micro-v1:0', saved, DEFAULT, zh).find((option) => option.value === 'us.amazon.nova-micro-v1:0')!.label, '已選擇：us.amazon.nova-micro-v1:0');
+});
+
+// Requirement 5: the forms' own check stops a save with no model, also when
+// "Other" is chosen and its field is empty or only spaces (the picker hands
+// the form the trimmed text). Breaks if modelChosen accepts blank text.
+test('an empty choice is refused', () => {
+  assert.equal(modelChosen(''), false);
+  assert.equal(modelChosen('   '), false);
+  assert.equal(modelChosen(DEFAULT), true);
+});
+
+const ALL_REASONS: BedrockListReason[] = ['no_credentials', 'unreadable_credentials', 'credentials_refused', 'not_allowed', 'offline', 'timed_out', 'failed'];
+const CREDENTIAL_REASONS: BedrockListReason[] = ['no_credentials', 'unreadable_credentials', 'credentials_refused'];
+const ready = (reason: BedrockListReason, list: BedrockModelList = builtIn): BedrockListState => ({ status: 'ready', list: { ...list, reason, missing_permissions: reason === 'not_allowed' ? ['bedrock:ListFoundationModels'] : [] } });
+
+// Requirement 9: each place has its own true "no credentials" line, in both
+// languages. Settings' says to save them below; the Mail dialog has no such
+// panel (they are in Settings > Models); the setup guide takes the keys
+// above and saves them with its test button. Breaks if a place falls back
+// to another place's words.
+test('each place says where to save AWS credentials, in both languages', () => {
+  assert.equal(
+    listStatus(ready('no_credentials'), en, 'settings'),
+    `Built-in list: no AWS credentials are saved. Save them under AWS Bedrock below to load the list from your AWS account. ${BUILT_IN_REGION_NOTE[0]}`,
+  );
+  assert.equal(listStatus(ready('no_credentials'), en), listStatus(ready('no_credentials'), en, 'settings'), 'Settings is the default place');
+  assert.equal(
+    listStatus(ready('no_credentials'), en, 'mail'),
+    `Built-in list: no AWS credentials are saved. Save them in Settings → Models, under AWS Bedrock, to load the list from your AWS account. ${BUILT_IN_REGION_NOTE[0]}`,
+  );
+  assert.equal(
+    listStatus(ready('no_credentials'), zh, 'mail'),
+    `內置清單：尚未儲存 AWS 憑證。請在設定的「模型」頁面「AWS Bedrock」部分儲存憑證，即可從你的 AWS 帳戶載入清單。${BUILT_IN_REGION_NOTE[1]}`,
+  );
+  assert.equal(
+    listStatus(ready('no_credentials'), en, 'setup'),
+    `Built-in list: no AWS credentials are saved. The keys entered above are saved when you press “Test and use Bedrock for mail”, and JARVIS then asks your AWS account for the list. ${BUILT_IN_REGION_NOTE[0]}`,
+  );
+  assert.equal(
+    listStatus(ready('no_credentials'), zh, 'setup'),
+    `內置清單：尚未儲存 AWS 憑證。上方輸入的密鑰會在按「測試並以 Bedrock 處理電郵」時儲存，之後 JARVIS 會向你的 AWS 帳戶查詢清單。${BUILT_IN_REGION_NOTE[1]}`,
+  );
+  // The other two lines about saved credentials follow the same rule.
+  for (const reason of CREDENTIAL_REASONS) {
+    const mail = [listStatus(ready(reason), en, 'mail'), listStatus(ready(reason), zh, 'mail')];
+    const setup = [listStatus(ready(reason), en, 'setup'), listStatus(ready(reason), zh, 'setup')];
+    assert.doesNotMatch(mail[0], /below/, `${reason}: nothing is below in the Mail dialog`);
+    assert.doesNotMatch(mail[1], /下方/, reason);
+    assert.match(mail[0], /Settings → Models, under AWS Bedrock/, reason);
+    assert.match(mail[1], /設定的「模型」頁面「AWS Bedrock」部分/, reason);
+    assert.doesNotMatch(setup[0], /below|Settings/, `${reason}: the keys are in the setup guide's own block`);
+    assert.doesNotMatch(setup[1], /下方|設定的/, reason);
+    assert.match(setup[0], /above.*“Test and use Bedrock for mail”/, reason);
+    assert.match(setup[1], /上方.*「測試並以 Bedrock 處理電郵」/, reason);
+    for (const line of [...mail, ...setup]) assert.match(line, /^(Built-in list: |內置清單：)/, reason);
+  }
+});
+
+// Requirement 9: every other line the picker brings is the same in each
+// place and true there; every "Built-in list:" line keeps its last sentence
+// about regions; the AWS line keeps the sentence that AWS can still refuse a
+// listed model, and never says the account can use one. Breaks if a place
+// drops the region sentence or the refusal sentence.
+test('every other line is the same in each place, with the region and refusal sentences', () => {
+  for (const place of ['settings', 'mail', 'setup'] as const) {
+    for (const reason of ALL_REASONS) {
+      assert.ok(listStatus(ready(reason), en, place).endsWith(`. ${BUILT_IN_REGION_NOTE[0]}`), `${place} ${reason}`);
+      assert.ok(listStatus(ready(reason), zh, place).endsWith(`。${BUILT_IN_REGION_NOTE[1]}`), `${place} ${reason}`);
+      if (!CREDENTIAL_REASONS.includes(reason)) {
+        assert.equal(listStatus(ready(reason), en, place), listStatus(ready(reason), en, 'settings'), `${place} ${reason}`);
+        assert.equal(listStatus(ready(reason), zh, place), listStatus(ready(reason), zh, 'settings'), `${place} ${reason}`);
+      }
+    }
+    for (const state of [{ status: 'idle' }, { status: 'loading' }, { status: 'error' }] as BedrockListState[]) {
+      assert.equal(listStatus(state, en, place), listStatus(state, en, 'settings'));
+    }
+    const aws = [listStatus({ status: 'ready', list: awsList }, en, place), listStatus({ status: 'ready', list: awsList }, zh, place)];
+    assert.ok(aws[0].endsWith('AWS can still refuse a listed model if your account has no access to it.'), place);
+    assert.ok(aws[1].endsWith('如帳戶未獲某個模型的存取權限，即使該模型在清單中，AWS 仍可能拒絕。'), place);
+    assert.match(aws[0], /ap-southeast-1/);
+    assert.doesNotMatch(aws[0], /you can use|available to you|your account can use/i);
+  }
+  // The setup guide also takes new keys: its AWS line says the list is from the saved ones.
+  assert.match(listStatus({ status: 'ready', list: awsList }, en, 'setup'), /^List from the AWS account of your saved credentials, for ap-southeast-1\./);
+  assert.match(listStatus({ status: 'ready', list: awsList }, zh, 'setup'), /^清單來自已儲存憑證的 AWS 帳戶（地區：ap-southeast-1）。/);
+  assert.equal(listStatus({ status: 'ready', list: awsList }, en, 'mail'), listStatus({ status: 'ready', list: awsList }, en, 'settings'));
+});
+
+// Requirement 9: the help under "Other" is true where it is shown. A mail
+// form cannot be left empty, so only Settings says to leave it empty for the
+// default. Breaks if a form says it may be left empty, or Settings' text changes.
+test('the help under Other is true in each place', () => {
+  assert.equal(
+    otherIdHelp('settings', DEFAULT, en),
+    `A model ID or an inference profile ID from the Bedrock console. A us., eu. or apac. profile is sent for the region of your saved AWS credentials; other IDs are sent as typed. Leave it empty for ${DEFAULT}. Usage is recorded against the ID that is sent.`,
+  );
+  assert.equal(otherIdHelp('settings', '', zh), '可輸入 Bedrock 主控台的模型 ID 或推論設定檔 ID。us.、eu. 或 apac. 開頭的設定檔會按已儲存 AWS 憑證的地區發送，其他 ID 按輸入內容發送。留空即使用 預設模型。用量按實際發送的 ID 記錄。');
+  for (const place of ['mail', 'setup'] as const) {
+    assert.doesNotMatch(otherIdHelp(place, DEFAULT, en), /empty|default/i, place);
+    assert.doesNotMatch(otherIdHelp(place, DEFAULT, zh), /留空|預設/, place);
+    assert.match(otherIdHelp(place, DEFAULT, en), /^A model ID or an inference profile ID from the Bedrock console\./);
+    assert.match(otherIdHelp(place, DEFAULT, zh), /^可輸入 Bedrock 主控台的模型 ID 或推論設定檔 ID。/);
+  }
+});
+
+// ---------------------------------------------------------------------------
+// Requirement 7: when JARVIS asks AWS, rendered for real.
+
+const asked: Array<(value: BedrockModelList) => void> = [];
+const calls: Array<Record<string, unknown> | undefined> = [];
+mockIPC((command, args) => {
+  assert.equal(command, 'list_bedrock_models', 'the hook sends nothing else');
+  calls.push(args as Record<string, unknown> | undefined);
+  return new Promise((resolve) => asked.push(resolve));
+});
+const { watchUserActivity } = await import('../src/lib/user-activity.ts');
+const activity: Record<string, () => void> = {};
+watchUserActivity({ addEventListener: (event, listener) => { activity[event] = listener; } });
+const { useBedrockModelList } = await import('../src/hooks/useBedrockModelList.ts');
+
+const settle = () => new Promise((resolve) => setTimeout(resolve, 20));
+
+function mount() {
+  const seen: BedrockListState[] = [];
+  let reload = () => {};
+  function Probe({ onScreen }: { onScreen: boolean }) {
+    const result = useBedrockModelList(onScreen);
+    seen.push(result.list);
+    reload = result.reload;
+    return null;
+  }
+  const root = createRoot(document.createElement('div') as unknown as HTMLElement);
+  return {
+    // The app renders in StrictMode, which runs each effect twice on mount.
+    render: (onScreen: boolean) => flushSync(() => root.render(createElement(StrictMode, null, createElement(Probe, { onScreen })))),
+    reload: () => flushSync(() => reload()),
+    last: () => seen[seen.length - 1],
+    unmount: () => flushSync(() => root.unmount()),
+  };
+}
+
+// Not asked while the picker is closed, nor while it is open before anyone
+// has clicked or pressed a key; asked once when someone does; once per
+// opening after that. Breaks if the hook stops checking onScreen or the
+// gate.
+test('the mail forms ask only while the picker is open, after a key or click, once per opening', async () => {
+  const probe = mount();
+  probe.render(false);
+  await settle();
+  assert.equal(asked.length, 0, 'closed: nothing asked');
+  probe.render(true);
+  await settle();
+  assert.equal(asked.length, 0, 'open, but nobody has used the window: nothing asked');
+  assert.deepEqual(probe.last(), { status: 'idle' });
+
+  flushSync(() => activity.keydown());
+  await settle();
+  assert.equal(asked.length, 1, 'a key press opens the gate: asked once');
+  assert.deepEqual(probe.last(), { status: 'loading' });
+  assert.deepEqual(calls[0] ?? {}, {}, 'the request carries no keys, typed or saved');
+  asked[0](builtIn);
+  await settle();
+  assert.deepEqual(probe.last(), { status: 'ready', list: builtIn });
+
+  probe.render(true);
+  flushSync(() => activity.click());
+  await settle();
+  assert.equal(asked.length, 1, 'the same opening does not ask again');
+
+  probe.render(false);
+  await settle();
+  assert.deepEqual(probe.last(), { status: 'idle' }, 'closing forgets the list');
+  assert.equal(asked.length, 1, 'closing asks nothing');
+
+  probe.render(true);
+  await settle();
+  assert.equal(asked.length, 2, 'opened again: asked once more');
+  probe.render(true);
+  await settle();
+  assert.equal(asked.length, 2);
+  probe.unmount();
+});
+
+// An opening asks once, StrictMode's second effect run included. The
+// button, and the setup guide after it saved AWS credentials, ask again once
+// each. A reply that arrives after the picker closed is not shown. Breaks if
+// the hook stops remembering that this opening has asked, reload stops
+// asking, or the request counter stops guarding a late reply.
+test('loading the list again asks once more; a late reply after closing is dropped', async () => {
+  const probe = mount();
+  probe.render(true);
+  await settle();
+  const before = asked.length;
+  assert.equal(before, 3, 'a new opening asks once (the gate is already open)');
+  asked[before - 1](builtIn);
+  await settle();
+
+  probe.reload();
+  await settle();
+  assert.equal(asked.length, before + 1, 'reload asks once');
+  asked[before](awsList);
+  await settle();
+  assert.deepEqual(probe.last(), { status: 'ready', list: awsList });
+
+  probe.reload();
+  await settle();
+  assert.equal(asked.length, before + 2);
+  probe.render(false);
+  asked[before + 1](builtIn);
+  await settle();
+  assert.deepEqual(probe.last(), { status: 'idle' }, 'the reply for a closed picker is not shown');
+
+  probe.reload();
+  await settle();
+  assert.equal(asked.length, before + 2, 'nothing is asked while closed, whatever asks');
+  probe.render(true);
+  await settle();
+  assert.equal(asked.length, before + 3, 'reopened: asked once');
+  probe.unmount();
+});
+
+// ---------------------------------------------------------------------------
+// The pages' wiring, read in the source.
+
+/** The text between two markers, so a check reads one block, not the file. */
+function between(text: string, start: string, end: string): string {
+  const from = text.indexOf(start);
+  assert.ok(from >= 0, `missing: ${start}`);
+  const to = text.indexOf(end, from + start.length);
+  assert.ok(to > from, `missing after ${start}: ${end}`);
+  return text.slice(from, to);
+}
+
+// Requirement 1: one component and one hook serve the forms; nothing else
+// asks for the list. Breaks if a page calls listBedrockModels itself or
+// keeps its own copy of the picker.
+test('the forms use the shared picker and hook, and only they ask', () => {
+  const email = source('../src/pages/EmailPage.tsx');
+  const wizard = source('../src/pages/OnboardingWizard.tsx');
+  for (const page of [email, wizard]) {
+    assert.doesNotMatch(page, /listBedrockModels/, 'the page does not ask by itself');
+    assert.doesNotMatch(page, /Bedrock model ID", "Bedrock 模型 ID"\)\}<input|Bedrock model ID', 'Bedrock 模型 ID'\)\}<input/, 'the typed field is gone');
+    assert.doesNotMatch(page, /pickerReducer|formPickerOptions/, 'no copy of the picker');
+  }
+  const hook = source('../src/hooks/useBedrockModelList.ts');
+  assert.equal(hook.split('listBedrockModels()').length, 2, 'one call, with no arguments');
+  assert.match(hook, /if \(!onScreen\) \{\s*asked\.current = null;\s*request\.current \+= 1;\s*setList\(\{ status: "idle" \}\);\s*return;\s*\}/);
+  assert.match(hook, /if \(!userActed \|\| asked\.current === ask\) return;\s*asked\.current = ask;/);
+  assert.match(hook, /const userActed = useUserHasActed\(\);/);
+  const picker = source('../src/components/BedrockModelPicker.tsx');
+  assert.doesNotMatch(picker, /listBedrockModels|invoke\(/, 'the picker shows a list; it does not ask');
+});
+
+// Requirements 4, 5 and 7 in the Mail dialog. Breaks if the list is asked
+// for with the dialog closed or another processing choice, the picker saves
+// by itself, or Save no longer needs a model with Bedrock.
+test('the Mail dialog: asked only while Bedrock is chosen in the open dialog; Save needs a model', () => {
+  const email = source('../src/pages/EmailPage.tsx');
+  assert.match(email, /const tabActive = useIsActiveTab\(\);\s*const bedrockList = useBedrockModelList\(tabActive && editor\?\.type === "settings" && editor\.input\.processing_mode === "bedrock"\);/);
+  assert.match(email, /<BedrockModelPicker place="mail" value=\{editor\.input\.bedrock_model\} stored=\{workspace\?\.settings\.bedrock_model \?\? ""\} fallback=\{models\?\.defaults\.bedrock \?\? ""\} listState=\{bedrockList\.list\} onReload=\{bedrockList\.reload\} onChange=\{model => setEditor\(\{ \.\.\.editor, input: \{ \.\.\.editor\.input, bedrock_model: model \} \}\)\} \/>/);
+  assert.match(email, /\|\| \(editor\.type === "settings" && editor\.input\.processing_mode === "bedrock" && !modelChosen\(editor\.input\.bedrock_model\)\)\}>\{busy \?/);
+  // The consent box and the save path are as before.
+  assert.match(email, /<label className="mail-consent"><input type="checkbox" required checked=\{editor\.consent\} onChange=\{e => setEditor\(\{ \.\.\.editor, consent: e\.target\.checked \}\)\} \/>\{text\("I understand that analysis sends the group's emails, instructions and active memories to AWS Bedrock\."/);
+  assert.match(email, /if \(draft\.type === "settings"\) \{\s*await mail\.mailSaveSettings\(draft\.input\);/);
+});
+
+// Requirements 4, 5, 7 and 8 in the setup guide. Breaks if the list is
+// asked for with the block closed or off step 1, typed keys are saved before
+// the button, the list is not asked again after the button saved keys, or
+// the button runs with no model.
+test('the setup guide: asked only while the block is open; again after the button saved keys', () => {
+  const wizard = source('../src/pages/OnboardingWizard.tsx');
+  assert.match(wizard, /const \[bedrockOpen, setBedrockOpen\] = useState\(false\);\s*const bedrockList = useBedrockModelList\(step === 1 && bedrockOpen\);/);
+  assert.match(wizard, /<details onToggle=\{event => \{ const open = \(event\.target as HTMLDetailsElement\)\.open; setBedrockOpen\(open\);/);
+  assert.match(wizard, /function goStep\(next: number\) \{ setError\(''\); setNotice\(''\); setBedrockOpen\(false\); setStep\(next\); \}/);
+  assert.equal(wizard.split('setStep(').length, 2, 'goStep is the only way off step 1');
+  const save = between(wizard, 'async function testAndSave() {', 'async function verifyMail() {');
+  assert.match(save, /await setAwsCredentials\(accessKey\.trim\(\), secretKey\.trim\(\), region\);\s*setAccessKey\(''\); setSecretKey\(''\);\s*(\/\/[^\n]*\n\s*)?bedrockList\.reload\(\);\s*\}\s*const tested = await testMailAiConnection\(settings\);/, 'asked again once the keys are saved, before the test runs');
+  assert.equal(wizard.split('setAwsCredentials(').length, 2, 'keys are saved in one place only: the test button');
+  assert.match(wizard, /<BedrockModelPicker place="setup" value=\{settings\.bedrock_model\} stored=\{workspace\.settings\.bedrock_model\} fallback=\{models\?\.defaults\.bedrock \?\? ''\} listState=\{bedrockList\.list\} onReload=\{bedrockList\.reload\} onChange=\{model => changeSettings\(\{ \.\.\.settings, processing_mode: 'bedrock', bedrock_model: model \}\)\} \/>/);
+  assert.match(wizard, /disabled=\{!consent \|\| settings\.processing_mode !== 'bedrock' \|\| !modelChosen\(settings\.bedrock_model\)\} onClick=\{\(\) => void testAndSave\(\)\}/);
+});
+
+// Requirements 4, 5 and 12 in the shared component: in a form a choice goes
+// into the form, nothing is saved by the picker, a model is required, and
+// the reload button does not submit the Mail form. Breaks if form mode gets
+// a save of its own, loses required, or the button loses type="button".
+test('the picker in a form: changes the form only, requires a model, and its button does not submit', () => {
+  const picker = source('../src/components/BedrockModelPicker.tsx');
+  assert.match(picker, /if \(props\.place !== "settings"\) \{\s*props\.onChange\(value\);\s*return;\s*\}/, 'a choice goes into the form');
+  assert.match(picker, /function type\(draft: string\) \{\s*dispatch\(\{ type: "type", draft \}\);\s*if \(props\.place !== "settings"\) props\.onChange\(draft\.trim\(\)\);/, 'typed text goes into the form, trimmed');
+  assert.match(picker, /onChange=\{\(e\) => choose\(e\.target\.value\)\} required=\{form\}/, 'the select is required in a form');
+  assert.match(picker, /disabled=\{busy\} required=\{form\}\s*onChange=\{\(e\) => type\(e\.target\.value\)\}/, 'the ID field is required in a form');
+  assert.match(picker, /\{!form && <button disabled=\{!changed \|\| busy\}/, '"Save model" only in Settings');
+  assert.match(picker, /onKeyDown=\{\(e\) => \{ if \(!form && e\.key === "Enter"/, 'Enter saves only in Settings');
+  assert.match(picker, /<button type="button" disabled=\{listState\.status === "loading" \|\| busy\} onClick=\{onReload\}/);
+  assert.match(picker, /placeholder=\{form \? undefined : fallback\}/, 'an empty ID field in a form shows no id');
+  assert.match(picker, /<option key=\{option\.value\} value=\{option\.value\} disabled=\{option\.disabled\}>/);
+  assert.match(picker, /<p id=\{statusId\} role="status" className=\{LOOK\[place\]\.help\}>/, 'the status line is announced as in Settings');
+  assert.match(picker, /mail: \{ field: "mail-bedrock-model", help: "mail-hint" \}/);
+  assert.match(picker, /setup: \{ field: "setup-bedrock-model", help: "setup-hint" \}/);
+});
+
+// Requirement 2: Settings > Models renders the same picker with the same
+// props as merged, and keeps its own request effect. Breaks if Settings'
+// row passes anything else or loses the immediate save.
+test('Settings > Models is unchanged: same props, same save, same request effect', () => {
+  const settings = source('../src/pages/Settings.tsx');
+  assert.match(settings, /<BedrockModelPicker place="settings" saved=\{entry\.model_id \?\? ""\} fallback=\{models\?\.defaults\.bedrock \?\? ""\} listState=\{bedrockList\} onReload=\{\(\) => setBedrockAsk\(\(n\) => n \+ 1\)\} onSave=\{\(model\) => handleSetBedrockModel\(i, model\)\} styles=\{\{ select: styles\.select, button: styles\.saveBtn, input: styles\.tokenInput \}\} \/>/);
+  assert.doesNotMatch(settings, /function BedrockModelField\(/, 'no second copy of the picker');
+  assert.doesNotMatch(settings, /useBedrockModelList/, 'Settings keeps its own effect, as merged');
+  const picker = source('../src/components/BedrockModelPicker.tsx');
+  assert.match(picker, /pickerOptions\(list, props\.saved, fallback, text\)/, 'Settings keeps its options, the default entry included');
+  assert.match(picker, /const \{ onSave \} = props;\s*dispatch\(\{ type: "saving", value \}\);/);
+  assert.match(picker, /otherIdHelp\(place, fallback, text\)/);
+});

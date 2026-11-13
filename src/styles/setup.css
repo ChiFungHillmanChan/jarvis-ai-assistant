@@ -61,3 +61,6 @@
 .setup-topline select { width: auto; min-width: 190px; padding-top: 7px; padding-bottom: 7px; }
 .setup-content input[type=radio]:focus-visible, .setup-local input[type=radio]:focus-visible { outline-offset: 2px; border-radius: 50%; }
 .setup-content input[type=checkbox], .setup-content input[type=radio], .setup-local input[type=checkbox], .setup-local input[type=radio] { accent-color: #43b4ed; }
+/* The Bedrock model picker (components/BedrockModelPicker.tsx): the button and its status line under the select. */
+.setup-content .setup-bedrock-model > label:first-child { margin-bottom: 8px; }
+.setup-content .setup-bedrock-model .setup-hint { margin-top: 8px; }

@@ -5,6 +5,9 @@ import * as mail from '../lib/mail';
 import { canStartFirstAnalysis, triageConsentText } from '../lib/setup-flow';
 import { applyTestedMailSettings, getSetupStatus, setupError, testMailAiConnection, type SetupStatus } from '../lib/setup';
 import ChooseAi from '../components/ChooseAi';
+import BedrockModelPicker from '../components/BedrockModelPicker';
+import { useBedrockModelList } from '../hooks/useBedrockModelList';
+import { modelChosen } from '../lib/bedrock-models';
 import { useAiModels } from '../lib/ai-models';
 import WindowControls from '../components/WindowControls';
 import ReadableContent from '../components/content/ReadableContent';
@@ -36,6 +39,11 @@ export default function OnboardingWizard({ onComplete }: { onComplete: () => voi
   const [loading, setLoading] = useState(true);
   const [credentialDirty, setCredentialDirty] = useState(false);
   const [triageDeclined, setTriageDeclined] = useState(false);
+  // The Bedrock model list, asked for only while the Advanced Bedrock block
+  // is open on step 1 (hooks/useBedrockModelList.ts). It reads the saved
+  // credentials only, never the keys typed here.
+  const [bedrockOpen, setBedrockOpen] = useState(false);
+  const bedrockList = useBedrockModelList(step === 1 && bedrockOpen);
   const operation = useRef(false);
   const mounted = useRef(true);
   const firstGroup = useRef<number | null>(null);
@@ -71,7 +79,7 @@ export default function OnboardingWizard({ onComplete }: { onComplete: () => voi
   function changeSettings(next: mail.MailSettings) { setSettings(next); setAnalysis(null); setConsent(false); }
   const sameSettings = !!settings && JSON.stringify(settings) === JSON.stringify(workspace?.settings);
   const readiness = sameSettings && !credentialDirty ? status?.mail.state || 'not_configured' : 'saved_unverified';
-  function goStep(next: number) { setError(''); setNotice(''); setStep(next); }
+  function goStep(next: number) { setError(''); setNotice(''); setBedrockOpen(false); setStep(next); }
   const canAnalyze = canStartFirstAnalysis(readiness, selected.length);
 
   async function testAndSave() {
@@ -85,6 +93,8 @@ export default function OnboardingWizard({ onComplete }: { onComplete: () => voi
         if (!accessKey.trim() || !secretKey.trim()) throw Error('credential_missing');
         await setAwsCredentials(accessKey.trim(), secretKey.trim(), region);
         setAccessKey(''); setSecretKey('');
+        // Saved before the test, so the list is asked again whatever the test says.
+        bedrockList.reload();
       }
       const tested = await testMailAiConnection(settings);
       if (tested.state !== 'ready') { setStatus(current => current ? { ...current, mail: tested } : current); throw Error(tested.errorCode || 'probe_failed'); }
@@ -143,15 +153,15 @@ export default function OnboardingWizard({ onComplete }: { onComplete: () => voi
         {step === 1 && <>
           <ChooseAi onChosen={() => void verifyMail()} onBusyChange={setLocalBusy} />
           {readiness === 'ready' && <p className="setup-notice">{text('Mail analysis passed its test with this AI. Press Continue to connect Gmail.', '電郵分析已用這個 AI 通過測試。按「繼續」連接 Gmail。')}</p>}
-          <details onToggle={event => { if ((event.target as HTMLDetailsElement).open && settings.processing_mode !== 'bedrock') changeSettings({ ...settings, processing_mode: 'bedrock' }); }}>
+          <details onToggle={event => { const open = (event.target as HTMLDetailsElement).open; setBedrockOpen(open); if (open && settings.processing_mode !== 'bedrock') changeSettings({ ...settings, processing_mode: 'bedrock' }); }}>
             <summary>{text('Advanced: use a company AWS Bedrock account for mail', '進階：電郵改用公司 AWS Bedrock 帳戶')}</summary>
             <p>{text('Your company administrator provides these credentials. Model availability depends on the region and account. Start with a text model approved by your company.', '憑證由公司管理員提供；可用模型取決於地區及帳戶。請先使用公司批准的文字模型。')}</p>
             <label>Access Key ID<input autoComplete="off" value={accessKey} onChange={event => { setAccessKey(event.target.value); setCredentialDirty(true); }} placeholder={text('Leave both keys blank to reuse saved credentials', '兩個欄位都留空會沿用已儲存憑證')} /></label>
             <label>Secret Access Key<input type="password" autoComplete="off" value={secretKey} onChange={event => { setSecretKey(event.target.value); setCredentialDirty(true); }} /></label>
             <label>{text('Region for new credentials', '新憑證使用的地區')}<select value={region} onChange={event => setRegion(event.target.value)}><option value="us-east-1">us-east-1 — US</option><option value="ap-southeast-1">ap-southeast-1 — Singapore</option><option value="ap-northeast-1">ap-northeast-1 — Tokyo</option><option value="eu-west-2">eu-west-2 — London</option></select></label>
-            <label>{text('Bedrock model ID', 'Bedrock 模型 ID')}<input required value={settings.bedrock_model} onChange={event => changeSettings({ ...settings, processing_mode: 'bedrock', bedrock_model: event.target.value })} placeholder={models?.defaults.bedrock} /></label>
+            <BedrockModelPicker place="setup" value={settings.bedrock_model} stored={workspace.settings.bedrock_model} fallback={models?.defaults.bedrock ?? ''} listState={bedrockList.list} onReload={bedrockList.reload} onChange={model => changeSettings({ ...settings, processing_mode: 'bedrock', bedrock_model: model })} />
             <label className="setup-checkbox"><input type="checkbox" checked={consent} onChange={event => setConsent(event.target.checked)} />{text('The test sends synthetic text and may incur a small charge. Later mail analysis sends selected mail content, instructions and valid memories to this provider.', '測試會傳送合成文字，可能產生少量費用。之後分析郵件時，所選郵件內容、指示及有效記憶會傳送至此供應商。')}</label>
-            <button type="button" className="setup-primary" disabled={!consent || settings.processing_mode !== 'bedrock'} onClick={() => void testAndSave()}>{text('Test and use Bedrock for mail', '測試並以 Bedrock 處理電郵')}</button>
+            <button type="button" className="setup-primary" disabled={!consent || settings.processing_mode !== 'bedrock' || !modelChosen(settings.bedrock_model)} onClick={() => void testAndSave()}>{text('Test and use Bedrock for mail', '測試並以 Bedrock 處理電郵')}</button>
           </details>
         </>}
         {step === 2 && <>
