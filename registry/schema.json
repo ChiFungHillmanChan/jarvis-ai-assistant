@@ -1,0 +1,367 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://jarvis-automation.com/registry/schema.json",
+  "title": "JARVIS model registry",
+  "description": "The one list of AI models, prices, limits, capability flags, per-feature defaults, kill switches, provider data terms and JARVIS AI's commercial settings. Published signed at GET /v1/registry. It is public: it must never hold a key, a secret, a credential or any user data. See registry/README.md. Model lookup: an id a cloud provider reports is matched to the entry with the longest id contained in it (case-insensitive; on a tie the later entry wins), among entries whose prices are not null and that are not managed. That set is exactly the price list the app ships in src-tauri/src/ai/models.rs. Every other entry is matched by exact id.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["version", "issued_at", "min_app_version", "providers", "models", "features", "chat_model_filter", "presets", "managed"],
+  "properties": {
+    "version": {
+      "description": "Monotonic. Every publish must carry a version greater than the one already published; apps refuse a lower version than the copy they hold.",
+      "type": "integer",
+      "minimum": 1
+    },
+    "issued_at": {
+      "description": "When this version was written, UTC.",
+      "type": "string",
+      "pattern": "^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}Z$"
+    },
+    "min_app_version": {
+      "description": "The oldest app version that may use this registry. An older app keeps the copy built into it.",
+      "type": "string",
+      "pattern": "^[0-9]+\\.[0-9]+\\.[0-9]+$"
+    },
+    "providers": {
+      "type": "array",
+      "minItems": 1,
+      "items": { "$ref": "#/$defs/provider" }
+    },
+    "models": {
+      "type": "array",
+      "minItems": 1,
+      "items": { "$ref": "#/$defs/model" }
+    },
+    "features": {
+      "description": "For each feature, the model each provider uses when the user has not chosen one: provider id to model id. A provider that is absent has no default for that feature (the user picks the model, as for Ollama and OpenAI-compatible services, or the feature does not run on it).",
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["chat", "premium", "mail_analysis", "mail_sort", "briefing", "memory", "stt", "tts", "cloud_triage"],
+      "properties": {
+        "chat": { "$ref": "#/$defs/featureDefaults" },
+        "premium": { "$ref": "#/$defs/featureDefaults" },
+        "mail_analysis": { "$ref": "#/$defs/featureDefaults" },
+        "mail_sort": { "$ref": "#/$defs/featureDefaults" },
+        "briefing": { "$ref": "#/$defs/featureDefaults" },
+        "memory": { "$ref": "#/$defs/featureDefaults" },
+        "stt": { "$ref": "#/$defs/featureDefaults" },
+        "tts": { "$ref": "#/$defs/featureDefaults" },
+        "cloud_triage": { "$ref": "#/$defs/featureDefaults" }
+      }
+    },
+    "chat_model_filter": {
+      "description": "Which ids from a provider's live model list are offered as chat models (commands/ai_choice.rs chat_models).",
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["strip_prefix", "exclude_words", "exclude_dated_snapshots"],
+      "properties": {
+        "strip_prefix": { "type": "string" },
+        "exclude_words": { "type": "array", "items": { "type": "string", "minLength": 1 } },
+        "exclude_dated_snapshots": { "type": "boolean" }
+      }
+    },
+    "presets": {
+      "description": "The named Gemini chains of Settings (ai/mod.rs AiRouter::new). A null model means the workload picks it: the premium default for a premium request, the chat default otherwise.",
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["default", "chains"],
+      "properties": {
+        "default": { "$ref": "#/$defs/id" },
+        "chains": {
+          "type": "object",
+          "minProperties": 1,
+          "propertyNames": { "$ref": "#/$defs/id" },
+          "additionalProperties": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": ["label", "entries"],
+            "properties": {
+              "label": { "$ref": "#/$defs/text" },
+              "entries": {
+                "type": "array",
+                "minItems": 1,
+                "items": {
+                  "type": "object",
+                  "additionalProperties": false,
+                  "required": ["provider", "model"],
+                  "properties": {
+                    "provider": { "$ref": "#/$defs/id" },
+                    "model": { "type": ["string", "null"], "minLength": 1 }
+                  }
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "managed": {
+      "description": "JARVIS AI (managed Bedrock through the JARVIS proxy): commercial settings and the proxy's models. Money is integer US$ micros (1000000 = US$1) billed to the user, unless the name says HKD.",
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["paused", "markup", "allowances_usd_micros", "top_up_packs_hkd", "hkd_per_usd", "credit_expiry_months", "per_user_daily_cap_usd_micros", "daily_cap_time_zone", "global_daily_ceiling", "budget_alert_percent", "budget_kill_percent", "bedrock_region", "workload_map", "fallback", "default_output_tokens", "max_output_tokens"],
+      "properties": {
+        "paused": { "description": "Kill switch: true stops every JARVIS AI request.", "type": "boolean" },
+        "markup": { "description": "Billed = AWS cost x markup.", "type": "number", "minimum": 1 },
+        "allowances_usd_micros": {
+          "description": "Monthly allowance, in US$ billed. Resets monthly, no rollover.",
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["pro", "team", "grant"],
+          "properties": {
+            "pro": { "$ref": "#/$defs/micros" },
+            "team": { "$ref": "#/$defs/micros" },
+            "grant": { "$ref": "#/$defs/micros" }
+          }
+        },
+        "top_up_packs_hkd": { "type": "array", "minItems": 1, "uniqueItems": true, "items": { "type": "integer", "minimum": 1 } },
+        "hkd_per_usd": { "type": "number", "exclusiveMinimum": 0 },
+        "credit_expiry_months": { "type": "integer", "minimum": 1 },
+        "per_user_daily_cap_usd_micros": { "$ref": "#/$defs/micros" },
+        "daily_cap_time_zone": { "type": "string", "minLength": 1 },
+        "global_daily_ceiling": {
+          "description": "The global daily ceiling is the number of active entitled users times the per-user daily cap.",
+          "const": "entitled_users_x_per_user_daily_cap"
+        },
+        "budget_alert_percent": { "type": "array", "minItems": 1, "items": { "type": "integer", "minimum": 1 } },
+        "budget_kill_percent": { "type": "integer", "minimum": 1 },
+        "bedrock_region": { "type": "string", "pattern": "^[a-z]{2}(-[a-z]+)+-[0-9]$" },
+        "workload_map": {
+          "description": "The managed model the proxy runs for each JARVIS AI workload.",
+          "type": "object",
+          "minProperties": 1,
+          "propertyNames": { "$ref": "#/$defs/id" },
+          "additionalProperties": { "type": "string", "minLength": 1 }
+        },
+        "fallback": { "description": "The proxy's internal fallback when the primary model fails to open; the user sees JARVIS AI as one model.", "type": ["string", "null"] },
+        "default_output_tokens": { "type": "integer", "minimum": 1 },
+        "max_output_tokens": { "type": "integer", "minimum": 1 }
+      }
+    }
+  },
+  "$defs": {
+    "id": { "type": "string", "pattern": "^[a-z][a-z0-9_]*$" },
+    "text": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["en", "zh-HK"],
+      "properties": {
+        "en": { "type": "string", "minLength": 1 },
+        "zh-HK": { "type": "string", "minLength": 1 }
+      }
+    },
+    "micros": { "type": "integer", "minimum": 0 },
+    "rate": { "description": "US$ per 1M tokens.", "type": "number", "minimum": 0 },
+    "optionalRate": { "description": "US$ per 1M tokens; null when the provider lists no such rate.", "type": ["number", "null"], "minimum": 0 },
+    "url": { "type": "string", "pattern": "^https?://[^\\s?#]+$" },
+    "featureName": { "enum": ["chat", "premium", "mail_analysis", "mail_sort", "briefing", "memory", "stt", "tts", "cloud_triage"] },
+    "featureDefaults": {
+      "type": "object",
+      "minProperties": 1,
+      "propertyNames": { "$ref": "#/$defs/id" },
+      "additionalProperties": { "type": "string", "minLength": 1 }
+    },
+    "provider": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["id", "wire", "display_name", "base_url", "data_terms", "data_terms_note", "consent_copy_keys", "setup", "model_id_pattern", "default_for"],
+      "properties": {
+        "id": { "$ref": "#/$defs/id" },
+        "wire": {
+          "description": "The request format. typesafe, minimax and whisper_cpp are beyond the seven formats the plan lists: they are the mail classifier, the speech service and the on-device speech model the app already uses.",
+          "enum": ["openai", "anthropic", "gemini", "bedrock", "ollama", "openai_compat", "jarvis_proxy", "typesafe", "minimax", "whisper_cpp"]
+        },
+        "display_name": { "$ref": "#/$defs/text" },
+        "base_url": { "description": "Null where the user or the region decides it.", "oneOf": [{ "$ref": "#/$defs/url" }, { "type": "null" }] },
+        "regions": {
+          "type": "array",
+          "minItems": 1,
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": ["id", "base_url", "key_page"],
+            "properties": {
+              "id": { "$ref": "#/$defs/id" },
+              "base_url": { "$ref": "#/$defs/url" },
+              "key_page": { "$ref": "#/$defs/url" }
+            }
+          }
+        },
+        "host_suffixes": { "description": "An OpenAI-compatible base URL whose host ends in one of these is this provider (ai/compat.rs label).", "type": "array", "minItems": 1, "items": { "type": "string", "minLength": 1 } },
+        "model_id_suffixes": { "description": "A model id ending in one of these belongs to this provider (ai/mail_policy.rs is_ollama_cloud_model).", "type": "array", "minItems": 1, "items": { "type": "string", "minLength": 1 } },
+        "data_terms": {
+          "description": "safe: email may be sent. needs_billing_confirmation: only after the user confirms paid billing. unknown: not checked; email is not sent today (the consent card is P06).",
+          "enum": ["safe", "needs_billing_confirmation", "unknown"]
+        },
+        "data_terms_note": { "type": "string", "minLength": 1 },
+        "consent_copy_keys": {
+          "description": "Message keys (src/i18n/catalog.ts) for the consent card. Null exactly when data_terms is safe.",
+          "oneOf": [
+            { "type": "null" },
+            {
+              "type": "object",
+              "additionalProperties": false,
+              "required": ["blocked", "confirm"],
+              "properties": {
+                "blocked": { "type": "string", "pattern": "^[a-z][A-Za-z0-9]*$" },
+                "confirm": { "type": "string", "pattern": "^[a-z][A-Za-z0-9]*$" }
+              }
+            }
+          ]
+        },
+        "setup": {
+          "description": "How the provider is offered in setup step 1 (components/ChooseAi.tsx). Null: not offered there.",
+          "oneOf": [
+            { "type": "null" },
+            {
+              "type": "object",
+              "additionalProperties": false,
+              "required": ["order", "key_page", "model", "hint"],
+              "properties": {
+                "order": { "type": "integer", "minimum": 1 },
+                "key_page": { "oneOf": [{ "$ref": "#/$defs/url" }, { "type": "null" }] },
+                "model": { "description": "optional: none means the feature default. required: the user must pick one.", "enum": ["optional", "required"] },
+                "hint": { "$ref": "#/$defs/text" }
+              }
+            }
+          ]
+        },
+        "model_id_pattern": { "description": "A regular expression the ids from the provider's live list must match to be offered as chat models; null keeps all.", "type": ["string", "null"], "minLength": 1 },
+        "default_for": { "description": "The features this provider must have a default for in features.", "type": "array", "uniqueItems": true, "items": { "$ref": "#/$defs/featureName" } },
+        "limits": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "chat_max_output_tokens": { "type": "integer", "minimum": 1 },
+            "default_max_output_tokens": { "description": "For a model without max_output.", "type": "integer", "minimum": 1 },
+            "stt_max_output_tokens": { "type": "integer", "minimum": 1 },
+            "completion_context_tokens": { "type": "integer", "minimum": 1 },
+            "default_context_tokens": { "type": "integer", "minimum": 1 },
+            "max_tool_rounds": { "type": "integer", "minimum": 1 },
+            "chat_reasoning_effort": { "type": "string", "minLength": 1 },
+            "chat_temperature": { "type": "number", "minimum": 0 },
+            "api_version": { "type": "string", "minLength": 1 }
+          }
+        },
+        "inference_geographies": { "description": "Bedrock inference profile prefixes the app points at the saved region; global is never rewritten.", "type": "array", "items": { "type": "string", "minLength": 1 } },
+        "built_in_models": { "description": "The Bedrock picker's built-in list, shown when AWS cannot be asked.", "type": "array", "items": { "type": "string", "minLength": 1 } },
+        "tool_capable_families": { "description": "Local model families with native tool calling, for models outside the catalog.", "type": "array", "items": { "type": "string", "minLength": 1 } }
+      }
+    },
+    "model": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["id", "provider", "kind", "display_name", "status", "replacement", "managed", "prices", "context", "max_output", "capabilities"],
+      "properties": {
+        "id": { "type": "string", "minLength": 1, "pattern": "^[^\\sA-Z]+$" },
+        "provider": { "$ref": "#/$defs/id" },
+        "kind": { "description": "family: a price pattern for a model family, not a model a user can pick.", "enum": ["model", "family"] },
+        "display_name": { "$ref": "#/$defs/text" },
+        "status": { "description": "Kill switch per model. disabled: never used; deprecated: still works, the replacement is suggested.", "enum": ["active", "deprecated", "disabled"] },
+        "replacement": { "type": ["string", "null"], "minLength": 1 },
+        "managed": { "description": "True for JARVIS AI's own models: priced for the proxy and never matched by the app's price lookup.", "type": "boolean" },
+        "prices": {
+          "description": "Null: no price (a local model, which is free, or a service billed in other units).",
+          "oneOf": [
+            { "type": "null" },
+            {
+              "type": "object",
+              "additionalProperties": false,
+              "required": ["input", "output", "cache_read", "cache_write", "tiers"],
+              "properties": {
+                "input": { "$ref": "#/$defs/rate" },
+                "output": { "$ref": "#/$defs/rate" },
+                "cache_read": { "$ref": "#/$defs/optionalRate" },
+                "cache_write": { "$ref": "#/$defs/optionalRate" },
+                "tiers": {
+                  "description": "Once a request's input exceeds above_input_tokens, the whole request is billed at that tier.",
+                  "type": "array",
+                  "items": {
+                    "type": "object",
+                    "additionalProperties": false,
+                    "required": ["above_input_tokens", "input", "output", "cache_read", "cache_write"],
+                    "properties": {
+                      "above_input_tokens": { "type": "integer", "minimum": 1 },
+                      "input": { "$ref": "#/$defs/rate" },
+                      "output": { "$ref": "#/$defs/rate" },
+                      "cache_read": { "$ref": "#/$defs/optionalRate" },
+                      "cache_write": { "$ref": "#/$defs/optionalRate" }
+                    }
+                  }
+                }
+              }
+            }
+          ]
+        },
+        "price_source": { "description": "Where and when the prices were read.", "type": "string", "minLength": 1 },
+        "context": { "description": "Context window in tokens; null where the app does not record it.", "type": ["integer", "null"], "minimum": 1 },
+        "max_output": { "description": "The most output tokens (thinking included) one request may ask for; null where not recorded.", "type": ["integer", "null"], "minimum": 1 },
+        "capabilities": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["tools", "streaming", "json", "json_schema", "vision", "thinking", "reasoning_effort"],
+          "properties": {
+            "tools": { "type": "boolean" },
+            "streaming": { "type": "boolean" },
+            "json": { "type": "boolean" },
+            "json_schema": { "type": "boolean" },
+            "vision": { "type": "boolean" },
+            "thinking": { "type": "boolean" },
+            "reasoning_effort": { "type": "boolean" }
+          }
+        },
+        "local": {
+          "description": "For a model run by Ollama on this Mac.",
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["param_size", "download_gb", "min_ram_gb", "description", "setup"],
+          "properties": {
+            "param_size": { "type": "string", "minLength": 1 },
+            "download_gb": { "type": "number", "exclusiveMinimum": 0 },
+            "min_ram_gb": { "type": "integer", "minimum": 1 },
+            "description": { "type": "string", "minLength": 1 },
+            "setup": {
+              "description": "Set for the models offered in one-click setup and approved for mail.",
+              "oneOf": [
+                { "type": "null" },
+                {
+                  "type": "object",
+                  "additionalProperties": false,
+                  "required": ["disk_reserve_gb", "context_cap", "think_off"],
+                  "properties": {
+                    "disk_reserve_gb": { "type": "number", "exclusiveMinimum": 0 },
+                    "context_cap": { "type": "integer", "minimum": 1 },
+                    "think_off": { "type": "boolean" }
+                  }
+                }
+              ]
+            }
+          }
+        },
+        "download": {
+          "description": "For a model file the app downloads; the hash is checked before use.",
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["url", "sha256", "min_bytes"],
+          "properties": {
+            "url": { "$ref": "#/$defs/url" },
+            "sha256": { "type": "string", "pattern": "^[0-9a-f]{64}$" },
+            "min_bytes": { "type": "integer", "minimum": 1 }
+          }
+        },
+        "bedrock": {
+          "description": "For a managed model: where and how the proxy calls it.",
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["region", "model_id", "invoke", "hold_text_with_tools"],
+          "properties": {
+            "region": { "type": "string", "pattern": "^[a-z]{2}(-[a-z]+)+-[0-9]$" },
+            "model_id": { "type": "string", "minLength": 1 },
+            "invoke": { "description": "The foundation model ARN or the inference profile id the proxy sends.", "type": "string", "minLength": 1 },
+            "hold_text_with_tools": { "description": "The model can leak tool-call markup into text (DeepSeek DSML); the proxy holds text in tool turns until the message ends.", "type": "boolean" }
+          }
+        }
+      }
+    }
+  }
+}
