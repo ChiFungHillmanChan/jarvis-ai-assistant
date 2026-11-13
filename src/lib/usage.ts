@@ -66,7 +66,7 @@ export interface UsageGroup {
   /** The model's provider, when grouped by model. */
   provider: string | null;
   requests: number;
-  /** Without the cache: stored input minus cache reads and writes. */
+  /** Without the cache, as AWS reports inputTokens; never below zero. No speech characters in any token figure. */
   input_tokens: number;
   output_tokens: number;
   cache_read_tokens: number;
@@ -74,6 +74,8 @@ export interface UsageGroup {
   /** Over the requests whose price is known. */
   usd_cost: number;
   price_unknown_requests: number;
+  /** MiniMax speech, counted in characters, not tokens. */
+  speech_characters: number;
 }
 
 /** The periods the page offers, in days. */
@@ -215,8 +217,12 @@ export function expensiveHeading(days: number, text: Text): string {
 /**
  * A row's tokens the way the provider reports them: input without the cache
  * (AWS's inputTokens), output, then the cache reads and writes when there are
- * any. Stored input includes the cache for every provider, so the cache is
- * taken out here; the stored figures do not change.
+ * any. Stored input includes the cache, so the cache is taken out here; the
+ * stored figures do not change. A row whose stored input is smaller than its
+ * cache cannot include it, so its input is shown as stored: never a negative
+ * or clamped figure. (Older Bedrock and Claude rows stored input without the
+ * cache; the one-time correction in src-tauri/src/ai/cost.rs gives them the
+ * cache back, so this is a guard.)
  */
 export function tokenFigures(
   row: { input_tokens: number; output_tokens: number; cache_read_tokens: number; cache_write_tokens: number },
@@ -224,7 +230,7 @@ export function tokenFigures(
 ): string {
   const read = row.cache_read_tokens ?? 0;
   const write = row.cache_write_tokens ?? 0;
-  const input = Math.max(0, row.input_tokens - read - write);
+  const input = row.input_tokens >= read + write ? row.input_tokens - read - write : row.input_tokens;
   const parts = [
     text(`${count(input)} in`, `輸入 ${count(input)}`),
     text(`${count(row.output_tokens)} out`, `輸出 ${count(row.output_tokens)}`),
@@ -305,6 +311,8 @@ export interface GroupRow {
   output: string;
   cacheRead: string;
   cacheWrite: string;
+  /** MiniMax speech in the group, as characters; shown under the input, never as tokens. */
+  characters: string | null;
   cost: string;
 }
 
@@ -318,15 +326,22 @@ export function groupRows(groups: UsageGroup[], by: GroupBy, text: Text): GroupR
         : by === 'time'
           ? timeLabel(group.key, text)
           : group.key;
+    const characters = group.speech_characters ?? 0;
+    // A group of MiniMax speech alone has no tokens: the cells stay empty
+    // rather than read 0, and the characters say what was used.
+    const speechOnly = characters > 0
+      && group.input_tokens === 0 && group.output_tokens === 0 && group.cache_read_tokens === 0 && group.cache_write_tokens === 0;
+    const tokens = (figure: number) => (speechOnly ? '' : count(figure));
     return {
       id: `${group.provider ?? ''}|${group.key}`,
       name,
       detail: by === 'model' && group.provider ? providerLabel(group.provider, text) : null,
       requests: count(group.requests),
-      input: count(group.input_tokens),
-      output: count(group.output_tokens),
-      cacheRead: count(group.cache_read_tokens),
-      cacheWrite: count(group.cache_write_tokens),
+      input: tokens(group.input_tokens),
+      output: tokens(group.output_tokens),
+      cacheRead: tokens(group.cache_read_tokens),
+      cacheWrite: tokens(group.cache_write_tokens),
+      characters: characters > 0 ? text(`${count(characters)} characters of speech`, `語音 ${count(characters)} 個字元`) : null,
       cost: costLabel(group.usd_cost, group.price_unknown_requests, text),
     };
   });

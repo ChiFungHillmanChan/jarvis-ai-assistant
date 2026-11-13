@@ -60,6 +60,7 @@ test('the usage panel has the period selector and the group-by control', () => {
   assert.match(panel, /useTauriCommand<BlendedCost>\("get_blended_cost", \{ days \}\)/);
   assert.match(panel, /useTauriCommand<UsageGroup\[\]>\("get_usage_groups", \{ days, groupBy \}\)/);
   assert.match(panel, /groupRows\(groups, groupBy, text\)/);
+  assert.match(panel, /\{row\.input\}\s*\{row\.characters && <span style=\{styles\.detail\}>\{row\.characters\}<\/span>\}/, 'speech characters under the input, apart from the tokens');
   assert.match(panel, /expensiveHeading\(data\.expensive_days, text\)/);
   assert.match(panel, /historyLine\(data\.expensive_days, text\)/);
 });

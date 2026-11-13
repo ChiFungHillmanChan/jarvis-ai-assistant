@@ -100,7 +100,10 @@ export default memo(function CostPanel() {
                     {row.detail && <span style={styles.detail}>{row.detail}</span>}
                   </th>
                   <td style={styles.td}>{row.requests}</td>
-                  <td style={styles.td}>{row.input}</td>
+                  <td style={styles.td}>
+                    {row.input}
+                    {row.characters && <span style={styles.detail}>{row.characters}</span>}
+                  </td>
                   <td style={styles.td}>{row.output}</td>
                   <td style={styles.td}>{row.cacheRead}</td>
                   <td style={styles.td}>{row.cacheWrite}</td>

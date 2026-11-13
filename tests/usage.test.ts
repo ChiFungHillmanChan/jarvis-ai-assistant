@@ -129,6 +129,27 @@ test('token figures show input without the cache, as AWS reports inputTokens', (
   assert.doesNotMatch(tokenFigures(aws, zh), /tokens/, 'the Chinese form has no English plural');
 });
 
+// N2: v0.5.10 stored the same Bedrock request as input 120, without the
+// cache. Input below the cache cannot include it, so it is shown as stored.
+test('a row stored with less input than its cache shows its input as stored', () => {
+  const old = { input_tokens: 120, output_tokens: 45, cache_read_tokens: 800, cache_write_tokens: 400 };
+  assert.equal(tokenFigures(old, en), '120 in · 45 out · 800 cache read · 400 cache write tokens');
+  assert.equal(tokenFigures(old, zh), 'token：輸入 120 · 輸出 45 · 快取讀取 800 · 快取寫入 400');
+  assert.equal(tokenFigures({ input_tokens: 1_200, output_tokens: 1, cache_read_tokens: 800, cache_write_tokens: 400 }, en), '0 in · 1 out · 800 cache read · 400 cache write tokens', 'all of the input was cache');
+});
+
+// N5: MiniMax speech is billed per character; the characters are never shown as tokens.
+test('speech characters are shown as characters, never as tokens', () => {
+  const speech = groupRows([group({ key: 'speech-02-hd', provider: 'minimax', requests: 2, speech_characters: 2_468, price_unknown_requests: 2 })], 'model', en)[0];
+  assert.deepEqual(
+    [speech.input, speech.output, speech.cacheRead, speech.cacheWrite, speech.characters, speech.cost],
+    ['', '', '', '', '2,468 characters of speech', 'Price unknown'],
+  );
+  const day = groupRows([group({ key: '2026-11-12', provider: null, requests: 3, input_tokens: 1_700, output_tokens: 40, speech_characters: 1_234, usd_cost: 0.0001, price_unknown_requests: 2 })], 'time', zh)[0];
+  assert.deepEqual([day.input, day.output, day.characters], ['1,700', '40', '語音 1,234 個字元'], 'a day of chat and speech: tokens for the chat, characters for the speech');
+  assert.equal(groupRows([group({})], 'model', en)[0].characters, null);
+});
+
 // R15: with nothing priced, "Most expensive requests" is not shown.
 test('only requests with a known cost are listed as the most expensive', () => {
   const unknown = row({ usd_cost: null, price_unknown: true });
@@ -143,7 +164,7 @@ test('only requests with a known cost are listed as the most expensive', () => {
 function group(change: Partial<UsageGroup>): UsageGroup {
   return {
     key: 'gpt-6-luna', provider: 'openai', requests: 1, input_tokens: 0, output_tokens: 0, cache_read_tokens: 0, cache_write_tokens: 0,
-    usd_cost: 0, price_unknown_requests: 0, ...change,
+    usd_cost: 0, price_unknown_requests: 0, speech_characters: 0, ...change,
   };
 }
 
@@ -212,7 +233,7 @@ test('a group with no priced request reads price unknown, one with some reads at
   const rows = groupRows(groups, 'model', en);
   assert.deepEqual(rows[0], {
     id: 'bedrock|apac.anthropic.claude-haiku-4-5-20251001-v1:0', name: 'apac.anthropic.claude-haiku-4-5-20251001-v1:0', detail: 'AWS Bedrock',
-    requests: '1', input: '120', output: '45', cacheRead: '800', cacheWrite: '400', cost: 'US$0.0009',
+    requests: '1', input: '120', output: '45', cacheRead: '800', cacheWrite: '400', characters: null, cost: 'US$0.0009',
   });
   assert.deepEqual(rows.map(row => row.cost), ['US$0.0009', 'At least US$1.25', 'Price unknown', 'US$0']);
   assert.deepEqual(groupRows(groups, 'model', zh).map(row => row.cost), ['US$0.0009', '最少 US$1.25', '價格未知', 'US$0']);
