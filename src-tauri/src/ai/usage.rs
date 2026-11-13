@@ -19,6 +19,10 @@
 //! years back is dated before the first day kept, which never moves back:
 //! the roll-up that moves it deletes it with the oldest totals (pinned by
 //! `a_request_stored_under_a_clock_two_years_back_is_deleted_when_rolled_up`).
+//! The first day kept is first recorded no earlier than the first day JARVIS
+//! could have stored usage, so a total from such a clock that is there before
+//! any day is recorded goes at the next run too, instead of holding expiry
+//! back for years (`the_first_day_kept_never_starts_before_usage_could_exist`).
 //!
 //! Days are UTC days (`ts / 86400`) in both levels, so a period is exact to
 //! the day. Nothing here leaves the Mac, and the log gets counts only.
@@ -55,6 +59,13 @@ pub const MIN_PER_REQUEST_DAYS: i64 = 7;
 
 /// How long the daily totals are kept.
 pub const DAILY_TOTALS_DAYS: i64 = 730;
+
+/// The first UTC day JARVIS could have stored usage: inference_metrics came
+/// with V13, 57da92f ("feat(db): V13 add aws_credentials, workload_routing,
+/// inference_metrics"), authored 2026-05-04T18:16:54Z (`git log -1
+/// --format=%at 57da92f`, divided by 86,400). A total dated earlier was
+/// stored under a wrong clock.
+const FIRST_USAGE_DAY: i64 = 20_577; // 57da92f
 
 /// user_preferences: the UTC day of the last roll-up.
 const ROLLED_UP_DAY_KEY: &str = "usage_rolled_up_day";
@@ -471,7 +482,9 @@ fn expire(tx: &Connection, today: i64) -> rusqlite::Result<usize> {
         Some(day) => day,
         None => {
             // The first run with totals only records where they start, no
-            // later than the oldest, and deletes nothing. Any later run can
+            // later than the oldest total and never before the first day
+            // usage could exist (a total dated earlier, from a clock years
+            // back, then goes at the next run), and deletes nothing. Any later run can
             // move that day forward by one and delete what is before it, and
             // that includes the clean-up at start-up of the same launch
             // (commands/storage.rs `sweep` runs a roll-up of its own). So with
@@ -479,7 +492,7 @@ fn expire(tx: &Connection, today: i64) -> rusqlite::Result<usize> {
             // and clean-up on, the first day of real usage still goes at that
             // launch; each run takes at most one day.
             if let Some(oldest) = tx.query_row("SELECT MIN(day) FROM usage_daily", [], |r| r.get::<_, Option<i64>>(0))? {
-                write_day(tx, KEPT_FROM_KEY, oldest.min(due))?;
+                write_day(tx, KEPT_FROM_KEY, oldest.max(FIRST_USAGE_DAY).min(due))?;
             }
             return Ok(0);
         }
@@ -919,7 +932,9 @@ mod tests {
         store(&conn, &requests);
 
         assert_eq!(roll_up(&conn, NOW, 30).unwrap(), RolledUp { requests_moved: 3, totals_expired: 0 }, "the first run only records where the totals start");
-        assert_eq!(read_day(&conn, KEPT_FROM_KEY).unwrap(), Some(TODAY - 731));
+        // The oldest total is older than the first day usage could exist
+        // (FIRST_USAGE_DAY), so the day recorded is the one two years back.
+        assert_eq!(read_day(&conn, KEPT_FROM_KEY).unwrap(), Some(TODAY - 730));
         assert_eq!(roll_up(&conn, NOW, 30).unwrap(), RolledUp { requests_moved: 0, totals_expired: 1 });
         assert_eq!(daily_days(&conn), vec![TODAY - 730, TODAY - 729]);
         let two_years = totals(&conn, Period::last(730, NOW).unwrap()).unwrap();
@@ -976,6 +991,33 @@ mod tests {
         assert_eq!(daily_days(&conn), vec![TODAY - 40, TODAY - 20, TODAY - 3]);
         assert_eq!(roll_up(&conn, ahead, 30).unwrap().totals_expired, 1, "the next run: one day");
         assert_eq!(daily_days(&conn), vec![TODAY - 20, TODAY - 3]);
+    }
+
+    /// R4-4. No first day kept is recorded yet; a total dated 2001 (a clock
+    /// reset before the first roll-up) and a real one. The first run deletes
+    /// nothing and records a day no earlier than the first day usage could
+    /// exist; the next run deletes the 2001 total and keeps the real one.
+    /// Before 3 May 2028 the day recorded is the one two years back, which is
+    /// earlier than that first day; from then on it is that first day.
+    #[test]
+    fn the_first_day_kept_never_starts_before_usage_could_exist() {
+        // 2026-05-04: `git log -1 --format=%aI 57da92f` is 2026-05-04T19:16:54+01:00.
+        assert_eq!(chrono::DateTime::from_timestamp(FIRST_USAGE_DAY * DAY, 0).unwrap().format("%Y-%m-%d").to_string(), "2026-05-04");
+        let reset = 11_323; // 2001-01-01
+        for (now, recorded) in [(NOW, TODAY - 730), (NOW + 1_000 * DAY, FIRST_USAGE_DAY)] {
+            let db = opened();
+            let conn = db.conn.lock().unwrap();
+            store(&conn, &[
+                req(reset * DAY + 60, "local", "qwen3:4b", "chat", 4_000, 900, 0, 0, Some(0)),
+                req((FIRST_USAGE_DAY + 10) * DAY + 60, "openai", "gpt-6-luna", "chat", 10, 1, 0, 0, Some(3)),
+            ]);
+            assert_eq!(read_day(&conn, KEPT_FROM_KEY).unwrap(), None);
+            assert_eq!(roll_up(&conn, now, 30).unwrap(), RolledUp { requests_moved: 2, totals_expired: 0 }, "{now}");
+            assert_eq!(read_day(&conn, KEPT_FROM_KEY).unwrap(), Some(recorded), "{now}");
+            assert!(recorded > reset, "not 2001");
+            assert_eq!(roll_up(&conn, now, 30).unwrap().totals_expired, 1, "{now}");
+            assert_eq!(daily_days(&conn), vec![FIRST_USAGE_DAY + 10], "{now}: the 2001 total is gone, the real one is there");
+        }
     }
 
     /// U5. A Mac whose clock reset to 1 January 2001: local requests stored
