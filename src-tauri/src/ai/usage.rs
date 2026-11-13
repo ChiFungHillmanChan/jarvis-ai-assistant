@@ -1263,6 +1263,28 @@ mod tests {
         );
     }
 
+    /// While the correction fails, the roll-up moves no request; once it
+    /// succeeds, the next roll-up corrects and moves them (what the log line
+    /// of ai/cost.rs `correct_old_rows_on_open` says).
+    #[test]
+    fn a_failed_correction_stops_the_roll_up_until_it_succeeds() {
+        // Not opened(): the step has not run on these rows yet.
+        let db = crate::db::test_database();
+        let conn = db.conn.lock().unwrap();
+        store(&conn, &[req((TODAY - 80) * DAY, "bedrock", HAIKU, "chat", 120, 45, 800, 400, Some(805))]);
+        conn.execute_batch("CREATE TEMP TRIGGER refuse BEFORE UPDATE OF input_tokens ON inference_metrics BEGIN SELECT RAISE(ABORT, 'disk full'); END;").unwrap();
+        assert!(roll_up(&conn, NOW, 30).is_err());
+        crate::ai::cost::correct_old_rows_on_open(&conn);
+        assert!(roll_up(&conn, NOW, 30).is_err());
+        assert_eq!(daily(&conn), vec![]);
+        let stored: (i64, i64) = conn.query_row("SELECT COUNT(*), SUM(input_tokens) FROM inference_metrics", [], |r| Ok((r.get(0)?, r.get(1)?))).unwrap();
+        assert_eq!(stored, (1, 120), "the request is still stored, uncorrected");
+
+        conn.execute_batch("DROP TRIGGER refuse;").unwrap();
+        roll_up(&conn, NOW, 30).unwrap();
+        assert_eq!(daily(&conn), vec![((TODAY - 80, "bedrock".into(), HAIKU.into(), "chat".into(), 0), (1, 1_320, 45, 800, 400, Some(925)))]);
+    }
+
     /// N2. A row whose input is smaller than its cache counts its input as
     /// stored; a group's input without the cache is never below zero.
     #[test]

@@ -436,15 +436,17 @@ pub fn correct_old_rows(conn: &rusqlite::Connection) -> rusqlite::Result<Correct
 }
 
 /// `correct_old_rows` as the app runs it when it opens the database,
-/// logging counts only. A failure is logged and tried again at the next
-/// start; it never stops JARVIS from opening.
+/// logging counts only. A failure is logged and never stops JARVIS from
+/// opening. Every roll-up (ai/usage.rs `roll_up`, the first of them straight
+/// after this one) runs the step again first and moves no request while it
+/// fails.
 pub fn correct_old_rows_on_open(conn: &rusqlite::Connection) {
     match correct_old_rows(conn) {
         Ok(corrected) if corrected == Corrected::default() => {}
         Ok(Corrected { guessed, billed_at_zero, local_made_free, cache_added }) => log::info!(
             "cost: old usage rows corrected: {guessed} billed at the guessed rate and {billed_at_zero} billed at zero now count as price unknown, {local_made_free} local rows are free, {cache_added} Bedrock rows now count their cache in the input"
         ),
-        Err(e) => log::warn!("cost: could not correct the old usage rows; trying again at the next start: {e}"),
+        Err(e) => log::warn!("cost: could not correct the old usage rows; every roll-up tries again first and moves no request until it succeeds: {e}"),
     }
 }
 
