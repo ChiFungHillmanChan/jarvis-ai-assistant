@@ -117,11 +117,21 @@ This bucket only serves the binaries (and an optional mirror of the manifest).
 
 ```bash
 cd infra && npm ci && (cd lambda/registry && npm ci) && npm run build
-npx cdk diff   --context env=dev --profile jarvis-deploy --exclusively Jarvis-dev-Registry
-npx cdk deploy --context env=dev --profile jarvis-deploy --exclusively Jarvis-dev-Registry
+npx cdk diff --profile jarvis --context env=dev --exclusively Jarvis-dev-Registry
+npm run deploy:dev -- --exclusively Jarvis-dev-Registry
 ```
 
-`--exclusively` 令 CDK 不會連帶部署 Payment 等依賴的 stack。部署後的 GitHub 設定（environment、變數、簽署 secret）見 `registry/README.md`。
+`--exclusively` 令 CDK 不會連帶部署 Payment 等依賴的 stack；`deploy:dev` 是現有部署腳本（`jarvis` profile）。`cdk diff` 會連接 AWS，因此必須明確指定 profile，以免使用預設憑證。部署後的 GitHub 設定（environment、變數、簽署 secret）見 `registry/README.md`。
+
+只在本機合成範本、不應連接 AWS 時（例如驗證此 stack），使用以下形式。它清除所有 AWS 憑證來源，並關閉 CDK CLI 的遙測及通告下載；否則 CLI 會以預設 profile 向 STS 查詢帳戶（`sts:GetCallerIdentity`），並向 AWS 營運的端點傳送遙測及下載通告：
+
+```bash
+mkdir -p /tmp/no-aws && : > /tmp/no-aws/config && : > /tmp/no-aws/credentials
+env -u AWS_PROFILE -u AWS_DEFAULT_PROFILE -u AWS_ACCESS_KEY_ID -u AWS_SECRET_ACCESS_KEY -u AWS_SESSION_TOKEN \
+  AWS_CONFIG_FILE=/tmp/no-aws/config AWS_SHARED_CREDENTIALS_FILE=/tmp/no-aws/credentials \
+  AWS_EC2_METADATA_DISABLED=true CDK_DISABLE_CLI_TELEMETRY=true \
+  npx cdk synth --no-notices --context env=dev
+```
 
 ## 付款設定與 sandbox 驗證（2026-09-23；live 未啟用）
 
