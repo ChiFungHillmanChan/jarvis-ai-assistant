@@ -561,6 +561,7 @@ mod tests {
         assert!(synthetic_facts_present(&result.text), "{}", result.text);
         assert_eq!(server.await.unwrap().path, "/model/eu.amazon.nova-micro-v1:0/converse");
         assert_eq!(crate::ai::cost::tests::usage_rows(&db)[0].model_id, "eu.amazon.nova-micro-v1:0");
+        assert_eq!(result.model, "eu.amazon.nova-micro-v1:0", "the result names the id that was sent");
     }
 
     #[test]
