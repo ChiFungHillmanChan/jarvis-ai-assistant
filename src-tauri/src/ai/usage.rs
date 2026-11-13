@@ -18,7 +18,8 @@
 //! these, never from the two tables:
 //! - [`Period::last`]: the last N UTC days including today, N in [`PERIODS`].
 //! - [`totals`]: the sums over a period, from both levels.
-//! - [`groups`]: the same sums split by model, provider, feature or time.
+//! - [`groups`]: the same sums split by model, provider, feature or time;
+//!   the oldest month of a period that starts after the 1st says so.
 //! - [`expensive_requests`]: the costliest single requests, from the
 //!   per-request level only (a daily total has no single requests).
 //! - [`any_usage_except`]: whether usage from any other provider than one is
@@ -246,7 +247,19 @@ pub struct Group {
     pub key: String,
     /// The provider of the model, when grouped by model.
     pub provider: Option<String>,
+    /// On the oldest month of a period that starts after that month's
+    /// first day: the period's first day ("2026-05-18"), so the row can say
+    /// it holds only that day onwards. None on every other group.
+    pub from_day: Option<String>,
     pub sums: Sums,
+}
+
+/// The month a period enters part-way and the day it enters it, as the
+/// time groups name them: ("2026-05", "2026-05-18"). None when the period
+/// starts on the 1st.
+fn part_month(period: Period) -> Option<(String, String)> {
+    let first = chrono::DateTime::from_timestamp(period.first_day * DAY, 0)?.date_naive();
+    (chrono::Datelike::day(&first) != 1).then(|| (first.format("%Y-%m").to_string(), first.format("%Y-%m-%d").to_string()))
 }
 
 /// A period's usage by model, provider, feature or time. Model, provider and
@@ -265,8 +278,16 @@ pub fn groups(conn: &Connection, period: Period, by: GroupBy) -> rusqlite::Resul
         "SELECT {key}, {provider}, {} FROM ({BOTH_LEVELS}) GROUP BY 1, 2 ORDER BY {order}",
         sums_sql()
     ))?;
-    let rows = stmt.query_map(period_params(period), |r| Ok(Group { key: r.get(0)?, provider: r.get(1)?, sums: Sums::read(r, 2)? }))?;
-    rows.collect()
+    let rows = stmt.query_map(period_params(period), |r| Ok(Group { key: r.get(0)?, provider: r.get(1)?, from_day: None, sums: Sums::read(r, 2)? }))?;
+    let mut groups = rows.collect::<rusqlite::Result<Vec<Group>>>()?;
+    if by == GroupBy::Time && by_month(period) {
+        if let Some((month, first)) = part_month(period) {
+            for group in groups.iter_mut().filter(|group| group.key == month) {
+                group.from_day = Some(first.clone());
+            }
+        }
+    }
+    Ok(groups)
 }
 
 /// One request, as stored.
@@ -826,13 +847,13 @@ mod tests {
 
         let models = groups(&conn, p90, GroupBy::Model).unwrap();
         assert_eq!(keys(&models), [HAIKU, "gpt-6-luna", "gpt-unlisted-1", "kimi-k2-0905-preview", "qwen3:4b"]);
-        assert_eq!(models[0], Group { key: HAIKU.into(), provider: Some("bedrock".into()), sums: sums(2, 2_640, 90, 1_600, 800, 1_800, 0) });
+        assert_eq!(models[0], Group { key: HAIKU.into(), provider: Some("bedrock".into()), from_day: None, sums: sums(2, 2_640, 90, 1_600, 800, 1_800, 0) });
         assert_eq!(models[0].sums.input_without_cache, 240, "120 per request, as AWS reported it");
-        assert_eq!(models[3], Group { key: "kimi-k2-0905-preview".into(), provider: Some("compat:api.moonshot.ai".into()), sums: sums(1, 3_000, 20, 0, 0, 0, 1) });
+        assert_eq!(models[3], Group { key: "kimi-k2-0905-preview".into(), provider: Some("compat:api.moonshot.ai".into()), from_day: None, sums: sums(1, 3_000, 20, 0, 0, 0, 1) });
 
         let providers = groups(&conn, p90, GroupBy::Provider).unwrap();
         assert_eq!(keys(&providers), ["bedrock", "openai", "compat:api.moonshot.ai", "local"]);
-        assert_eq!(providers[1], Group { key: "openai".into(), provider: None, sums: sums(2, 1_500, 15, 0, 0, 105, 1) });
+        assert_eq!(providers[1], Group { key: "openai".into(), provider: None, from_day: None, sums: sums(2, 1_500, 15, 0, 0, 105, 1) });
 
         let features = groups(&conn, p90, GroupBy::Feature).unwrap();
         assert_eq!(keys(&features), ["chat", "tools", "mail_sort", "mail_analysis"]);
@@ -849,6 +870,40 @@ mod tests {
         assert!(!by_month(p90) && by_month(Period::last(180, NOW).unwrap()));
         assert_eq!(GroupBy::parse("feature"), Ok(GroupBy::Feature));
         assert!(GroupBy::parse("prompt").is_err());
+    }
+
+    /// U1. Six months from 13 November 2026 start on 18 May. The May row
+    /// holds 18 to 31 May and says so; the request of 17 May is in no row,
+    /// though it is still on this Mac. A period that starts on the 1st, and
+    /// a period grouped by day, have no part-month.
+    #[test]
+    fn the_oldest_month_says_from_which_day_it_counts() {
+        let db = opened();
+        let conn = db.conn.lock().unwrap();
+        let six_months = Period::last(180, NOW).unwrap();
+        let first = six_months.first_day();
+        assert_eq!(chrono::DateTime::from_timestamp(first * DAY, 0).unwrap().format("%Y-%m-%d").to_string(), "2026-05-18");
+        let requests = [
+            req((first - 1) * DAY + 60, "openai", "gpt-6-luna", "chat", 1_000, 10, 0, 0, Some(105)),
+            req(first * DAY + 60, "openai", "gpt-6-luna", "chat", 2_000, 20, 0, 0, Some(210)),
+            req((first + 20) * DAY + 60, "openai", "gpt-6-luna", "chat", 4_000, 40, 0, 0, Some(420)),
+        ];
+        store(&conn, &requests);
+        roll_up(&conn, NOW, 30).unwrap();
+        assert_eq!(daily_days(&conn), vec![first - 1, first, first + 20], "all three are daily totals, the 17 May one too");
+
+        let months = groups(&conn, six_months, GroupBy::Time).unwrap();
+        let found: Vec<(&str, Option<&str>, i64)> = months.iter().map(|g| (g.key.as_str(), g.from_day.as_deref(), g.sums.requests)).collect();
+        assert_eq!(found, [("2026-06", None, 1), ("2026-05", Some("2026-05-18"), 1)]);
+        assert_eq!(months[1].sums, brute(&requests[1..2], |_| true), "the 17 May request is left out");
+
+        // 30 November 2026: a year starts on 1 December 2025.
+        let year = Period::last(365, (TODAY + 17) * DAY + 3_600).unwrap();
+        store(&conn, &[req(year.first_day() * DAY + 60, "openai", "gpt-6-luna", "chat", 1, 1, 0, 0, Some(1))]);
+        let months = groups(&conn, year, GroupBy::Time).unwrap();
+        assert_eq!(months.last().map(|g| (g.key.as_str(), g.from_day.as_deref())), Some(("2025-12", None)));
+        assert!(groups(&conn, Period::last(90, NOW).unwrap(), GroupBy::Time).unwrap().iter().all(|g| g.from_day.is_none()));
+        assert!(groups(&conn, six_months, GroupBy::Model).unwrap().iter().all(|g| g.from_day.is_none()));
     }
 
     /// A day with only unpriced usage is not a day of use for the average.

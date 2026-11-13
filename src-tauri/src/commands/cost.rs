@@ -157,6 +157,10 @@ pub struct UsageGroup {
     pub price_unknown_requests: i64,
     /// MiniMax speech, which is counted in characters, not tokens.
     pub speech_characters: i64,
+    /// On the oldest month of a period that starts after the 1st: the
+    /// period's first day ("2026-05-18"), from which the row counts. None on
+    /// every other row.
+    pub from_day: Option<String>,
 }
 
 /// The period's usage by "model", "provider", "feature" or "time" (by UTC day
@@ -184,6 +188,7 @@ fn groups_for(conn: &Connection, now: i64, days: i64, group_by: &str) -> Result<
             usd_cost: micro_to_usd(group.sums.known_cost_micro),
             price_unknown_requests: group.sums.price_unknown_requests,
             speech_characters: group.sums.speech_characters,
+            from_day: group.from_day,
         })
         .collect())
 }
@@ -332,6 +337,28 @@ mod tests {
             assert_eq!(blended.active_days, days, "{days} days");
             assert_eq!(stats_for(&conn, now, days).unwrap().total_requests, days, "{days} days");
         }
+    }
+
+    /// U1. Six months from 13 November 2026 start on 18 May: the May row
+    /// carries that day, so the page can say it counts from it.
+    #[test]
+    fn the_oldest_month_row_carries_the_period_s_first_day() {
+        const DAY: i64 = 86_400;
+        // 2026-11-13, 12:00 UTC; six months start on 18 May 2026.
+        let now = 20_770 * DAY + 12 * 3_600;
+        let first = 20_770 - 179;
+        let db = crate::db::test_database();
+        let conn = db.conn.lock().unwrap();
+        for ts in [first * DAY, (first + 20) * DAY] {
+            conn.execute(
+                "INSERT INTO inference_metrics (ts, workload, model_id, input_tokens, output_tokens, latency_ms, provider, usd_cost_micro, feature, price_unknown) VALUES (?1, 'volume', 'gpt-6-luna', 10, 1, 5, 'openai', 100, 'mail_sort', 0)",
+                [ts],
+            )
+            .unwrap();
+        }
+        let rows: Vec<(String, Option<String>)> = groups_for(&conn, now, 180, "time").unwrap().into_iter().map(|g| (g.key, g.from_day)).collect();
+        assert_eq!(rows, [("2026-06".to_string(), None), ("2026-05".to_string(), Some("2026-05-18".to_string()))]);
+        assert!(groups_for(&conn, now, 90, "time").unwrap().iter().all(|g| g.from_day.is_none()), "days need no label");
     }
 
     #[test]

@@ -164,7 +164,7 @@ test('only requests with a known cost are listed as the most expensive', () => {
 function group(change: Partial<UsageGroup>): UsageGroup {
   return {
     key: 'gpt-6-luna', provider: 'openai', requests: 1, input_tokens: 0, output_tokens: 0, cache_read_tokens: 0, cache_write_tokens: 0,
-    usd_cost: 0, price_unknown_requests: 0, speech_characters: 0, ...change,
+    usd_cost: 0, price_unknown_requests: 0, speech_characters: 0, from_day: null, ...change,
   };
 }
 
@@ -220,6 +220,12 @@ test('providers, features and days read as people know them', () => {
   assert.equal(timeLabel('2026-11-03', zh), '2026年11月3日');
   assert.equal(timeLabel('2026-09', en), 'Sep 2026');
   assert.equal(timeLabel('2026-09', zh), '2026年9月');
+  // U1: the oldest month of a period that starts after the 1st.
+  assert.equal(timeLabel('2026-05', en, '2026-05-18'), 'May 2026, from 18 May');
+  assert.equal(timeLabel('2026-05', zh, '2026-05-18'), '2026年5月（由18日起）');
+  assert.equal(timeLabel('2026-05', en, null), 'May 2026');
+  const months = groupRows([group({ key: '2026-06' }), group({ key: '2026-05', from_day: '2026-05-18' })], 'time', en);
+  assert.deepEqual(months.map(row => row.name), ['Jun 2026', 'May 2026, from 18 May']);
 });
 
 // AWS returned inputTokens 120, outputTokens 45, cacheReadInputTokens 800,

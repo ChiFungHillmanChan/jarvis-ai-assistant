@@ -76,6 +76,12 @@ export interface UsageGroup {
   price_unknown_requests: number;
   /** MiniMax speech, counted in characters, not tokens. */
   speech_characters: number;
+  /**
+   * On the oldest month of a period that starts after the 1st: the period's
+   * first day ("2026-05-18"), from the backend, so the row says it counts
+   * from that day. null on every other row.
+   */
+  from_day: string | null;
 }
 
 /** The periods the page offers, in days. */
@@ -292,11 +298,20 @@ export function featureLabel(feature: string, text: Text): string {
 
 const MONTHS = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'];
 
-/** A UTC day ("2026-11-13") or month ("2026-11") as the table shows it. */
-export function timeLabel(key: string, text: Text): string {
+/**
+ * A UTC day ("2026-11-13") or month ("2026-11") as the table shows it. A
+ * month the period enters part-way says from which day it counts, from the
+ * period's first day the backend gives (UsageGroup.from_day), never from
+ * this machine's clock.
+ */
+export function timeLabel(key: string, text: Text, fromDay?: string | null): string {
   const [year, month, day] = key.split('-').map(Number);
   if (!year || !month || month > 12) return key;
   if (day) return text(`${day} ${MONTHS[month - 1]} ${year}`, `${year}年${month}月${day}日`);
+  const from = fromDay ? Number(fromDay.split('-')[2]) : 0;
+  if (from > 1) {
+    return text(`${MONTHS[month - 1]} ${year}, from ${from} ${MONTHS[month - 1]}`, `${year}年${month}月（由${from}日起）`);
+  }
   return text(`${MONTHS[month - 1]} ${year}`, `${year}年${month}月`);
 }
 
@@ -324,7 +339,7 @@ export function groupRows(groups: UsageGroup[], by: GroupBy, text: Text): GroupR
       : by === 'feature'
         ? featureLabel(group.key, text)
         : by === 'time'
-          ? timeLabel(group.key, text)
+          ? timeLabel(group.key, text, group.from_day)
           : group.key;
     const characters = group.speech_characters ?? 0;
     // A group of MiniMax speech alone has no tokens: the cells stay empty
