@@ -1,11 +1,11 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { readFileSync } from 'node:fs';
+import { readFileSync, readdirSync } from 'node:fs';
 import {
   OTHER_MODEL, groupLabel, groupedOptions, initialPicker, listStatus, pickerOptions, pickerReducer, selectValue,
   type BedrockModelList,
 } from '../src/lib/bedrock-models.ts';
-import { userHasActed, watchUserActivity } from '../src/lib/user-activity.ts';
+import { ACTIVITY_EVENTS, activityGate, userHasActed, watchUserActivity } from '../src/lib/user-activity.ts';
 
 // Fix round 7: the Bedrock model picker. The options and the line under the
 // select are pure functions; Settings.tsx is JSX, so its wiring is checked in
@@ -157,16 +157,49 @@ test('Other opens the ID field on the saved id; a save closes it', () => {
   assert.equal(selectValue(picking, ''), 'amazon.nova-micro-v1:0', 'the choice shows while it saves');
 });
 
-// Requirement 8: the request waits for someone to use the window. Breaks if
-// watchUserActivity stops listening for clicks or keys.
-test('user activity is false until a click or a key press', () => {
-  const listeners: Record<string, () => void> = {};
-  watchUserActivity({ addEventListener: (type, listener) => { listeners[type] = listener; } });
-  assert.deepEqual(Object.keys(listeners).sort(), ['keydown', 'pointerdown']);
+// Requirement 8: the request waits for someone to use the window. Round 8,
+// R7-1: a press that arrives as a click alone (VoiceOver, Voice Control,
+// Switch Control) opens the gate. Breaks if a type leaves ACTIVITY_EVENTS or
+// the gate stops listening in the capture phase.
+test('user activity is false until a click, a pointer press or a key press', () => {
+  assert.deepEqual([...ACTIVITY_EVENTS].sort(), ['click', 'keydown', 'pointerdown']);
+  for (const type of ACTIVITY_EVENTS) {
+    const listeners: Record<string, () => void> = {};
+    const captured: boolean[] = [];
+    const gate = activityGate();
+    gate.watch({ addEventListener: (event, listener, capture) => { listeners[event] = listener; captured.push(capture); } });
+    assert.deepEqual(Object.keys(listeners).sort(), ['click', 'keydown', 'pointerdown']);
+    assert.ok(captured.every(Boolean), 'capture phase');
+    assert.equal(gate.hasActed(), false, 'closed before any event');
+    let told = 0;
+    gate.subscribe(() => { told += 1; });
+    listeners[type]();
+    assert.equal(gate.hasActed(), true, `${type} alone opens the gate`);
+    listeners[type]();
+    assert.equal(told, 1, 'subscribers hear it once');
+  }
+  // The app's own gate, started by main.tsx before the app renders.
+  const appListeners: Record<string, () => void> = {};
+  watchUserActivity({ addEventListener: (event, listener) => { appListeners[event] = listener; } });
   assert.equal(userHasActed(), false);
-  listeners.keydown();
-  assert.equal(userHasActed(), true);
-  assert.match(source('../src/main.tsx'), /^watchUserActivity\(\);$/m, 'main.tsx starts watching before the app renders');
+  appListeners.click();
+  assert.equal(userHasActed(), true, 'a click alone opens the app gate');
+  assert.match(source('../src/main.tsx'), /^watchUserActivity\(\);$/m);
+});
+
+// R7-1: nothing in the app clicks by itself, so the click listener cannot
+// open the gate at launch. Breaks if code under src/ calls .click() or
+// dispatches a click event.
+test('no code under src/ clicks or dispatches a click by itself', () => {
+  const files = readdirSync(new URL('../src/', import.meta.url), { recursive: true })
+    .map(String)
+    .filter((file) => /\.(ts|tsx)$/.test(file));
+  assert.ok(files.length > 50, `found ${files.length} source files`);
+  for (const file of files) {
+    const text = readFileSync(new URL(`../src/${file}`, import.meta.url), 'utf8');
+    assert.doesNotMatch(text, /\.click\(\s*\)/, `${file} calls .click()`);
+    assert.doesNotMatch(text, /new (Mouse|Pointer)Event\(|new Event\(\s*['"]click['"]/, `${file} builds a click event`);
+  }
 });
 
 /** The text between two markers, so a check reads one block, not the file. */
