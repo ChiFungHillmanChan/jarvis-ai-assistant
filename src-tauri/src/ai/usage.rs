@@ -1572,8 +1572,17 @@ mod tests {
                 i += 1;
                 continue;
             }
-            // The item ends at its first `;`, or at the brace that closes its
-            // first `{`, whichever comes first.
+            // A variant, a field or an arm on one line ends in a comma: only
+            // that line is test code.
+            let item = (i + attribute.len()..n).find(|&k| !chars[k].is_whitespace()).unwrap_or(n);
+            let line_end = (item..n).find(|&k| chars[k] == '\n').unwrap_or(n);
+            if out[item..line_end].iter().rev().find(|c| !c.is_whitespace()) == Some(&',') {
+                blank(&mut out, i, line_end);
+                i = line_end;
+                continue;
+            }
+            // Any other item ends at its first `;`, or at the brace that
+            // closes its first `{`, whichever comes first.
             let mut j = i + attribute.len();
             while j < n && !(kinds[j] == Kind::Code && (chars[j] == '{' || chars[j] == ';')) {
                 j += 1;
@@ -1729,6 +1738,10 @@ mod tests {
         assert!(seen("const Q: &str = \"INSERT INTO usage_daily (day) VALUES (1)\";"));
         // 5. Code after a test module.
         assert!(seen("#[cfg(test)]\nmod tests {\n    fn t() {}\n}\nfn later() { let _ = \"DELETE FROM inference_metrics\"; }"));
+        // ... and after a test-only variant, field or arm (R4-5): only its
+        // line is test code, so the next block is still searched.
+        assert!(seen("enum Target {\n    #[cfg(test)]\n    Loopback(u16), // a port\n}\nfn later() { let _ = \"SELECT 1 FROM usage_daily\"; }"));
+        assert!(seen("struct S {\n    #[cfg(test)] probe: u8,\n}\nimpl S { fn read() { let _ = \"SELECT 1 FROM inference_metrics\"; } }"));
         // 6. A migration, a view included.
         assert!(migration_mentions("V35__usage_view.sql", "CREATE VIEW spend AS SELECT * FROM usage_daily;"));
         assert!(!migration_mentions("V35__other.sql", "CREATE TABLE notes (id INTEGER);"));
@@ -1737,6 +1750,7 @@ mod tests {
         // functions of ai/cost.rs; another function there is not.
         assert!(!seen("// reads inference_metrics\n/* and usage_daily */\nfn f() {}"));
         assert!(!seen("#[cfg(test)]\nfn fixture() { let _ = \"INSERT INTO inference_metrics\"; }\nfn f() { let c = '{'; let _ = c; }"));
+        assert!(!seen("match x {\n    #[cfg(test)]\n    Kind::Probe => \"DELETE FROM usage_daily\",\n    _ => \"\",\n}"));
         assert!(usage_table_mentions("ai/usage.rs", "const Q: &str = \"SELECT * FROM usage_daily\";").is_empty());
         let cost = "fn insert_row() { let _ = \"INSERT INTO inference_metrics\"; }\npub fn correct_old_rows() { if true { let _ = \"UPDATE inference_metrics {\"; } let _ = ('{', \"SELECT 1 FROM inference_metrics\"); }\nfn helper() { let _ = \"DELETE FROM usage_daily\"; }";
         assert_eq!(usage_table_mentions("ai/cost.rs", cost), ["ai/cost.rs:3: fn helper() { let _ = \"DELETE FROM usage_daily\"; }"]);
