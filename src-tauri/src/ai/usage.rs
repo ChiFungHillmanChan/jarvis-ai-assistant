@@ -85,7 +85,13 @@ impl Period {
     }
 }
 
-/// Usage added up, the same way for both levels.
+/// The one provider whose usage is counted in characters, not tokens:
+/// MiniMax speech bills per character, and ai/cost.rs `record_unpriced`
+/// stores the characters in the input column.
+const BILLED_BY_CHARACTER: &str = "minimax";
+
+/// Usage added up, the same way for both levels. Speech characters are
+/// never added into a token figure.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct Sums {
     pub requests: i64,
@@ -98,14 +104,19 @@ pub struct Sums {
     pub known_cost_micro: i64,
     /// Requests whose price is unknown. What they cost is in no figure.
     pub price_unknown_requests: i64,
+    /// Input without the cache, the way AWS reports inputTokens, worked out
+    /// row by row (a request, or a day's total) and then added up. A row
+    /// whose input is smaller than its cache reads and writes cannot hold
+    /// the cache (ai/cost.rs `correct_old_rows` corrects every such Claude
+    /// and Bedrock row before anything reads them), so its input counts as
+    /// stored: the figure is never below zero, and nothing is clamped away.
+    pub input_without_cache: i64,
+    /// Characters of MiniMax speech ([`BILLED_BY_CHARACTER`]); none of them
+    /// is in the token figures above.
+    pub speech_characters: i64,
 }
 
 impl Sums {
-    /// Input without the cache, the way AWS reports inputTokens.
-    pub fn input_without_cache(&self) -> i64 {
-        (self.input_tokens - self.cache_read_tokens - self.cache_write_tokens).max(0)
-    }
-
     fn add(&mut self, other: &Sums) {
         self.requests += other.requests;
         self.input_tokens += other.input_tokens;
@@ -114,9 +125,11 @@ impl Sums {
         self.cache_write_tokens += other.cache_write_tokens;
         self.known_cost_micro += other.known_cost_micro;
         self.price_unknown_requests += other.price_unknown_requests;
+        self.input_without_cache += other.input_without_cache;
+        self.speech_characters += other.speech_characters;
     }
 
-    /// Read from the columns [`SUMS`] selects, starting at `at`.
+    /// Read from the columns [`sums_sql`] selects, starting at `at`.
     fn read(row: &rusqlite::Row, at: usize) -> rusqlite::Result<Sums> {
         Ok(Sums {
             requests: row.get(at)?,
@@ -126,6 +139,8 @@ impl Sums {
             cache_write_tokens: row.get(at + 4)?,
             known_cost_micro: row.get(at + 5)?,
             price_unknown_requests: row.get(at + 6)?,
+            input_without_cache: row.get(at + 7)?,
+            speech_characters: row.get(at + 8)?,
         })
     }
 }
@@ -141,12 +156,25 @@ const BOTH_LEVELS: &str = "
            requests, input_tokens, output_tokens, cache_read_tokens, cache_write_tokens, usd_cost_micro
     FROM usage_daily WHERE day >= ?2";
 
-/// The columns [`Sums::read`] reads.
-const SUMS: &str = "
-    COALESCE(SUM(requests), 0), COALESCE(SUM(input_tokens), 0), COALESCE(SUM(output_tokens), 0),
-    COALESCE(SUM(cache_read_tokens), 0), COALESCE(SUM(cache_write_tokens), 0),
-    COALESCE(SUM(CASE WHEN price_unknown = 0 THEN usd_cost_micro END), 0),
-    COALESCE(SUM(CASE WHEN price_unknown = 1 THEN requests ELSE 0 END), 0)";
+/// The columns [`Sums::read`] reads, over [`BOTH_LEVELS`].
+fn sums_sql() -> String {
+    let characters = format!("provider = '{BILLED_BY_CHARACTER}'");
+    let tokens = |column: &str| format!("COALESCE(SUM(CASE WHEN {characters} THEN 0 ELSE {column} END), 0)");
+    format!(
+        "COALESCE(SUM(requests), 0), {}, {}, {}, {},
+         COALESCE(SUM(CASE WHEN price_unknown = 0 THEN usd_cost_micro END), 0),
+         COALESCE(SUM(CASE WHEN price_unknown = 1 THEN requests ELSE 0 END), 0),
+         COALESCE(SUM(CASE WHEN {characters} THEN 0
+                           WHEN input_tokens >= cache_read_tokens + cache_write_tokens
+                               THEN input_tokens - cache_read_tokens - cache_write_tokens
+                           ELSE input_tokens END), 0),
+         COALESCE(SUM(CASE WHEN {characters} THEN input_tokens ELSE 0 END), 0)",
+        tokens("input_tokens"),
+        tokens("output_tokens"),
+        tokens("cache_read_tokens"),
+        tokens("cache_write_tokens"),
+    )
+}
 
 fn period_params(period: Period) -> [i64; 2] {
     [period.first_day * DAY, period.first_day]
@@ -234,7 +262,8 @@ pub fn groups(conn: &Connection, period: Period, by: GroupBy) -> rusqlite::Resul
     // Columns: 1 key, 2 provider, 3 requests, ..., 8 known cost.
     let order = if by == GroupBy::Time { "1 DESC" } else { "8 DESC, 3 DESC, 1, 2" };
     let mut stmt = conn.prepare(&format!(
-        "SELECT {key}, {provider}, {SUMS} FROM ({BOTH_LEVELS}) GROUP BY 1, 2 ORDER BY {order}"
+        "SELECT {key}, {provider}, {} FROM ({BOTH_LEVELS}) GROUP BY 1, 2 ORDER BY {order}",
+        sums_sql()
     ))?;
     let rows = stmt.query_map(period_params(period), |r| Ok(Group { key: r.get(0)?, provider: r.get(1)?, sums: Sums::read(r, 2)? }))?;
     rows.collect()
@@ -339,8 +368,9 @@ pub struct RolledUp {
 /// together; running again changes nothing. A request stored later for a
 /// day already moved (a clock that went back) is added to that day's total.
 ///
-/// The old guessed costs are cleared first (M2 / D5): a daily total is
-/// never corrected afterwards. That returns at once when it is done.
+/// The rows earlier builds stored wrongly are corrected first (ai/cost.rs
+/// `correct_old_rows`): a daily total is never corrected afterwards. That
+/// returns at once when it is done.
 ///
 /// Expiry is the one step that cannot be undone, so a wrong clock is not
 /// trusted with it: the first day kept moves forward by at most one day per
@@ -348,7 +378,7 @@ pub struct RolledUp {
 /// oldest totals per run, not two years. Moving requests early under such a
 /// clock loses nothing: each stays under its own day.
 pub fn roll_up(conn: &Connection, now: i64, per_request_days: i64) -> rusqlite::Result<RolledUp> {
-    crate::ai::cost::clear_guessed_costs(conn)?;
+    crate::ai::cost::correct_old_rows(conn)?;
     let today = utc_day(now);
     // The day before this one ended at least `per_request_days` days ago.
     let first_kept_ts = (today - per_request_days.max(1)) * DAY;
@@ -425,8 +455,8 @@ fn roll_up_logged(conn: &Connection, now: i64) {
     }
 }
 
-/// The roll-up when the database opens: after the migrations and the old
-/// guess correction (db.rs), before the Storage clean-up (lib.rs).
+/// The roll-up when the database opens: after the migrations and the
+/// correction of old rows (db.rs), before the Storage clean-up (lib.rs).
 pub fn roll_up_on_open(conn: &Connection) {
     roll_up_logged(conn, chrono::Utc::now().timestamp());
 }
@@ -469,6 +499,15 @@ mod tests {
         Req { ts, provider, model, feature, input, output, cache_read, cache_write, cost }
     }
 
+    /// A database as JARVIS opens one: migrated, and the one-time
+    /// correction of old rows already made (on an empty table, as on a new
+    /// install), so the rows a test stores count as stored by this build.
+    fn opened() -> crate::db::Database {
+        let db = crate::db::test_database();
+        crate::ai::cost::correct_old_rows(&db.conn.lock().unwrap()).unwrap();
+        db
+    }
+
     fn store(conn: &Connection, requests: &[Req]) {
         for r in requests {
             conn.execute(
@@ -492,6 +531,7 @@ mod tests {
             sums.cache_write_tokens += r.cache_write;
             sums.known_cost_micro += r.cost.unwrap_or(0);
             sums.price_unknown_requests += i64::from(r.cost.is_none());
+            sums.input_without_cache += r.input - r.cache_read - r.cache_write;
         }
         sums
     }
@@ -584,7 +624,7 @@ mod tests {
     /// and feature, and so for every period.
     #[test]
     fn a_roll_up_keeps_every_sum() {
-        let db = crate::db::test_database();
+        let db = opened();
         let conn = db.conn.lock().unwrap();
         let requests = mixed();
         store(&conn, &requests);
@@ -603,7 +643,7 @@ mod tests {
     /// second run changes nothing in either table.
     #[test]
     fn a_second_roll_up_changes_nothing_and_the_window_is_untouched() {
-        let db = crate::db::test_database();
+        let db = opened();
         let conn = db.conn.lock().unwrap();
         store(&conn, &mixed());
         let inside: Vec<Stored> = per_request(&conn).into_iter().filter(|((_, ts, ..), _)| *ts >= (TODAY - 30) * DAY).collect();
@@ -620,7 +660,7 @@ mod tests {
     /// stay together until all of the day is.
     #[test]
     fn a_day_that_straddles_the_cutoff_is_moved_only_once_all_of_it_is_old() {
-        let db = crate::db::test_database();
+        let db = opened();
         let conn = db.conn.lock().unwrap();
         let day = TODAY - 30;
         store(&conn, &[req(day * DAY + 5, "openai", "gpt-6-luna", "chat", 10, 1, 0, 0, Some(3)), req(day * DAY + DAY - 5, "openai", "gpt-6-luna", "chat", 20, 2, 0, 0, Some(4))]);
@@ -637,7 +677,7 @@ mod tests {
     /// transaction leaves both tables as they were.
     #[test]
     fn a_failure_between_writing_totals_and_deleting_rows_changes_neither_table() {
-        let db = crate::db::test_database();
+        let db = opened();
         let conn = db.conn.lock().unwrap();
         store(&conn, &mixed());
         let before = (per_request(&conn), daily(&conn));
@@ -655,7 +695,7 @@ mod tests {
     /// count in the 30-day view. With clean-up off the window is 30 days.
     #[test]
     fn a_short_clean_up_window_moves_requests_without_losing_them() {
-        let db = crate::db::test_database();
+        let db = opened();
         let conn = db.conn.lock().unwrap();
         set_pref(&conn, "storage_retention_enabled", "1");
         set_pref(&conn, "storage_retention_days", "7");
@@ -682,7 +722,7 @@ mod tests {
     /// A day's total goes once all of the day is older than 730 days.
     #[test]
     fn daily_totals_are_deleted_after_730_days() {
-        let db = crate::db::test_database();
+        let db = opened();
         let conn = db.conn.lock().unwrap();
         let requests = [731, 730, 729, 5].map(|back| req((TODAY - back) * DAY + 60, "openai", "gpt-6-luna", "chat", 1_000, back, 0, 0, Some(back)));
         store(&conn, &requests);
@@ -702,7 +742,7 @@ mod tests {
     /// first day kept never moves back.
     #[test]
     fn a_wrong_clock_cannot_delete_the_history() {
-        let db = crate::db::test_database();
+        let db = opened();
         let conn = db.conn.lock().unwrap();
         let requests = [729, 725, 400, 2].map(|back| req((TODAY - back) * DAY + 60, "openai", "gpt-6-luna", "chat", 1_000, back, 0, 0, Some(back)));
         store(&conn, &requests);
@@ -730,7 +770,7 @@ mod tests {
     /// before not.
     #[test]
     fn every_period_is_the_sum_of_its_days_over_both_levels() {
-        let db = crate::db::test_database();
+        let db = opened();
         let conn = db.conn.lock().unwrap();
         let requests = mixed();
         store(&conn, &requests);
@@ -765,7 +805,7 @@ mod tests {
     #[test]
     fn usage_is_grouped_by_model_provider_feature_and_time() {
         assert_eq!(chrono::DateTime::from_timestamp(NOW, 0).unwrap().format("%Y-%m-%d").to_string(), "2026-11-13");
-        let db = crate::db::test_database();
+        let db = opened();
         let conn = db.conn.lock().unwrap();
         store(&conn, &[
             req((TODAY - 2) * DAY + 100, "bedrock", HAIKU, "chat", 1_320, 45, 800, 400, Some(900)),
@@ -780,13 +820,14 @@ mod tests {
         let p90 = Period::last(90, NOW).unwrap();
         let sums = |requests, input, output, cache_read, cache_write, known, unknown| Sums {
             requests, input_tokens: input, output_tokens: output, cache_read_tokens: cache_read, cache_write_tokens: cache_write, known_cost_micro: known, price_unknown_requests: unknown,
+            input_without_cache: input - cache_read - cache_write, speech_characters: 0,
         };
         let keys = |groups: &[Group]| groups.iter().map(|g| g.key.clone()).collect::<Vec<_>>();
 
         let models = groups(&conn, p90, GroupBy::Model).unwrap();
         assert_eq!(keys(&models), [HAIKU, "gpt-6-luna", "gpt-unlisted-1", "kimi-k2-0905-preview", "qwen3:4b"]);
         assert_eq!(models[0], Group { key: HAIKU.into(), provider: Some("bedrock".into()), sums: sums(2, 2_640, 90, 1_600, 800, 1_800, 0) });
-        assert_eq!(models[0].sums.input_without_cache(), 240, "120 per request, as AWS reported it");
+        assert_eq!(models[0].sums.input_without_cache, 240, "120 per request, as AWS reported it");
         assert_eq!(models[3], Group { key: "kimi-k2-0905-preview".into(), provider: Some("compat:api.moonshot.ai".into()), sums: sums(1, 3_000, 20, 0, 0, 0, 1) });
 
         let providers = groups(&conn, p90, GroupBy::Provider).unwrap();
@@ -813,7 +854,7 @@ mod tests {
     /// A day with only unpriced usage is not a day of use for the average.
     #[test]
     fn priced_days_are_the_utc_days_with_a_known_price() {
-        let db = crate::db::test_database();
+        let db = opened();
         let conn = db.conn.lock().unwrap();
         let period = Period::last(30, NOW).unwrap();
         assert_eq!(totals(&conn, period).unwrap(), Totals::default(), "nothing recorded");
@@ -832,7 +873,7 @@ mod tests {
     /// UTC days; unpriced and local requests are not listed.
     #[test]
     fn the_most_expensive_requests_are_recent_single_requests() {
-        let db = crate::db::test_database();
+        let db = opened();
         let conn = db.conn.lock().unwrap();
         store(&conn, &[
             req((TODAY - 1) * DAY, "openai", "gpt-6-luna", "chat", 1, 1, 0, 0, Some(5_000)),
@@ -854,7 +895,7 @@ mod tests {
     /// already moved (a clock that went back) joins that day's total.
     #[test]
     fn usage_reads_roll_up_once_a_day() {
-        let db = crate::db::test_database();
+        let db = opened();
         let conn = db.conn.lock().unwrap();
         let old = req((TODAY - 40) * DAY, "openai", "gpt-6-luna", "chat", 10, 1, 0, 0, Some(3));
         store(&conn, &[old.clone()]);
@@ -871,7 +912,7 @@ mod tests {
 
     #[test]
     fn usage_from_another_provider_is_found_in_either_level() {
-        let db = crate::db::test_database();
+        let db = opened();
         let conn = db.conn.lock().unwrap();
         store(&conn, &[req((TODAY - 1) * DAY, "gemini", "gemini-3-flash", "chat", 1, 1, 0, 0, Some(1))]);
         assert!(!any_usage_except(&conn, "gemini").unwrap());
@@ -881,19 +922,78 @@ mod tests {
         assert!(any_usage_except(&conn, "gemini").unwrap());
     }
 
-    /// The old guessed costs are cleared before a roll-up moves a request:
-    /// a guessed request lands in the totals as price unknown.
+    /// The old rows are corrected before a roll-up moves a request: they
+    /// land in the daily totals corrected, a guessed cost as price unknown
+    /// and an old Bedrock row with its cache in the input.
     #[test]
-    fn a_guessed_cost_reaches_the_totals_as_price_unknown() {
+    fn old_rows_reach_the_daily_totals_corrected() {
+        // Not opened(): the step has not run on these rows yet.
         let db = crate::db::test_database();
         let conn = db.conn.lock().unwrap();
-        // Kimi, billed by an older build at the guess: 42,600 micro-USD.
-        store(&conn, &[req((TODAY - 80) * DAY, "compat:api.moonshot.ai", "kimi-k2-0905-preview", "chat", 12_000, 800, 2_000, 0, Some(42_600))]);
+        store(&conn, &[
+            // Kimi, billed by an older build at the guess: 42,600 micro-USD.
+            req((TODAY - 80) * DAY, "compat:api.moonshot.ai", "kimi-k2-0905-preview", "chat", 12_000, 800, 2_000, 0, Some(42_600)),
+            // v0.5.10 on Bedrock: input 120 without the cache, 805 micro-USD.
+            req((TODAY - 80) * DAY, "bedrock", HAIKU, "chat", 120, 45, 800, 400, Some(805)),
+        ]);
         roll_up(&conn, NOW, 30).unwrap();
-        assert_eq!(daily(&conn), vec![((TODAY - 80, "compat:api.moonshot.ai".into(), "kimi-k2-0905-preview".into(), "chat".into(), 1), (1, 12_000, 800, 2_000, 0, None))]);
+        assert_eq!(
+            daily(&conn),
+            vec![
+                ((TODAY - 80, "bedrock".into(), HAIKU.into(), "chat".into(), 0), (1, 1_320, 45, 800, 400, Some(925))),
+                ((TODAY - 80, "compat:api.moonshot.ai".into(), "kimi-k2-0905-preview".into(), "chat".into(), 1), (1, 12_000, 800, 2_000, 0, None)),
+            ]
+        );
     }
 
-    /// At every open: the migrations, then the old-guess correction, then
+    /// N2. A row whose input is smaller than its cache counts its input as
+    /// stored; a group's input without the cache is never below zero.
+    #[test]
+    fn input_below_its_cache_counts_as_stored_and_never_below_zero() {
+        let db = opened();
+        let conn = db.conn.lock().unwrap();
+        store(&conn, &[
+            req((TODAY - 1) * DAY, "bedrock", HAIKU, "chat", 1_320, 45, 800, 400, Some(925)),
+            req((TODAY - 1) * DAY, "bedrock", HAIKU, "chat", 120, 45, 800, 400, Some(805)),
+            req((TODAY - 2) * DAY, "claude", "claude-sonnet-4-6", "tools", 50, 400, 9_100, 120, Some(9_330)),
+        ]);
+        let groups = groups(&conn, Period::last(30, NOW).unwrap(), GroupBy::Model).unwrap();
+        let without_cache: Vec<(String, i64, i64)> = groups.iter().map(|g| (g.key.clone(), g.sums.input_tokens, g.sums.input_without_cache)).collect();
+        assert_eq!(without_cache, [("claude-sonnet-4-6".into(), 50, 50), (HAIKU.into(), 1_440, 240)]);
+        let all = totals(&conn, Period::last(30, NOW).unwrap()).unwrap().sums;
+        assert_eq!((all.input_without_cache, all.input_tokens - all.cache_read_tokens - all.cache_write_tokens), (290, -10_130), "subtracted from the sums it would be negative");
+    }
+
+    /// N5. MiniMax speech stores characters in the input column: they are
+    /// never in a token figure, in either level or any grouping, and are
+    /// counted as characters instead.
+    #[test]
+    fn speech_characters_are_never_counted_as_tokens() {
+        let db = opened();
+        let conn = db.conn.lock().unwrap();
+        for back in [1, 40] {
+            store(&conn, &[
+                req((TODAY - back) * DAY + 10, "minimax", "speech-02-hd", "tts", 1_234, 0, 0, 0, None),
+                req((TODAY - back) * DAY + 20, "gemini", crate::ai::models::GEMINI_FLASH, "stt", 900, 30, 0, 0, None),
+                req((TODAY - back) * DAY + 30, "openai", "gpt-6-luna", "chat", 1_000, 10, 200, 0, Some(105)),
+            ]);
+        }
+        roll_up(&conn, NOW, 30).unwrap();
+        assert_eq!(daily(&conn).len(), 3, "one level each");
+        let p90 = Period::last(90, NOW).unwrap();
+        let figures = |g: &Group| (g.key.clone(), g.sums.input_tokens, g.sums.output_tokens, g.sums.input_without_cache, g.sums.speech_characters);
+        let by_feature: Vec<_> = groups(&conn, p90, GroupBy::Feature).unwrap().iter().map(figures).collect();
+        assert_eq!(by_feature, [("chat".into(), 2_000, 20, 1_600, 0), ("stt".into(), 1_800, 60, 1_800, 0), ("tts".into(), 0, 0, 0, 2_468)]);
+        let by_provider: Vec<_> = groups(&conn, p90, GroupBy::Provider).unwrap().iter().map(figures).collect();
+        assert!(by_provider.contains(&("minimax".into(), 0, 0, 0, 2_468)), "{by_provider:?}");
+        let by_day: Vec<_> = groups(&conn, p90, GroupBy::Time).unwrap().iter().map(figures).collect();
+        assert_eq!(by_day, [("2026-11-12".into(), 1_900, 40, 1_700, 1_234), ("2026-10-04".into(), 1_900, 40, 1_700, 1_234)], "a day of speech and chat");
+        let all = totals(&conn, p90).unwrap().sums;
+        assert_eq!((all.input_tokens, all.speech_characters, all.requests), (3_800, 2_468, 6));
+        assert!(include_str!("../voice/minimax.rs").contains(&format!("record_unpriced(db, \"{BILLED_BY_CHARACTER}\", ")), "MiniMax speech is stored under the provider counted in characters");
+    }
+
+    /// At every open: the migrations, then the correction of old rows, then
     /// the roll-up, then the database is handed out; the Storage clean-up
     /// runs after that.
     #[test]
@@ -906,7 +1006,7 @@ mod tests {
         assert!(migrated < prepared && prepared < open.find("Ok(Database {").unwrap());
         let steps = &db_rs[db_rs.find("pub(crate) fn prepare_usage(").unwrap()..];
         let steps = &steps[..steps.find("\n}\n").unwrap()];
-        let corrected = steps.find("crate::ai::cost::clear_guessed_costs_on_open(conn);").unwrap();
+        let corrected = steps.find("crate::ai::cost::correct_old_rows_on_open(conn);").unwrap();
         let rolled = steps.find("crate::ai::usage::roll_up_on_open(conn);").unwrap();
         assert!(corrected < rolled);
         let lib_rs = include_str!("../lib.rs");
@@ -928,7 +1028,7 @@ mod tests {
             for (back, cost) in [(5, 1_000), (40, 2_000), (80, 4_000)] {
                 conn.execute(
                     "INSERT INTO inference_metrics (ts, workload, model_id, input_tokens, output_tokens, cache_read_tokens, cache_write_tokens, latency_ms, provider, usd_cost_micro)
-                     VALUES (?1, 'tools', 'claude-sonnet-4-6', ?2, 10, 100, 0, 40, 'claude', ?3)",
+                     VALUES (?1, 'tools', 'gpt-6-luna', ?2, 10, 100, 0, 40, 'openai', ?3)",
                     rusqlite::params![now - back * DAY, back * 100, cost],
                 )
                 .unwrap();
@@ -942,7 +1042,10 @@ mod tests {
         assert_eq!(left, [now - 5 * DAY]);
         assert_eq!(daily_days(&conn), vec![utc_day(now - 80 * DAY), utc_day(now - 40 * DAY)]);
         let ninety = totals(&conn, Period::last(90, now).unwrap()).unwrap().sums;
-        assert_eq!(ninety, Sums { requests: 3, input_tokens: 12_500, output_tokens: 30, cache_read_tokens: 300, cache_write_tokens: 0, known_cost_micro: 7_000, price_unknown_requests: 0 });
+        assert_eq!(
+            ninety,
+            Sums { requests: 3, input_tokens: 12_500, output_tokens: 30, cache_read_tokens: 300, cache_write_tokens: 0, known_cost_micro: 7_000, price_unknown_requests: 0, input_without_cache: 12_200, speech_characters: 0 }
+        );
         drop(conn);
         drop(db);
         std::fs::remove_dir_all(&directory).unwrap();
@@ -950,7 +1053,7 @@ mod tests {
 
     /// Every read of usage goes through this module, so the two levels are
     /// always added together (P07 and P10 too). Other code may store a
-    /// request and clear the old guessed costs (both in ai/cost.rs), but
+    /// request and correct the old rows once (both in ai/cost.rs), but
     /// reads neither table, and deletes from neither.
     #[test]
     fn no_other_code_reads_the_usage_tables() {
@@ -990,7 +1093,7 @@ mod tests {
             let source = std::fs::read_to_string(&path).unwrap();
             let mut code = runtime(&source).to_string();
             if name == "ai/cost.rs" {
-                let start = code.find("pub fn clear_guessed_costs(").expect("the correction is in cost.rs");
+                let start = code.find("pub fn correct_old_rows(").expect("the correction is in cost.rs");
                 let end = start + code[start..].find("\n}\n").unwrap();
                 code.replace_range(start..end, "");
             }

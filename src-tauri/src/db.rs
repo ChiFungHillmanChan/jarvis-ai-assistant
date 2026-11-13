@@ -110,11 +110,12 @@ fn restrict_to_owner(db_path: &std::path::Path) {
 }
 
 /// What every open does to the usage after the migrations, before anything
-/// reads it: the old guessed costs become "price unknown" (M2 / D5), then the
-/// requests older than the per-request window move into the daily totals
-/// (ai/usage.rs). Neither can stop JARVIS from opening.
+/// reads it: the rows earlier builds stored wrongly are corrected once
+/// (ai/cost.rs `correct_old_rows`), then the requests older than the
+/// per-request window move into the daily totals (ai/usage.rs). Neither can
+/// stop JARVIS from opening.
 pub(crate) fn prepare_usage(conn: &Connection) {
-    crate::ai::cost::clear_guessed_costs_on_open(conn);
+    crate::ai::cost::correct_old_rows_on_open(conn);
     crate::ai::usage::roll_up_on_open(conn);
 }
 

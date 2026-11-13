@@ -145,7 +145,9 @@ pub struct UsageGroup {
     /// The model's provider, when grouped by model.
     pub provider: Option<String>,
     pub requests: i64,
-    /// Without the cache: stored input minus cache reads and writes.
+    /// Without the cache, the way AWS reports inputTokens (ai/usage.rs
+    /// `Sums::input_without_cache`): never below zero. Speech characters
+    /// are in none of the token figures.
     pub input_tokens: i64,
     pub output_tokens: i64,
     pub cache_read_tokens: i64,
@@ -153,6 +155,8 @@ pub struct UsageGroup {
     /// Over the requests whose price is known.
     pub usd_cost: f64,
     pub price_unknown_requests: i64,
+    /// MiniMax speech, which is counted in characters, not tokens.
+    pub speech_characters: i64,
 }
 
 /// The period's usage by "model", "provider", "feature" or "time" (by UTC day
@@ -170,7 +174,7 @@ fn groups_for(conn: &Connection, now: i64, days: i64, group_by: &str) -> Result<
     Ok(groups
         .into_iter()
         .map(|group| UsageGroup {
-            input_tokens: group.sums.input_without_cache(),
+            input_tokens: group.sums.input_without_cache,
             key: group.key,
             provider: group.provider,
             requests: group.sums.requests,
@@ -179,6 +183,7 @@ fn groups_for(conn: &Connection, now: i64, days: i64, group_by: &str) -> Result<
             cache_write_tokens: group.sums.cache_write_tokens,
             usd_cost: micro_to_usd(group.sums.known_cost_micro),
             price_unknown_requests: group.sums.price_unknown_requests,
+            speech_characters: group.sums.speech_characters,
         })
         .collect())
 }
@@ -274,6 +279,59 @@ mod tests {
         assert_eq!((bedrock.input_tokens, bedrock.output_tokens, bedrock.cache_read_tokens, bedrock.cache_write_tokens), (129, 47, 800, 400));
         let top = &stats_for(&conn, now, 30).unwrap().top_expensive[0];
         assert_eq!((top.input_tokens, top.output_tokens, top.cache_read_tokens, top.cache_write_tokens), (1_320, 45, 800, 400));
+    }
+
+    /// N2 and N5: a row stored with less input than its cache (an old
+    /// Bedrock row the step did not correct) shows its input as stored, not
+    /// zero; MiniMax characters reach the table as characters, never tokens.
+    #[test]
+    fn stored_input_below_its_cache_and_speech_characters_reach_the_table_as_they_are() {
+        let db = crate::db::test_database();
+        let now = chrono::Utc::now().timestamp();
+        let conn = db.conn.lock().unwrap();
+        conn.execute_batch(&format!(
+            "INSERT INTO inference_metrics (ts, workload, model_id, input_tokens, output_tokens, cache_read_tokens, cache_write_tokens, latency_ms, provider, usd_cost_micro, feature, price_unknown) VALUES
+                ({now}, 'tools', 'apac.anthropic.claude-haiku-4-5-20251001-v1:0', 120, 45, 800, 400, 5, 'bedrock', 805, 'chat', 0),
+                ({now}, 'volume', 'speech-02-hd', 1234, 0, 0, 0, 5, 'minimax', NULL, 'tts', 1);"
+        ))
+        .unwrap();
+        let groups = groups_for(&conn, now, 30, "model").unwrap();
+        let figures: Vec<(&str, i64, i64, i64)> = groups.iter().map(|g| (g.key.as_str(), g.input_tokens, g.output_tokens, g.speech_characters)).collect();
+        assert_eq!(figures, [("apac.anthropic.claude-haiku-4-5-20251001-v1:0", 120, 45, 0), ("speech-02-hd", 0, 0, 1_234)]);
+    }
+
+    /// N1. Usage spread through every day, read at 07:00 UTC (15:00 in Hong
+    /// Kong): a request on each of the UTC days the last N x 24 hours touch,
+    /// which is N + 1 of them. A period is the last N UTC days including
+    /// today, in both levels, so it never counts more than N days of use.
+    #[test]
+    fn a_period_never_counts_more_days_than_it_has() {
+        const DAY: i64 = 86_400;
+        // 2026-11-13, 07:00 UTC.
+        let today = 20_770;
+        let now = today * DAY + 7 * 3_600;
+        for days in crate::ai::usage::PERIODS {
+            let db = crate::db::test_database();
+            let conn = db.conn.lock().unwrap();
+            // The evening of the day the last N x 24 hours start on, then a
+            // morning on every day since, today's before now.
+            let mut stamps = vec![(today - days) * DAY + 23 * 3_600];
+            stamps.extend((today - days + 1..=today).map(|day| day * DAY + 3_600));
+            assert_eq!(stamps.len() as i64, days + 1);
+            assert!(stamps.iter().all(|ts| *ts <= now && now - ts < days * DAY), "all inside the last {days} x 24 hours");
+            for ts in stamps {
+                conn.execute(
+                    "INSERT INTO inference_metrics (ts, workload, model_id, input_tokens, output_tokens, latency_ms, provider, usd_cost_micro, feature, price_unknown) VALUES (?1, 'volume', 'gpt-6-luna', 10, 1, 5, 'openai', 100, 'mail_sort', 0)",
+                    [ts],
+                )
+                .unwrap();
+            }
+            crate::ai::usage::roll_up(&conn, now, 30).unwrap();
+            let blended = blended_for(&conn, now, days).unwrap();
+            assert!(blended.active_days <= days, "{days} days: {}", blended.active_days);
+            assert_eq!(blended.active_days, days, "{days} days");
+            assert_eq!(stats_for(&conn, now, days).unwrap().total_requests, days, "{days} days");
+        }
     }
 
     #[test]

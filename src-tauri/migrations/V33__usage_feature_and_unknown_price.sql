@@ -7,14 +7,19 @@
 -- Rows from before this migration cannot be attributed and become 'other'.
 --
 -- price_unknown = 1 marks a cloud model missing from the price list; its cost
--- is NULL. Older rows keep the cost they were stored with (an unknown model
--- was billed at a guessed US$3/US$15 per 1M) and price_unknown = 0: the rows
--- do not record whether the guess was used.
+-- is NULL. Older rows are copied with the cost they were stored with and
+-- price_unknown = 0. The step that runs once after the migrations
+-- (ai/cost.rs correct_old_rows) then corrects the ones earlier builds got
+-- wrong: the guessed US$3/US$15 per 1M an unknown model was billed at, an
+-- unknown model billed at zero, a local model's row that holds a cost, and
+-- Claude and Bedrock input stored without the cache.
 --
 -- provider: openai, claude, gemini, bedrock, local, typesafe, minimax, or
 -- compat:<host> for an OpenAI-compatible service. 'openai-mail' was OpenAI
--- itself, and a bare host was a custom compatible URL. 'kimi' and 'qwen' are
--- left alone: each has two hosts (global and China) and the row does not say
+-- itself, and a bare host was a custom compatible URL. 'ollama' and '本機 ai'
+-- were a local model's plain completions from v0.5.0 to v0.5.4, so they
+-- become 'local' and count in the local share. 'kimi' and 'qwen' are left
+-- alone: each has two hosts (global and China) and the row does not say
 -- which one answered.
 CREATE TABLE inference_metrics_v33 (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -40,6 +45,7 @@ SELECT id, ts, workload, model_id, input_tokens, output_tokens, cache_read_token
        cache_write_tokens, latency_ms,
        CASE
            WHEN provider = 'openai-mail' THEN 'openai'
+           WHEN lower(provider) IN ('ollama', '本機 ai') THEN 'local'
            WHEN provider LIKE '%.%' OR provider IN ('localhost', '[::1]') THEN 'compat:' || provider
            ELSE provider
        END,
