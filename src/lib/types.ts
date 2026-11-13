@@ -118,6 +118,38 @@ export interface CronRunView {
   status: string;
   result: string | null;
   error: string | null;
+  /** scheduled | catch_up | manual | retry_interrupted; null for a row that is not a run. */
+  trigger: string | null;
+  /** The scheduled time this row is for, with its UTC offset; null for a manual run. */
+  slot: string | null;
+}
+
+export interface KeepAwakeView {
+  /** The setting. */
+  enabled: boolean;
+  /** Idle sleep is being prevented right now. False on battery even with the setting on. */
+  active: boolean;
+}
+
+export interface DailyBriefingSettings {
+  enabled: boolean;
+  /** "HH:MM", local time. */
+  time: string;
+  voice: boolean;
+  /** The app-wide text-to-speech switch. With it off the briefing is never read aloud. */
+  speech_enabled: boolean;
+}
+
+export interface DailyBrief {
+  /** The local day it is for, YYYY-MM-DD. */
+  date: string;
+  shown_at: string;
+  trigger: string;
+  /** From what is saved on this Mac. */
+  local: string;
+  summary: string | null;
+  summary_pending: boolean;
+  summary_error: string | null;
 }
 
 export interface NotionPageView {

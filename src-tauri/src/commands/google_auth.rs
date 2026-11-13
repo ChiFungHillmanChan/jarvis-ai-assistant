@@ -91,6 +91,7 @@ pub async fn google_connect(
     force: Option<bool>,
     auth: State<'_, Arc<GoogleAuth>>,
     db: State<'_, Arc<Database>>,
+    app: tauri::AppHandle,
 ) -> Result<String, String> {
     let mut plan = connect_plan(auth.is_linked(), force.unwrap_or(false));
     if plan == ConnectPlan::Reuse && auth.ensure_access_token().await.is_err() {
@@ -100,7 +101,7 @@ pub async fn google_connect(
     }
     match plan {
         ConnectPlan::Reuse => return Ok(ALREADY_CONNECTED.to_string()),
-        ConnectPlan::Relink => unlink(&auth, &db).await?,
+        ConnectPlan::Relink => unlink(&auth, &db, &app).await?,
         ConnectPlan::Fresh => {}
     }
 
@@ -287,9 +288,12 @@ fn save_profile(db: &Database, body: &serde_json::Value) -> Result<(), String> {
 /// and calendar. Shared by `google_disconnect` and by the account switch in
 /// `google_connect`, so switching cannot leave the previous account's mail on
 /// disk.
-async fn unlink(auth: &GoogleAuth, db: &Database) -> Result<(), String> {
+async fn unlink(auth: &GoogleAuth, db: &Database, app: &tauri::AppHandle) -> Result<(), String> {
     let revoke = !mailbox_shares_grant(auth, db).await;
     auth.disconnect(db, revoke).await?;
+    // `disconnect` removed today's stored brief; an Automation page that is
+    // open is still showing it.
+    crate::scheduler::scheduled_briefing::announce_removed(app);
 
     // The mail, events and briefings on disk are all derived from the account
     // we just unlinked. Leaving them would show a disconnected user their old
@@ -350,8 +354,9 @@ fn shares_grant(mailboxes: &[String], main: Option<&str>) -> bool {
 pub async fn google_disconnect(
     auth: State<'_, Arc<GoogleAuth>>,
     db: State<'_, Arc<Database>>,
+    app: tauri::AppHandle,
 ) -> Result<String, String> {
-    unlink(&auth, &db).await?;
+    unlink(&auth, &db, &app).await?;
     log::info!("Disconnected from Google");
     Ok("Disconnected from Google".to_string())
 }

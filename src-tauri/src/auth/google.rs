@@ -59,7 +59,21 @@ const REVOKE_URL: &str = "https://oauth2.googleapis.com/revoke";
 
 /// Google access tokens live about an hour. Treat one as spent slightly early
 /// so a call that starts just before the boundary does not land just after it.
-const TOKEN_EXPIRY_MARGIN: std::time::Duration = std::time::Duration::from_secs(60);
+const TOKEN_EXPIRY_MARGIN_SECS: i64 = 60;
+
+/// Whether an access token expiring at `expires_at` can still be used at
+/// `now`. Both are wall-clock Unix seconds, as for Cognito
+/// (`cognito::needs_refresh`). The expiry used to be a monotonic `Instant`,
+/// which stands still while the Mac sleeps: after an hour asleep the token was
+/// an hour older than the app believed, and the first calls after waking went
+/// out with a spent token.
+fn token_is_live(expires_at: i64, now: i64) -> bool {
+    now + TOKEN_EXPIRY_MARGIN_SECS < expires_at
+}
+
+fn unix_now() -> i64 {
+    chrono::Utc::now().timestamp()
+}
 
 /// Assumed lifetime when a token response omits `expires_in`. Matches Google's
 /// documented default; the margin above absorbs the difference either way.
@@ -186,10 +200,10 @@ pub struct GoogleAuth {
     client_id: String,
     client_secret: String,
     pub access_token: Mutex<Option<String>>,
-    /// When the cached access token stops being usable. Written together with
-    /// the token itself -- without it every caller kept using an hour-old token
-    /// and depended on a 401 to find out.
-    access_token_expiry: Mutex<Option<std::time::Instant>>,
+    /// When the cached access token stops being usable, as wall-clock Unix
+    /// seconds. Written together with the token itself -- without it every
+    /// caller kept using an hour-old token and depended on a 401 to find out.
+    access_token_expiry: Mutex<Option<i64>>,
     pub refresh_token: Mutex<Option<String>>,
     /// Serialises refreshes so a burst of calls that all find the token expired
     /// produces one round trip to Google, not one per caller.
@@ -442,15 +456,15 @@ impl GoogleAuth {
     fn store_access_token(&self, token: String, expires_in: Option<std::time::Duration>) {
         let lifetime = expires_in.unwrap_or(DEFAULT_TOKEN_LIFETIME);
         *self.access_token.lock().unwrap() = Some(token);
-        *self.access_token_expiry.lock().unwrap() =
-            Some(std::time::Instant::now() + lifetime);
+        let lifetime_secs = i64::try_from(lifetime.as_secs()).unwrap_or(i64::MAX);
+        *self.access_token_expiry.lock().unwrap() = Some(unix_now().saturating_add(lifetime_secs));
     }
 
     /// The cached access token, but only while it is still comfortably valid.
     fn live_access_token(&self) -> Option<String> {
         let token = self.access_token.lock().unwrap().clone()?;
         let expiry = (*self.access_token_expiry.lock().unwrap())?;
-        if std::time::Instant::now() + TOKEN_EXPIRY_MARGIN < expiry {
+        if token_is_live(expiry, unix_now()) {
             Some(token)
         } else {
             None
@@ -722,10 +736,16 @@ impl GoogleAuth {
             log::warn!("Keychain delete during disconnect: {}", e);
         }
 
+        // The last two are the scheduled daily briefing's
+        // (scheduler/scheduled_briefing.rs): the brief on the Automation page
+        // is drawn from this account's meetings and mail, and the record of
+        // the day it counted against goes with it, so an account connected
+        // afterwards gets its own briefing today.
         let conn = db.conn.lock().map_err(|e| e.to_string())?;
         conn.execute(
             "DELETE FROM user_preferences WHERE key IN \
-             ('google_refresh_token', 'user_name', 'google_account_email', 'cached_briefing', 'last_briefing_date', ?1)",
+             ('google_refresh_token', 'user_name', 'google_account_email', 'cached_briefing', 'last_briefing_date', \
+              'daily_briefing_today', 'daily_briefing_last_date', ?1)",
             [GRANTED_SCOPES_KEY],
         )
         .map_err(|e| e.to_string())?;
@@ -821,6 +841,24 @@ mod tests {
 
         auth.store_access_token("spent".to_string(), Some(std::time::Duration::from_secs(0)));
         assert_eq!(auth.live_access_token(), None);
+    }
+
+    /// The expiry is a wall-clock time, so sleep counts against it. A token
+    /// issued at 09:00 for an hour is spent at 10:00 whether or not the Mac
+    /// was awake in between; the old monotonic clock stopped with the lid.
+    #[test]
+    fn a_token_expires_by_the_wall_clock() {
+        let issued_at = 1_794_450_000;
+        let expires_at = issued_at + 3600;
+        assert!(token_is_live(expires_at, issued_at));
+        assert!(token_is_live(expires_at, issued_at + 3500));
+        assert!(!token_is_live(expires_at, issued_at + 3540), "inside the one-minute margin");
+        assert!(!token_is_live(expires_at, issued_at + 3 * 3600), "three hours later, asleep or not");
+
+        let auth = GoogleAuth::new_empty();
+        auth.store_access_token("fresh".to_string(), Some(std::time::Duration::from_secs(3600)));
+        let stored = auth.access_token_expiry.lock().unwrap().unwrap();
+        assert!((3598..=3602).contains(&(stored - unix_now())), "stored as Unix seconds an hour from now");
     }
 
     /// Closing the browser tab tells JARVIS nothing, so the button stayed busy
@@ -937,6 +975,35 @@ mod tests {
             .query_row("SELECT COUNT(*) FROM user_preferences WHERE key = ?1", [GRANTED_SCOPES_KEY], |r| r.get(0))
             .unwrap();
         assert_eq!(rows, 0);
+    }
+
+    /// The brief on the Automation page lists the disconnected account's
+    /// meetings and mail. It goes with the account, and so does the record
+    /// that today's briefing has been shown.
+    #[tokio::test]
+    async fn disconnect_forgets_the_daily_brief_drawn_from_the_account() {
+        use crate::scheduler::scheduled_briefing::{todays_brief, LAST_DATE_KEY, TODAY_KEY};
+        let db = crate::db::test_database();
+        let brief = serde_json::json!({
+            "date": "2026-11-12", "shown_at": "2026-11-12T08:30:01+08:00", "trigger": "scheduled",
+            "local": "Meetings: 1 today\n  09:30\u{3000}Board call", "summary": "One meeting, with the board.",
+            "summary_pending": false, "summary_error": null,
+        });
+        {
+            let conn = db.conn.lock().unwrap();
+            for (key, value) in [(TODAY_KEY, brief.to_string()), (LAST_DATE_KEY, "2026-11-12".to_string())] {
+                conn.execute("INSERT INTO user_preferences (key, value) VALUES (?1, ?2)", [key, value.as_str()]).unwrap();
+            }
+        }
+        assert!(todays_brief(&db, "2026-11-12").unwrap().is_some(), "the brief is on the page before the disconnect");
+
+        with_scopes(&[]).disconnect(&db, false).await.unwrap();
+
+        assert_eq!(todays_brief(&db, "2026-11-12").unwrap(), None);
+        let left: i64 = db.conn.lock().unwrap()
+            .query_row("SELECT COUNT(*) FROM user_preferences WHERE key IN (?1, ?2)", [TODAY_KEY, LAST_DATE_KEY], |r| r.get(0))
+            .unwrap();
+        assert_eq!(left, 0, "a newly connected account gets a briefing today");
     }
 
     /// Incremental authorization: asking for Gmail later returns a token that

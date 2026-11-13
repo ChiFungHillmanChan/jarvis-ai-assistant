@@ -9,8 +9,17 @@ pub fn check_onboarding_status(db: State<Arc<Database>>) -> Result<bool, String>
 }
 
 #[tauri::command]
-pub fn mark_onboarding_complete(db: State<Arc<Database>>) -> Result<(), String> {
-    write_onboarding_complete(&db)
+pub fn mark_onboarding_complete(
+    db: State<Arc<Database>>,
+    login_item: State<crate::system::login_item::LoginItemState>,
+) -> Result<(), String> {
+    write_onboarding_complete(&db)?;
+    // Open at login is on by default from here on. A Mac that refuses it must
+    // not keep the user in onboarding: it is tried again at the next launch.
+    if let Err(e) = crate::system::login_item::apply_default(&db, login_item.0.as_ref()) {
+        log::warn!("Could not turn on open at login: {}", e);
+    }
+    Ok(())
 }
 
 fn read_onboarding_complete(db: &Arc<Database>) -> Result<bool, String> {

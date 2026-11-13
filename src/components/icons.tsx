@@ -26,6 +26,7 @@ export {
   CreditCard,
   HardDrive,
   BarChart3,
+  Power,
 } from "lucide-react";
 
 interface MarkProps { size?: number }

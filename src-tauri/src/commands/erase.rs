@@ -8,8 +8,12 @@
 //! 2. The data folder: the database with its -wal and -shm, downloaded
 //!    models, backups. It goes before the Keychain because an encrypted
 //!    database left without its key would stop JARVIS from opening again.
-//! 3. Every Keychain item under every JARVIS service.
-//! 4. The web cache and the web view's own storage.
+//! 3. Open at login is turned off, so the Mac does not open the emptied
+//!    JARVIS at every login. It comes back on by default only when somebody
+//!    finishes onboarding again: the record that the default was applied
+//!    went with the database.
+//! 4. Every Keychain item under every JARVIS service.
+//! 5. The web cache and the web view's own storage.
 //!
 //! Nothing outside this Mac is touched: mail stays in Gmail, events in Google
 //! Calendar, pages JARVIS made in Notion, and the JARVIS account stays open.
@@ -23,6 +27,7 @@ use tauri::{AppHandle, State};
 use super::storage;
 use crate::db::Database;
 use crate::security::keychain::KeychainStore;
+use crate::system::login_item::{LoginItem, LoginItemState};
 
 /// Every Keychain service JARVIS writes to.
 /// `every_keychain_service_in_the_source_is_deleted` fails when a new one
@@ -42,20 +47,36 @@ pub(crate) const KEYCHAIN_SERVICES: &[&str] = &[
 /// mailbox.
 const GOOGLE_TOKEN_SERVICES: &[&str] = &["com.jarvis.google", "com.jarvis.mail"];
 
-/// Returns the Keychain items that could not be deleted. When there are none
-/// the app restarts and the caller never sees the result.
+/// What the erase could not remove, for the user to remove by hand.
+#[derive(Debug, Default, PartialEq, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct Leftovers {
+    /// "service / account" for each Keychain item that is still there.
+    pub keychain: Vec<String>,
+    /// JARVIS is still set to open at login.
+    pub open_at_login: bool,
+}
+
+impl Leftovers {
+    fn is_empty(&self) -> bool {
+        self.keychain.is_empty() && !self.open_at_login
+    }
+}
+
+/// Returns what could not be removed. When that is nothing the app restarts
+/// and the caller never sees the result.
 #[tauri::command]
 pub async fn delete_all_data(
     app: AppHandle,
     db: State<'_, Arc<Database>>,
-) -> Result<Vec<String>, String> {
+    login_item: State<'_, LoginItemState>,
+) -> Result<Leftovers, String> {
     let data_dir = storage::jarvis_data_dir(&db)?;
     revoke_google(GOOGLE_TOKEN_SERVICES).await;
 
     // Held while the files go, so no job is midway through a write.
     let _conn = db.conn.lock().map_err(|e| e.to_string())?;
-    delete_data_folder(&data_dir)?;
-    let left = delete_keychain_items(KEYCHAIN_SERVICES);
+    let left = erase(&data_dir, KEYCHAIN_SERVICES, login_item.0.as_ref())?;
     if let Some(cache) = storage::jarvis_cache_dir() {
         if let Err(e) = storage::remove_dir_contents(&cache) {
             log::warn!("delete all: web cache: {e}");
@@ -74,6 +95,33 @@ pub async fn delete_all_data(
         app.request_restart();
     }
     Ok(left)
+}
+
+/// Steps 2 to 4. An error means nothing was deleted and nothing was changed.
+/// After the data folder has gone, nothing stops the rest: what could not be
+/// removed is returned, not raised.
+fn erase(data_dir: &Path, keychain_services: &[&str], login_item: &dyn LoginItem) -> Result<Leftovers, String> {
+    delete_data_folder(data_dir)?;
+    let open_at_login = still_opens_at_login(login_item);
+    let keychain = delete_keychain_items(keychain_services);
+    Ok(Leftovers { keychain, open_at_login })
+}
+
+/// Turn open at login off, and say whether the Mac still has it on. Through
+/// the same login item as the switch in Settings, so a development or QA
+/// build changes only its in-memory stand-in.
+fn still_opens_at_login(login_item: &dyn LoginItem) -> bool {
+    match login_item.set_enabled(false).and_then(|()| login_item.is_enabled()) {
+        Ok(false) => false,
+        Ok(true) => {
+            log::warn!("delete all: open at login is still on after it was turned off");
+            true
+        }
+        Err(e) => {
+            log::warn!("delete all: open at login: {e}");
+            true
+        }
+    }
 }
 
 /// Best effort, like disconnect: offline, the tokens are still deleted with
@@ -143,6 +191,7 @@ fn delete_keychain_items(services: &[&str]) -> Vec<String> {
 mod tests {
     use super::*;
     use crate::security::keychain::memory;
+    use crate::system::login_item::{apply_default, MemoryLoginItem};
 
     // The in-memory Keychain is shared by every test in the process, so these
     // use their own services and never the real ones in KEYCHAIN_SERVICES.
@@ -217,6 +266,92 @@ mod tests {
 
         assert!(delete_data_folder(&dir).is_err());
         assert!(dir.join("notes.txt").exists());
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    /// A folder that passes for the JARVIS data folder. Returns its parent,
+    /// to clean up, and the folder.
+    fn data_folder() -> (std::path::PathBuf, std::path::PathBuf) {
+        let root = std::env::temp_dir().join(format!("jarvis-erase-{}", uuid::Uuid::new_v4()));
+        let dir = root.join("jarvis");
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("jarvis.db"), b"x").unwrap();
+        (root, dir)
+    }
+
+    /// Somebody leaving JARVIS, or passing the Mac on, does not want the
+    /// emptied app opened at every login. It is opened at login again only
+    /// once somebody has set JARVIS up again.
+    #[test]
+    fn open_at_login_is_turned_off_with_the_data_until_onboarding_is_finished_again() {
+        let (root, dir) = data_folder();
+        let svc = "com.jarvis.test.erase.login";
+        KeychainStore::put(svc, "refresh", "token").unwrap();
+        let login_item = MemoryLoginItem::default();
+        login_item.set_enabled(true).unwrap();
+
+        let left = erase(&dir, &[svc], &login_item).unwrap();
+        assert!(!dir.exists());
+        assert!(!login_item.is_enabled().unwrap(), "open at login is off");
+        assert_eq!(left, Leftovers::default());
+        assert!(left.is_empty(), "nothing is left, so JARVIS restarts");
+
+        // The restart finds a new, empty database.
+        let db = crate::db::test_database();
+        assert!(!apply_default(&db, &login_item).unwrap());
+        assert!(!login_item.is_enabled().unwrap(), "still off: nobody has set JARVIS up again");
+        db.conn
+            .lock()
+            .unwrap()
+            .execute(
+                "INSERT INTO user_preferences (key, value) VALUES ('onboarding_complete', 'true') \
+                 ON CONFLICT(key) DO UPDATE SET value = 'true'",
+                [],
+            )
+            .unwrap();
+        assert!(apply_default(&db, &login_item).unwrap(), "the default applies again when onboarding is finished again");
+        assert!(login_item.is_enabled().unwrap());
+        std::fs::remove_dir_all(&root).unwrap();
+    }
+
+    /// A Mac that will not let go of the login item.
+    struct StuckLoginItem;
+
+    impl LoginItem for StuckLoginItem {
+        fn is_enabled(&self) -> Result<bool, String> {
+            Ok(true)
+        }
+        fn set_enabled(&self, _enabled: bool) -> Result<(), String> {
+            Err("Operation not permitted (os error 1)".to_string())
+        }
+    }
+
+    /// The erase goes through all the same, and the user is told what is
+    /// left instead of being told everything is gone.
+    #[test]
+    fn a_login_item_that_cannot_be_turned_off_is_reported_and_does_not_stop_the_erase() {
+        let (root, dir) = data_folder();
+        let svc = "com.jarvis.test.erase.login.stuck";
+        KeychainStore::put(svc, "refresh", "token").unwrap();
+
+        let left = erase(&dir, &[svc], &StuckLoginItem).unwrap();
+        assert!(!dir.exists(), "the data is gone");
+        assert!(KeychainStore::accounts(svc).unwrap().is_empty(), "and so is the Keychain item");
+        assert_eq!(left, Leftovers { keychain: Vec::new(), open_at_login: true });
+        assert!(!left.is_empty(), "so JARVIS stays open to say so");
+        std::fs::remove_dir_all(&root).unwrap();
+    }
+
+    /// An erase that is refused changes nothing, the login item included.
+    #[test]
+    fn open_at_login_is_left_alone_when_nothing_is_deleted() {
+        let dir = std::env::temp_dir().join(format!("jarvis-erase-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let login_item = MemoryLoginItem::default();
+        login_item.set_enabled(true).unwrap();
+
+        assert!(erase(&dir, &["com.jarvis.test.erase.login.refused"], &login_item).is_err());
+        assert!(login_item.is_enabled().unwrap());
         std::fs::remove_dir_all(&dir).unwrap();
     }
 

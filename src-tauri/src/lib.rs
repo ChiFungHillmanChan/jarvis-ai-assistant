@@ -40,11 +40,17 @@ pub fn run() {
     }
     env_logger::init();
 
-    tauri::Builder::default()
-        .plugin(tauri_plugin_autostart::init(
-            tauri_plugin_autostart::MacosLauncher::LaunchAgent,
-            None,
-        ))
+    let builder = tauri::Builder::default();
+    // Open at login. Registered only in the build that uses it: the released
+    // app (system/login_item.rs). A development or QA build keeps the setting
+    // in memory, and without the plugin nothing in it can write a LaunchAgent
+    // that would start that build at every login.
+    #[cfg(not(any(debug_assertions, feature = "native-qa")))]
+    let builder = builder.plugin(tauri_plugin_autostart::init(
+        tauri_plugin_autostart::MacosLauncher::LaunchAgent,
+        None,
+    ));
+    builder
         .plugin(tauri_plugin_updater::Builder::new().build())
         .plugin(tauri_plugin_process::init())
         .plugin(tauri_plugin_global_shortcut::Builder::new().build())
@@ -153,8 +159,13 @@ pub fn run() {
             let db_for_scheduler = std::sync::Arc::clone(&db_arc);
             let auth_for_scheduler = std::sync::Arc::clone(&auth_arc);
             let handle_for_scheduler = std::sync::Arc::clone(&scheduler_handle);
+            let briefing = std::sync::Arc::new(scheduler::scheduled_briefing::BriefingService::new(
+                std::sync::Arc::clone(&db_arc),
+                std::sync::Arc::clone(&auth_arc),
+                app.handle().clone(),
+            ));
             tauri::async_runtime::spawn(async move {
-                match scheduler::Scheduler::new(db_for_scheduler, auth_for_scheduler).await {
+                match scheduler::Scheduler::new(db_for_scheduler, auth_for_scheduler, briefing).await {
                     Ok(sched) => {
                         let sched = std::sync::Arc::new(sched);
                         if let Err(e) = sched.start().await {
@@ -243,88 +254,6 @@ pub fn run() {
                 app.handle().clone(),
             ));
 
-            // Auto-briefing on startup (only if enabled)
-            let db_brief = std::sync::Arc::clone(&db_arc);
-            let auth_brief = std::sync::Arc::clone(&auth_arc);
-            let voice_engine_brief = std::sync::Arc::clone(&voice_engine);
-            // Same provider the managed router was built from. This used to be
-            // the literal "gemini_primary", which quietly ignored the provider
-            // the user picked in Settings.
-            let provider_brief = ai_provider.clone();
-            let app_handle_brief = app.handle().clone();
-            tauri::async_runtime::spawn(async move {
-                tokio::time::sleep(std::time::Duration::from_secs(3)).await;
-                // Check if auto-briefing is enabled. Defaults to off, matching
-                // the '0' seed in V15 -- an app that starts talking out loud
-                // three seconds after first launch is not a good introduction.
-                let enabled = {
-                    let conn = db_brief.conn.lock().unwrap();
-                    conn.query_row(
-                        "SELECT value FROM user_preferences WHERE key = 'auto_briefing'",
-                        [], |row| row.get::<_, String>(0)
-                    ).unwrap_or_else(|_| "false".to_string()) == "true"
-                };
-                if !enabled {
-                    log::info!("Auto-briefing disabled");
-                    return;
-                }
-                // Check if we already briefed today
-                let already_briefed = {
-                    let conn = db_brief.conn.lock().unwrap();
-                    conn.query_row(
-                        "SELECT value FROM user_preferences WHERE key = 'last_briefing_date'",
-                        [], |row| row.get::<_, String>(0)
-                    ).unwrap_or_default() == chrono::Local::now().format("%Y-%m-%d").to_string()
-                };
-                if already_briefed {
-                    log::info!("Already briefed today, skipping");
-                    return;
-                }
-
-                let mut router = crate::ai::AiRouter::new(&provider_brief);
-                router.load_from_db(&db_brief);
-                router.reload_keys();
-                router.append_default_fallbacks();
-                match crate::assistant::briefing::generate_briefing(&db_brief, &router, &auth_brief, &app_handle_brief).await {
-                    Ok(result) => {
-                        log::info!("Morning briefing: {}", result.briefing);
-                        // Mark as briefed today
-                        {
-                            let conn = db_brief.conn.lock().unwrap();
-                            let today = chrono::Local::now().format("%Y-%m-%d").to_string();
-                            let _ = conn.execute(
-                                "INSERT INTO user_preferences (key, value, updated_at) VALUES ('last_briefing_date', ?1, datetime('now'))
-                                 ON CONFLICT(key) DO UPDATE SET value = ?1, updated_at = datetime('now')",
-                                rusqlite::params![today],
-                            );
-                            // Cache the briefing text
-                            let _ = conn.execute(
-                                "INSERT INTO user_preferences (key, value, updated_at) VALUES ('cached_briefing', ?1, datetime('now'))
-                                 ON CONFLICT(key) DO UPDATE SET value = ?1, updated_at = datetime('now')",
-                                rusqlite::params![result.briefing],
-                            );
-                        }
-                        // Share VoiceEngine's TextToSpeech, and therefore its
-                        // cancel flag, rather than building a private one: the
-                        // briefing is the longest utterance the app ever
-                        // speaks, and a private flag is one nothing in the UI
-                        // can reach, so it was uninterruptible.
-                        let tts = match voice_engine_brief.tts.lock() {
-                            Ok(guard) => guard.clone(),
-                            Err(e) => {
-                                log::warn!("Briefing TTS unavailable: {}", e);
-                                return;
-                            }
-                        };
-                        let speech = format!("{}. {}", result.greeting, result.briefing);
-                        if let Err(e) = tts.speak(&speech).await {
-                            log::warn!("Briefing TTS failed: {}", e);
-                        }
-                    }
-                    Err(e) => log::warn!("Briefing generation failed: {}", e),
-                }
-            });
-
             let wake_word_enabled = {
                 let conn = db_arc.conn.lock().unwrap();
                 conn.query_row(
@@ -345,6 +274,22 @@ pub fn run() {
             app.manage(commands::local_setup::LocalSetupState::new());
             app.manage(mail::sync::MailSyncState::new());
             app.manage(std::sync::Arc::clone(&scheduler_handle));
+
+            // Open at login: on by default once onboarding has finished.
+            // Someone who finished it in an earlier version gets the default
+            // here, on the first launch after updating, and never again.
+            let login_item = system::login_item::LoginItemState::for_this_build(app.handle());
+            match system::login_item::apply_default(&db_arc, login_item.0.as_ref()) {
+                Ok(true) => log::info!("Open at login turned on by default"),
+                Ok(false) => {}
+                Err(e) => log::warn!("Could not turn on open at login: {}", e),
+            }
+            app.manage(login_item);
+
+            // Keep awake on mains power: off unless the user turned it on.
+            let keep_awake = std::sync::Arc::new(system::keep_awake::KeepAwakeState::from_db(&db_arc));
+            system::keep_awake::KeepAwakeState::watch(std::sync::Arc::clone(&keep_awake));
+            app.manage(keep_awake);
             app.manage(std::sync::Arc::new(auth::cognito::CognitoSession::new(
                 auth::cognito::CognitoConfig::from_env(),
             )));
@@ -493,6 +438,7 @@ pub fn run() {
             commands::cron::delete_cron_job,
             commands::cron::toggle_cron_job,
             commands::cron::get_upcoming_runs,
+            commands::cron::run_cron_job_now,
             commands::google_auth::google_connect,
             commands::google_auth::google_connect_gmail,
             commands::google_auth::google_cancel_connect,
@@ -556,6 +502,13 @@ pub fn run() {
             commands::aws::set_aws_credentials,
             commands::aws::get_aws_credentials_status,
             commands::aws::clear_aws_credentials,
+            commands::background::get_open_at_login,
+            commands::background::set_open_at_login,
+            commands::background::get_keep_awake,
+            commands::background::set_keep_awake,
+            commands::background::get_daily_briefing_settings,
+            commands::background::set_daily_briefing_settings,
+            commands::background::get_daily_briefing,
             commands::onboarding::check_onboarding_status,
             commands::onboarding::mark_onboarding_complete,
             commands::local_llm::list_local_endpoints,

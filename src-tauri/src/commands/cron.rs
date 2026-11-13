@@ -1,6 +1,7 @@
 use crate::ai::{cost::Feature, AiRouter, Workload};
 use crate::db::Database;
-use croner::Cron;
+use crate::scheduler::engine::{format_baseline, write_status};
+use crate::scheduler::slots::parse_schedule;
 use serde::{Deserialize, Serialize};
 use std::sync::{Arc, Mutex};
 use tauri::State;
@@ -17,18 +18,6 @@ fn validate_interpretation(value: &CronInterpretation) -> Result<(), String> {
     Ok(())
 }
 
-/// The one parser. `tokio-cron-scheduler` reads every registration with croner
-/// in exactly this configuration, so validating or previewing with a different
-/// one (the `cron` crate numbers weekdays from Sunday = 1, croner from
-/// Sunday = 0) showed the user a schedule other than the one that runs.
-fn parse_schedule(schedule: &str) -> Result<Cron, String> {
-    Cron::new(schedule)
-        .with_seconds_required()
-        .with_dom_and_dow()
-        .parse()
-        .map_err(|e| format!("Invalid cron expression: {}", e))
-}
-
 /// Parse before touching the table. The insert used to happen first, so an
 /// expression the scheduler cannot read reached `cron_jobs` and was only
 /// undone by the registration failure path below -- and while the scheduler
@@ -42,9 +31,11 @@ fn insert_cron_job(
     description: &str,
 ) -> Result<i64, String> {
     validate_interpretation(&CronInterpretation { name:name.into(),schedule:schedule.into(),action_type:action_type.into(),description:description.into() })?;
+    // The baseline is the moment of creation: a new job first runs at its next
+    // slot and owes nothing from before it existed.
     conn.execute(
-        "INSERT INTO cron_jobs (name, schedule, action_type, status, description) VALUES (?1, ?2, ?3, 'active', ?4)",
-        rusqlite::params![name, schedule, action_type, description],
+        "INSERT INTO cron_jobs (name, schedule, action_type, status, description, baseline_at) VALUES (?1, ?2, ?3, 'active', ?4, ?5)",
+        rusqlite::params![name, schedule, action_type, description, format_baseline(chrono::Utc::now())],
     ).map_err(|e| e.to_string())?;
     Ok(conn.last_insert_rowid())
 }
@@ -53,7 +44,7 @@ fn insert_cron_job(
 pub struct CronJobView { pub id: i64, pub name: String, pub schedule: String, pub action_type: String, pub status: String, pub last_run: Option<String>, pub next_run: Option<String>, pub description: Option<String> }
 
 #[derive(Serialize)]
-pub struct CronRunView { pub id: i64, pub job_id: i64, pub started_at: String, pub finished_at: Option<String>, pub status: String, pub result: Option<String>, pub error: Option<String> }
+pub struct CronRunView { pub id: i64, pub job_id: i64, pub started_at: String, pub finished_at: Option<String>, pub status: String, pub result: Option<String>, pub error: Option<String>, pub trigger: Option<String>, pub slot: Option<String> }
 
 #[tauri::command]
 pub fn get_cron_jobs(db: State<Arc<Database>>) -> Result<Vec<CronJobView>, String> {
@@ -68,8 +59,10 @@ pub fn get_cron_jobs(db: State<Arc<Database>>) -> Result<Vec<CronJobView>, Strin
 pub fn get_cron_runs(db: State<Arc<Database>>, job_id: i64, limit: Option<u32>) -> Result<Vec<CronRunView>, String> {
     let limit = limit.unwrap_or(10);
     let conn = db.conn.lock().map_err(|e| e.to_string())?;
-    let mut stmt = conn.prepare("SELECT id, job_id, started_at, finished_at, status, result, error FROM cron_runs WHERE job_id = ?1 ORDER BY started_at DESC LIMIT ?2").map_err(|e| e.to_string())?;
-    let runs = stmt.query_map(rusqlite::params![job_id, limit], |row| Ok(CronRunView { id: row.get(0)?, job_id: row.get(1)?, started_at: row.get(2)?, finished_at: row.get(3)?, status: row.get(4)?, result: row.get(5)?, error: row.get(6)? }))
+    // `id` breaks ties: two rows written in the same second otherwise come
+    // back in no particular order.
+    let mut stmt = conn.prepare("SELECT id, job_id, started_at, finished_at, status, result, error, \"trigger\", slot FROM cron_runs WHERE job_id = ?1 ORDER BY started_at DESC, id DESC LIMIT ?2").map_err(|e| e.to_string())?;
+    let runs = stmt.query_map(rusqlite::params![job_id, limit], |row| Ok(CronRunView { id: row.get(0)?, job_id: row.get(1)?, started_at: row.get(2)?, finished_at: row.get(3)?, status: row.get(4)?, result: row.get(5)?, error: row.get(6)?, trigger: row.get(7)?, slot: row.get(8)? }))
         .map_err(|e| e.to_string())?.collect::<Result<Vec<_>, _>>().map_err(|e| e.to_string())?;
     Ok(runs)
 }
@@ -244,10 +237,9 @@ async fn change_cron_status(db: &Database, scheduler: &crate::scheduler::Schedul
 
         let new_status = desired.as_deref().unwrap_or(if current == "active" { "paused" } else { "active" });
         if new_status == current { return Ok(current); }
-        conn.execute(
-            "UPDATE cron_jobs SET status = ?1 WHERE id = ?2",
-            rusqlite::params![new_status, job_id],
-        ).map_err(|e| e.to_string())?;
+        // Resuming resets the baseline: nothing that came due while the job
+        // was paused is caught up.
+        write_status(&conn, job_id, new_status == "active", chrono::Utc::now())?;
 
         (new_status.to_string(), name, schedule, action_type)
     };
@@ -275,6 +267,18 @@ async fn change_cron_status(db: &Database, scheduler: &crate::scheduler::Schedul
     }
 
     Ok(new_status)
+}
+
+/// Run an automation now, outside its schedule. The run is recorded with the
+/// trigger `manual` and leaves the schedule as it was: whatever occurrence is
+/// due next still runs at its time.
+#[tauri::command]
+pub async fn run_cron_job_now(
+    scheduler: State<'_, Arc<crate::scheduler::SchedulerHandle>>,
+    job_id: i64,
+) -> Result<(), String> {
+    let sched = scheduler.get().ok_or("The scheduler is still starting. Try again in a moment.")?;
+    sched.run_now(job_id)
 }
 
 #[tauri::command]
@@ -308,7 +312,8 @@ mod tests {
                  schedule TEXT NOT NULL,
                  action_type TEXT NOT NULL,
                  status TEXT DEFAULT 'active',
-                 description TEXT);",
+                 description TEXT,
+                 baseline_at TEXT);",
         )
         .unwrap();
 
@@ -321,6 +326,9 @@ mod tests {
 
         let id = insert_cron_job(&conn, "Friday digest", "0 0 9 * * 5", "email_sync", "Fridays at 9am").unwrap();
         assert_eq!(id, 1, "a schedule the scheduler accepts is still inserted");
+        let baseline: String = conn.query_row("SELECT baseline_at FROM cron_jobs WHERE id = 1", [], |r| r.get(0)).unwrap();
+        let age = chrono::Utc::now() - chrono::DateTime::parse_from_rfc3339(&baseline).unwrap().with_timezone(&chrono::Utc);
+        assert!((0..5).contains(&age.num_seconds()), "a new job's baseline is the moment it was created: {}", baseline);
     }
 
     #[test]
@@ -343,7 +351,11 @@ mod tests {
         assert_eq!(job.schedule,"0 0 9 * * 1");
         assert_eq!(change_cron_status(&db,&scheduler,job.id,Some("paused".into())).await.unwrap(),"paused");
         assert_eq!(change_cron_status(&db,&scheduler,job.id,Some("paused".into())).await.unwrap(),"paused");
+        // Re-enabling moves the baseline, so the paused period is never caught up.
+        db.conn.lock().unwrap().execute("UPDATE cron_jobs SET baseline_at = '2026-01-01T00:00:00Z' WHERE id = ?1", [job.id]).unwrap();
         assert_eq!(change_cron_status(&db,&scheduler,job.id,Some("active".into())).await.unwrap(),"active");
+        let baseline: String = db.conn.lock().unwrap().query_row("SELECT baseline_at FROM cron_jobs WHERE id = ?1", [job.id], |r| r.get(0)).unwrap();
+        assert!(baseline.as_str() > "2026-11-01", "paused to active resets the baseline: {}", baseline);
     }
     #[tokio::test]
     async fn preview_context_blocks_tools_before_database_side_effects() {
@@ -358,7 +370,7 @@ mod tests {
 
     /// The preview and the scheduler must agree on which day fires. The `cron`
     /// crate numbered weekdays Sunday = 1, so '0 0 9 * * 1' previewed as Sunday
-    /// while tokio-cron-scheduler (croner, Sunday = 0) ran it on Monday.
+    /// while the scheduler (croner, Sunday = 0) ran it on Monday.
     #[test]
     fn upcoming_runs_use_croner_weekdays() {
         let runs = get_upcoming_runs("0 0 9 * * 1".to_string(), Some(3)).unwrap();

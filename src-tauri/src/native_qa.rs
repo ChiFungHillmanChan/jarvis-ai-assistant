@@ -37,7 +37,6 @@ pub fn seed_once(conn: &mut Connection) -> Result<(), rusqlite::Error> {
     let tx = conn.transaction()?;
     for (key, value) in [
         ("onboarding_complete", if std::env::var("JARVIS_NATIVE_QA_FIRST_RUN").as_deref() == Ok("1") { "false" } else { "true" }),
-        ("auto_briefing", "false"),
         ("wake_word_enabled", "false"),
         ("ai_provider", "local"),
         ("native_qa_seeded", "true"),

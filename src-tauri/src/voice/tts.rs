@@ -400,6 +400,28 @@ impl TextToSpeech {
         Ok(())
     }
 
+    /// `speak`, for an utterance that is only right while something outside
+    /// stays true. The daily briefing is one: it is for someone at the Mac at
+    /// its time, not for whoever is near when a sleeping Mac is opened later.
+    ///
+    /// `may_go_on` is asked once the utterance has its turn, before every
+    /// sentence, and every `CANCEL_POLL_MS` while a sentence is being spoken.
+    /// Once it says no, the sentence in progress is cut (its `say` child is
+    /// killed) and nothing more is spoken. `cancel()` works as it does for
+    /// `speak`.
+    pub async fn speak_while(&self, text: &str, may_go_on: &(dyn Fn() -> bool + Send + Sync)) -> Result<(), String> {
+        if !self.enabled || text.is_empty() {
+            return Ok(());
+        }
+        self.cancel_flag.store(false, Ordering::SeqCst);
+        let _utterance = utterance_lock().lock().await;
+        let should_stop = || self.is_cancelled() || !may_go_on();
+        play_until_stopped(split_sentences(text), &should_stop, |sentence, stop| async move {
+            spawn_say(&self.voice, &self.voice_yue, self.rate, &sentence, &stop).await
+        })
+        .await
+    }
+
     pub async fn speak_queued(
         &self,
         text: &str,
@@ -603,6 +625,62 @@ async fn wait_with_cancel(
             return child.wait().await.map_err(|e| format!("TTS error: {}", e));
         }
         tokio::time::sleep(std::time::Duration::from_millis(CANCEL_POLL_MS)).await;
+    }
+}
+
+/// Play sentences one after another until `should_stop` says so.
+///
+/// It is asked before every sentence and, through `stop_when`, all the while
+/// one is being played. `play` is one sentence being spoken, which ends early
+/// when the flag it is given is raised. Apart from `say` itself this is the
+/// whole of `speak_while`, so the rule can be tested without a sound.
+async fn play_until_stopped<F>(
+    sentences: Vec<String>,
+    should_stop: &(dyn Fn() -> bool + Send + Sync),
+    play: impl Fn(String, Arc<AtomicBool>) -> F,
+) -> Result<(), String>
+where
+    F: std::future::Future<Output = Result<std::process::ExitStatus, String>>,
+{
+    for sentence in sentences {
+        if should_stop() {
+            return Ok(());
+        }
+        let _playback = playback_lock().lock().await;
+        // Waiting for the lock can take as long as somebody else's sentence.
+        if should_stop() {
+            return Ok(());
+        }
+        // A flag of its own: stopping this utterance must not cancel anybody
+        // else's.
+        let stop = Arc::new(AtomicBool::new(false));
+        let status = stop_when(play(sentence, Arc::clone(&stop)), &stop, should_stop).await?;
+        if stop.load(Ordering::SeqCst) {
+            return Ok(());
+        }
+        if !status.success() {
+            return Err("TTS command failed".to_string());
+        }
+    }
+    Ok(())
+}
+
+/// Drive `speech` to its end, raising `stop` as soon as `should_stop` says so.
+async fn stop_when<T>(
+    speech: impl std::future::Future<Output = T>,
+    stop: &AtomicBool,
+    should_stop: &(dyn Fn() -> bool + Send + Sync),
+) -> T {
+    tokio::pin!(speech);
+    loop {
+        tokio::select! {
+            done = &mut speech => return done,
+            _ = tokio::time::sleep(std::time::Duration::from_millis(CANCEL_POLL_MS)) => {
+                if should_stop() {
+                    stop.store(true, Ordering::SeqCst);
+                }
+            }
+        }
     }
 }
 
@@ -898,6 +976,49 @@ mod tests {
             started.elapsed() < std::time::Duration::from_secs(5),
             "cancel must not have to wait for the utterance to finish"
         );
+    }
+
+    /// The daily briefing must stop when the Mac sleeps or the screen locks
+    /// part way through: the sentence being spoken is cut and the rest are
+    /// never started. A stand-in child plays the part of `say`.
+    #[tokio::test]
+    async fn an_utterance_that_may_not_go_on_is_cut_and_the_rest_is_not_spoken() {
+        let played = std::sync::Mutex::new(Vec::new());
+        // Allowed until the second sentence is being spoken.
+        let should_stop = || played.lock().unwrap().len() >= 2;
+        let sentences = vec!["one".to_string(), "two".to_string(), "three".to_string()];
+
+        let started = std::time::Instant::now();
+        let result = play_until_stopped(sentences, &should_stop, |sentence, stop| {
+            // The first sentence is short and finishes; the second would take
+            // half a minute.
+            let length = if sentence == "one" { "0.1" } else { "30" };
+            played.lock().unwrap().push(sentence);
+            async move {
+                let child = Command::new("sleep").arg(length).spawn().expect("spawn a stand-in child");
+                wait_with_cancel(child, &stop).await
+            }
+        })
+        .await;
+
+        assert_eq!(result, Ok(()), "stopping is not an error");
+        assert_eq!(*played.lock().unwrap(), ["one", "two"], "the third sentence is never started");
+        assert!(started.elapsed() < std::time::Duration::from_secs(5), "the second sentence is cut, not finished");
+    }
+
+    #[tokio::test]
+    async fn an_utterance_that_may_not_start_plays_nothing() {
+        let played = std::sync::Mutex::new(Vec::new());
+        let result = play_until_stopped(vec!["one".to_string()], &|| true, |sentence, stop| {
+            played.lock().unwrap().push(sentence);
+            async move {
+                let child = Command::new("sleep").arg("30").spawn().expect("spawn a stand-in child");
+                wait_with_cancel(child, &stop).await
+            }
+        })
+        .await;
+        assert_eq!(result, Ok(()));
+        assert!(played.lock().unwrap().is_empty());
     }
 
     #[tokio::test]
