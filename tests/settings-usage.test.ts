@@ -29,7 +29,7 @@ test('Settings lists a Usage section that shows the usage panel', () => {
 
 // R13: a refused model id is shown at the field the user just saved.
 test('the Bedrock model field shows its own save error', () => {
-  const field = between(settings, 'function BedrockModelField(', 'function formatBytes(');
+  const field = source('../src/components/BedrockModelPicker.tsx');
   assert.match(field, /onSave: \(model: string\) => Promise<string \| null>/);
   assert.match(field, /dispatch\(\{ type: "saved", error: await onSave\(value\) \}\);/);
   assert.match(field, /\{state\.error && <p role="alert" className="settings-bedrock-model-error">\{state\.error\}<\/p>\}/);

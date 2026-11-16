@@ -250,12 +250,13 @@ test('Settings asks for the list only with a Bedrock row on screen, once per ope
 // is the picker's own alert. Breaks if the select loses its label or the
 // handlers stop dispatching the changes that clear the refusal.
 test('the picker is labelled, described by its status line, and clears its refusal on change', () => {
-  const settings = source('../src/pages/Settings.tsx');
-  const field = between(settings, 'function BedrockModelField(', 'function formatBytes(');
+  const field = source('../src/components/BedrockModelPicker.tsx');
   assert.match(field, /<label>\s*<span>\{text\("Bedrock model", "Bedrock 模型"\)\}<\/span>\s*<select value=\{selectValue\(state, saved\)\} disabled=\{busy\} aria-describedby=\{statusId\} onChange=\{\(e\) => choose\(e\.target\.value\)\}/);
-  assert.match(field, /<p id=\{statusId\} role="status" className="settings-help">\{listStatus\(listState, text\)\}<\/p>/);
+  assert.match(field, /<p id=\{statusId\} role="status" className=\{LOOK\[place\]\.help\}>\{listStatus\(listState, text, place\)\}<\/p>/);
+  assert.match(field, /settings: \{ field: "settings-bedrock-model", help: "settings-help" \}/, 'Settings keeps its classes');
   assert.match(field, /dispatch\(\{ type: "choose", value, saved \}\);\s*if \(value !== OTHER_MODEL && value !== saved\) void save\(value\);/);
-  assert.match(field, /onChange=\{\(e\) => dispatch\(\{ type: "type", draft: e\.target\.value \}\)\}/);
+  assert.match(field, /onChange=\{\(e\) => type\(e\.target\.value\)\}/);
+  assert.match(field, /function type\(draft: string\) \{\s*dispatch\(\{ type: "type", draft \}\);/);
   assert.match(field, /dispatch\(\{ type: "saved", error: await onSave\(value\) \}\);/);
   assert.match(field, /\{state\.error && <p role="alert" className="settings-bedrock-model-error">\{state\.error\}<\/p>\}/);
   assert.match(field, /\{state\.other && \(<>\s*<label>\s*<span>\{text\("Bedrock model ID", "Bedrock 模型 ID"\)\}<\/span>/, 'Other shows the ID field');
