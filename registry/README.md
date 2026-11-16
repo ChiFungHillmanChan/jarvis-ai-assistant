@@ -110,7 +110,7 @@ node --experimental-strip-types registry/validate.ts registry/registry.json
 
 ## 首次設定（擁有人操作）
 
-須依次完成。最後的設定步驟（第 8 步）把 repository 變數 `REGISTRY_PUBLISHING` 設為 `on` 之前，推送至 `main` 只會執行 validate：sign 及兩個 publish job 都會略過，workflow 顯示成功，亦不會建立任何 environment。設為 `on` 之後，欠缺 `REGISTRY_SIGNING_KEY` 或 `registry/signing-public-key.pem` 時，sign job 會失敗並指出欠缺哪一項；欠缺 `REGISTRY_ROLE_ARN` 時，publish job 會在取得 AWS 憑證的步驟失敗，訊息由該 action 提供；欠缺 `REGISTRY_BUCKET` 時，`publish.sh` 會失敗。以上情況都不會發佈任何內容。
+須依次完成。第 8 步（提交公鑰的 PR 之前的最後一步）把 repository 變數 `REGISTRY_PUBLISHING` 設為 `on` 之前，推送至 `main` 只會執行 validate：sign 及兩個 publish job 都會略過，workflow 顯示成功，亦不會建立任何 environment。設為 `on` 之後，欠缺 `REGISTRY_SIGNING_KEY` 或 `registry/signing-public-key.pem` 時，sign job 會失敗並指出欠缺哪一項；欠缺 `REGISTRY_ROLE_ARN` 時，publish job 會在取得 AWS 憑證的步驟失敗，訊息由該 action 提供；欠缺 `REGISTRY_BUCKET` 時，`publish.sh` 會失敗。以上情況都不會發佈任何內容。
 
 以下 AWS 指令使用部署腳本所用的 `jarvis` profile；每個指令都明確指定 profile，避免使用預設憑證。所有 `gh` 指令使用同一個 `REPO` 變數，請在同一個終端機視窗內完成全部步驟。
 
@@ -184,7 +184,7 @@ node --experimental-strip-types registry/validate.ts registry/registry.json
    ```bash
    gh variable list --env registry-dev --repo "$REPO"
    ```
-8. **開啟發佈**（最後的設定步驟，在提交公鑰的 PR 之前）：
+8. **開啟發佈**（提交公鑰的 PR 之前的最後一步）：
    ```bash
    gh variable set REGISTRY_PUBLISHING --repo "$REPO" --body on
    ```

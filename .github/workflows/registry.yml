@@ -14,9 +14,10 @@ name: Registry
 # well.
 #
 # Setup (environments, AWS, key, variables) is in registry/README.md. Until
-# its last step sets the repository variable REGISTRY_PUBLISHING to "on", a
-# run only validates: sign is skipped, so both publish jobs are skipped too,
-# the run stays green and no environment is created. Once it is on, a missing
+# the founder sets the repository variable REGISTRY_PUBLISHING to "on" (the
+# step just before the pull request that commits the public key), a run only
+# validates: sign is skipped, so both publish jobs are skipped too, the run
+# stays green and no environment is created. Once it is on, a missing
 # REGISTRY_SIGNING_KEY or registry/signing-public-key.pem fails the sign job
 # with a message naming it; a missing REGISTRY_ROLE_ARN fails the publish job
 # in the AWS credentials step with that action's own message, and a missing
@@ -75,7 +76,7 @@ jobs:
   sign:
     name: Sign
     needs: validate
-    # Off until the founder's last setup step (registry/README.md).
+    # Off until the founder turns publishing on (registry/README.md, step 8).
     if: vars.REGISTRY_PUBLISHING == 'on'
     runs-on: ubuntu-latest
     # Holds the REGISTRY_SIGNING_KEY secret. The founder limits this
