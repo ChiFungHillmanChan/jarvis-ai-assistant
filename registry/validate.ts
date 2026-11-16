@@ -41,6 +41,8 @@ interface Registry {
     workload_map: Record<string, string>;
     fallback: string | null;
     bedrock_region: string;
+    hkd_per_usd: number;
+    daily_cap_time_zone: string;
     budget_alert_percent: number[];
     budget_kill_percent: number;
     default_output_tokens: number;
@@ -97,6 +99,12 @@ function semanticErrors(r: Registry, publishedVersion: number | undefined): stri
     // JARVIS AI's prices are AWS's; each says where and when it was read.
     if (m.managed && m.prices && !(typeof m.price_source === 'string' && /https:\/\/\S+/.test(m.price_source) && /\b\d{4}-\d{2}-\d{2}\b/.test(m.price_source))) {
       errors.push(`model "${m.id}": a managed price must cite its source in price_source, a URL and the date it was read`);
+    }
+    // Users are billed cost x markup, so a JARVIS AI price of 0 bills nothing.
+    if (m.managed && m.prices) {
+      const p = m.prices;
+      const rates = [p.input, p.output, p.cache_read, p.cache_write, ...p.tiers.flatMap(t => [t.input, t.output, t.cache_read, t.cache_write])];
+      if (rates.some(rate => rate !== null && !(rate > 0))) errors.push(`model "${m.id}": every JARVIS AI price must be greater than 0`);
     }
     if (m.prices) {
       const above = m.prices.tiers.map(t => t.above_input_tokens);
@@ -179,6 +187,13 @@ function semanticErrors(r: Registry, publishedVersion: number | undefined): stri
   if (alerts.some((v, i) => i > 0 && v <= alerts[i - 1])) errors.push('managed.budget_alert_percent must rise');
   if (alerts.some(v => v >= m.budget_kill_percent)) errors.push('managed.budget_kill_percent must be above every alert');
   if (m.default_output_tokens > m.max_output_tokens) errors.push('managed.default_output_tokens is above managed.max_output_tokens');
+  // The Hong Kong dollar is held within 7.75 to 7.85 per US dollar; a rate
+  // outside that band is a typo (78, 0.78) until the peg changes, and then
+  // this check changes in the same pull request.
+  if (!(m.hkd_per_usd >= 7.75 && m.hkd_per_usd <= 7.85)) errors.push(`managed.hkd_per_usd ${m.hkd_per_usd} is outside 7.75 to 7.85, the band of the Hong Kong dollar's peg`);
+  try { new Intl.DateTimeFormat('en', { timeZone: m.daily_cap_time_zone }); } catch {
+    errors.push(`managed.daily_cap_time_zone "${m.daily_cap_time_zone}" is not a time zone this runtime knows (for example UTC or Asia/Hong_Kong)`);
+  }
 
   for (const [path, text] of strings(r, '$', [])) {
     for (const [pattern, what] of FORBIDDEN) {

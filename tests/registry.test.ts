@@ -317,6 +317,30 @@ test('the validator checks the rest of the cross-references', () => {
   assert.ok(errorsFor(doc => { model(doc, 'gpt-4o').prices.tiers = [{ above_input_tokens: 5, input: 1, output: 1, cache_read: 1, cache_write: 1 }, { above_input_tokens: 5, input: 1, output: 1, cache_read: 1, cache_write: 1 }]; }).some(e => e.includes('tiers must rise')));
 });
 
+test('the validator refuses a JARVIS AI price of 0, a rate outside the peg band and an unknown time zone', () => {
+  const managedPriced = seeded().models.filter((m: any) => m.managed && m.prices).map((m: any) => m.id);
+  assert.ok(managedPriced.length > 0);
+  for (const id of managedPriced) {
+    assert.ok(errorsFor(doc => { model(doc, id).prices.input = 0; }).includes(`model "${id}": every JARVIS AI price must be greater than 0`), id);
+  }
+  const chat = seeded().managed.workload_map.chat;
+  assert.ok(errorsFor(doc => { model(doc, chat).prices.output = 0; }).includes(`model "${chat}": every JARVIS AI price must be greater than 0`));
+  assert.ok(errorsFor(doc => { model(doc, chat).prices.cache_read = 0; }).includes(`model "${chat}": every JARVIS AI price must be greater than 0`));
+
+  for (const rate of [7.7, 7.86, 78, 0.78]) {
+    assert.ok(errorsFor(doc => { doc.managed.hkd_per_usd = rate; }).includes(`managed.hkd_per_usd ${rate} is outside 7.75 to 7.85, the band of the Hong Kong dollar's peg`), String(rate));
+  }
+  for (const rate of [7.75, 7.8, 7.85]) {
+    assert.ok(!errorsFor(doc => { doc.managed.hkd_per_usd = rate; }).some(e => e.startsWith('managed.hkd_per_usd')), String(rate));
+  }
+
+  assert.ok(errorsFor(doc => { doc.managed.daily_cap_time_zone = 'Asia/HongKong'; })
+    .includes('managed.daily_cap_time_zone "Asia/HongKong" is not a time zone this runtime knows (for example UTC or Asia/Hong_Kong)'));
+  for (const zone of ['UTC', 'Asia/Hong_Kong']) {
+    assert.ok(!errorsFor(doc => { doc.managed.daily_cap_time_zone = zone; }).some(e => e.startsWith('managed.daily_cap_time_zone')), zone);
+  }
+});
+
 // ---------------------------------------------------------------------------
 // Signing. A throwaway key pair is made in memory for each test; no key is on disk.
 

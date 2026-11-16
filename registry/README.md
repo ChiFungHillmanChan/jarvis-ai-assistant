@@ -30,7 +30,7 @@
 
 PR 檢查只讀取，沒有 environment、secret 或 AWS 權限。PR 改動了 `registry.json` 而 base 分支已有該檔案時，版本必須高於 base 分支的版本；`registry.json` 沒有改動的 PR（例如只改說明或測試）毋須提高版本。
 
-P05 令 App 改讀註冊表之前，`tests/registry.test.ts` 會把註冊表與現時程式碼逐項比對：修改 App 目前寫死的數值（例如 `models.rs` 的價格）會令 PR 檢查及 `npm run test:frontend` 失敗，但不會阻止發佈。這是刻意的：在 P05 之前，改動註冊表不會改變 App 的行為。P05 令 App 改讀註冊表時，這些對照 `models.rs` 等程式碼的鎖定會從測試移除。JARVIS AI 的設定（`managed`）及各模型的 `status` 沒有被測試鎖定，可直接修改；它們的數值以擁有人的決定及審查為準，驗證器只檢查必須一直成立的規則。
+P05 令 App 改讀註冊表之前，`tests/registry.test.ts` 會把註冊表與現時程式碼逐項比對：修改 App 目前寫死的數值（例如 `models.rs` 的價格）會令 PR 檢查及 `npm run test:frontend` 失敗，但不會阻止發佈。這是刻意的：在 P05 之前，改動註冊表不會改變 App 的行為。P05 令 App 改讀註冊表時，這些對照 `models.rs` 等程式碼的鎖定會從測試移除。JARVIS AI 的設定（`managed`）及各模型的 `status` 沒有被測試鎖定，可直接修改；它們的數值以擁有人的決定及審查為準，驗證器只檢查必須一直成立的規則。驗證器對 `managed.hkd_per_usd` 的檢查是港元聯繫匯率的兌換範圍 7.75 至 7.85；匯率如須設於這個範圍之外，必須在同一個 PR 一併修改驗證器。
 
 ## 修改流程
 
