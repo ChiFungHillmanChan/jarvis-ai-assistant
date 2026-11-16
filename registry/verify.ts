@@ -4,7 +4,8 @@
 //
 //   node --experimental-strip-types registry/verify.ts <registry.json> <registry.json.sig>
 //
-// Exit code 0 when the signature verifies over the file's exact bytes.
+// Exit code 0 when the signature verifies over the file's exact bytes. A
+// command line only: it runs on load, so nothing may import it.
 import { existsSync, readFileSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';

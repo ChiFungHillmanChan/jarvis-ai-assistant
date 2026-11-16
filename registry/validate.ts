@@ -8,7 +8,7 @@
 // newline; with --signed (publish.sh, on the signed bytes) it must be exactly
 // the canonical bytes. Either way a key given twice cannot pass.
 // Exit code 0 when valid; otherwise every problem is printed and the exit code is 1.
-import { readFileSync } from 'node:fs';
+import { readFileSync, realpathSync } from 'node:fs';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import { dirname, join } from 'node:path';
 import { Ajv2020, type ErrorObject } from 'ajv/dist/2020.js';
@@ -239,4 +239,11 @@ function main(argv: string[]): number {
   return 0;
 }
 
-if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) process.exitCode = main(process.argv.slice(2));
+// The command line runs only when this file is the entry point, never on
+// import (the tests import it). Node loads the entry point by its real path,
+// so argv[1] is compared by its real path too: a path through a symlink, such
+// as macOS's /tmp or /var, still runs it instead of exiting 0 in silence.
+const isMain = (() => {
+  try { return import.meta.url === pathToFileURL(realpathSync(process.argv[1] ?? '')).href; } catch { return false; }
+})();
+if (isMain) process.exitCode = main(process.argv.slice(2));

@@ -20,7 +20,8 @@ dir="${1:?usage: publish.sh <signed dir>}"
 bucket="${REGISTRY_BUCKET:?REGISTRY_BUCKET is not set (GitHub environment variable)}"
 body="$dir/registry.json"
 sig_file="$dir/registry.json.sig"
-here="$(cd "$(dirname "$0")" && pwd)"
+# The physical path (pwd -P), so no symlink is in the paths node is given.
+here="$(cd "$(dirname "$0")" && pwd -P)"
 work="$(mktemp -d)"
 trap 'rm -rf "$work"' EXIT
 

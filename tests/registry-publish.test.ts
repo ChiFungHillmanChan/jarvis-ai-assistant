@@ -7,11 +7,11 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { spawnSync } from 'node:child_process';
-import { copyFileSync, cpSync, existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, realpathSync, rmSync, symlinkSync, writeFileSync, chmodSync } from 'node:fs';
+import { copyFileSync, cpSync, existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, symlinkSync, writeFileSync, chmodSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { generateKeyPairSync } from 'node:crypto';
-import { canonicalBytes, signBytes } from '../registry/signing.ts';
+import { canonicalBytes, signBytes, verifyBytes } from '../registry/signing.ts';
 
 const repo = new URL('..', import.meta.url).pathname;
 // The seeded registry, with the two values these tests build on set here so
@@ -59,9 +59,7 @@ console.error('unexpected command'); process.exit(2);
 `;
 
 function setup() {
-  // The real path: validate.ts runs its CLI only when argv[1] is its own
-  // resolved path, and macOS's temporary directory is behind a symlink.
-  const root = realpathSync(mkdtempSync(join(tmpdir(), 'jarvis-registry-publish-')));
+  const root = mkdtempSync(join(tmpdir(), 'jarvis-registry-publish-'));
   mkdirSync(join(root, 'bin'));
   mkdirSync(join(root, 's3'));
   writeFileSync(join(root, 'bin', 'aws'), FAKE_AWS);
@@ -237,4 +235,32 @@ test('the read Lambda reads the object and the metadata name publish.sh writes',
   assert.equal(s.publish(v1).status, 0);
   assert.deepEqual(s.object(key), readFileSync(join(v1, 'registry.json')));
   assert.equal(s.meta(key).metadata[name], readFileSync(join(v1, 'registry.json.sig'), 'utf8'));
+});
+
+test('validate.ts and sign.ts do their work when started through a symlinked path', (t) => {
+  const s = setup();
+  t.after(s.done);
+  // sign.ts reads the updater key from src-tauri/tauri.conf.json beside registry/.
+  mkdirSync(join(s.root, 'repo', 'src-tauri'));
+  copyFileSync(join(repo, 'src-tauri/tauri.conf.json'), join(s.root, 'repo', 'src-tauri', 'tauri.conf.json'));
+  const link = join(s.root, 'link');
+  symlinkSync(join(s.root, 'repo'), link);
+  const run = (file: string, args: string[], env: Record<string, string> = {}) =>
+    spawnSync('node', ['--experimental-strip-types', join(link, 'registry', file), ...args], { encoding: 'utf8', env: { ...process.env, ...env } });
+
+  const bad = seeded();
+  delete bad.features.chat.openai;
+  writeFileSync(join(s.root, 'bad.json'), `${JSON.stringify(bad, null, 2)}\n`);
+  const refused = run('validate.ts', [join(s.root, 'bad.json')]);
+  assert.equal(refused.status, 1, refused.stdout);
+  assert.match(refused.stderr, /features\.chat: missing the default for provider "openai"/);
+
+  const good = join(s.root, 'good.json');
+  writeFileSync(good, `${JSON.stringify(seeded(), null, 2)}\n`);
+  const out = join(s.root, 'signed');
+  // The in-memory test key, given to the child process in its environment only.
+  const signed = run('sign.ts', [good, out], { REGISTRY_SIGNING_KEY: privateKey });
+  assert.equal(signed.status, 0, signed.stderr);
+  assert.match(signed.stdout, /registry: signed version 1/);
+  assert.ok(verifyBytes(readFileSync(join(out, 'registry.json')), readFileSync(join(out, 'registry.json.sig'), 'utf8'), publicKey));
 });

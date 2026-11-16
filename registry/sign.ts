@@ -9,7 +9,7 @@
 // checking that the registry is valid, that the key matches the committed
 // public key registry/signing-public-key.pem (the key the app will trust),
 // and that it is not the app updater's key. Never prints the key.
-import { mkdirSync, readFileSync, writeFileSync, existsSync } from 'node:fs';
+import { mkdirSync, readFileSync, realpathSync, writeFileSync, existsSync } from 'node:fs';
 import { createHash } from 'node:crypto';
 import { dirname, join } from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
@@ -56,4 +56,11 @@ function main(argv: string[]): number {
   }
 }
 
-if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) process.exitCode = main(process.argv.slice(2));
+// The command line runs only when this file is the entry point, never on
+// import (the tests import it). Node loads the entry point by its real path,
+// so argv[1] is compared by its real path too: a path through a symlink, such
+// as macOS's /tmp or /var, still runs it instead of exiting 0 in silence.
+const isMain = (() => {
+  try { return import.meta.url === pathToFileURL(realpathSync(process.argv[1] ?? '')).href; } catch { return false; }
+})();
+if (isMain) process.exitCode = main(process.argv.slice(2));
