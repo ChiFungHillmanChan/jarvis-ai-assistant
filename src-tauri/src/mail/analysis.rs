@@ -144,14 +144,16 @@ async fn analyze_with_endpoints(
             (done.text, openai::Usage::default())
         }
         "local" => send_to_ollama(&prepared.model, &prepared.prompt, ollama_port).await?,
-        "bedrock" => send_to_bedrock(
-            creds.ok_or_else(|| "未設定 AWS 憑證，無法使用 Bedrock。".to_string())?,
-            &prepared.model,
-            &prepared.prompt,
-            metrics,
-            started,
-        )
-        .await?,
+        "bedrock" => {
+            let creds = creds.ok_or_else(|| "未設定 AWS 憑證，無法使用 Bedrock。".to_string())?;
+            // The saved id is sent as chat sends it (ai/mod.rs): a `us.`, `eu.`
+            // or `apac.` prefix is pointed at the saved region's geography;
+            // `global.` ids and ids with no such prefix go as saved. The
+            // request, its usage row and the result name the id that was sent;
+            // the saved setting is not changed.
+            prepared.model = crate::ai::apply_inference_profile(&prepared.model, inference_profile_for_region(&creds.region));
+            send_to_bedrock(creds, &prepared.model, &prepared.prompt, metrics, started).await?
+        }
         "openai" => {
             let key = openai_key
                 .as_deref()
@@ -587,6 +589,9 @@ fn validate_local_model(model: &str, tags: &OllamaTagsResponse) -> Result<String
 /// openai::Usage has no place for the cache write: it holds the figures AWS
 /// returned for this request, against the model id that was sent. A failed
 /// request, or a reply without usage, stores nothing.
+///
+/// `model` is sent as given: the caller (`analyze_with_endpoints`) has
+/// already pointed it at the saved region.
 async fn send_to_bedrock(
     creds: AwsCredentials,
     model: &str,
@@ -1242,6 +1247,33 @@ mod tests {
         assert_eq!(rows.len(), 1, "the billed reply is stored");
         assert_eq!((rows[0].model_id.as_str(), rows[0].input_tokens, rows[0].output_tokens), ("apac.amazon.nova-pro-v1:0", 1_320, 45));
         assert_eq!(crate::ai::cost::tests::cache_tokens(&db), vec![(800, 400)]);
+    }
+
+    /// P02b: mail sends the saved id as chat does. A `us.`, `eu.` or `apac.`
+    /// prefix that does not match the saved region is pointed at the region's
+    /// geography, and the usage row and the result carry the id that was sent;
+    /// `global.` ids and ids with no such prefix are sent as saved.
+    #[tokio::test]
+    async fn a_bedrock_analysis_sends_the_saved_id_for_the_saved_region() {
+        for (region, saved, sent) in [
+            ("us-east-1", "apac.amazon.nova-micro-v1:0", "us.amazon.nova-micro-v1:0"),
+            ("eu-west-2", "us.amazon.nova-micro-v1:0", "eu.amazon.nova-micro-v1:0"),
+            ("ap-northeast-1", "eu.anthropic.claude-haiku-4-5-20251001-v1:0", "apac.anthropic.claude-haiku-4-5-20251001-v1:0"),
+            ("ap-southeast-1", "apac.amazon.nova-micro-v1:0", "apac.amazon.nova-micro-v1:0"),
+            ("us-east-1", "global.anthropic.claude-sonnet-4-6", "global.anthropic.claude-sonnet-4-6"),
+            ("eu-west-2", "amazon.nova-pro-v1:0", "amazon.nova-pro-v1:0"),
+        ] {
+            let db = crate::ai::cost::tests::temp_metrics_db("");
+            let creds = crate::ai::bedrock::tests::fixture_creds(region);
+            let server = crate::ai::bedrock::tests::aws_loopback(200, None, crate::ai::bedrock::tests::converse_json("星期五前回覆合約。[郵件 #42]")).await;
+            let result = analyze_with_endpoints(context("bedrock", saved, vec![message(42, "正文")]), Some(creds), None, None, OLLAMA_PORT, OpenAiEndpoint::Production, Some(&db))
+                .await
+                .expect("valid Bedrock analysis");
+            assert_eq!(server.await.unwrap().path, format!("/model/{sent}/converse"), "{saved} saved, {region} saved");
+            assert_eq!(result.model, sent, "the line under the analysis names the id that was sent");
+            let rows = crate::ai::cost::tests::usage_rows(&db);
+            assert_eq!((rows.len(), rows[0].model_id.as_str()), (1, sent), "usage is recorded against the id sent");
+        }
     }
 
     /// A local analysis is stored too: free, with Ollama's token counts.
