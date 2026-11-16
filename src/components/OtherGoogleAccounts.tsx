@@ -3,6 +3,7 @@ import * as mail from "../lib/mail";
 import type { MailAccount } from "../lib/mail";
 import { syncCalendar } from "../lib/commands";
 import { useUiLocale } from "../i18n";
+import { confirmAction } from "./ConfirmDialog";
 import "../pages/settings-workspace.css";
 
 /**
@@ -47,7 +48,7 @@ export default function OtherGoogleAccounts({ accounts, canAdd, onChanged }: { a
     void mail.mailCancelConnect().catch(() => undefined);
   }
   async function disconnect(account: MailAccount) {
-    if (!window.confirm(text(`Disconnect ${account.email}? Its events are removed from JARVIS; its mail copies stay on this Mac.`, `是否中斷 ${account.email} 的連接？其日曆活動會從 JARVIS 移除，郵件副本會保留在此 Mac。`))) return;
+    if (!(await confirmAction(text(`Disconnect ${account.email}? Its events are removed from JARVIS; its mail copies stay on this Mac.`, `是否中斷 ${account.email} 的連接？其日曆活動會從 JARVIS 移除，郵件副本會保留在此 Mac。`), text("Disconnect", "中斷連接")))) return;
     setBusy(account.id); setError(null); setNotice(null);
     try { await mail.mailDisconnectAccount(account.id); }
     catch (e) { setError(String(e)); }

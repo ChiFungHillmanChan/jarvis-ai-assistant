@@ -407,6 +407,8 @@ export type StorageScope = "cache" | "backups" | "models" | "mailBodies" | "conv
 // means "nothing happened", not "connected". Must match the value of
 // ALREADY_CONNECTED in src-tauri/src/commands/google_auth.rs.
 export const GOOGLE_ALREADY_CONNECTED = "Already connected to Google";
+// Signed in, but Calendar was left unticked on Google's consent screen.
+export const GOOGLE_CALENDAR_NOT_ALLOWED = "Connected without Calendar";
 
 /** Mirrors auth::cognito::AccountStatus. `tier` is null when signed in but the server was unreachable. */
 export interface AccountStatus {

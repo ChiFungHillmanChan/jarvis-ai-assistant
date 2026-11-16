@@ -1038,6 +1038,7 @@ async fn execute_calendar_tool(
             if !event_id.is_empty() && event_id != "unknown" {
                 crate::chat_session::tool_result(name, json!({"view":"calendar","accountId":"legacy-google","eventId":event_id}), json!({"title":title,"start":start,"end":end,"state":"created"}));
             }
+            mirror_event_days(db, token, &start, &end).await;
             Ok(format!("Event created: {}", result))
         }
         "update_event" => {
@@ -1055,6 +1056,7 @@ async fn execute_calendar_tool(
             if edits_shared_content(args) && !event_content_is_editable(db, event_id) {
                 return Ok(SHARED_EVENT_REFUSAL.to_string());
             }
+            let previous = local_event_times(db, event_id);
             let result = calendar::update_event(
                 token,
                 event_id,
@@ -1066,12 +1068,20 @@ async fn execute_calendar_tool(
             )
             .await?;
             crate::chat_session::tool_result(name, json!({"view":"calendar","accountId":"legacy-google","eventId":event_id}), json!({"state":"updated"}));
+            let new_start = start.or_else(|| previous.as_ref().map(|p| p.0.clone()));
+            let new_end = end.or_else(|| previous.as_ref().map(|p| p.1.clone()));
+            if let (Some(new_start), Some(new_end)) = (new_start, new_end) {
+                // The old row may sit on another day the refresh below does not cover.
+                forget_local_event(db, event_id);
+                mirror_event_days(db, token, &new_start, &new_end).await;
+            }
             Ok(format!("Event updated: {}", result))
         }
         "delete_event" => {
             let event_id = args["event_id"].as_str().unwrap_or("");
             let result = calendar::delete_event(token, event_id).await?;
             forget_local_event(db, event_id);
+            crate::chat_session::notify("calendar-changed");
             Ok(result)
         }
         _ => Err(format!("Unknown Calendar tool: {}", name)),
@@ -1105,6 +1115,60 @@ fn with_other_accounts(main: String, others: Vec<String>) -> String {
         return main;
     }
     format!("{}\n\nOther Google accounts (read-only):\n{}", main, others.join("\n"))
+}
+
+/// The Calendar page reads the local copy, so an event the assistant writes on
+/// Google is copied in straight away and the page is told to reload. Before
+/// this, a new or moved meeting only appeared after the next sync. A failure
+/// here leaves the write on Google intact and the next sync repairs the copy.
+async fn mirror_event_days(db: &crate::db::Database, token: &str, start: &str, end: &str) {
+    use crate::integrations::calendar;
+    if let Some((time_min, time_max)) = local_day_window(start, end, &chrono::Local) {
+        match calendar::fetch_events_detailed(token, &time_min, &time_max).await {
+            Ok(fetched) => {
+                if let Err(e) = calendar::save_to_db(db, &fetched, &time_min, &time_max, calendar::MAIN_ACCOUNT) {
+                    log::warn!("[calendar] local copy not refreshed after assistant change: {}", e);
+                }
+            }
+            Err(e) => log::warn!("[calendar] could not re-read changed days: {}", e),
+        }
+    }
+    crate::chat_session::notify("calendar-changed");
+}
+
+/// Local midnight of the first day the event touches to local midnight after
+/// its last day: the window `save_to_db` may reconcile. Accepts RFC3339 times
+/// and all-day `YYYY-MM-DD` dates.
+fn local_day_window<Tz>(start: &str, end: &str, tz: &Tz) -> Option<(String, String)>
+where
+    Tz: chrono::TimeZone,
+    Tz::Offset: std::fmt::Display,
+{
+    let day = |value: &str| {
+        chrono::DateTime::parse_from_rfc3339(value)
+            .map(|t| t.with_timezone(tz).date_naive())
+            .ok()
+            .or_else(|| chrono::NaiveDate::parse_from_str(value, "%Y-%m-%d").ok())
+    };
+    let first = day(start)?;
+    let last = day(end).unwrap_or(first).max(first);
+    let midnight = |d: chrono::NaiveDate| {
+        tz.from_local_datetime(&d.and_hms_opt(0, 0, 0)?)
+            .earliest()
+            .map(|t| t.to_rfc3339())
+    };
+    Some((midnight(first)?, midnight(last.succ_opt()?)?))
+}
+
+/// Start and end of the main calendar's local copy of an event, if it has one.
+fn local_event_times(db: &crate::db::Database, event_id: &str) -> Option<(String, String)> {
+    let conn = db.conn.lock().ok()?;
+    conn.query_row(
+        "SELECT start_time, end_time FROM calendar_events WHERE account_id = '' AND google_id = ?1",
+        rusqlite::params![event_id],
+        |row| Ok((row.get(0)?, row.get(1)?)),
+    )
+    .ok()
 }
 
 /// Drop the local mirror row for an event Google has confirmed deleted.
@@ -2703,6 +2767,20 @@ mod local_time_tests {
             "the model must not be told to stamp today's offset on a future date, got: {line}"
         );
         assert!(!line.contains('\n'), "must stay a single line, got: {line}");
+    }
+
+    #[test]
+    fn local_day_window_covers_whole_local_days() {
+        let hk = hong_kong();
+        // 23:30 UTC on the 16th is already the 17th in Hong Kong.
+        let (from, to) = local_day_window("2026-11-16T23:30:00+00:00", "2026-11-17T00:30:00+00:00", &hk).unwrap();
+        assert_eq!(from, "2026-11-17T00:00:00+08:00");
+        assert_eq!(to, "2026-11-18T00:00:00+08:00");
+        // All-day dates, and an end before the start never inverts the window.
+        let (from, to) = local_day_window("2026-11-20", "2026-11-19", &hk).unwrap();
+        assert_eq!(from, "2026-11-20T00:00:00+08:00");
+        assert_eq!(to, "2026-11-21T00:00:00+08:00");
+        assert!(local_day_window("not a time", "2026-11-19", &hk).is_none());
     }
 
     #[test]

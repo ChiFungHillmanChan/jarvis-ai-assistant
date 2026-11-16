@@ -25,3 +25,8 @@ export function addStep(steps: ChatStep[], payload: { status: string; detail?: s
   const step = { status: payload.status, detail: payload.detail ?? null };
   return steps.some(s => s.status === step.status && s.detail === step.detail) ? steps : [...steps, step];
 }
+// A model round that follows a tool call is a separate reply. Streamed straight
+// on, "calendar." and "Tomorrow" ran together; it starts a new paragraph.
+export function roundBreak(sofar: string, token: string): string {
+  return token.trim() && sofar.trim() && !/\s$/.test(sofar) ? '\n\n' : '';
+}

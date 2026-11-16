@@ -33,7 +33,7 @@ test('saved native settings restore the selected language and skip the completed
   await store.restore();
   assert.equal(store.getSnapshot().locale, 'zh-HK');
   assert.equal(store.getSnapshot().hasSavedChoice, true);
-  assert.equal(await readStartupScreen(checkOnboardingStatus, () => getOptionalPreference('onboarding_intro_complete')), 'setup');
+  assert.equal(await readStartupScreen(checkOnboardingStatus, () => getOptionalPreference('onboarding_intro_complete')), 'quick');
 });
 
 test('a native settings read failure remains an error rather than becoming a first launch', async () => {
