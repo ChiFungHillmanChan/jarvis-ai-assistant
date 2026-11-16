@@ -123,8 +123,8 @@
           "description": "The global daily ceiling is the number of active entitled users times the per-user daily cap.",
           "const": "entitled_users_x_per_user_daily_cap"
         },
-        "budget_alert_percent": { "type": "array", "minItems": 1, "items": { "type": "integer", "minimum": 1 } },
-        "budget_kill_percent": { "type": "integer", "minimum": 1 },
+        "budget_alert_percent": { "description": "Percentages of the monthly Bedrock budget at which the founder is alerted.", "type": "array", "minItems": 1, "items": { "type": "integer", "minimum": 1 } },
+        "budget_kill_percent": { "description": "Percentage of the monthly Bedrock budget at which JARVIS AI is switched off.", "type": "integer", "minimum": 1 },
         "bedrock_region": { "type": "string", "pattern": "^[a-z]{2}(-[a-z]+)+-[0-9]$" },
         "workload_map": {
           "description": "The managed model the proxy runs for each JARVIS AI workload.",
@@ -195,7 +195,7 @@
         },
         "data_terms_note": { "type": "string", "minLength": 1 },
         "consent_copy_keys": {
-          "description": "Message keys (src/i18n/catalog.ts) for the consent card. Null exactly when data_terms is safe.",
+          "description": "Message keys for the consent card. P06 adds them to src/i18n/catalog.ts; they are not in the catalog yet. Null exactly when data_terms is safe.",
           "oneOf": [
             { "type": "null" },
             {
@@ -297,6 +297,7 @@
         "context": { "description": "Context window in tokens; null where the app does not record it.", "type": ["integer", "null"], "minimum": 1 },
         "max_output": { "description": "The most output tokens (thinking included) one request may ask for; null where not recorded.", "type": ["integer", "null"], "minimum": 1 },
         "capabilities": {
+          "description": "What JARVIS uses with this model today, not everything the model can do: false can mean the app does not use the ability yet.",
           "type": "object",
           "additionalProperties": false,
           "required": ["tools", "streaming", "json", "json_schema", "vision", "thinking", "reasoning_effort"],
