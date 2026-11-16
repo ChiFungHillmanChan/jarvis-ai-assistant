@@ -213,9 +213,9 @@ const errorsFor = (change: (doc: any) => void, publishedVersion?: number) => {
 // from today's values, so that editing the workload map, the fallback, the
 // region or the kill level in registry.json never changes what a test means.
 // The copy's fallback: the file's own, or, when it has none, a managed entry
-// no workload uses.
+// with its own Bedrock settings and prices that no workload uses.
 const withFallback = (doc: any): string => {
-  doc.managed.fallback ??= doc.models.find((m: any) => m.managed && !Object.values(doc.managed.workload_map).includes(m.id))?.id;
+  doc.managed.fallback ??= doc.models.find((m: any) => m.managed && m.bedrock && m.prices && !Object.values(doc.managed.workload_map).includes(m.id))?.id;
   return doc.managed.fallback;
 };
 
@@ -249,7 +249,11 @@ test('the validator rejects another provider\'s model as a default, a preset ent
   // An id reached through the price lookup is checked the same way.
   assert.ok(errorsFor(doc => { doc.features.chat.gemini = 'gpt-6-luna-x'; }).some(e => e.includes('belongs to provider "openai", not "gemini"')));
   // Bedrock is the exception: its ids are other vendors' models, priced under them.
-  assert.deepEqual(errorsFor(doc => { doc.features.chat.bedrock = 'us.anthropic.claude-haiku-4-5-20251001-v1:0'; }), []);
+  // The entry it resolves to is made active on the copy, whatever its status in the file.
+  assert.deepEqual(errorsFor(doc => {
+    Object.assign(model(doc, 'claude-haiku-4-5'), { status: 'active', replacement: null });
+    doc.features.chat.bedrock = 'us.anthropic.claude-haiku-4-5-20251001-v1:0';
+  }), []);
 });
 
 test('the validator rejects a family, a price pattern, as a default, a preset entry or a replacement', () => {

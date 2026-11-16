@@ -156,15 +156,18 @@ node --experimental-strip-types registry/validate.ts registry/registry.json
      --query "Exports[?Name=='Jarvis-dev-ApiBaseUrl'].Value" --output text
    ```
    檢查：應顯示一個以 `https://` 開頭的網址。沒有輸出即 dev 的 Payment stack 未部署，須先部署它才可繼續。
-5. **部署 dev 的 Registry stack**。部署使用主要 checkout 的程式碼，因此第一段先確認它就是最新的 `main`（已合併 P04），而且 `infra/` 沒有未提交的改動，否則在建置之前停止；停止時先 `git switch main && git pull --ff-only`（或先處理 `infra/` 未提交的改動），再重新執行。
+5. **部署 dev 的 Registry stack**。部署使用主要 checkout 的程式碼，因此第一段先確認它就是最新的 `main`（已合併 P04），而且 `infra/` 沒有未提交的改動，否則在建置之前停止；停止時先 `git switch main && git pull --ff-only`（或先處理 `infra/` 未提交的改動），再重新執行。部署的一行會再檢查一次這兩項：即使把整段一次貼上，檢查不通過時亦不會部署。
    ```bash
    cd "${MAIN_CHECKOUT:?先執行第 0 步}" &&
      git fetch origin main &&
      test "$(git rev-parse HEAD)" = "$(git rev-parse origin/main)" &&
      test -z "$(git status --porcelain -- infra)" &&
      cd infra && npm ci && (cd lambda/registry && npm ci) && npm run build
-   cd "$MAIN_CHECKOUT/infra" && npx cdk diff --profile jarvis --context env=dev --exclusively Jarvis-dev-Registry
-   cd "$MAIN_CHECKOUT/infra" && npm run deploy:dev -- --exclusively Jarvis-dev-Registry
+   cd "${MAIN_CHECKOUT:?先執行第 0 步}/infra" && npx cdk diff --profile jarvis --context env=dev --exclusively Jarvis-dev-Registry
+   cd "${MAIN_CHECKOUT:?先執行第 0 步}/infra" &&
+     test "$(git rev-parse HEAD)" = "$(git rev-parse origin/main)" &&
+     test -z "$(git status --porcelain -- .)" &&
+     npm run deploy:dev -- --exclusively Jarvis-dev-Registry
    ```
    **不可省略 `--exclusively`**：省略時，CDK 會先以本機的 checkout 部署 Registry 所依賴的 Auth、Data 及 Payment stack；prod 的 Payment stack 如部署時缺少三個 Stripe id，checkout 會回傳 503。
    檢查：應列出 `RegistryBucketName`、`RegistryPublisherRoleArn` 及 `RegistryUrl` 三項輸出（第 7 步用前兩項，第 9 步用 `RegistryUrl`）；以 `RegistryUrl` 執行的 `curl` 應顯示 `503`，即端點已存在、但未有發佈內容（第 9 步之後才會是 `200`）。
@@ -226,9 +229,11 @@ node --experimental-strip-types registry/validate.ts registry/registry.json
      git commit -m "chore(registry): 提交註冊表的公鑰" &&
      git push -u origin chore/registry-public-key
    ```
-   然後在 GitHub 開 PR（base 為 `main`）並合併。合併會觸發 Registry workflow。合併後約半分鐘，等候該次執行完成：
+   然後在 GitHub 開 PR（base 為 `main`）並合併。合併會觸發 Registry workflow。合併後約半分鐘，等候該次執行完成。下面只找由這次合併的 commit（`origin/main` 的最新 commit）觸發的執行，不會誤看較早的執行；如顯示未找到，稍候再執行本段：
    ```bash
-   gh run watch "$(gh run list --workflow registry.yml --repo "$REPO" --event push --limit 1 --json databaseId --jq '.[0].databaseId')" --repo "$REPO" --exit-status
+   cd "${MAIN_CHECKOUT:?先執行第 0 步}" && git fetch origin main &&
+     RUN_ID="$(gh run list --workflow registry.yml --repo "$REPO" --event push --commit "$(git rev-parse origin/main)" --limit 1 --json databaseId --jq '.[0].databaseId // empty')" &&
+     gh run watch "${RUN_ID:?未找到這次合併觸發的執行，稍候再執行本段}" --repo "$REPO" --exit-status
    ```
    檢查：該次執行應以成功結束（validate、sign 及 publish-dev 都成功）。如 sign job 失敗並顯示 `the signing key does not match registry/signing-public-key.pem`，即 secret 與公鑰不是同一對：執行第 6 步重試的一行，再重複本步（commit 新的公鑰、push、開 PR 並合併）。
    然後確認 dev 提供的內容能以 `main` 上的公鑰驗證（`REGISTRY_URL` 設為第 5 步的 `RegistryUrl`）：
@@ -237,15 +242,15 @@ node --experimental-strip-types registry/validate.ts registry/registry.json
    cd "${MAIN_CHECKOUT:?先執行第 0 步}" && git fetch origin main &&
      git show origin/main:registry/signing-public-key.pem > /tmp/registry-public-key.pem &&
      curl -fsS -D /tmp/registry.headers -o /tmp/registry.json "$REGISTRY_URL" &&
-     SIG="$(grep -i '^x-registry-signature:' /tmp/registry.headers | cut -d' ' -f2 | tr -d '\r')" node -e '
+     SIG="$(grep -i '^x-registry-signature:' /tmp/registry.headers | cut -d' ' -f2 | tr -d '\r')" URL="$REGISTRY_URL" node -e '
      const { readFileSync } = require("node:fs");
      const { verify } = require("node:crypto");
      const body = readFileSync("/tmp/registry.json");
      const sig = Buffer.from(process.env.SIG ?? "", "base64");
      const ok = sig.length === 64 && verify(null, body, readFileSync("/tmp/registry-public-key.pem", "utf8"), sig);
-     console.log(ok ? `signature ok, version ${JSON.parse(body).version}` : "SIGNATURE BAD");'
+     console.log(ok ? `signature ok, version ${JSON.parse(body).version}, from ${process.env.URL}` : `SIGNATURE BAD, from ${process.env.URL}`);'
    ```
-   顯示 `signature ok` 後，移除第 6 步開的 worktree：
+   結果會顯示所檢查的網址：確認它是 dev 的 `RegistryUrl`。顯示 `signature ok` 後，移除第 6 步開的 worktree：
    ```bash
    cd "${MAIN_CHECKOUT:?先執行第 0 步}" && git worktree remove "${KEY_WORKTREE:?先執行第 6 步}"
    ```
@@ -261,8 +266,11 @@ node --experimental-strip-types registry/validate.ts registry/registry.json
       test "$(git rev-parse HEAD)" = "$(git rev-parse origin/main)" &&
       test -z "$(git status --porcelain -- infra)" &&
       cd infra && npm ci && (cd lambda/registry && npm ci) && npm run build
-    cd "$MAIN_CHECKOUT/infra" && npx cdk diff --profile jarvis --context env=prod --exclusively Jarvis-prod-Registry
-    cd "$MAIN_CHECKOUT/infra" && npm run deploy:prod -- --exclusively Jarvis-prod-Registry
+    cd "${MAIN_CHECKOUT:?先執行第 0 步}/infra" && npx cdk diff --profile jarvis --context env=prod --exclusively Jarvis-prod-Registry
+    cd "${MAIN_CHECKOUT:?先執行第 0 步}/infra" &&
+      test "$(git rev-parse HEAD)" = "$(git rev-parse origin/main)" &&
+      test -z "$(git status --porcelain -- .)" &&
+      npm run deploy:prod -- --exclusively Jarvis-prod-Registry
     ```
     檢查：應列出三項輸出，以 prod 的 `RegistryUrl` 執行的 `curl` 應顯示 `503`。
     ```bash
@@ -281,11 +289,15 @@ node --experimental-strip-types registry/validate.ts registry/registry.json
     ```bash
     gh workflow run registry.yml --ref main --repo "$REPO"
     ```
-    約半分鐘後（新的執行要一點時間才會出現），等候該次執行完成：
+    約半分鐘後（新的執行要一點時間才會出現），找出最新一次手動執行：
     ```bash
-    gh run watch "$(gh run list --workflow registry.yml --repo "$REPO" --event workflow_dispatch --limit 1 --json databaseId --jq '.[0].databaseId')" --repo "$REPO" --exit-status
+    RUN="$(gh run list --workflow registry.yml --repo "$REPO" --event workflow_dispatch --limit 1 --json databaseId,createdAt --jq '.[] | "\(.databaseId) \(.createdAt)"')" && echo "${RUN:?未有手動執行的記錄，稍候再執行本行}"
     ```
-    檢查：該次執行應以成功結束（validate、sign 及 publish-prod 都成功）。然後把 `REGISTRY_URL` 設為 prod 的 `RegistryUrl`，再執行第 9 步確認 dev 內容的那一段（由 `cd "${MAIN_CHECKOUT…` 開始）；應顯示 `signature ok`，版本與 dev 相同。
+    檢查：顯示的是執行編號及建立時間（UTC），時間應是剛才手動發佈的一刻；如仍是較早的一次執行，稍候再執行上面一行。確認後等候它完成：
+    ```bash
+    gh run watch "${RUN%% *}" --repo "$REPO" --exit-status
+    ```
+    檢查：該次執行應以成功結束（validate、sign 及 publish-prod 都成功）。然後把 `REGISTRY_URL` 設為 prod 的 `RegistryUrl`，再執行第 9 步確認 dev 內容的那一段（由 `cd "${MAIN_CHECKOUT…` 開始）；應顯示 `signature ok`，版本與 dev 相同，而且顯示的網址必須是 prod 的 `RegistryUrl`（如仍是 dev 的網址，即下面一行沒有生效，檢查的仍是 dev）。
     ```bash
     REGISTRY_URL=<prod 的 RegistryUrl>
     ```
