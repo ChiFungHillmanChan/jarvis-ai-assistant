@@ -14,7 +14,16 @@ import { generateKeyPairSync } from 'node:crypto';
 import { canonicalBytes, signBytes } from '../registry/signing.ts';
 
 const repo = new URL('..', import.meta.url).pathname;
-const seeded = () => JSON.parse(readFileSync(new URL('../registry/registry.json', import.meta.url), 'utf8'));
+// The seeded registry, with the two values these tests build on set here so
+// that an edit to the real file (a new version, the kill switch) never changes
+// what a test means: version 1, and JARVIS AI not paused (a test makes its
+// "changed" registry by pausing it).
+const seeded = () => {
+  const doc = JSON.parse(readFileSync(new URL('../registry/registry.json', import.meta.url), 'utf8'));
+  doc.version = 1;
+  doc.managed.paused = false;
+  return doc;
+};
 const pair = generateKeyPairSync('ed25519');
 const privateKey = pair.privateKey.export({ type: 'pkcs8', format: 'pem' }) as string;
 const publicKey = pair.publicKey.export({ type: 'spki', format: 'pem' }) as string;

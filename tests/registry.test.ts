@@ -206,6 +206,16 @@ const errorsFor = (change: (doc: any) => void, publishedVersion?: number) => {
   return validateRegistry(doc, { publishedVersion });
 };
 
+// The tests below take JARVIS AI's models from the copy's own settings, never
+// from today's values, so that editing the workload map, the fallback, the
+// region or the kill level in registry.json never changes what a test means.
+// The copy's fallback: the file's own, or, when it has none, a managed entry
+// no workload uses.
+const withFallback = (doc: any): string => {
+  doc.managed.fallback ??= doc.models.find((m: any) => m.managed && !Object.values(doc.managed.workload_map).includes(m.id))?.id;
+  return doc.managed.fallback;
+};
+
 test('the validator rejects a missing feature default', () => {
   assert.ok(errorsFor(doc => { delete doc.features.chat.openai; }).some(e => e.includes('features.chat: missing the default for provider "openai"')));
   assert.ok(errorsFor(doc => { delete doc.features.tts; }).some(e => e.startsWith('schema:') && e.includes('tts')));
@@ -222,7 +232,7 @@ test('the validator rejects a disabled or deprecated model used as a default', (
   assert.ok(viaLookup.some(e => e.includes('presets.chains.gemini_pro_only[0]')));
   assert.ok(errorsFor(doc => { model(doc, 'claude-sonnet-5-5').status = 'deprecated'; model(doc, 'claude-sonnet-5-5').replacement = 'claude-opus-5-5'; })
     .some(e => e.includes('is deprecated; a default must be active')));
-  assert.ok(errorsFor(doc => { model(doc, 'qwen.qwen3-32b-v1:0').status = 'disabled'; }).some(e => e.includes('managed.workload_map.chat')));
+  assert.ok(errorsFor(doc => { model(doc, doc.managed.workload_map.chat).status = 'disabled'; }).some(e => e.includes('managed.workload_map.chat')));
   assert.ok(errorsFor(doc => { doc.features.chat.openai = 'gpt-9-nonexistent'; }).some(e => e.includes('does not exist')));
 });
 
@@ -247,10 +257,11 @@ test('the validator rejects a family, a price pattern, as a default, a preset en
   assert.ok(errorsFor(doc => { model(doc, 'gpt-4o-mini').status = 'deprecated'; model(doc, 'gpt-4o-mini').replacement = 'gpt-5'; })
     .includes('model "gpt-4o-mini": replacement: "gpt-5" is a family, a price pattern, not a model one can pick'));
   // An id that only contains a family's id resolves to that family and is accepted (the mail classifier's jev-latest).
-  const models = seeded().models as RegistryModel[];
-  assert.equal(seeded().features.mail_sort.typesafe, 'jev-latest');
+  const doc = seeded();
+  doc.features.mail_sort.typesafe = 'jev-latest';
+  const models = doc.models as RegistryModel[];
   assert.deepEqual([resolveModel(models, 'jev-latest', false)?.id, resolveModel(models, 'jev-latest', false)?.kind], ['jev', 'family']);
-  assert.deepEqual(validateRegistry(seeded()), []);
+  assert.deepEqual(validateRegistry(doc), []);
 });
 
 test('the validator rejects a duplicate id', () => {
@@ -259,9 +270,9 @@ test('the validator rejects a duplicate id', () => {
 });
 
 test('the validator rejects a version that is not greater than the published one', () => {
-  assert.deepEqual(errorsFor(() => {}, 0), []);
-  assert.ok(errorsFor(() => {}, 1).some(e => e === 'version 1 must be greater than the published version 1'));
-  assert.ok(errorsFor(() => {}, 7).some(e => e.includes('greater than the published version 7')));
+  assert.deepEqual(errorsFor(doc => { doc.version = 1; }, 0), []);
+  assert.ok(errorsFor(doc => { doc.version = 1; }, 1).some(e => e === 'version 1 must be greater than the published version 1'));
+  assert.ok(errorsFor(doc => { doc.version = 6; }, 7).some(e => e === 'version 6 must be greater than the published version 7'));
   assert.deepEqual(errorsFor(doc => { doc.version = 8; }, 7), []);
   assert.equal(publishedVersionOf(canonicalJson({ version: 7, other: true })), 7);
   assert.throws(() => publishedVersionOf('{"version":"7"}'));
@@ -270,7 +281,7 @@ test('the validator rejects a version that is not greater than the published one
 test('the validator refuses a file not exactly in its own format, such as one with a key given twice', () => {
   const text = read('registry/registry.json');
   assert.deepEqual(validateRegistryText(text), []);
-  const twice = text.replace('    "markup": 2,\n', '    "markup": 3,\n    "markup": 2,\n');
+  const twice = text.replace(/\n    "markup": ([^,\n]+),\n/, '\n    "markup": 0,\n    "markup": $1,\n');
   assert.notEqual(twice, text);
   assert.deepEqual(JSON.parse(twice), JSON.parse(text), 'JSON.parse keeps the last of two equal keys');
   assert.ok(validateRegistryText(twice).some(e => e.startsWith('the file is not exactly JSON.stringify(registry, null, 2)')));
@@ -292,11 +303,16 @@ test('the validator checks the rest of the cross-references', () => {
   assert.ok(errorsFor(doc => { doc.features.tts.openai = 'gpt-6-luna'; }).some(e => e.includes('does not list tts in default_for')));
   assert.ok(errorsFor(doc => { provider(doc, 'gemini').consent_copy_keys = null; }).some(e => e.includes('consent_copy_keys')));
   assert.ok(errorsFor(doc => { model(doc, 'gpt-5.6-luna').status = 'deprecated'; model(doc, 'gpt-5.6-luna').replacement = 'gpt-9'; }).some(e => e.includes('replacement "gpt-9" does not exist')));
-  assert.ok(errorsFor(doc => { doc.managed.fallback = 'qwen.qwen3-32b-v1:0'; }).some(e => e.includes('fallback must differ')));
-  assert.ok(errorsFor(doc => { model(doc, 'deepseek.v3.2').bedrock.region = 'us-east-1'; }).some(e => e.includes('not ap-northeast-1')));
-  assert.ok(errorsFor(doc => { delete model(doc, 'deepseek.v3.2').price_source; }).includes('model "deepseek.v3.2": a managed price must cite its source in price_source, a URL and the date it was read'));
-  assert.ok(errorsFor(doc => { model(doc, 'qwen.qwen3-32b-v1:0').price_source = 'the AWS pricing page'; }).some(e => e.includes('"qwen.qwen3-32b-v1:0": a managed price must cite its source')));
-  assert.ok(errorsFor(doc => { doc.managed.budget_alert_percent = [50, 80, 160]; }).some(e => e.includes('budget_kill_percent')));
+  assert.ok(errorsFor(doc => { doc.managed.fallback = doc.managed.workload_map.chat; }).some(e => e.includes('fallback must differ')));
+  const elsewhere = (region: string) => (region === 'us-east-1' ? 'us-west-2' : 'us-east-1');
+  assert.ok(errorsFor(doc => { model(doc, withFallback(doc)).bedrock.region = elsewhere(doc.managed.bedrock_region); })
+    .some(e => e.startsWith('managed.fallback:') && e.endsWith(`, not ${seeded().managed.bedrock_region}`)));
+  for (const id of seeded().models.filter((m: any) => m.managed && m.prices).map((m: any) => m.id)) {
+    assert.ok(errorsFor(doc => { delete model(doc, id).price_source; }).includes(`model "${id}": a managed price must cite its source in price_source, a URL and the date it was read`), id);
+  }
+  const chat = seeded().managed.workload_map.chat;
+  assert.ok(errorsFor(doc => { model(doc, chat).price_source = 'the AWS pricing page'; }).some(e => e.includes(`"${chat}": a managed price must cite its source`)));
+  assert.ok(errorsFor(doc => { doc.managed.budget_kill_percent = 150; doc.managed.budget_alert_percent = [50, 80, 160]; }).some(e => e.includes('budget_kill_percent')));
   assert.ok(errorsFor(doc => { doc.presets.default = 'nope'; }).some(e => e.includes('presets.default')));
   assert.ok(errorsFor(doc => { model(doc, 'gpt-4o').prices.tiers = [{ above_input_tokens: 5, input: 1, output: 1, cache_read: 1, cache_write: 1 }, { above_input_tokens: 5, input: 1, output: 1, cache_read: 1, cache_write: 1 }]; }).some(e => e.includes('tiers must rise')));
 });
@@ -335,7 +351,7 @@ test('a signature verifies over the exact bytes and fails on any change', () => 
 test('signing refuses an invalid registry, a mismatched public key and the updater key', () => {
   const { privatePem, publicPem } = keyPair();
   const signed = signRegistry(seeded(), privatePem, publicPem, null);
-  assert.equal(signed.version, 1);
+  assert.equal(signed.version, seeded().version);
   assert.equal(signed.bytes.toString('utf8'), canonicalJson(seeded()));
   assert.ok(verifyBytes(signed.bytes, signed.signature, publicPem));
 
