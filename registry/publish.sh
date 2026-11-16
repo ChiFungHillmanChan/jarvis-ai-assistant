@@ -12,6 +12,8 @@
 # a reader never sees one version's body with another's signature.
 # Re-running for a version that is already published with the same bytes
 # changes nothing; any other content for an existing version is refused.
+# Before any S3 call, the signature must verify with the committed public key
+# (registry/signing-public-key.pem); a failed S3 list call stops the publish.
 set -euo pipefail
 
 dir="${1:?usage: publish.sh <signed dir>}"
@@ -28,8 +30,17 @@ signature="$(tr -d '\n' < "$sig_file")"
 [[ "$signature" =~ ^[A-Za-z0-9+/]{86}==$ ]] || { echo 'registry: bad signature file' >&2; exit 1; }
 metadata="{\"signature\":\"$signature\",\"version\":\"$version\"}"
 
+# The signature must verify over these exact bytes with the key the app
+# trusts before anything is read from or written to the bucket.
+node --experimental-strip-types "$here/verify.ts" "$body" "$sig_file"
+
+# Whether this exact key is in the bucket. A failed list call stops the
+# publish: read as "not there", it would skip the version check below.
 exists() {
-  [[ "$(aws s3api list-objects-v2 --bucket "$bucket" --prefix "$1" --query "length(Contents[?Key=='$1'] || \`[]\`)" --output text)" == 1 ]]
+  local n
+  n="$(aws s3api list-objects-v2 --bucket "$bucket" --prefix "$1" --query "length(Contents[?Key=='$1'] || \`[]\`)" --output text)" \
+    || { echo "registry: cannot list s3://$bucket/$1; nothing is uploaded" >&2; exit 1; }
+  [[ "$n" == 1 ]]
 }
 
 # Writes $1 from $2 only if the key does not exist yet; an existing object
