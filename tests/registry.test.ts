@@ -1,8 +1,12 @@
 // The model registry (registry/): the seeded file against the code the app
 // runs today, the validator's refusals, and the signing format.
+//
+// Name every repository file a registry test reads by its full path in a
+// string literal ('src-tauri/src/ai/openai.rs', or '../<path>' in a URL): the
+// last test checks that the pull-request check runs when any of them changes.
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { readFileSync } from 'node:fs';
+import { existsSync, readdirSync, readFileSync, statSync } from 'node:fs';
 import { generateKeyPairSync } from 'node:crypto';
 import { validateRegistry, validateRegistryText, publishedVersionOf } from '../registry/validate.ts';
 import { findPriced, resolveModel, costMicros, type RegistryModel } from '../registry/lookup.ts';
@@ -120,20 +124,19 @@ test('the price lookup over the registry gives what models.rs gives', () => {
 
 test('limits, presets and lists the registry holds match the code', () => {
   const doc = seeded();
-  const src = (p: string) => read(`src-tauri/src/${p}`);
-  assert.equal(provider(doc, 'openai').limits.chat_max_output_tokens, Number(one(src('ai/openai.rs'), /max_completion_tokens: official\.then_some\((\d+)\)/)));
-  assert.equal(provider(doc, 'kimi').limits.chat_max_output_tokens, Number(one(src('ai/openai.rs'), /max_tokens: \(!official\)\.then_some\((\d+)\)/)));
-  assert.equal(provider(doc, 'openai').limits.chat_reasoning_effort, one(src('ai/openai.rs'), /reasoning_effort: official\.then_some\("([^"]+)"\)/));
-  assert.equal(provider(doc, 'claude').limits.chat_max_output_tokens, Number(one(src('ai/claude.rs'), /max_tokens: (\d+),/)));
-  assert.equal(provider(doc, 'claude').limits.api_version, one(src('ai/claude.rs'), /"anthropic-version", "([^"]+)"/));
-  assert.equal(provider(doc, 'gemini').limits.default_max_output_tokens, Number(one(src('ai/gemini.rs'), /max_output_tokens\(model\)\.unwrap_or\(([\d_]+)\)/).replace(/_/g, '')));
-  assert.equal(provider(doc, 'gemini').limits.stt_max_output_tokens, Number(one(src('voice/transcribe.rs'), /"maxOutputTokens": (\d+)/)));
-  assert.equal(provider(doc, 'bedrock').limits.chat_max_output_tokens, Number(one(src('ai/bedrock.rs'), /\.max_tokens\((\d+)\)\s*\.temperature/)));
-  assert.equal(provider(doc, 'bedrock').limits.chat_temperature, Number(one(src('ai/bedrock.rs'), /\.temperature\(([\d.]+)\)/)));
-  assert.equal(provider(doc, 'ollama').limits.completion_context_tokens, Number(one(src('ai/complete.rs'), /const OLLAMA_CONTEXT: u32 = ([\d_]+);/).replace(/_/g, '')));
-  assert.equal(provider(doc, 'ollama').limits.default_context_tokens, Number(one(src('ai/mod.rs'), /\|row\| row\.get\(0\),\s*\)\s*\.unwrap_or\((\d+)\);/)));
-  for (const file of ['ai/openai.rs', 'ai/claude.rs', 'ai/gemini.rs', 'ai/bedrock.rs', 'ai/local/mod.rs']) {
-    assert.equal(Number(one(src(file), /let max_iterations = (\d+);/)), 5, file);
+  assert.equal(provider(doc, 'openai').limits.chat_max_output_tokens, Number(one(read('src-tauri/src/ai/openai.rs'), /max_completion_tokens: official\.then_some\((\d+)\)/)));
+  assert.equal(provider(doc, 'kimi').limits.chat_max_output_tokens, Number(one(read('src-tauri/src/ai/openai.rs'), /max_tokens: \(!official\)\.then_some\((\d+)\)/)));
+  assert.equal(provider(doc, 'openai').limits.chat_reasoning_effort, one(read('src-tauri/src/ai/openai.rs'), /reasoning_effort: official\.then_some\("([^"]+)"\)/));
+  assert.equal(provider(doc, 'claude').limits.chat_max_output_tokens, Number(one(read('src-tauri/src/ai/claude.rs'), /max_tokens: (\d+),/)));
+  assert.equal(provider(doc, 'claude').limits.api_version, one(read('src-tauri/src/ai/claude.rs'), /"anthropic-version", "([^"]+)"/));
+  assert.equal(provider(doc, 'gemini').limits.default_max_output_tokens, Number(one(read('src-tauri/src/ai/gemini.rs'), /max_output_tokens\(model\)\.unwrap_or\(([\d_]+)\)/).replace(/_/g, '')));
+  assert.equal(provider(doc, 'gemini').limits.stt_max_output_tokens, Number(one(read('src-tauri/src/voice/transcribe.rs'), /"maxOutputTokens": (\d+)/)));
+  assert.equal(provider(doc, 'bedrock').limits.chat_max_output_tokens, Number(one(read('src-tauri/src/ai/bedrock.rs'), /\.max_tokens\((\d+)\)\s*\.temperature/)));
+  assert.equal(provider(doc, 'bedrock').limits.chat_temperature, Number(one(read('src-tauri/src/ai/bedrock.rs'), /\.temperature\(([\d.]+)\)/)));
+  assert.equal(provider(doc, 'ollama').limits.completion_context_tokens, Number(one(read('src-tauri/src/ai/complete.rs'), /const OLLAMA_CONTEXT: u32 = ([\d_]+);/).replace(/_/g, '')));
+  assert.equal(provider(doc, 'ollama').limits.default_context_tokens, Number(one(read('src-tauri/src/ai/mod.rs'), /\|row\| row\.get\(0\),\s*\)\s*\.unwrap_or\((\d+)\);/)));
+  for (const file of ['src-tauri/src/ai/openai.rs', 'src-tauri/src/ai/claude.rs', 'src-tauri/src/ai/gemini.rs', 'src-tauri/src/ai/bedrock.rs', 'src-tauri/src/ai/local/mod.rs']) {
+    assert.equal(Number(one(read(file), /let max_iterations = (\d+);/)), 5, file);
   }
   for (const p of doc.providers) if (p.limits?.max_tool_rounds !== undefined) assert.equal(p.limits.max_tool_rounds, 5, p.id);
 
@@ -150,13 +153,13 @@ test('limits, presets and lists the registry holds match the code', () => {
   }
 
   // Bedrock: inference geographies and the picker's built-in list.
-  assert.deepEqual(provider(doc, 'bedrock').inference_geographies, JSON.parse(one(src('ai/mod.rs'), /const INFERENCE_GEOGRAPHIES: \[&str; 3\] = (\[[^\]]+\]);/)));
-  const list = src('aws/model_list.rs');
+  assert.deepEqual(provider(doc, 'bedrock').inference_geographies, JSON.parse(one(read('src-tauri/src/ai/mod.rs'), /const INFERENCE_GEOGRAPHIES: \[&str; 3\] = (\[[^\]]+\]);/)));
+  const list = read('src-tauri/src/aws/model_list.rs');
   assert.deepEqual(provider(doc, 'bedrock').built_in_models, [constant('BEDROCK_DEFAULT'), one(list, /const SEEDED_HAIKU: &str = "([^"]+)";/), one(list, /const SEEDED_NOVA_MICRO: &str = "([^"]+)";/)]);
 
   // Setup and compatible services: commands/ai_choice.rs, ai/compat.rs, src/lib/ai-choice.ts, ChooseAi.tsx.
-  assert.deepEqual(doc.chat_model_filter.exclude_words, JSON.parse(one(src('commands/ai_choice.rs'), /const NOT_CHAT: \[&str; 14\] = (\[[^\]]+\]);/)));
-  const compat = src('ai/compat.rs');
+  assert.deepEqual(doc.chat_model_filter.exclude_words, JSON.parse(one(read('src-tauri/src/commands/ai_choice.rs'), /const NOT_CHAT: \[&str; 14\] = (\[[^\]]+\]);/)));
+  const compat = read('src-tauri/src/ai/compat.rs');
   assert.deepEqual(provider(doc, 'kimi').regions.map((r: any) => r.base_url), [one(compat, /KIMI_GLOBAL: &str = "([^"]+)"/), one(compat, /KIMI_CHINA: &str = "([^"]+)"/)]);
   assert.deepEqual(provider(doc, 'qwen').regions.map((r: any) => r.base_url), [one(compat, /QWEN_INTERNATIONAL: &str = "([^"]+)"/), one(compat, /QWEN_CHINA: &str = "([^"]+)"/)]);
   const choice = read('src/lib/ai-choice.ts');
@@ -172,10 +175,10 @@ test('limits, presets and lists the registry holds match the code', () => {
     if (p.setup.key_page) assert.ok(chooseAi.includes(`'${p.setup.key_page}'`), p.id);
   }
   assert.deepEqual(provider(doc, 'ollama_cloud').model_id_suffixes, [':cloud', '-cloud']);
-  assert.match(src('ai/mail_policy.rs'), /name\.ends_with\(":cloud"\) \|\| name\.ends_with\("-cloud"\)/);
+  assert.match(read('src-tauri/src/ai/mail_policy.rs'), /name\.ends_with\(":cloud"\) \|\| name\.ends_with\("-cloud"\)/);
 
   // voice/model_manager.rs: the Whisper download.
-  const manager = src('voice/model_manager.rs');
+  const manager = read('src-tauri/src/voice/model_manager.rs');
   assert.deepEqual(model(doc, 'ggml-base').download, {
     url: one(manager, /const MODEL_URL: &str =\s*"([^"]+)";/),
     sha256: one(manager, /const MODEL_SHA256: &str = "([^"]+)";/),
@@ -393,4 +396,50 @@ test('signing refuses an invalid registry, a mismatched public key and the updat
   const real = JSON.parse(read('src-tauri/tauri.conf.json')).plugins.updater.pubkey;
   assert.equal(updaterRawPublicKey(real).length, 32);
   assert.doesNotThrow(() => signRegistry(seeded(), privatePem, publicPem, real));
+});
+
+// ---------------------------------------------------------------------------
+// The pull-request check (.github/workflows/registry-check.yml) runs only when
+// a pull request touches one of its paths, so a repository file the registry
+// tests read but the paths miss could change without the check ever running.
+
+const repoRoot = new URL('..', import.meta.url);
+const pullRequestPaths = (workflow: string) => {
+  const lines = read(workflow).split('\n');
+  const start = lines.indexOf('    paths:', lines.indexOf('  pull_request:'));
+  assert.ok(lines.includes('  pull_request:') && start > 0, `${workflow} has a pull_request paths list`);
+  const paths: string[] = [];
+  for (const line of lines.slice(start + 1)) {
+    const item = line.match(/^      - "([^"]+)"$/);
+    if (item) paths.push(item[1]);
+    else if (!/^      #/.test(line)) break;
+  }
+  return paths;
+};
+// GitHub's path filters: ** matches any characters, * any but "/".
+const globToRegExp = (glob: string) => new RegExp(`^${glob.split('**')
+  .map(part => part.split('*').map(text => text.replace(/[.+?^${}()|[\]\\]/g, '\\$&')).join('[^/]*'))
+  .join('.*')}$`);
+
+test('the pull-request check runs on every repository file the registry tests read', () => {
+  const patterns = pullRequestPaths('.github/workflows/registry-check.yml');
+  const covered = (file: string) => patterns.some(glob => globToRegExp(glob).test(file));
+  const sources = readdirSync(new URL('.', import.meta.url)).filter(name => /^registry.*\.ts$/.test(name)).map(name => `tests/${name}`);
+  assert.ok(sources.includes('tests/registry.test.ts') && sources.includes('tests/registry-publish.test.ts'), sources.join(', '));
+  // Every string literal in the test sources that names a file of the repository.
+  const literal = /'((?:[^'\\\n]|\\.)+)'|"((?:[^"\\\n]|\\.)+)"|`((?:[^`\\$\n]|\\.)+)`/g;
+  const named = new Set<string>(sources);
+  for (const source of sources) {
+    for (const match of read(source).matchAll(literal)) {
+      const path = (match[1] ?? match[2] ?? match[3]).replace(/^\.\.\//, '');
+      if (path.startsWith('node_modules') || path.startsWith('/')) continue;
+      const url = new URL(path, repoRoot);
+      if (existsSync(url) && statSync(url).isFile()) named.add(path);
+    }
+  }
+  for (const file of ['src-tauri/src/ai/models.rs', 'src/pages/Settings.tsx', 'infra/lambda/registry/index.ts']) assert.ok(named.has(file), `the scan finds ${file}`);
+  const uncovered = [...named].filter(file => !covered(file)).sort();
+  assert.deepEqual(uncovered, [], `add to the pull_request paths of .github/workflows/registry-check.yml: ${uncovered.join(', ')}`);
+  // A listed file that no longer exists (renamed or moved) leaves its new name unchecked.
+  for (const glob of patterns.filter(g => !g.includes('*'))) assert.ok(existsSync(new URL(glob, repoRoot)), `${glob} is listed but does not exist`);
 });
