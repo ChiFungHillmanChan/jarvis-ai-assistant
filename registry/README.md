@@ -112,12 +112,14 @@ node --experimental-strip-types registry/validate.ts registry/registry.json
 
 須依次完成。第 8 步（提交公鑰的 PR 之前的最後一步）把 repository 變數 `REGISTRY_PUBLISHING` 設為 `on` 之前，推送至 `main` 只會執行 validate：sign 及兩個 publish job 都會略過，workflow 顯示成功，亦不會建立任何 environment。設為 `on` 之後，欠缺 `REGISTRY_SIGNING_KEY` 或 `registry/signing-public-key.pem` 時，sign job 會失敗並指出欠缺哪一項；欠缺 `REGISTRY_ROLE_ARN` 時，publish job 會在取得 AWS 憑證的步驟失敗，訊息由該 action 提供；欠缺 `REGISTRY_BUCKET` 時，`publish.sh` 會失敗。以上情況都不會發佈任何內容。
 
-以下 AWS 指令使用部署腳本所用的 `jarvis` profile；每個指令都明確指定 profile，避免使用預設憑證。所有 `gh` 指令使用同一個 `REPO` 變數，請在同一個終端機視窗內完成全部步驟。
+以下 AWS 指令使用部署腳本所用的 `jarvis` profile；每個指令都明確指定 profile，避免使用預設憑證。請在 repository 的主要 checkout 內開始，並在同一個終端機視窗內逐行完成全部步驟：`REPO`、`MAIN_CHECKOUT`、`KEYGEN`、`KEY_WORKTREE` 及 `REGISTRY_URL` 這些變數只存在於這個視窗。以 `&&` 連接的各行，任何一行失敗都會停止其後各行；停止時先處理該行的錯誤，再從該段的開頭重新執行。
 
-0. **設定 `REPO`**（只需一次）：
+0. **設定 `REPO` 及主要 checkout 的位置**（只需一次；在主要 checkout 內任何一個資料夾執行）：
    ```bash
    REPO=ChiFungHillmanChan/jarvis-ai-assistant
+   MAIN_CHECKOUT="$(git rev-parse --show-toplevel)" && echo "$MAIN_CHECKOUT"
    ```
+   檢查：顯示的應是主要 checkout 的頂層資料夾。
 1. **GitHub 方案**：私人 repository 的 environment 及 environment secret 需要 GitHub Pro（或 Team、Enterprise）。
 2. **建立三個 GitHub environment**（`registry-signing`、`registry-dev`、`registry-prod`），每個都只容許 `main` 分支。這一步必須在第 5 步建立發佈角色之前完成：environment job 的 OIDC subject 不包含分支，未有分支規則時，任何分支上指名該 environment 的 workflow 都可取得角色接受的權杖。
    ```bash
@@ -127,6 +129,7 @@ node --experimental-strip-types registry/validate.ts registry/registry.json
      gh api -X POST "repos/$REPO/environments/$ENV/deployment-branch-policies" -f name=main -f type=branch
    done
    ```
+   重新執行時，如 POST 回覆 `main` 的規則已存在，可略過該錯誤。
    檢查：每個 environment 都應顯示 `{"custom_branch_policies":true,"protected_branches":false}` 及 `main`。
    ```bash
    for ENV in registry-signing registry-dev registry-prod; do
@@ -136,46 +139,70 @@ node --experimental-strip-types registry/validate.ts registry/registry.json
    done
    ```
    亦可在 GitHub 網頁操作：Settings → Environments → New environment，輸入名稱後於 Deployment branches and tags 選 Selected branches and tags，加入 `main`。
-3. **AWS 的 GitHub OIDC provider**（每個 AWS 帳戶只需一次）：
+3. **AWS 的 GitHub OIDC provider**（每個 AWS 帳戶只需一次）。先查看是否已有：
    ```bash
-   aws iam list-open-id-connect-providers --profile jarvis
-   # 清單沒有 token.actions.githubusercontent.com 時：
+   aws iam list-open-id-connect-providers --profile jarvis \
+     --query "OpenIDConnectProviderList[?ends_with(Arn, ':oidc-provider/token.actions.githubusercontent.com')].Arn" --output text
+   ```
+   沒有任何輸出時才建立：
+   ```bash
    aws iam create-open-id-connect-provider --profile jarvis \
      --url https://token.actions.githubusercontent.com --client-id-list sts.amazonaws.com
    ```
+   檢查：再執行第一個指令，應顯示一個以 `:oidc-provider/token.actions.githubusercontent.com` 結尾的 ARN。
 4. **確認 dev 的 Payment stack 已部署**（路由加在它的 HTTP API 上）：
    ```bash
    aws cloudformation list-exports --profile jarvis --region ap-southeast-1 \
      --query "Exports[?Name=='Jarvis-dev-ApiBaseUrl'].Value" --output text
    ```
-5. **部署 dev 的 Registry stack**：
+   檢查：應顯示一個以 `https://` 開頭的網址。沒有輸出即 dev 的 Payment stack 未部署，須先部署它才可繼續。
+5. **部署 dev 的 Registry stack**。部署使用主要 checkout 的程式碼，因此第一段先確認它就是最新的 `main`（已合併 P04），而且 `infra/` 沒有未提交的改動，否則在建置之前停止；停止時先 `git switch main && git pull --ff-only`（或先處理 `infra/` 未提交的改動），再重新執行。
    ```bash
-   cd infra && npm ci && (cd lambda/registry && npm ci) && npm run build
-   npx cdk diff --profile jarvis --context env=dev --exclusively Jarvis-dev-Registry
-   npm run deploy:dev -- --exclusively Jarvis-dev-Registry
+   cd "${MAIN_CHECKOUT:?先執行第 0 步}" &&
+     git fetch origin main &&
+     test "$(git rev-parse HEAD)" = "$(git rev-parse origin/main)" &&
+     test -z "$(git status --porcelain -- infra)" &&
+     cd infra && npm ci && (cd lambda/registry && npm ci) && npm run build
+   cd "$MAIN_CHECKOUT/infra" && npx cdk diff --profile jarvis --context env=dev --exclusively Jarvis-dev-Registry
+   cd "$MAIN_CHECKOUT/infra" && npm run deploy:dev -- --exclusively Jarvis-dev-Registry
    ```
-   **不可省略 `--exclusively`**：省略時，CDK 會先以本機的 checkout 部署 Registry 所依賴的 Auth、Data 及 Payment stack；prod 的 Payment stack 如部署時缺少三個 Stripe id，checkout 會回傳 503。記下輸出 `RegistryBucketName`、`RegistryPublisherRoleArn`、`RegistryUrl`。
-6. **產生註冊表的金鑰對，私鑰直接存入 secret**。私鑰只存在於 `registry-signing` 的 secret `REGISTRY_SIGNING_KEY`：不會寫入任何檔案、不會顯示在螢幕上，亦不另存副本（擁有人 2026-11-16 的決定）。在 repository 的任何一個現有 checkout 內，開一個由 `main` 開出的新 worktree 執行；主要 checkout 的檔案及未提交的改動不受影響：
+   **不可省略 `--exclusively`**：省略時，CDK 會先以本機的 checkout 部署 Registry 所依賴的 Auth、Data 及 Payment stack；prod 的 Payment stack 如部署時缺少三個 Stripe id，checkout 會回傳 503。
+   檢查：應列出 `RegistryBucketName`、`RegistryPublisherRoleArn` 及 `RegistryUrl` 三項輸出（第 7 步用前兩項，第 9 步用 `RegistryUrl`）；以 `RegistryUrl` 執行的 `curl` 應顯示 `503`，即端點已存在、但未有發佈內容（第 9 步之後才會是 `200`）。
    ```bash
-   git fetch origin main
-   git worktree add ../jarvis-registry-public-key -b chore/registry-public-key origin/main
-   cd ../jarvis-registry-public-key
-   node -e '
+   aws cloudformation describe-stacks --profile jarvis --region ap-southeast-1 --stack-name Jarvis-dev-Registry \
+     --query "Stacks[0].Outputs[].[OutputKey,OutputValue]" --output text
+   curl -s -o /dev/null -w '%{http_code}\n' <RegistryUrl>
+   ```
+6. **產生註冊表的金鑰對，私鑰直接存入 secret**。私鑰只存在於 `registry-signing` 的 secret `REGISTRY_SIGNING_KEY`：不會寫入任何檔案、不會顯示在螢幕上，亦不另存副本（擁有人 2026-11-16 的決定）。下面先把產生金鑰的程式存入變數 `KEYGEN`（只是程式，不含任何金鑰）；然後不論之前的步驟令終端機停在哪個資料夾，都先回到主要 checkout 的頂層，在它旁邊開一個由 `origin/main` 開出的新 worktree（`KEY_WORKTREE`），再在其中產生金鑰對。各行以 `&&` 連接，任何一行失敗都會在產生金鑰之前停止。主要 checkout 的檔案及未提交的改動不受影響。
+   ```bash
+   KEYGEN='
    if (process.stdout.isTTY) { console.error("pipe this into gh secret set; the private key never goes to the screen"); process.exit(1); }
    const { generateKeyPairSync } = require("node:crypto");
    const fs = require("node:fs");
    const { publicKey, privateKey } = generateKeyPairSync("ed25519");
    fs.writeFileSync("registry/signing-public-key.pem", publicKey.export({ type: "spki", format: "pem" }));
    process.stdout.write(privateKey.export({ type: "pkcs8", format: "pem" }));
-   ' | gh secret set REGISTRY_SIGNING_KEY --env registry-signing --repo "$REPO"
+   '
+   cd "${MAIN_CHECKOUT:?先執行第 0 步}" &&
+     KEY_WORKTREE="$(dirname "$MAIN_CHECKOUT")/jarvis-registry-public-key" &&
+     git fetch origin main &&
+     git worktree add -b chore/registry-public-key "$KEY_WORKTREE" origin/main &&
+     cd "$KEY_WORKTREE" &&
+     test -f registry/schema.json &&
+     node -e "$KEYGEN" | gh secret set REGISTRY_SIGNING_KEY --env registry-signing --repo "$REPO"
    ```
-   `node` 把公鑰寫入 `registry/signing-public-key.pem`，私鑰只寫到標準輸出，經管道直接交給 `gh secret set`（它從標準輸入讀取 secret 的值）；如沒有接上管道、標準輸出是終端機，`node` 會拒絕執行，不會產生金鑰。如任何一個指令失敗，只需在同一個 worktree 再執行一次整個 `node … | gh …` 指令：會產生一對新的金鑰並覆寫公鑰檔案。
+   `node` 把公鑰寫入 `registry/signing-public-key.pem`，私鑰只寫到標準輸出，經管道直接交給 `gh secret set`（它從標準輸入讀取 secret 的值）；如沒有接上管道、標準輸出是終端機，`node` 會拒絕執行，不會產生金鑰。如在 `test -f registry/schema.json` 停止，即 `origin/main` 未有 `registry/`（P04 未合併）。
+   如 `node` 或 `gh` 失敗（例如 environment 未建立），或之前的嘗試已建立這個 worktree（`git worktree add` 因此停止），在同一個視窗只執行下面一行重試：會產生一對新的金鑰並覆寫公鑰檔案。如分支 `chore/registry-public-key` 已存在而 worktree 不存在，先以 `git -C "$MAIN_CHECKOUT" branch -D chore/registry-public-key` 刪除舊分支，再執行上面整段。
+   ```bash
+   cd "${KEY_WORKTREE:?先執行上面整段}" && test -n "$KEYGEN" && test -f registry/schema.json && node -e "$KEYGEN" | gh secret set REGISTRY_SIGNING_KEY --env registry-signing --repo "$REPO"
+   ```
    檢查：應列出 `REGISTRY_SIGNING_KEY` 及更新時間（不會顯示其值）。
    ```bash
    gh secret list --env registry-signing --repo "$REPO"
    ```
+   這只證明 secret 存在，不證明它與 `registry/signing-public-key.pem` 是同一對金鑰；兩者相符與否，第一次由第 9 步 workflow 的 sign job 證明。
    **代價**：私鑰只存在於這個 secret。如 secret 遺失或被刪除，擁有人須重新產生金鑰對；公鑰編入 App（P05）之後，還要先發佈一個帶有新公鑰的 App 版本，使用者才能再收到註冊表更新。這對金鑰與 App 更新用的金鑰不同，`sign.ts` 每次簽署都會檢查。
-7. **設定 dev 的變數**（第 5 步的輸出）：
+7. **設定 dev 的變數**（第 5 步檢查列出的輸出）：
    ```bash
    gh variable set REGISTRY_BUCKET   --env registry-dev --repo "$REPO" --body <RegistryBucketName>
    gh variable set REGISTRY_ROLE_ARN --env registry-dev --repo "$REPO" --body <RegistryPublisherRoleArn>
@@ -192,17 +219,58 @@ node --experimental-strip-types registry/validate.ts registry/registry.json
    ```bash
    gh variable list --repo "$REPO"
    ```
-9. **提交公鑰**：在第 6 步的 worktree commit `registry/signing-public-key.pem`，push 該分支，開 PR 並合併至 `main`。合併會觸發 workflow，首次發佈至 dev。在同一個 worktree 檢查：
+9. **提交公鑰，首次發佈至 dev**。在第 6 步的 worktree commit 公鑰並 push：
    ```bash
-   curl -s -D /tmp/registry.headers -o /tmp/registry.json <RegistryUrl>
-   SIG=$(grep -i '^x-registry-signature:' /tmp/registry.headers | cut -d' ' -f2 | tr -d '\r') \
-   node --experimental-strip-types --input-type=module -e '
-   import { readFileSync } from "node:fs";
-   import { verifyBytes } from "./registry/signing.ts";
-   console.log(verifyBytes(readFileSync("/tmp/registry.json"), process.env.SIG, readFileSync("registry/signing-public-key.pem", "utf8")) ? "signature ok" : "SIGNATURE BAD");'
+   cd "${KEY_WORKTREE:?先執行第 6 步}" &&
+     git add registry/signing-public-key.pem &&
+     git commit -m "chore(registry): 提交註冊表的公鑰" &&
+     git push -u origin chore/registry-public-key
    ```
-   顯示 `signature ok` 後，可回到原本的 checkout，以 `git worktree remove ../jarvis-registry-public-key` 移除這個 worktree。
-10. **prod**：以 `env=prod` 重複第 4、5 步（`Jarvis-prod-ApiBaseUrl`；部署用 `npm run deploy:prod -- --exclusively Jarvis-prod-Registry`，同樣不可省略 `--exclusively`，原因見第 5 步），然後設定 `registry-prod` 的變數並檢查：
+   然後在 GitHub 開 PR（base 為 `main`）並合併。合併會觸發 Registry workflow。合併後約半分鐘，等候該次執行完成：
+   ```bash
+   gh run watch "$(gh run list --workflow registry.yml --repo "$REPO" --event push --limit 1 --json databaseId --jq '.[0].databaseId')" --repo "$REPO" --exit-status
+   ```
+   檢查：該次執行應以成功結束（validate、sign 及 publish-dev 都成功）。如 sign job 失敗並顯示 `the signing key does not match registry/signing-public-key.pem`，即 secret 與公鑰不是同一對：執行第 6 步重試的一行，再重複本步（commit 新的公鑰、push、開 PR 並合併）。
+   然後確認 dev 提供的內容能以 `main` 上的公鑰驗證（`REGISTRY_URL` 設為第 5 步的 `RegistryUrl`）：
+   ```bash
+   REGISTRY_URL=<RegistryUrl>
+   cd "${MAIN_CHECKOUT:?先執行第 0 步}" && git fetch origin main &&
+     git show origin/main:registry/signing-public-key.pem > /tmp/registry-public-key.pem &&
+     curl -fsS -D /tmp/registry.headers -o /tmp/registry.json "$REGISTRY_URL" &&
+     SIG="$(grep -i '^x-registry-signature:' /tmp/registry.headers | cut -d' ' -f2 | tr -d '\r')" node -e '
+     const { readFileSync } = require("node:fs");
+     const { verify } = require("node:crypto");
+     const body = readFileSync("/tmp/registry.json");
+     const sig = Buffer.from(process.env.SIG ?? "", "base64");
+     const ok = sig.length === 64 && verify(null, body, readFileSync("/tmp/registry-public-key.pem", "utf8"), sig);
+     console.log(ok ? `signature ok, version ${JSON.parse(body).version}` : "SIGNATURE BAD");'
+   ```
+   顯示 `signature ok` 後，移除第 6 步開的 worktree：
+   ```bash
+   cd "${MAIN_CHECKOUT:?先執行第 0 步}" && git worktree remove "${KEY_WORKTREE:?先執行第 6 步}"
+   ```
+10. **prod**。先確認 prod 的 Payment stack 已部署（檢查方法同第 4 步）：
+    ```bash
+    aws cloudformation list-exports --profile jarvis --region ap-southeast-1 \
+      --query "Exports[?Name=='Jarvis-prod-ApiBaseUrl'].Value" --output text
+    ```
+    再部署 prod 的 Registry stack。與第 5 步一樣，第一段會確認主要 checkout 是最新的 `main`；第 9 步的合併之後須先 `git pull --ff-only`。同樣不可省略 `--exclusively`（原因見第 5 步）：
+    ```bash
+    cd "${MAIN_CHECKOUT:?先執行第 0 步}" &&
+      git fetch origin main &&
+      test "$(git rev-parse HEAD)" = "$(git rev-parse origin/main)" &&
+      test -z "$(git status --porcelain -- infra)" &&
+      cd infra && npm ci && (cd lambda/registry && npm ci) && npm run build
+    cd "$MAIN_CHECKOUT/infra" && npx cdk diff --profile jarvis --context env=prod --exclusively Jarvis-prod-Registry
+    cd "$MAIN_CHECKOUT/infra" && npm run deploy:prod -- --exclusively Jarvis-prod-Registry
+    ```
+    檢查：應列出三項輸出，以 prod 的 `RegistryUrl` 執行的 `curl` 應顯示 `503`。
+    ```bash
+    aws cloudformation describe-stacks --profile jarvis --region ap-southeast-1 --stack-name Jarvis-prod-Registry \
+      --query "Stacks[0].Outputs[].[OutputKey,OutputValue]" --output text
+    curl -s -o /dev/null -w '%{http_code}\n' <prod 的 RegistryUrl>
+    ```
+    設定 `registry-prod` 的變數並檢查：
     ```bash
     gh variable set REGISTRY_BUCKET   --env registry-prod --repo "$REPO" --body <prod 的 RegistryBucketName>
     gh variable set REGISTRY_ROLE_ARN --env registry-prod --repo "$REPO" --body <prod 的 RegistryPublisherRoleArn>
@@ -212,4 +280,12 @@ node --experimental-strip-types registry/validate.ts registry/registry.json
     最後手動發佈：
     ```bash
     gh workflow run registry.yml --ref main --repo "$REPO"
+    ```
+    約半分鐘後（新的執行要一點時間才會出現），等候該次執行完成：
+    ```bash
+    gh run watch "$(gh run list --workflow registry.yml --repo "$REPO" --event workflow_dispatch --limit 1 --json databaseId --jq '.[0].databaseId')" --repo "$REPO" --exit-status
+    ```
+    檢查：該次執行應以成功結束（validate、sign 及 publish-prod 都成功）。然後把 `REGISTRY_URL` 設為 prod 的 `RegistryUrl`，再執行第 9 步確認 dev 內容的那一段（由 `cd "${MAIN_CHECKOUT…` 開始）；應顯示 `signature ok`，版本與 dev 相同。
+    ```bash
+    REGISTRY_URL=<prod 的 RegistryUrl>
     ```
