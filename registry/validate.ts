@@ -2,14 +2,18 @@
 // then the rules a schema cannot express. Run in CI before signing and again
 // against the published copy before upload:
 //
-//   node --experimental-strip-types registry/validate.ts registry/registry.json [--published <published registry.json>]
+//   node --experimental-strip-types registry/validate.ts registry/registry.json [--published <published registry.json>] [--signed]
 //
+// The edited file must be exactly JSON.stringify(registry, null, 2) plus a
+// newline; with --signed (publish.sh, on the signed bytes) it must be exactly
+// the canonical bytes. Either way a key given twice cannot pass.
 // Exit code 0 when valid; otherwise every problem is printed and the exit code is 1.
 import { readFileSync } from 'node:fs';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import { dirname, join } from 'node:path';
 import { Ajv2020, type ErrorObject } from 'ajv/dist/2020.js';
 import { resolveModel, type RegistryModel } from './lookup.ts';
+import { canonicalJson } from './signing.ts';
 
 const here = dirname(fileURLToPath(import.meta.url));
 export const SCHEMA_PATH = join(here, 'schema.json');
@@ -196,6 +200,22 @@ export function validateRegistry(doc: unknown, options: { publishedVersion?: num
   return semanticErrors(doc as Registry, options.publishedVersion);
 }
 
+/**
+ * Every problem with a registry file's text: its exact format, then
+ * validateRegistry. JSON.parse keeps the last of two equal keys, so a file
+ * whose text is not exactly its own re-serialisation could be signed with
+ * other values than a reviewer reads in the diff.
+ */
+export function validateRegistryText(text: string, options: { publishedVersion?: number; signed?: boolean } = {}): string[] {
+  let doc: unknown;
+  try { doc = JSON.parse(text); } catch (error) { return [`not JSON: ${(error as Error).message}`]; }
+  const expected = options.signed ? canonicalJson(doc) : `${JSON.stringify(doc, null, 2)}\n`;
+  const format = text === expected ? [] : [options.signed
+    ? 'the signed file is not exactly the canonical bytes of the registry'
+    : 'the file is not exactly JSON.stringify(registry, null, 2) plus a newline: a key is given twice or the format differs; reformat it and check that no value changed'];
+  return [...format, ...validateRegistry(doc, options)];
+}
+
 /** The version of a published registry file. */
 export function publishedVersionOf(text: string): number {
   const version = (JSON.parse(text) as { version?: unknown }).version;
@@ -206,13 +226,16 @@ export function publishedVersionOf(text: string): number {
 function main(argv: string[]): number {
   const file = argv.find(a => !a.startsWith('--')) ?? join(here, 'registry.json');
   const published = argv.includes('--published') ? argv[argv.indexOf('--published') + 1] : undefined;
-  const doc = JSON.parse(readFileSync(file, 'utf8'));
-  const errors = validateRegistry(doc, { publishedVersion: published ? publishedVersionOf(readFileSync(published, 'utf8')) : undefined });
+  const text = readFileSync(file, 'utf8');
+  const errors = validateRegistryText(text, {
+    publishedVersion: published ? publishedVersionOf(readFileSync(published, 'utf8')) : undefined,
+    signed: argv.includes('--signed'),
+  });
   if (errors.length) {
     for (const e of errors) console.error(`registry: ${e}`);
     return 1;
   }
-  console.log(`registry: version ${doc.version} is valid${published ? ' and newer than the published one' : ''}`);
+  console.log(`registry: version ${JSON.parse(text).version} is valid${published ? ' and newer than the published one' : ''}`);
   return 0;
 }
 

@@ -4,7 +4,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 import { generateKeyPairSync } from 'node:crypto';
-import { validateRegistry, publishedVersionOf } from '../registry/validate.ts';
+import { validateRegistry, validateRegistryText, publishedVersionOf } from '../registry/validate.ts';
 import { findPriced, resolveModel, costMicros, type RegistryModel } from '../registry/lookup.ts';
 import { canonicalJson, canonicalBytes, signBytes, verifyBytes, rawPublicKey, updaterRawPublicKey } from '../registry/signing.ts';
 import { signRegistry } from '../registry/sign.ts';
@@ -265,6 +265,19 @@ test('the validator rejects a version that is not greater than the published one
   assert.deepEqual(errorsFor(doc => { doc.version = 8; }, 7), []);
   assert.equal(publishedVersionOf(canonicalJson({ version: 7, other: true })), 7);
   assert.throws(() => publishedVersionOf('{"version":"7"}'));
+});
+
+test('the validator refuses a file not exactly in its own format, such as one with a key given twice', () => {
+  const text = read('registry/registry.json');
+  assert.deepEqual(validateRegistryText(text), []);
+  const twice = text.replace('    "markup": 2,\n', '    "markup": 3,\n    "markup": 2,\n');
+  assert.notEqual(twice, text);
+  assert.deepEqual(JSON.parse(twice), JSON.parse(text), 'JSON.parse keeps the last of two equal keys');
+  assert.ok(validateRegistryText(twice).some(e => e.startsWith('the file is not exactly JSON.stringify(registry, null, 2)')));
+  assert.ok(validateRegistryText(`${JSON.stringify(JSON.parse(text), null, 4)}\n`).some(e => e.startsWith('the file is not exactly')));
+  // The signed file is the canonical bytes, and only those.
+  assert.deepEqual(validateRegistryText(canonicalJson(seeded()), { signed: true }), []);
+  assert.ok(validateRegistryText(text, { signed: true }).includes('the signed file is not exactly the canonical bytes of the registry'));
 });
 
 test('the validator rejects anything that looks like a key or user data', () => {

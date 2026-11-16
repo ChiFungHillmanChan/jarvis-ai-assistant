@@ -63,10 +63,10 @@ if exists registry/latest.json; then
     echo "registry: version $version is already the published version"
     exit 0
   fi
-  node --experimental-strip-types "$here/validate.ts" "$body" --published "$work/published.json"
+  node --experimental-strip-types "$here/validate.ts" "$body" --signed --published "$work/published.json"
 else
   echo 'registry: nothing published yet; this is the first version'
-  node --experimental-strip-types "$here/validate.ts" "$body"
+  node --experimental-strip-types "$here/validate.ts" "$body" --signed
 fi
 
 put_once "registry/v$version.json" "$body" application/json --metadata "$metadata"
