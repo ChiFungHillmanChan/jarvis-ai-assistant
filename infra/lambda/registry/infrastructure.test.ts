@@ -1,6 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { registryTemplate } from '../../test-support/registry-template.cjs';
+import { appStackIds } from '../../test-support/app-stacks.cjs';
 
 const of = (template: any, type: string) => Object.entries<any>(template.Resources).filter(([, r]) => r.Type === type);
 const statements = (policy: any) => policy.Properties.PolicyDocument.Statement as any[];
@@ -17,6 +18,14 @@ test('the registry bucket is private, encrypted, versioned and TLS-only', () => 
   const [[, bucketPolicy]] = of(dev, 'AWS::S3::BucketPolicy');
   assert.ok(statements(bucketPolicy).some(s => s.Effect === 'Deny' && s.Condition?.Bool?.['aws:SecureTransport'] === 'false'));
   assert.ok(!statements(bucketPolicy).some(s => s.Effect === 'Allow' && s.Principal === '*'), 'nothing is public on the bucket itself');
+});
+
+test('the app has a Registry stack in dev and prod, and none in sandbox', () => {
+  const sandbox = appStackIds('sandbox');
+  assert.ok(sandbox.includes('Jarvis-sandbox-Payment'), 'the sandbox app is still built');
+  assert.ok(!sandbox.some((id: string) => id.endsWith('-Registry')), sandbox.join(' '));
+  assert.ok(appStackIds('dev').includes('Jarvis-dev-Registry'));
+  assert.ok(appStackIds('prod').includes('Jarvis-prod-Registry'));
 });
 
 test('the prod bucket is kept when the stack is deleted', () => {

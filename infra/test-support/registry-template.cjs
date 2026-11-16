@@ -17,11 +17,13 @@ exports.registryTemplate = function registryTemplate(envName = 'dev') {
   loaded.filename = file;
   loaded.paths = Module._nodeModulePaths(path.dirname(file));
   loaded._compile(source, file);
-  const app = new cdk.App({
-    outdir: fs.mkdtempSync('/tmp/jarvis-registry-template-test-'),
-    context: { 'aws:cdk:bundling-stacks': [] },
-  });
-  const env = { account: '111111111111', region: 'ap-southeast-1' };
-  const stack = new loaded.exports.RegistryStack(app, 'FixtureRegistry', { env, envName, githubRepo: 'owner/repo' });
-  return Template.fromStack(stack).toJSON();
+  const outdir = fs.mkdtempSync('/tmp/jarvis-registry-template-test-');
+  try {
+    const app = new cdk.App({ outdir, context: { 'aws:cdk:bundling-stacks': [] } });
+    const env = { account: '111111111111', region: 'ap-southeast-1' };
+    const stack = new loaded.exports.RegistryStack(app, 'FixtureRegistry', { env, envName, githubRepo: 'owner/repo' });
+    return Template.fromStack(stack).toJSON();
+  } finally {
+    fs.rmSync(outdir, { recursive: true, force: true });
+  }
 };

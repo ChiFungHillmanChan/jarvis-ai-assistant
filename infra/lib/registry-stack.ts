@@ -60,7 +60,7 @@ export class RegistryStack extends cdk.Stack {
 
     // The account's GitHub OIDC provider. IAM allows one per URL per account,
     // and dev and prod share the account, so it is created once outside CDK
-    // (infra/README.md, "Model registry") and referenced here.
+    // (registry/README.md, first-time setup) and referenced here.
     const githubOidc = iam.OpenIdConnectProvider.fromOpenIdConnectProviderArn(
       this, 'GithubOidc', `arn:${this.partition}:iam::${this.account}:oidc-provider/token.actions.githubusercontent.com`,
     );
@@ -102,8 +102,10 @@ export class RegistryStack extends cdk.Stack {
 
     // The control-plane HTTP API, read from the Payment stack's existing
     // ApiBaseUrl export (https://<api-id>.execute-api.<region>.amazonaws.com),
-    // so the Payment stack's template does not change. The route inherits the
-    // API's default stage throttle (10 requests a second, burst 20).
+    // so the Payment stack's template does not change. While this stack
+    // exists, CloudFormation refuses to change or delete that export. The
+    // route inherits the API's default stage throttle (10 requests a second,
+    // burst 20).
     const apiBaseUrl = cdk.Fn.importValue(`Jarvis-${props.envName}-ApiBaseUrl`);
     const httpApiId = cdk.Fn.select(0, cdk.Fn.split('.', cdk.Fn.select(1, cdk.Fn.split('//', apiBaseUrl))));
     const httpApi = apigwv2.HttpApi.fromHttpApiAttributes(this, 'ControlPlaneApi', { httpApiId });
@@ -116,17 +118,14 @@ export class RegistryStack extends cdk.Stack {
     new cdk.CfnOutput(this, 'RegistryBucketName', {
       value: bucket.bucketName,
       description: 'GitHub environment variable REGISTRY_BUCKET for registry-' + props.envName,
-      exportName: `Jarvis-${props.envName}-RegistryBucket`,
     });
     new cdk.CfnOutput(this, 'RegistryPublisherRoleArn', {
       value: publisher.roleArn,
       description: 'GitHub environment variable REGISTRY_ROLE_ARN for registry-' + props.envName,
-      exportName: `Jarvis-${props.envName}-RegistryPublisherRoleArn`,
     });
     new cdk.CfnOutput(this, 'RegistryUrl', {
       value: cdk.Fn.join('', [apiBaseUrl, '/v1/registry']),
       description: 'GET the signed registry here',
-      exportName: `Jarvis-${props.envName}-RegistryUrl`,
     });
   }
 }

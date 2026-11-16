@@ -95,12 +95,12 @@ This bucket only serves the binaries (and an optional mirror of the manifest).
 
 ## 模型註冊表（Registry stack）
 
-`Jarvis-<env>-Registry` 提供 `registry/registry.json`（見 repository 根目錄的 `registry/README.md` 及 `registry/schema.json`）的發佈位置及讀取端點。註冊表是公開資料，**絕不可包含任何金鑰、密碼、憑證或使用者資料**。
+`Jarvis-<env>-Registry` 提供 `registry/registry.json`（見 repository 根目錄的 `registry/README.md` 及 `registry/schema.json`）的發佈位置及讀取端點。註冊表是公開資料，**絕不可包含任何金鑰、密碼、憑證或使用者資料**。只有 dev 及 prod 有這個 stack；sandbox 沒有（`infra/scripts/resume.sh` 會不經批准部署 sandbox 的所有 stack）。
 
 - **Bucket** `jarvis-registry-<env>-<account>`：私人、S3 管理加密、只接受 TLS、啟用版本控制；舊的 `latest.json` 版本一年後到期。prod 刪除 stack 時保留 bucket。
 - **發佈角色** `jarvis-<env>-registry-publisher`：只信任 GitHub OIDC，`sub` 必須為 `repo:ChiFungHillmanChan/jarvis-ai-assistant:environment:registry-<env>`；權限只有 `registry/*` 的 `s3:GetObject`、`s3:PutObject`，以及前綴 `registry/` 的 `s3:ListBucket`。repository 由 `cdk.json` 的 `jarvis.githubRepo` 設定。GitHub OIDC provider 每個帳戶只可有一個，由擁有人在 CDK 以外建立一次（見 `registry/README.md`）。
 - **讀取 Lambda** `jarvis-<env>-registry-read`：Node.js 24、256 MB、5 秒；只可讀取 `registry/latest.json`。
-- **路由** `GET /v1/registry`：加在 Payment stack 的 HTTP API 上，不需登入。API id 取自 Payment stack 現有的 export `Jarvis-<env>-ApiBaseUrl`，因此 Payment stack 的範本不變；但部署 Registry stack 前，該 env 的 Payment stack 必須已部署。路由沿用 `$default` stage 的全域限流（每秒 10 次、burst 20）。
+- **路由** `GET /v1/registry`：加在 Payment stack 的 HTTP API 上，不需登入。API id 取自 Payment stack 現有的 export `Jarvis-<env>-ApiBaseUrl`，因此 Payment stack 的範本不變；但部署 Registry stack 前，該 env 的 Payment stack 必須已部署。Registry stack 存在期間，CloudFormation 不容許更改或刪除這個 export：日後 Payment stack 的改動如須替換該 API，要先改動或移除 Registry stack。路由沿用 `$default` stage 的全域限流（每秒 10 次、burst 20）。
 - **獨立 stack 而非加入 Data stack**：路由在 Payment stack 的 API 上，而 Payment 已依賴 Data，由 Data 加路由會形成循環依賴；把 CI 可寫入的公開內容與使用者資料的 stack 分開，亦令發佈角色的影響範圍一目了然。
 
 ### 讀取端點契約
@@ -121,7 +121,7 @@ npx cdk diff --profile jarvis --context env=dev --exclusively Jarvis-dev-Registr
 npm run deploy:dev -- --exclusively Jarvis-dev-Registry
 ```
 
-`--exclusively` 令 CDK 不會連帶部署 Payment 等依賴的 stack；`deploy:dev` 是現有部署腳本（`jarvis` profile）。`cdk diff` 會連接 AWS，因此必須明確指定 profile，以免使用預設憑證。部署後的 GitHub 設定（environment、變數、簽署 secret）見 `registry/README.md`。
+**不可省略 `--exclusively`**：省略時，CDK 會先以本機的 checkout 部署 Registry 所依賴的 Auth、Data 及 Payment stack；prod 的 Payment stack 如部署時缺少三個 Stripe id，checkout 會回傳 503。`deploy:dev` 是現有部署腳本（`jarvis` profile）。`cdk diff` 會連接 AWS，因此必須明確指定 profile，以免使用預設憑證。GitHub 的設定及次序（environment 須在部署此 stack 之前建立，然後才是簽署用的 secret 及變數）見 `registry/README.md` 的「首次設定」。
 
 只在本機合成範本、不應連接 AWS 時（例如驗證此 stack），使用以下形式。它清除所有 AWS 憑證來源，並關閉 CDK CLI 的遙測及通告下載；否則 CLI 會以預設 profile 向 STS 查詢帳戶（`sts:GetCallerIdentity`），並向 AWS 營運的端點傳送遙測及下載通告：
 

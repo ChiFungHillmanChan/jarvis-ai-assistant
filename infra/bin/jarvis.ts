@@ -64,10 +64,14 @@ new AuditStack(app, `Jarvis-${env}-Audit`, {
 });
 
 // GET /v1/registry is a route on the Payment stack's HTTP API, found through
-// that stack's ApiBaseUrl export.
-const registry = new RegistryStack(app, `Jarvis-${env}-Registry`, {
-  ...stackProps,
-  envName: env,
-  githubRepo: ctx.githubRepo,
-});
-registry.addDependency(payment);
+// that stack's ApiBaseUrl export. dev and prod only: no registry is published
+// to sandbox, and infra/scripts/resume.sh deploys every sandbox stack without
+// approval.
+if (env !== 'sandbox') {
+  const registry = new RegistryStack(app, `Jarvis-${env}-Registry`, {
+    ...stackProps,
+    envName: env,
+    githubRepo: ctx.githubRepo,
+  });
+  registry.addDependency(payment);
+}
