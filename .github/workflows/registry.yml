@@ -47,8 +47,12 @@ jobs:
       - run: npm ci --ignore-scripts
       - name: Validate the registry
         run: node --experimental-strip-types registry/validate.ts registry/registry.json
-      - name: Registry tests (schema, code match, signing, publish script)
-        run: node --experimental-strip-types --test tests/registry.test.ts tests/registry-publish.test.ts
+      # Only the publish script's tests gate publishing. tests/registry.test.ts
+      # (the registry against the code the app runs today) runs in the
+      # pull-request check and in `npm run test:frontend`, so a value meant to
+      # be edited in the registry never needs a test edit to publish.
+      - name: Publish script tests
+        run: node --experimental-strip-types --test tests/registry-publish.test.ts
 
   sign:
     name: Sign

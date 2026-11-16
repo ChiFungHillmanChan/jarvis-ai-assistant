@@ -90,6 +90,10 @@ function semanticErrors(r: Registry, publishedVersion: number | undefined): stri
     if ('local' in m && provider.wire !== 'ollama') errors.push(`model "${m.id}": local settings on a provider that is not Ollama`);
     if ('bedrock' in m && !m.managed) errors.push(`model "${m.id}": bedrock settings on a model that is not managed`);
     if (m.status === 'active' && m.replacement !== null) errors.push(`model "${m.id}": an active model has no replacement`);
+    // JARVIS AI's prices are AWS's; each says where and when it was read.
+    if (m.managed && m.prices && !(typeof m.price_source === 'string' && /https:\/\/\S+/.test(m.price_source) && /\b\d{4}-\d{2}-\d{2}\b/.test(m.price_source))) {
+      errors.push(`model "${m.id}": a managed price must cite its source in price_source, a URL and the date it was read`);
+    }
     if (m.prices) {
       const above = m.prices.tiers.map(t => t.above_input_tokens);
       if (above.some((v, i) => i > 0 && v <= above[i - 1])) errors.push(`model "${m.id}": price tiers must rise`);

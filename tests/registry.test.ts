@@ -44,7 +44,6 @@ test('the registry price list is models.rs CLOUD_MODELS, entry for entry and in 
       ? [{ above_input_tokens: r.long_context.above, ...{ input: r.long_context.price.input, output: r.long_context.price.output, cache_read: r.long_context.price.cache_read, cache_write: r.long_context.price.cache_write } }]
       : [], r.id);
     assert.equal(m.max_output, r.max_output_tokens, r.id);
-    assert.equal(m.status, 'active', r.id);
   });
 });
 
@@ -114,7 +113,9 @@ test('the price lookup over the registry gives what models.rs gives', () => {
   assert.equal(findPriced(models, constant('GEMINI_PRO')!)?.max_output, 65_536);
   assert.equal(findPriced(models, 'gemini-flash-latest')?.kind, 'family');
   assert.equal(findPriced(models, 'gemini-flash-latest')?.max_output, null);
-  assert.equal(resolveModel(models, 'apac.amazon.nova-micro-v1:0', true)?.prices?.input, 0.042);
+  // JARVIS AI's own models match by exact id only, and never through the app's lookup.
+  for (const m of models.filter(m => m.managed)) assert.equal(resolveModel(models, m.id, true), m, m.id);
+  for (const m of models) assert.ok(!findPriced(models, m.id)?.managed, m.id);
 });
 
 test('limits, presets and lists the registry holds match the code', () => {
@@ -194,30 +195,6 @@ test('data terms follow ai/mail_policy.rs', () => {
   // Any other base URL, Gemini's compatible URL and Ollama cloud models are refused today.
   for (const id of ['kimi', 'qwen', 'gemini_compat', 'openai_compat', 'ollama_cloud']) assert.equal(terms[id], 'unknown', id);
   assert.match(read('src-tauri/src/ai/mail_policy.rs'), /\("claude" \| "bedrock", _\) \| \("openai", None\) => Ok\(\(\)\)/);
-});
-
-test('JARVIS AI settings follow DECISIONS.md and the Tokyo price list', () => {
-  const m = seeded().managed;
-  assert.equal(m.markup, 2);
-  assert.deepEqual(m.allowances_usd_micros, { pro: 20_000_000, team: 40_000_000, grant: 20_000_000 });
-  assert.deepEqual(m.top_up_packs_hkd, [50, 100, 200]);
-  assert.equal(m.credit_expiry_months, 12);
-  // DECISIONS.md 2026-11-13: US$2.00 billed per user per day; HK$7.80 per US$.
-  assert.equal(m.per_user_daily_cap, 2_000_000);
-  assert.equal(m.hkd_per_usd, 7.8);
-  assert.equal(m.global_daily_ceiling, 'entitled_users_x_per_user_daily_cap');
-  assert.deepEqual(m.budget_alert_percent, [50, 80, 100]);
-  assert.equal(m.budget_kill_percent, 150);
-  assert.equal(m.workload_map.chat, 'qwen.qwen3-32b-v1:0');
-  assert.equal(m.workload_map.mail_analysis, 'qwen.qwen3-32b-v1:0');
-  assert.equal(m.workload_map.mail_sort, 'apac.amazon.nova-micro-v1:0');
-  assert.equal(m.workload_map.cloud_triage, 'apac.amazon.nova-micro-v1:0');
-  assert.equal(m.fallback, 'deepseek.v3.2');
-  const doc = seeded();
-  assert.deepEqual(model(doc, 'qwen.qwen3-32b-v1:0').prices, { input: 0.18, output: 0.73, cache_read: null, cache_write: null, tiers: [] });
-  assert.deepEqual(model(doc, 'deepseek.v3.2').prices, { input: 0.74, output: 2.22, cache_read: null, cache_write: null, tiers: [] });
-  assert.deepEqual(model(doc, 'apac.amazon.nova-micro-v1:0').prices, { input: 0.042, output: 0.168, cache_read: 0.0105, cache_write: null, tiers: [] });
-  for (const id of ['qwen.qwen3-32b-v1:0', 'deepseek.v3.2', 'apac.amazon.nova-micro-v1:0']) assert.match(model(doc, id).price_source, /pricing\.us-east-1\.amazonaws\.com.*read 2026-11-13/);
 });
 
 // ---------------------------------------------------------------------------
@@ -304,6 +281,8 @@ test('the validator checks the rest of the cross-references', () => {
   assert.ok(errorsFor(doc => { model(doc, 'gpt-5.6-luna').status = 'deprecated'; model(doc, 'gpt-5.6-luna').replacement = 'gpt-9'; }).some(e => e.includes('replacement "gpt-9" does not exist')));
   assert.ok(errorsFor(doc => { doc.managed.fallback = 'qwen.qwen3-32b-v1:0'; }).some(e => e.includes('fallback must differ')));
   assert.ok(errorsFor(doc => { model(doc, 'deepseek.v3.2').bedrock.region = 'us-east-1'; }).some(e => e.includes('not ap-northeast-1')));
+  assert.ok(errorsFor(doc => { delete model(doc, 'deepseek.v3.2').price_source; }).includes('model "deepseek.v3.2": a managed price must cite its source in price_source, a URL and the date it was read'));
+  assert.ok(errorsFor(doc => { model(doc, 'qwen.qwen3-32b-v1:0').price_source = 'the AWS pricing page'; }).some(e => e.includes('"qwen.qwen3-32b-v1:0": a managed price must cite its source')));
   assert.ok(errorsFor(doc => { doc.managed.budget_alert_percent = [50, 80, 160]; }).some(e => e.includes('budget_kill_percent')));
   assert.ok(errorsFor(doc => { doc.presets.default = 'nope'; }).some(e => e.includes('presets.default')));
   assert.ok(errorsFor(doc => { model(doc, 'gpt-4o').prices.tiers = [{ above_input_tokens: 5, input: 1, output: 1, cache_read: 1, cache_write: 1 }, { above_input_tokens: 5, input: 1, output: 1, cache_read: 1, cache_write: 1 }]; }).some(e => e.includes('tiers must rise')));

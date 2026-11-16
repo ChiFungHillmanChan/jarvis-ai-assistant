@@ -82,7 +82,10 @@ node -e 'const fs=require("fs"),p="registry/registry.json",d=JSON.parse(fs.readF
 node --experimental-strip-types registry/validate.ts registry/registry.json
 ```
 
-只需停用個別模型或暫停 JARVIS AI 時毋須回滾：把該模型的 `status` 改為 `disabled`（或 `deprecated` 並填寫 `replacement`），或把 `managed.paused` 設為 `true`，再按上述流程發佈。
+只需停用個別模型或暫停 JARVIS AI 時毋須回滾：
+
+- `managed.paused` 設為 `true` 即可單獨暫停 JARVIS AI，再按上述流程發佈。
+- 把模型的 `status` 改為 `disabled`（或 `deprecated` 並填寫 `replacement`）時，如該模型是某個功能預設、preset 項目、`managed.workload_map` 的模型或 `managed.fallback`，必須在同一次改動中一併改用新的模型；否則驗證器會拒絕，不會發佈。其他模型可單獨停用。
 
 ## 首次設定（擁有人操作）
 
