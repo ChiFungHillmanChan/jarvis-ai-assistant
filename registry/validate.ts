@@ -95,18 +95,33 @@ function semanticErrors(r: Registry, publishedVersion: number | undefined): stri
       if (above.some((v, i) => i > 0 && v <= above[i - 1])) errors.push(`model "${m.id}": price tiers must rise`);
     }
   }
+  // A configured id (a default, a preset entry, a replacement) must name a
+  // model of its own provider. An exact match to a family is refused: a family
+  // is a price pattern, not a model one can pick (an id that merely contains a
+  // family's id, such as jev-latest, still resolves to it). Bedrock is the
+  // exception to the provider rule: its ids are other vendors' models reached
+  // through AWS, priced under those vendors' entries.
+  const pickable = (where: string, providerId: string | undefined, id: string, model: RegistryModel) => {
+    if (model.id === id && model.kind === 'family') errors.push(`${where}: "${id}" is a family, a price pattern, not a model one can pick`);
+    if (providerId !== undefined && providerId !== 'bedrock' && model.provider !== providerId) {
+      errors.push(`${where}: model "${id}" belongs to provider "${model.provider}", not "${providerId}"`);
+    }
+  };
+
   for (const m of r.models) {
     if (m.replacement === null) continue;
     const target = resolveModel(r.models, m.replacement, m.managed);
-    if (!target) errors.push(`model "${m.id}": replacement "${m.replacement}" does not exist`);
-    else if (target.status !== 'active') errors.push(`model "${m.id}": replacement "${m.replacement}" is ${target.status}`);
+    if (!target) { errors.push(`model "${m.id}": replacement "${m.replacement}" does not exist`); continue; }
+    pickable(`model "${m.id}": replacement`, m.provider, m.replacement, target);
+    if (target.status !== 'active') errors.push(`model "${m.id}": replacement "${m.replacement}" is ${target.status}`);
   }
 
   const usable = (where: string, provider: Provider | undefined, modelId: string) => {
     const managed = provider?.wire === 'jarvis_proxy';
     const model = resolveModel(r.models, modelId, managed);
-    if (!model) errors.push(`${where}: model "${modelId}" does not exist`);
-    else if (model.status !== 'active') errors.push(`${where}: model "${modelId}" is ${model.status}; a default must be active`);
+    if (!model) { errors.push(`${where}: model "${modelId}" does not exist`); return model; }
+    pickable(where, provider?.id, modelId, model);
+    if (model.status !== 'active') errors.push(`${where}: model "${modelId}" is ${model.status}; a default must be active`);
     return model;
   };
 

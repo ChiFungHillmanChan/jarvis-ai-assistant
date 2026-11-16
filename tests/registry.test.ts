@@ -249,6 +249,33 @@ test('the validator rejects a disabled or deprecated model used as a default', (
   assert.ok(errorsFor(doc => { doc.features.chat.openai = 'gpt-9-nonexistent'; }).some(e => e.includes('does not exist')));
 });
 
+test('the validator rejects another provider\'s model as a default, a preset entry or a replacement', () => {
+  const cross = errorsFor(doc => { doc.features.chat.openai = 'claude-sonnet-5-5'; });
+  assert.ok(cross.includes('features.chat.openai: model "claude-sonnet-5-5" belongs to provider "claude", not "openai"'), cross.join('\n'));
+  assert.ok(errorsFor(doc => { doc.presets.chains.gemini_flash_only.entries[0].model = 'gpt-6-luna'; })
+    .includes('presets.chains.gemini_flash_only[0]: model "gpt-6-luna" belongs to provider "openai", not "gemini"'));
+  assert.ok(errorsFor(doc => { model(doc, 'gpt-5.6-luna').status = 'deprecated'; model(doc, 'gpt-5.6-luna').replacement = 'claude-opus-5-5'; })
+    .includes('model "gpt-5.6-luna": replacement: model "claude-opus-5-5" belongs to provider "claude", not "openai"'));
+  // An id reached through the price lookup is checked the same way.
+  assert.ok(errorsFor(doc => { doc.features.chat.gemini = 'gpt-6-luna-x'; }).some(e => e.includes('belongs to provider "openai", not "gemini"')));
+  // Bedrock is the exception: its ids are other vendors' models, priced under them.
+  assert.deepEqual(errorsFor(doc => { doc.features.chat.bedrock = 'us.anthropic.claude-haiku-4-5-20251001-v1:0'; }), []);
+});
+
+test('the validator rejects a family, a price pattern, as a default, a preset entry or a replacement', () => {
+  const family = errorsFor(doc => { doc.features.chat.gemini = 'gemini-flash'; });
+  assert.ok(family.includes('features.chat.gemini: "gemini-flash" is a family, a price pattern, not a model one can pick'), family.join('\n'));
+  assert.ok(errorsFor(doc => { doc.presets.chains.gemini_pro_only.entries[0].model = 'gemini-pro'; })
+    .includes('presets.chains.gemini_pro_only[0]: "gemini-pro" is a family, a price pattern, not a model one can pick'));
+  assert.ok(errorsFor(doc => { model(doc, 'gpt-4o-mini').status = 'deprecated'; model(doc, 'gpt-4o-mini').replacement = 'gpt-5'; })
+    .includes('model "gpt-4o-mini": replacement: "gpt-5" is a family, a price pattern, not a model one can pick'));
+  // An id that only contains a family's id resolves to that family and is accepted (the mail classifier's jev-latest).
+  const models = seeded().models as RegistryModel[];
+  assert.equal(seeded().features.mail_sort.typesafe, 'jev-latest');
+  assert.deepEqual([resolveModel(models, 'jev-latest', false)?.id, resolveModel(models, 'jev-latest', false)?.kind], ['jev', 'family']);
+  assert.deepEqual(validateRegistry(seeded()), []);
+});
+
 test('the validator rejects a duplicate id', () => {
   assert.ok(errorsFor(doc => { doc.models.push({ ...model(doc, 'gpt-6-luna') }); }).some(e => e === 'duplicate model id "gpt-6-luna"'));
   assert.ok(errorsFor(doc => { doc.providers.push({ ...provider(doc, 'openai'), setup: null }); }).some(e => e === 'duplicate provider id "openai"'));

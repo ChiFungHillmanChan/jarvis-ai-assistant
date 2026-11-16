@@ -41,6 +41,8 @@ P05 令 App 改讀註冊表之前，`tests/registry.test.ts` 會把註冊表與�
 - 雲端服務商回報的模型 id，以「包含於該 id 之內的最長 entry id」比對（不分大小寫；長度相同時取較後的 entry），範圍只限 `prices` 不為 `null` 且 `managed` 為 `false` 的 entry。這組 entry 即 `models.rs` 的 `CLOUD_MODELS`，次序亦相同。
 - `kind: "family"` 是一系列模型的價格樣式（例如 `gemini-flash`），不是可選擇的模型。
 - 功能預設、preset 及 `replacement` 先以完全相同的 id 比對，找不到才用上述規則（例如 `gemini-3.1-pro-preview` 對應 `gemini-3.1-pro`）。
+- 比對到的 entry 必須屬於同一服務商，而且不可完全等於 `kind: "family"` 的 entry；只包含 family id 的 id 則可以（例如 `jev-latest` 對應 `jev`）。`bedrock` 例外：它的 id 是經 AWS 使用的其他廠商模型，價格記在該廠商的 entry 之下。
+- 仍包含真實 id 的錯字（例如 `gpt-6-luna-x` 會對應 `gpt-6-luna`）目前驗證器無法發現，要堵住須另設明確的別名清單。
 - `managed: true` 的 entry 屬 JARVIS AI 自家代理，只以完全相同的 id 比對，永不用於 App 的價格查詢。
 - 每個服務商在 `default_for` 列出的功能，都必須在 `features` 有預設模型，而且該模型必須為 `active`。
 
