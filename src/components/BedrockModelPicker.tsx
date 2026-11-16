@@ -46,7 +46,7 @@ type Props = Shared & (
  * choice changes the form only, a model is required, the form's own button
  * saves it, and a line (or, under "Other", the ID field's help) says that a
  * us., eu. or apac. profile is sent for the saved region
- * (mail/analysis.rs send_to_bedrock, as chat).
+ * (mail/analysis.rs analyze_with_endpoints, as chat).
  */
 export default function BedrockModelPicker(props: Props) {
   const { place, fallback, listState, onReload } = props;

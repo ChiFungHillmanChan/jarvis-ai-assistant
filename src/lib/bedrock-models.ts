@@ -305,9 +305,9 @@ export function selectValue(state: PickerState, saved: string): string {
  * The help under the ID field of "Other (enter an ID)", true for where it is
  * shown. Chat and mail both point a us., eu. or apac. profile at the saved
  * region when they send (ai/mod.rs apply_inference_profile, called by
- * mail/analysis.rs send_to_bedrock too), so every place says so in Settings'
- * words. A mail form cannot be left empty, and in the setup guide the test
- * button saves new keys and their region before it tests.
+ * mail/analysis.rs analyze_with_endpoints too), so every place says so in
+ * Settings' words. A mail form cannot be left empty, and in the setup guide
+ * the test button saves new keys and their region before it tests.
  */
 export function otherIdHelp(place: PickerPlace, fallback: string, text: Text): string {
   switch (place) {
@@ -331,9 +331,8 @@ export function otherIdHelp(place: PickerPlace, fallback: string, text: Text): s
 
 /**
  * The sentence the Mail dialog and the setup guide show under the picker
- * whenever "Other" is not chosen (a model from a list is chosen, or nothing
- * is chosen yet), since a us., eu. or apac. id can be chosen there from
- * either list: mail sends it for the saved region, as chat does. In the setup
+ * whenever "Other" is not chosen (any choice in the select, or none yet),
+ * since a us., eu. or apac. id can be chosen there from either list: mail sends it for the saved region, as chat does. In the setup
  * guide new keys and their region are saved by the test button before it
  * tests. While "Other" is chosen the help under the ID field (otherIdHelp)
  * says the same, so the sentence is shown once.

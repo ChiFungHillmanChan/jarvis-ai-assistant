@@ -223,7 +223,7 @@ test('the help under Other is true in each place', () => {
 
 // Founder decision (option A) and requirement 10: mail sends a us., eu. or
 // apac. profile for the saved region, as chat does (mail/analysis.rs
-// send_to_bedrock). Such an id can be chosen in a mail form from either list,
+// analyze_with_endpoints). Such an id can be chosen in a mail form from either list,
 // so the forms say so under the picker, in words true there: in the setup
 // guide new keys and their region are saved by the test button before it
 // tests. While "Other" is chosen the help under the ID field says it instead
