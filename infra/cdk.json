@@ -34,7 +34,8 @@
       "billingAlertEmail": "hillmanchan709@gmail.com",
       "primaryRegion": "ap-southeast-1",
       "fallbackRegion": "us-east-1",
-      "appDomain": "jarvis-automation.com"
+      "appDomain": "jarvis-automation.com",
+      "githubRepo": "ChiFungHillmanChan/jarvis-ai-assistant"
     }
   }
 }

@@ -1,0 +1,99 @@
+name: Registry check
+
+# Checks a pull request that touches the model registry before it is merged:
+# the validator, the type check and both registry test files. When the base
+# branch already holds registry/registry.json and the pull request changes
+# it, the version must be higher than the base's, so the publishing rule
+# (registry/publish.sh) is checked before merge; an unchanged file is not
+# published again, so it needs no new version.
+#
+# The paths are the registry, its tests and workflows, the files those tests
+# read elsewhere in the repository (the code they compare the registry with),
+# and the package files the type check and the validator install from. The
+# last test in tests/registry.test.ts fails when a test reads a file these
+# paths miss.
+#
+# Read-only: no environment, no secret, no AWS, and no checkout keeps the
+# token. Publishing is registry.yml, which has no pull-request trigger.
+# Every action is pinned to a full commit SHA (the release it is, in the
+# comment).
+on:
+  pull_request:
+    paths:
+      - "registry/**"
+      - "tests/registry*.ts"
+      - ".github/workflows/registry.yml"
+      - ".github/workflows/registry-check.yml"
+      # Installed by npm ci; the type check and the validator depend on them.
+      - "package.json"
+      - "package-lock.json"
+      # Read by tests/registry.test.ts (the code the registry must match).
+      - "src-tauri/migrations/V30__choose_one_ai.sql"
+      - "src-tauri/src/ai/bedrock.rs"
+      - "src-tauri/src/ai/claude.rs"
+      - "src-tauri/src/ai/compat.rs"
+      - "src-tauri/src/ai/complete.rs"
+      - "src-tauri/src/ai/gemini.rs"
+      - "src-tauri/src/ai/local/mod.rs"
+      - "src-tauri/src/ai/mail_policy.rs"
+      - "src-tauri/src/ai/mod.rs"
+      - "src-tauri/src/ai/models.rs"
+      - "src-tauri/src/ai/openai.rs"
+      - "src-tauri/src/aws/model_list.rs"
+      - "src-tauri/src/commands/ai_choice.rs"
+      - "src-tauri/src/mail/models.rs"
+      - "src-tauri/src/voice/minimax.rs"
+      - "src-tauri/src/voice/model_manager.rs"
+      - "src-tauri/src/voice/transcribe.rs"
+      - "src-tauri/tauri.conf.json"
+      - "src/components/ChooseAi.tsx"
+      - "src/lib/ai-choice.ts"
+      - "src/pages/Settings.tsx"
+      # Read by tests/registry-publish.test.ts (the read Lambda's key and metadata name).
+      - "infra/lambda/registry/index.ts"
+
+permissions:
+  contents: read
+
+concurrency:
+  group: registry-check-${{ github.event.pull_request.number }}
+  cancel-in-progress: true
+
+jobs:
+  check:
+    name: Check
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
+        with:
+          persist-credentials: false
+      # The base branch's registry/ folder, to compare the version with. Cone
+      # mode also keeps the top-level files, so the checkout is never empty,
+      # even on a base that has no registry/ yet.
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
+        with:
+          ref: ${{ github.base_ref }}
+          path: base
+          sparse-checkout: registry
+          sparse-checkout-cone-mode: true
+          persist-credentials: false
+      - uses: actions/setup-node@a0853c24544627f65ddf259abe73b1d18a591444 # v5.0.0
+        with:
+          node-version: "22"
+      # Install scripts are not run in any registry job.
+      - run: npm ci --ignore-scripts
+      - name: Validate the registry
+        run: |
+          if [ ! -f base/registry/registry.json ]; then
+            echo "registry: the base branch has no registry yet; no version to compare with"
+            node --experimental-strip-types registry/validate.ts registry/registry.json
+          elif cmp -s registry/registry.json base/registry/registry.json; then
+            echo "registry: registry.json is unchanged from the base branch; nothing new to publish"
+            node --experimental-strip-types registry/validate.ts registry/registry.json
+          else
+            node --experimental-strip-types registry/validate.ts registry/registry.json --published base/registry/registry.json
+          fi
+      - name: Type check (registry code and tests)
+        run: npm run registry:typecheck
+      - name: Registry tests (code match, validator, signing, publish script)
+        run: node --experimental-strip-types --test tests/registry.test.ts tests/registry-publish.test.ts

@@ -1,0 +1,179 @@
+name: Registry
+
+# Validates, signs and publishes the model registry (registry/registry.json).
+#
+# - A push or merge to main that touches the registry publishes to dev.
+# - Prod is published only by hand: Actions -> Registry -> Run workflow on
+#   main. That run signs main's registry again (Ed25519 signatures are
+#   deterministic, so the bytes and signature are the ones dev got) and
+#   refuses unless dev already serves exactly those bytes.
+#
+# Manual approval is this manual run, not an environment reviewer: on a
+# private repository, GitHub offers required reviewers only on Enterprise.
+# If the plan allows it later, add a required reviewer to registry-prod as
+# well.
+#
+# Setup (environments, AWS, key, variables) is in registry/README.md. Until
+# the founder sets the repository variable REGISTRY_PUBLISHING to "on" (the
+# step just before the pull request that commits the public key), a run only
+# validates: sign is skipped, so both publish jobs are skipped too, the run
+# stays green and no environment is created. Once it is on, a missing
+# REGISTRY_SIGNING_KEY or registry/signing-public-key.pem fails the sign job
+# with a message naming it; a missing REGISTRY_ROLE_ARN fails the publish job
+# in the AWS credentials step with that action's own message, and a missing
+# REGISTRY_BUCKET fails publish.sh. Nothing is published in any of these cases.
+#
+# Pull requests are checked by registry-check.yml; this workflow has no
+# pull-request trigger. Every action is pinned to a full commit SHA (the
+# release it is, in the comment), and no checkout keeps the token.
+on:
+  push:
+    branches: [main]
+    paths:
+      - "registry/**"
+      - "tests/registry*.ts"
+      - ".github/workflows/registry.yml"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+# One publish at a time, never cancelled half-way. GitHub keeps at most one
+# running and one pending run in this group, and a newer run cancels the one
+# still pending: a prod run started by hand that waits behind a dev publish
+# is cancelled if another push to main arrives, and has to be started again.
+concurrency:
+  group: registry-publish
+  cancel-in-progress: false
+
+env:
+  AWS_REGION: ap-southeast-1
+
+jobs:
+  validate:
+    name: Validate
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@a0853c24544627f65ddf259abe73b1d18a591444 # v5.0.0
+        with:
+          node-version: "22"
+      # Install scripts are not run in any registry job.
+      - run: npm ci --ignore-scripts
+      - name: Validate the registry
+        run: node --experimental-strip-types registry/validate.ts registry/registry.json
+      - name: Type check (registry code and tests)
+        run: npm run registry:typecheck
+      # Only the publish script's tests gate publishing. tests/registry.test.ts
+      # (the registry against the code the app runs today) runs in the
+      # pull-request check and in `npm run test:frontend`, so a value meant to
+      # be edited in the registry never needs a test edit to publish.
+      - name: Publish script tests
+        run: node --experimental-strip-types --test tests/registry-publish.test.ts
+
+  sign:
+    name: Sign
+    needs: validate
+    # Off until the founder turns publishing on (registry/README.md, step 8).
+    if: vars.REGISTRY_PUBLISHING == 'on'
+    runs-on: ubuntu-latest
+    # Holds the REGISTRY_SIGNING_KEY secret. The founder limits this
+    # environment to the main branch. No AWS access in this job.
+    environment: registry-signing
+    steps:
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@a0853c24544627f65ddf259abe73b1d18a591444 # v5.0.0
+        with:
+          node-version: "22"
+      - run: npm ci --ignore-scripts
+      - name: Sign the canonical bytes
+        env:
+          REGISTRY_SIGNING_KEY: ${{ secrets.REGISTRY_SIGNING_KEY }}
+        run: node --experimental-strip-types registry/sign.ts registry/registry.json signed
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: signed-registry
+          path: |
+            signed/registry.json
+            signed/registry.json.sig
+          if-no-files-found: error
+          retention-days: 30
+
+  publish-dev:
+    name: Publish (dev)
+    needs: sign
+    if: github.event_name == 'push'
+    runs-on: ubuntu-latest
+    environment: registry-dev
+    permissions:
+      contents: read
+      id-token: write
+    steps:
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@a0853c24544627f65ddf259abe73b1d18a591444 # v5.0.0
+        with:
+          node-version: "22"
+      - run: npm ci --ignore-scripts
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: signed-registry
+          path: signed
+      - uses: aws-actions/configure-aws-credentials@e1253824e5c10ff9df46874f81ed3ec929e19cfd # v6.3.0
+        with:
+          role-to-assume: ${{ vars.REGISTRY_ROLE_ARN }}
+          aws-region: ${{ env.AWS_REGION }}
+          role-session-name: registry-dev-${{ github.run_id }}
+      - name: Publish
+        env:
+          REGISTRY_BUCKET: ${{ vars.REGISTRY_BUCKET }}
+        run: registry/publish.sh signed
+
+  publish-prod:
+    name: Publish (prod)
+    needs: sign
+    if: github.event_name == 'workflow_dispatch'
+    runs-on: ubuntu-latest
+    environment: registry-prod
+    permissions:
+      contents: read
+      id-token: write
+    steps:
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@a0853c24544627f65ddf259abe73b1d18a591444 # v5.0.0
+        with:
+          node-version: "22"
+      - run: npm ci --ignore-scripts
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: signed-registry
+          path: signed
+      - name: Check that dev already serves this registry
+        env:
+          REGISTRY_DEV_URL: ${{ vars.REGISTRY_DEV_URL }}
+        run: |
+          curl -fsS --retry 3 -D dev.headers -o dev.json "${REGISTRY_DEV_URL:?REGISTRY_DEV_URL is not set}"
+          if ! cmp -s dev.json signed/registry.json; then
+            echo "registry: dev does not serve this registry; let the push to main publish it to dev first" >&2
+            exit 1
+          fi
+          if ! grep -qiF "x-registry-signature: $(cat signed/registry.json.sig)" dev.headers; then
+            echo "registry: dev serves these bytes with another signature" >&2
+            exit 1
+          fi
+      - uses: aws-actions/configure-aws-credentials@e1253824e5c10ff9df46874f81ed3ec929e19cfd # v6.3.0
+        with:
+          role-to-assume: ${{ vars.REGISTRY_ROLE_ARN }}
+          aws-region: ${{ env.AWS_REGION }}
+          role-session-name: registry-prod-${{ github.run_id }}
+      - name: Publish
+        env:
+          REGISTRY_BUCKET: ${{ vars.REGISTRY_BUCKET }}
+        run: registry/publish.sh signed

@@ -6,6 +6,7 @@ import { DataStack } from '../lib/data-stack';
 import { ObservabilityStack } from '../lib/observability-stack';
 import { PaymentStack } from '../lib/payment-stack';
 import { AuditStack } from '../lib/audit-stack';
+import { RegistryStack } from '../lib/registry-stack';
 
 const app = new cdk.App();
 
@@ -48,7 +49,7 @@ new ObservabilityStack(app, `Jarvis-${env}-Observability`, {
   syncBucketName: data.syncBucketName,
 });
 
-new PaymentStack(app, `Jarvis-${env}-Payment`, {
+const payment = new PaymentStack(app, `Jarvis-${env}-Payment`, {
   ...stackProps,
   envName: env,
   userMetaTable: data.userMetaTable,
@@ -61,3 +62,16 @@ new AuditStack(app, `Jarvis-${env}-Audit`, {
   envName: env,
   kmsKey: auth.dataKey,
 });
+
+// GET /v1/registry is a route on the Payment stack's HTTP API, found through
+// that stack's ApiBaseUrl export. dev and prod only: no registry is published
+// to sandbox, and infra/scripts/resume.sh deploys every sandbox stack without
+// approval.
+if (env !== 'sandbox') {
+  const registry = new RegistryStack(app, `Jarvis-${env}-Registry`, {
+    ...stackProps,
+    envName: env,
+    githubRepo: ctx.githubRepo,
+  });
+  registry.addDependency(payment);
+}

@@ -1,0 +1,2056 @@
+{
+  "version": 1,
+  "issued_at": "2026-11-13T00:00:00Z",
+  "min_app_version": "0.5.11",
+  "providers": [
+    {
+      "id": "openai",
+      "wire": "openai",
+      "display_name": {
+        "en": "OpenAI (GPT)",
+        "zh-HK": "OpenAI (GPT)"
+      },
+      "base_url": "https://api.openai.com/v1",
+      "data_terms": "safe",
+      "data_terms_note": "OpenAI does not train on API traffic by default (ai/mail_policy.rs).",
+      "consent_copy_keys": null,
+      "setup": {
+        "order": 2,
+        "key_page": "https://platform.openai.com/api-keys",
+        "model": "optional",
+        "hint": {
+          "en": "Your own OpenAI API key.",
+          "zh-HK": "使用你的 OpenAI API 密鑰。"
+        }
+      },
+      "model_id_pattern": "^(gpt-|o[0-9])",
+      "default_for": [
+        "chat",
+        "premium",
+        "mail_analysis",
+        "mail_sort",
+        "briefing",
+        "memory"
+      ],
+      "limits": {
+        "chat_max_output_tokens": 4096,
+        "max_tool_rounds": 5,
+        "chat_reasoning_effort": "none"
+      }
+    },
+    {
+      "id": "claude",
+      "wire": "anthropic",
+      "display_name": {
+        "en": "Anthropic Claude",
+        "zh-HK": "Anthropic Claude"
+      },
+      "base_url": "https://api.anthropic.com/v1",
+      "data_terms": "safe",
+      "data_terms_note": "Anthropic does not train on API traffic by default (ai/mail_policy.rs).",
+      "consent_copy_keys": null,
+      "setup": {
+        "order": 4,
+        "key_page": "https://console.anthropic.com/settings/keys",
+        "model": "optional",
+        "hint": {
+          "en": "Your own Claude API key.",
+          "zh-HK": "使用你的 Claude API 密鑰。"
+        }
+      },
+      "model_id_pattern": "^claude-",
+      "default_for": [
+        "chat",
+        "premium",
+        "mail_analysis",
+        "mail_sort",
+        "briefing",
+        "memory"
+      ],
+      "limits": {
+        "chat_max_output_tokens": 4096,
+        "max_tool_rounds": 5,
+        "api_version": "2023-06-01"
+      }
+    },
+    {
+      "id": "gemini",
+      "wire": "gemini",
+      "display_name": {
+        "en": "Google Gemini",
+        "zh-HK": "Google Gemini"
+      },
+      "base_url": "https://generativelanguage.googleapis.com/v1beta",
+      "data_terms": "needs_billing_confirmation",
+      "data_terms_note": "Gemini's unpaid tier may use submitted content to improve Google's models (outside the EEA, Switzerland and the UK); email goes to Gemini only after the user confirms billing is on (ai/mail_policy.rs, user_preferences key gemini_billing_confirmed).",
+      "consent_copy_keys": {
+        "blocked": "consentGeminiBillingBlocked",
+        "confirm": "consentGeminiBillingConfirm"
+      },
+      "setup": {
+        "order": 3,
+        "key_page": "https://aistudio.google.com/apikey",
+        "model": "optional",
+        "hint": {
+          "en": "Your own Gemini API key.",
+          "zh-HK": "使用你的 Gemini API 密鑰。"
+        }
+      },
+      "model_id_pattern": "^gemini-",
+      "default_for": [
+        "chat",
+        "premium",
+        "mail_analysis",
+        "mail_sort",
+        "briefing",
+        "memory",
+        "stt"
+      ],
+      "limits": {
+        "default_max_output_tokens": 4096,
+        "max_tool_rounds": 5,
+        "stt_max_output_tokens": 512
+      }
+    },
+    {
+      "id": "bedrock",
+      "wire": "bedrock",
+      "display_name": {
+        "en": "AWS Bedrock",
+        "zh-HK": "AWS Bedrock"
+      },
+      "base_url": null,
+      "data_terms": "safe",
+      "data_terms_note": "Amazon Bedrock does not train on API traffic by default (ai/mail_policy.rs). Calls go to the user's own AWS account in the region saved with their credentials.",
+      "consent_copy_keys": null,
+      "setup": null,
+      "model_id_pattern": null,
+      "default_for": [
+        "chat",
+        "premium",
+        "mail_analysis",
+        "mail_sort",
+        "briefing",
+        "memory"
+      ],
+      "limits": {
+        "chat_max_output_tokens": 4096,
+        "max_tool_rounds": 5,
+        "chat_temperature": 0.2
+      },
+      "inference_geographies": [
+        "apac",
+        "us",
+        "eu"
+      ],
+      "built_in_models": [
+        "global.anthropic.claude-sonnet-4-6",
+        "global.anthropic.claude-haiku-4-5-20251001-v1:0",
+        "apac.amazon.nova-micro-v1:0"
+      ]
+    },
+    {
+      "id": "ollama",
+      "wire": "ollama",
+      "display_name": {
+        "en": "Ollama",
+        "zh-HK": "Ollama"
+      },
+      "base_url": "http://localhost:11434",
+      "data_terms": "safe",
+      "data_terms_note": "A model running on this Mac keeps email on the Mac. An endpoint on another machine is a remote service and is refused for email (ai/mail_policy.rs).",
+      "consent_copy_keys": null,
+      "setup": {
+        "order": 1,
+        "key_page": null,
+        "model": "required",
+        "hint": {
+          "en": "Runs on this Mac. Free; nothing leaves the Mac.",
+          "zh-HK": "在此 Mac 執行，免費，資料不會離開此 Mac。"
+        }
+      },
+      "model_id_pattern": null,
+      "default_for": [],
+      "limits": {
+        "completion_context_tokens": 8192,
+        "default_context_tokens": 4096,
+        "max_tool_rounds": 5
+      },
+      "tool_capable_families": [
+        "qwen2.5",
+        "qwen2",
+        "qwen3",
+        "llama3.1",
+        "llama3.2",
+        "llama3.3",
+        "llama4",
+        "mistral",
+        "mixtral",
+        "deepseek-v3",
+        "deepseek-r1",
+        "command-r",
+        "command-r-plus",
+        "firefunction",
+        "hermes",
+        "nemotron"
+      ]
+    },
+    {
+      "id": "ollama_cloud",
+      "wire": "ollama",
+      "display_name": {
+        "en": "Ollama Cloud",
+        "zh-HK": "Ollama Cloud"
+      },
+      "base_url": "http://localhost:11434",
+      "model_id_suffixes": [
+        ":cloud",
+        "-cloud"
+      ],
+      "data_terms": "unknown",
+      "data_terms_note": "An Ollama cloud model does not run on this Mac and its terms have not been checked; email is refused today (ai/mail_policy.rs).",
+      "consent_copy_keys": {
+        "blocked": "consentUnknownTermsBlocked",
+        "confirm": "consentUnknownTermsConfirm"
+      },
+      "setup": null,
+      "model_id_pattern": null,
+      "default_for": []
+    },
+    {
+      "id": "kimi",
+      "wire": "openai_compat",
+      "display_name": {
+        "en": "Kimi",
+        "zh-HK": "Kimi"
+      },
+      "base_url": "https://api.moonshot.ai/v1",
+      "regions": [
+        {
+          "id": "global",
+          "base_url": "https://api.moonshot.ai/v1",
+          "key_page": "https://platform.moonshot.ai/console/api-keys"
+        },
+        {
+          "id": "china",
+          "base_url": "https://api.moonshot.cn/v1",
+          "key_page": "https://platform.moonshot.cn/console/api-keys"
+        }
+      ],
+      "host_suffixes": [
+        "moonshot.ai",
+        "moonshot.cn"
+      ],
+      "data_terms": "unknown",
+      "data_terms_note": "Not checked; email is not sent to it today (ai/mail_policy.rs).",
+      "consent_copy_keys": {
+        "blocked": "consentUnknownTermsBlocked",
+        "confirm": "consentUnknownTermsConfirm"
+      },
+      "setup": {
+        "order": 5,
+        "key_page": null,
+        "model": "required",
+        "hint": {
+          "en": "Moonshot AI API key.",
+          "zh-HK": "使用 Moonshot AI 的 API 密鑰。"
+        }
+      },
+      "model_id_pattern": null,
+      "default_for": [],
+      "limits": {
+        "chat_max_output_tokens": 4096,
+        "max_tool_rounds": 5
+      }
+    },
+    {
+      "id": "qwen",
+      "wire": "openai_compat",
+      "display_name": {
+        "en": "Qwen",
+        "zh-HK": "Qwen"
+      },
+      "base_url": "https://dashscope-intl.aliyuncs.com/compatible-mode/v1",
+      "regions": [
+        {
+          "id": "global",
+          "base_url": "https://dashscope-intl.aliyuncs.com/compatible-mode/v1",
+          "key_page": "https://www.alibabacloud.com/help/en/model-studio/get-api-key"
+        },
+        {
+          "id": "china",
+          "base_url": "https://dashscope.aliyuncs.com/compatible-mode/v1",
+          "key_page": "https://help.aliyun.com/zh/model-studio/get-api-key"
+        }
+      ],
+      "host_suffixes": [
+        "aliyuncs.com"
+      ],
+      "data_terms": "unknown",
+      "data_terms_note": "Not checked; email is not sent to it today (ai/mail_policy.rs).",
+      "consent_copy_keys": {
+        "blocked": "consentUnknownTermsBlocked",
+        "confirm": "consentUnknownTermsConfirm"
+      },
+      "setup": {
+        "order": 6,
+        "key_page": null,
+        "model": "required",
+        "hint": {
+          "en": "Alibaba Cloud Model Studio API key.",
+          "zh-HK": "使用阿里雲百煉（Model Studio）API 密鑰。"
+        }
+      },
+      "model_id_pattern": null,
+      "default_for": [],
+      "limits": {
+        "chat_max_output_tokens": 4096,
+        "max_tool_rounds": 5
+      }
+    },
+    {
+      "id": "gemini_compat",
+      "wire": "openai_compat",
+      "display_name": {
+        "en": "Gemini",
+        "zh-HK": "Gemini"
+      },
+      "base_url": "https://generativelanguage.googleapis.com/v1beta/openai",
+      "host_suffixes": [
+        "generativelanguage.googleapis.com"
+      ],
+      "data_terms": "unknown",
+      "data_terms_note": "Gemini reached through its OpenAI-compatible URL: billing cannot be confirmed for it, so email is not sent to it today (ai/mail_policy.rs).",
+      "consent_copy_keys": {
+        "blocked": "consentUnknownTermsBlocked",
+        "confirm": "consentUnknownTermsConfirm"
+      },
+      "setup": null,
+      "model_id_pattern": null,
+      "default_for": [],
+      "limits": {
+        "chat_max_output_tokens": 4096,
+        "max_tool_rounds": 5
+      }
+    },
+    {
+      "id": "openai_compat",
+      "wire": "openai_compat",
+      "display_name": {
+        "en": "Other service",
+        "zh-HK": "其他服務"
+      },
+      "base_url": null,
+      "data_terms": "unknown",
+      "data_terms_note": "Any other OpenAI-compatible URL the user enters. Not checked; email is not sent to it today (ai/mail_policy.rs).",
+      "consent_copy_keys": {
+        "blocked": "consentUnknownTermsBlocked",
+        "confirm": "consentUnknownTermsConfirm"
+      },
+      "setup": {
+        "order": 7,
+        "key_page": null,
+        "model": "required",
+        "hint": {
+          "en": "Any OpenAI-compatible API, e.g. DeepSeek or OpenRouter.",
+          "zh-HK": "任何兼容 OpenAI 格式的 API，例如 DeepSeek 或 OpenRouter。"
+        }
+      },
+      "model_id_pattern": null,
+      "default_for": [],
+      "limits": {
+        "chat_max_output_tokens": 4096,
+        "max_tool_rounds": 5
+      }
+    },
+    {
+      "id": "typesafe",
+      "wire": "typesafe",
+      "display_name": {
+        "en": "TypeSafe",
+        "zh-HK": "TypeSafe"
+      },
+      "base_url": "https://api.typesafe.ai/v1",
+      "data_terms": "safe",
+      "data_terms_note": "Optional mail classifier with its own key. Its privacy policy says it does not train or fine-tune models on input (ai/mail_policy.rs). It is not the chosen AI and is not gated.",
+      "consent_copy_keys": null,
+      "setup": null,
+      "model_id_pattern": null,
+      "default_for": [
+        "mail_sort"
+      ]
+    },
+    {
+      "id": "minimax",
+      "wire": "minimax",
+      "display_name": {
+        "en": "MiniMax",
+        "zh-HK": "MiniMax"
+      },
+      "base_url": "https://api.minimaxi.chat/v1",
+      "data_terms": "unknown",
+      "data_terms_note": "Speech only, with the user's own key: it receives the reply text to be spoken. Its terms have not been checked and the mail gate does not cover it today.",
+      "consent_copy_keys": {
+        "blocked": "consentUnknownTermsBlocked",
+        "confirm": "consentUnknownTermsConfirm"
+      },
+      "setup": null,
+      "model_id_pattern": null,
+      "default_for": [
+        "tts"
+      ]
+    },
+    {
+      "id": "whisper",
+      "wire": "whisper_cpp",
+      "display_name": {
+        "en": "Whisper",
+        "zh-HK": "Whisper"
+      },
+      "base_url": null,
+      "data_terms": "safe",
+      "data_terms_note": "Speech to text on this Mac with a downloaded model; audio does not leave the Mac.",
+      "consent_copy_keys": null,
+      "setup": null,
+      "model_id_pattern": null,
+      "default_for": [
+        "stt"
+      ]
+    },
+    {
+      "id": "jarvis_ai",
+      "wire": "jarvis_proxy",
+      "display_name": {
+        "en": "JARVIS AI",
+        "zh-HK": "JARVIS AI"
+      },
+      "base_url": null,
+      "data_terms": "safe",
+      "data_terms_note": "JARVIS's own Bedrock through the JARVIS API; no prompt, email or reply is stored or logged server-side (DECISIONS section 2 and the privacy anti-goals).",
+      "consent_copy_keys": null,
+      "setup": null,
+      "model_id_pattern": null,
+      "default_for": [
+        "chat",
+        "mail_analysis",
+        "mail_sort",
+        "cloud_triage"
+      ]
+    }
+  ],
+  "models": [
+    {
+      "id": "gpt-6-luna",
+      "provider": "openai",
+      "kind": "model",
+      "display_name": {
+        "en": "GPT-6 Luna",
+        "zh-HK": "GPT-6 Luna"
+      },
+      "status": "active",
+      "replacement": null,
+      "managed": false,
+      "prices": {
+        "input": 0.1,
+        "output": 0.5,
+        "cache_read": 0.01,
+        "cache_write": 0.125,
+        "tiers": [
+          {
+            "above_input_tokens": 272000,
+            "input": 0.2,
+            "output": 0.75,
+            "cache_read": 0.02,
+            "cache_write": 0.25
+          }
+        ]
+      },
+      "context": null,
+      "max_output": null,
+      "capabilities": {
+        "tools": true,
+        "streaming": true,
+        "json": true,
+        "json_schema": true,
+        "vision": false,
+        "thinking": true,
+        "reasoning_effort": true
+      }
+    },
+    {
+      "id": "gpt-5.6-luna",
+      "provider": "openai",
+      "kind": "model",
+      "display_name": {
+        "en": "GPT-5.6 Luna",
+        "zh-HK": "GPT-5.6 Luna"
+      },
+      "status": "active",
+      "replacement": null,
+      "managed": false,
+      "prices": {
+        "input": 0.2,
+        "output": 1.2,
+        "cache_read": 0.02,
+        "cache_write": 0.25,
+        "tiers": []
+      },
+      "context": null,
+      "max_output": null,
+      "capabilities": {
+        "tools": true,
+        "streaming": true,
+        "json": true,
+        "json_schema": true,
+        "vision": false,
+        "thinking": true,
+        "reasoning_effort": true
+      }
+    },
+    {
+      "id": "gpt-5",
+      "provider": "openai",
+      "kind": "family",
+      "display_name": {
+        "en": "gpt-5",
+        "zh-HK": "gpt-5"
+      },
+      "status": "active",
+      "replacement": null,
+      "managed": false,
+      "prices": {
+        "input": 1.25,
+        "output": 10,
+        "cache_read": 0.125,
+        "cache_write": 1.25,
+        "tiers": []
+      },
+      "context": null,
+      "max_output": null,
+      "capabilities": {
+        "tools": true,
+        "streaming": true,
+        "json": true,
+        "json_schema": true,
+        "vision": false,
+        "thinking": true,
+        "reasoning_effort": true
+      }
+    },
+    {
+      "id": "gpt-4o-mini",
+      "provider": "openai",
+      "kind": "model",
+      "display_name": {
+        "en": "GPT-4o mini",
+        "zh-HK": "GPT-4o mini"
+      },
+      "status": "active",
+      "replacement": null,
+      "managed": false,
+      "prices": {
+        "input": 0.15,
+        "output": 0.6,
+        "cache_read": 0.075,
+        "cache_write": 0.15,
+        "tiers": []
+      },
+      "context": null,
+      "max_output": null,
+      "capabilities": {
+        "tools": true,
+        "streaming": true,
+        "json": true,
+        "json_schema": true,
+        "vision": false,
+        "thinking": false,
+        "reasoning_effort": false
+      }
+    },
+    {
+      "id": "gpt-4o",
+      "provider": "openai",
+      "kind": "model",
+      "display_name": {
+        "en": "GPT-4o",
+        "zh-HK": "GPT-4o"
+      },
+      "status": "active",
+      "replacement": null,
+      "managed": false,
+      "prices": {
+        "input": 2.5,
+        "output": 10,
+        "cache_read": 1.25,
+        "cache_write": 2.5,
+        "tiers": []
+      },
+      "context": null,
+      "max_output": null,
+      "capabilities": {
+        "tools": true,
+        "streaming": true,
+        "json": true,
+        "json_schema": true,
+        "vision": false,
+        "thinking": false,
+        "reasoning_effort": false
+      }
+    },
+    {
+      "id": "claude-sonnet-5-5",
+      "provider": "claude",
+      "kind": "model",
+      "display_name": {
+        "en": "Claude Sonnet 5.5",
+        "zh-HK": "Claude Sonnet 5.5"
+      },
+      "status": "active",
+      "replacement": null,
+      "managed": false,
+      "prices": {
+        "input": 2,
+        "output": 10,
+        "cache_read": 0.2,
+        "cache_write": 2.5,
+        "tiers": []
+      },
+      "context": null,
+      "max_output": null,
+      "capabilities": {
+        "tools": true,
+        "streaming": true,
+        "json": true,
+        "json_schema": false,
+        "vision": false,
+        "thinking": false,
+        "reasoning_effort": false
+      }
+    },
+    {
+      "id": "claude-opus-5-5",
+      "provider": "claude",
+      "kind": "model",
+      "display_name": {
+        "en": "Claude Opus 5.5",
+        "zh-HK": "Claude Opus 5.5"
+      },
+      "status": "active",
+      "replacement": null,
+      "managed": false,
+      "prices": {
+        "input": 4,
+        "output": 20,
+        "cache_read": 0.2,
+        "cache_write": 5,
+        "tiers": []
+      },
+      "context": null,
+      "max_output": null,
+      "capabilities": {
+        "tools": true,
+        "streaming": true,
+        "json": true,
+        "json_schema": false,
+        "vision": false,
+        "thinking": false,
+        "reasoning_effort": false
+      }
+    },
+    {
+      "id": "claude-haiku-5-5",
+      "provider": "claude",
+      "kind": "model",
+      "display_name": {
+        "en": "Claude Haiku 5.5",
+        "zh-HK": "Claude Haiku 5.5"
+      },
+      "status": "active",
+      "replacement": null,
+      "managed": false,
+      "prices": {
+        "input": 0.1,
+        "output": 0.5,
+        "cache_read": 0.01,
+        "cache_write": 0.125,
+        "tiers": [
+          {
+            "above_input_tokens": 100000,
+            "input": 0.5,
+            "output": 2.5,
+            "cache_read": 0.05,
+            "cache_write": 0.625
+          }
+        ]
+      },
+      "context": null,
+      "max_output": null,
+      "capabilities": {
+        "tools": true,
+        "streaming": true,
+        "json": true,
+        "json_schema": false,
+        "vision": false,
+        "thinking": false,
+        "reasoning_effort": false
+      }
+    },
+    {
+      "id": "claude-sonnet-4-6",
+      "provider": "claude",
+      "kind": "model",
+      "display_name": {
+        "en": "Claude Sonnet 4.6",
+        "zh-HK": "Claude Sonnet 4.6"
+      },
+      "status": "active",
+      "replacement": null,
+      "managed": false,
+      "prices": {
+        "input": 3,
+        "output": 15,
+        "cache_read": 0.3,
+        "cache_write": 3.75,
+        "tiers": []
+      },
+      "context": null,
+      "max_output": null,
+      "capabilities": {
+        "tools": true,
+        "streaming": true,
+        "json": true,
+        "json_schema": false,
+        "vision": false,
+        "thinking": false,
+        "reasoning_effort": false
+      }
+    },
+    {
+      "id": "sonnet-4.6",
+      "provider": "claude",
+      "kind": "family",
+      "display_name": {
+        "en": "sonnet-4.6",
+        "zh-HK": "sonnet-4.6"
+      },
+      "status": "active",
+      "replacement": null,
+      "managed": false,
+      "prices": {
+        "input": 3,
+        "output": 15,
+        "cache_read": 0.3,
+        "cache_write": 3.75,
+        "tiers": []
+      },
+      "context": null,
+      "max_output": null,
+      "capabilities": {
+        "tools": true,
+        "streaming": true,
+        "json": true,
+        "json_schema": false,
+        "vision": false,
+        "thinking": false,
+        "reasoning_effort": false
+      }
+    },
+    {
+      "id": "claude-haiku-4-5",
+      "provider": "claude",
+      "kind": "model",
+      "display_name": {
+        "en": "Claude Haiku 4.5",
+        "zh-HK": "Claude Haiku 4.5"
+      },
+      "status": "active",
+      "replacement": null,
+      "managed": false,
+      "prices": {
+        "input": 1,
+        "output": 5,
+        "cache_read": 0.1,
+        "cache_write": 1.25,
+        "tiers": []
+      },
+      "context": null,
+      "max_output": null,
+      "capabilities": {
+        "tools": true,
+        "streaming": true,
+        "json": true,
+        "json_schema": false,
+        "vision": false,
+        "thinking": false,
+        "reasoning_effort": false
+      }
+    },
+    {
+      "id": "haiku-4.5",
+      "provider": "claude",
+      "kind": "family",
+      "display_name": {
+        "en": "haiku-4.5",
+        "zh-HK": "haiku-4.5"
+      },
+      "status": "active",
+      "replacement": null,
+      "managed": false,
+      "prices": {
+        "input": 1,
+        "output": 5,
+        "cache_read": 0.1,
+        "cache_write": 1.25,
+        "tiers": []
+      },
+      "context": null,
+      "max_output": null,
+      "capabilities": {
+        "tools": true,
+        "streaming": true,
+        "json": true,
+        "json_schema": false,
+        "vision": false,
+        "thinking": false,
+        "reasoning_effort": false
+      }
+    },
+    {
+      "id": "gemini-3.7-flash",
+      "provider": "gemini",
+      "kind": "model",
+      "display_name": {
+        "en": "Gemini 3.7 Flash",
+        "zh-HK": "Gemini 3.7 Flash"
+      },
+      "status": "active",
+      "replacement": null,
+      "managed": false,
+      "prices": {
+        "input": 0.75,
+        "output": 3.75,
+        "cache_read": 0.075,
+        "cache_write": 0.75,
+        "tiers": []
+      },
+      "context": null,
+      "max_output": 65536,
+      "capabilities": {
+        "tools": true,
+        "streaming": true,
+        "json": true,
+        "json_schema": false,
+        "vision": false,
+        "thinking": true,
+        "reasoning_effort": false
+      }
+    },
+    {
+      "id": "gemini-3.1-pro",
+      "provider": "gemini",
+      "kind": "model",
+      "display_name": {
+        "en": "Gemini 3.1 Pro",
+        "zh-HK": "Gemini 3.1 Pro"
+      },
+      "status": "active",
+      "replacement": null,
+      "managed": false,
+      "prices": {
+        "input": 2,
+        "output": 12,
+        "cache_read": 0.5,
+        "cache_write": 2,
+        "tiers": [
+          {
+            "above_input_tokens": 200000,
+            "input": 4,
+            "output": 18,
+            "cache_read": 1,
+            "cache_write": 4
+          }
+        ]
+      },
+      "context": null,
+      "max_output": 65536,
+      "capabilities": {
+        "tools": true,
+        "streaming": true,
+        "json": true,
+        "json_schema": false,
+        "vision": false,
+        "thinking": true,
+        "reasoning_effort": false
+      }
+    },
+    {
+      "id": "gemini-3.6-flash",
+      "provider": "gemini",
+      "kind": "model",
+      "display_name": {
+        "en": "Gemini 3.6 Flash",
+        "zh-HK": "Gemini 3.6 Flash"
+      },
+      "status": "active",
+      "replacement": null,
+      "managed": false,
+      "prices": {
+        "input": 1.5,
+        "output": 7.5,
+        "cache_read": 0.375,
+        "cache_write": 1.5,
+        "tiers": []
+      },
+      "context": null,
+      "max_output": 65536,
+      "capabilities": {
+        "tools": true,
+        "streaming": true,
+        "json": true,
+        "json_schema": false,
+        "vision": false,
+        "thinking": true,
+        "reasoning_effort": false
+      }
+    },
+    {
+      "id": "gemini-3.5-flash",
+      "provider": "gemini",
+      "kind": "model",
+      "display_name": {
+        "en": "Gemini 3.5 Flash",
+        "zh-HK": "Gemini 3.5 Flash"
+      },
+      "status": "active",
+      "replacement": null,
+      "managed": false,
+      "prices": {
+        "input": 1.5,
+        "output": 9,
+        "cache_read": 0.375,
+        "cache_write": 1.5,
+        "tiers": []
+      },
+      "context": null,
+      "max_output": 65536,
+      "capabilities": {
+        "tools": true,
+        "streaming": true,
+        "json": true,
+        "json_schema": false,
+        "vision": false,
+        "thinking": true,
+        "reasoning_effort": false
+      }
+    },
+    {
+      "id": "gemini-3.5-flash-lite",
+      "provider": "gemini",
+      "kind": "model",
+      "display_name": {
+        "en": "Gemini 3.5 Flash-Lite",
+        "zh-HK": "Gemini 3.5 Flash-Lite"
+      },
+      "status": "active",
+      "replacement": null,
+      "managed": false,
+      "prices": {
+        "input": 0.3,
+        "output": 2.5,
+        "cache_read": 0.075,
+        "cache_write": 0.3,
+        "tiers": []
+      },
+      "context": null,
+      "max_output": 65536,
+      "capabilities": {
+        "tools": true,
+        "streaming": true,
+        "json": true,
+        "json_schema": false,
+        "vision": false,
+        "thinking": true,
+        "reasoning_effort": false
+      }
+    },
+    {
+      "id": "gemini-3.1-flash-lite",
+      "provider": "gemini",
+      "kind": "model",
+      "display_name": {
+        "en": "Gemini 3.1 Flash-Lite",
+        "zh-HK": "Gemini 3.1 Flash-Lite"
+      },
+      "status": "active",
+      "replacement": null,
+      "managed": false,
+      "prices": {
+        "input": 0.25,
+        "output": 1.5,
+        "cache_read": 0.0625,
+        "cache_write": 0.25,
+        "tiers": []
+      },
+      "context": null,
+      "max_output": 65536,
+      "capabilities": {
+        "tools": true,
+        "streaming": true,
+        "json": true,
+        "json_schema": false,
+        "vision": false,
+        "thinking": true,
+        "reasoning_effort": false
+      }
+    },
+    {
+      "id": "gemini-3-flash",
+      "provider": "gemini",
+      "kind": "model",
+      "display_name": {
+        "en": "Gemini 3 Flash",
+        "zh-HK": "Gemini 3 Flash"
+      },
+      "status": "active",
+      "replacement": null,
+      "managed": false,
+      "prices": {
+        "input": 0.5,
+        "output": 3,
+        "cache_read": 0.125,
+        "cache_write": 0.5,
+        "tiers": []
+      },
+      "context": null,
+      "max_output": 65536,
+      "capabilities": {
+        "tools": true,
+        "streaming": true,
+        "json": true,
+        "json_schema": false,
+        "vision": false,
+        "thinking": true,
+        "reasoning_effort": false
+      }
+    },
+    {
+      "id": "gemini-2.5-pro",
+      "provider": "gemini",
+      "kind": "model",
+      "display_name": {
+        "en": "Gemini 2.5 Pro",
+        "zh-HK": "Gemini 2.5 Pro"
+      },
+      "status": "active",
+      "replacement": null,
+      "managed": false,
+      "prices": {
+        "input": 1.25,
+        "output": 10,
+        "cache_read": 0.31,
+        "cache_write": 1.25,
+        "tiers": [
+          {
+            "above_input_tokens": 200000,
+            "input": 2.5,
+            "output": 15,
+            "cache_read": 0.625,
+            "cache_write": 2.5
+          }
+        ]
+      },
+      "context": null,
+      "max_output": 65536,
+      "capabilities": {
+        "tools": true,
+        "streaming": true,
+        "json": true,
+        "json_schema": false,
+        "vision": false,
+        "thinking": true,
+        "reasoning_effort": false
+      }
+    },
+    {
+      "id": "gemini-pro",
+      "provider": "gemini",
+      "kind": "family",
+      "display_name": {
+        "en": "gemini-pro",
+        "zh-HK": "gemini-pro"
+      },
+      "status": "active",
+      "replacement": null,
+      "managed": false,
+      "prices": {
+        "input": 1.25,
+        "output": 10,
+        "cache_read": 0.31,
+        "cache_write": 1.25,
+        "tiers": []
+      },
+      "context": null,
+      "max_output": null,
+      "capabilities": {
+        "tools": true,
+        "streaming": true,
+        "json": true,
+        "json_schema": false,
+        "vision": false,
+        "thinking": true,
+        "reasoning_effort": false
+      }
+    },
+    {
+      "id": "gemini-2.5-flash",
+      "provider": "gemini",
+      "kind": "model",
+      "display_name": {
+        "en": "Gemini 2.5 Flash",
+        "zh-HK": "Gemini 2.5 Flash"
+      },
+      "status": "active",
+      "replacement": null,
+      "managed": false,
+      "prices": {
+        "input": 0.3,
+        "output": 2.5,
+        "cache_read": 0.075,
+        "cache_write": 0.3,
+        "tiers": []
+      },
+      "context": null,
+      "max_output": 65536,
+      "capabilities": {
+        "tools": true,
+        "streaming": true,
+        "json": true,
+        "json_schema": false,
+        "vision": false,
+        "thinking": true,
+        "reasoning_effort": false
+      }
+    },
+    {
+      "id": "gemini-flash",
+      "provider": "gemini",
+      "kind": "family",
+      "display_name": {
+        "en": "gemini-flash",
+        "zh-HK": "gemini-flash"
+      },
+      "status": "active",
+      "replacement": null,
+      "managed": false,
+      "prices": {
+        "input": 0.3,
+        "output": 2.5,
+        "cache_read": 0.075,
+        "cache_write": 0.3,
+        "tiers": []
+      },
+      "context": null,
+      "max_output": null,
+      "capabilities": {
+        "tools": true,
+        "streaming": true,
+        "json": true,
+        "json_schema": false,
+        "vision": false,
+        "thinking": true,
+        "reasoning_effort": false
+      }
+    },
+    {
+      "id": "nova-micro",
+      "provider": "bedrock",
+      "kind": "model",
+      "display_name": {
+        "en": "Amazon Nova Micro",
+        "zh-HK": "Amazon Nova Micro"
+      },
+      "status": "active",
+      "replacement": null,
+      "managed": false,
+      "prices": {
+        "input": 0.035,
+        "output": 0.14,
+        "cache_read": 0.00875,
+        "cache_write": 0.04375,
+        "tiers": []
+      },
+      "context": null,
+      "max_output": null,
+      "capabilities": {
+        "tools": true,
+        "streaming": true,
+        "json": true,
+        "json_schema": false,
+        "vision": false,
+        "thinking": false,
+        "reasoning_effort": false
+      }
+    },
+    {
+      "id": "nova-lite",
+      "provider": "bedrock",
+      "kind": "model",
+      "display_name": {
+        "en": "Amazon Nova Lite",
+        "zh-HK": "Amazon Nova Lite"
+      },
+      "status": "active",
+      "replacement": null,
+      "managed": false,
+      "prices": {
+        "input": 0.06,
+        "output": 0.24,
+        "cache_read": 0.015,
+        "cache_write": 0.075,
+        "tiers": []
+      },
+      "context": null,
+      "max_output": null,
+      "capabilities": {
+        "tools": true,
+        "streaming": true,
+        "json": true,
+        "json_schema": false,
+        "vision": false,
+        "thinking": false,
+        "reasoning_effort": false
+      }
+    },
+    {
+      "id": "nova-pro",
+      "provider": "bedrock",
+      "kind": "model",
+      "display_name": {
+        "en": "Amazon Nova Pro",
+        "zh-HK": "Amazon Nova Pro"
+      },
+      "status": "active",
+      "replacement": null,
+      "managed": false,
+      "prices": {
+        "input": 0.8,
+        "output": 3.2,
+        "cache_read": 0.2,
+        "cache_write": 1,
+        "tiers": []
+      },
+      "context": null,
+      "max_output": null,
+      "capabilities": {
+        "tools": true,
+        "streaming": true,
+        "json": true,
+        "json_schema": false,
+        "vision": false,
+        "thinking": false,
+        "reasoning_effort": false
+      }
+    },
+    {
+      "id": "jev",
+      "provider": "typesafe",
+      "kind": "family",
+      "display_name": {
+        "en": "jev",
+        "zh-HK": "jev"
+      },
+      "status": "active",
+      "replacement": null,
+      "managed": false,
+      "prices": {
+        "input": 0.042,
+        "output": 0,
+        "cache_read": 0.042,
+        "cache_write": 0.042,
+        "tiers": []
+      },
+      "context": null,
+      "max_output": null,
+      "capabilities": {
+        "tools": false,
+        "streaming": false,
+        "json": false,
+        "json_schema": false,
+        "vision": false,
+        "thinking": false,
+        "reasoning_effort": false
+      }
+    },
+    {
+      "id": "qwen3.5:2b",
+      "provider": "ollama",
+      "kind": "model",
+      "display_name": {
+        "en": "Qwen 3.5 2B",
+        "zh-HK": "Qwen 3.5 2B"
+      },
+      "status": "active",
+      "replacement": null,
+      "managed": false,
+      "prices": null,
+      "context": null,
+      "max_output": null,
+      "capabilities": {
+        "tools": true,
+        "streaming": true,
+        "json": true,
+        "json_schema": false,
+        "vision": false,
+        "thinking": true,
+        "reasoning_effort": false
+      },
+      "local": {
+        "param_size": "2B",
+        "download_gb": 2.7,
+        "min_ram_gb": 8,
+        "description": "Lightweight local assistant",
+        "setup": {
+          "disk_reserve_gb": 8,
+          "context_cap": 4096,
+          "think_off": true
+        }
+      }
+    },
+    {
+      "id": "llama3.2:3b",
+      "provider": "ollama",
+      "kind": "model",
+      "display_name": {
+        "en": "Llama 3.2 3B",
+        "zh-HK": "Llama 3.2 3B"
+      },
+      "status": "active",
+      "replacement": null,
+      "managed": false,
+      "prices": null,
+      "context": null,
+      "max_output": null,
+      "capabilities": {
+        "tools": true,
+        "streaming": true,
+        "json": true,
+        "json_schema": false,
+        "vision": false,
+        "thinking": false,
+        "reasoning_effort": false
+      },
+      "local": {
+        "param_size": "3B",
+        "download_gb": 2,
+        "min_ram_gb": 8,
+        "description": "Fast, good for chat and basic tasks",
+        "setup": null
+      }
+    },
+    {
+      "id": "qwen2.5:7b",
+      "provider": "ollama",
+      "kind": "model",
+      "display_name": {
+        "en": "Qwen 2.5 7B",
+        "zh-HK": "Qwen 2.5 7B"
+      },
+      "status": "active",
+      "replacement": null,
+      "managed": false,
+      "prices": null,
+      "context": null,
+      "max_output": null,
+      "capabilities": {
+        "tools": true,
+        "streaming": true,
+        "json": true,
+        "json_schema": false,
+        "vision": false,
+        "thinking": false,
+        "reasoning_effort": false
+      },
+      "local": {
+        "param_size": "7B",
+        "download_gb": 4.7,
+        "min_ram_gb": 8,
+        "description": "Strong tool use, multilingual",
+        "setup": null
+      }
+    },
+    {
+      "id": "qwen3.5:4b",
+      "provider": "ollama",
+      "kind": "model",
+      "display_name": {
+        "en": "Qwen 3.5 4B",
+        "zh-HK": "Qwen 3.5 4B"
+      },
+      "status": "active",
+      "replacement": null,
+      "managed": false,
+      "prices": null,
+      "context": null,
+      "max_output": null,
+      "capabilities": {
+        "tools": true,
+        "streaming": true,
+        "json": true,
+        "json_schema": false,
+        "vision": false,
+        "thinking": true,
+        "reasoning_effort": false
+      },
+      "local": {
+        "param_size": "4B",
+        "download_gb": 3.4,
+        "min_ram_gb": 16,
+        "description": "Multilingual local assistant",
+        "setup": {
+          "disk_reserve_gb": 10,
+          "context_cap": 4096,
+          "think_off": true
+        }
+      }
+    },
+    {
+      "id": "qwen3.5:9b",
+      "provider": "ollama",
+      "kind": "model",
+      "display_name": {
+        "en": "Qwen 3.5 9B",
+        "zh-HK": "Qwen 3.5 9B"
+      },
+      "status": "active",
+      "replacement": null,
+      "managed": false,
+      "prices": null,
+      "context": null,
+      "max_output": null,
+      "capabilities": {
+        "tools": true,
+        "streaming": true,
+        "json": true,
+        "json_schema": false,
+        "vision": false,
+        "thinking": true,
+        "reasoning_effort": false
+      },
+      "local": {
+        "param_size": "9B",
+        "download_gb": 6.6,
+        "min_ram_gb": 24,
+        "description": "Multilingual local assistant",
+        "setup": {
+          "disk_reserve_gb": 15,
+          "context_cap": 8192,
+          "think_off": true
+        }
+      }
+    },
+    {
+      "id": "mistral:7b",
+      "provider": "ollama",
+      "kind": "model",
+      "display_name": {
+        "en": "Mistral 7B",
+        "zh-HK": "Mistral 7B"
+      },
+      "status": "active",
+      "replacement": null,
+      "managed": false,
+      "prices": null,
+      "context": null,
+      "max_output": null,
+      "capabilities": {
+        "tools": true,
+        "streaming": true,
+        "json": true,
+        "json_schema": false,
+        "vision": false,
+        "thinking": false,
+        "reasoning_effort": false
+      },
+      "local": {
+        "param_size": "7B",
+        "download_gb": 4.1,
+        "min_ram_gb": 8,
+        "description": "Fast reasoning and tool use",
+        "setup": null
+      }
+    },
+    {
+      "id": "qwen3:8b",
+      "provider": "ollama",
+      "kind": "model",
+      "display_name": {
+        "en": "Qwen 3 8B",
+        "zh-HK": "Qwen 3 8B"
+      },
+      "status": "active",
+      "replacement": null,
+      "managed": false,
+      "prices": null,
+      "context": null,
+      "max_output": null,
+      "capabilities": {
+        "tools": true,
+        "streaming": true,
+        "json": true,
+        "json_schema": false,
+        "vision": false,
+        "thinking": false,
+        "reasoning_effort": false
+      },
+      "local": {
+        "param_size": "8B",
+        "download_gb": 5.2,
+        "min_ram_gb": 8,
+        "description": "Qwen multilingual model",
+        "setup": null
+      }
+    },
+    {
+      "id": "deepseek-r1:7b",
+      "provider": "ollama",
+      "kind": "model",
+      "display_name": {
+        "en": "DeepSeek R1 7B",
+        "zh-HK": "DeepSeek R1 7B"
+      },
+      "status": "active",
+      "replacement": null,
+      "managed": false,
+      "prices": null,
+      "context": null,
+      "max_output": null,
+      "capabilities": {
+        "tools": false,
+        "streaming": true,
+        "json": true,
+        "json_schema": false,
+        "vision": false,
+        "thinking": false,
+        "reasoning_effort": false
+      },
+      "local": {
+        "param_size": "7B",
+        "download_gb": 4.7,
+        "min_ram_gb": 8,
+        "description": "Deep reasoning, no tool support",
+        "setup": null
+      }
+    },
+    {
+      "id": "qwen2.5:14b",
+      "provider": "ollama",
+      "kind": "model",
+      "display_name": {
+        "en": "Qwen 2.5 14B",
+        "zh-HK": "Qwen 2.5 14B"
+      },
+      "status": "active",
+      "replacement": null,
+      "managed": false,
+      "prices": null,
+      "context": null,
+      "max_output": null,
+      "capabilities": {
+        "tools": true,
+        "streaming": true,
+        "json": true,
+        "json_schema": false,
+        "vision": false,
+        "thinking": false,
+        "reasoning_effort": false
+      },
+      "local": {
+        "param_size": "14B",
+        "download_gb": 9,
+        "min_ram_gb": 16,
+        "description": "Higher quality tool use",
+        "setup": null
+      }
+    },
+    {
+      "id": "deepseek-r1:14b",
+      "provider": "ollama",
+      "kind": "model",
+      "display_name": {
+        "en": "DeepSeek R1 14B",
+        "zh-HK": "DeepSeek R1 14B"
+      },
+      "status": "active",
+      "replacement": null,
+      "managed": false,
+      "prices": null,
+      "context": null,
+      "max_output": null,
+      "capabilities": {
+        "tools": false,
+        "streaming": true,
+        "json": true,
+        "json_schema": false,
+        "vision": false,
+        "thinking": false,
+        "reasoning_effort": false
+      },
+      "local": {
+        "param_size": "14B",
+        "download_gb": 9,
+        "min_ram_gb": 16,
+        "description": "Strong reasoning at 14B",
+        "setup": null
+      }
+    },
+    {
+      "id": "qwen2.5:32b",
+      "provider": "ollama",
+      "kind": "model",
+      "display_name": {
+        "en": "Qwen 2.5 32B",
+        "zh-HK": "Qwen 2.5 32B"
+      },
+      "status": "active",
+      "replacement": null,
+      "managed": false,
+      "prices": null,
+      "context": null,
+      "max_output": null,
+      "capabilities": {
+        "tools": true,
+        "streaming": true,
+        "json": true,
+        "json_schema": false,
+        "vision": false,
+        "thinking": false,
+        "reasoning_effort": false
+      },
+      "local": {
+        "param_size": "32B",
+        "download_gb": 20,
+        "min_ram_gb": 32,
+        "description": "Near-cloud quality",
+        "setup": null
+      }
+    },
+    {
+      "id": "deepseek-r1:32b",
+      "provider": "ollama",
+      "kind": "model",
+      "display_name": {
+        "en": "DeepSeek R1 32B",
+        "zh-HK": "DeepSeek R1 32B"
+      },
+      "status": "active",
+      "replacement": null,
+      "managed": false,
+      "prices": null,
+      "context": null,
+      "max_output": null,
+      "capabilities": {
+        "tools": false,
+        "streaming": true,
+        "json": true,
+        "json_schema": false,
+        "vision": false,
+        "thinking": false,
+        "reasoning_effort": false
+      },
+      "local": {
+        "param_size": "32B",
+        "download_gb": 20,
+        "min_ram_gb": 32,
+        "description": "Best local reasoning",
+        "setup": null
+      }
+    },
+    {
+      "id": "llama3.3:70b",
+      "provider": "ollama",
+      "kind": "model",
+      "display_name": {
+        "en": "Llama 3.3 70B",
+        "zh-HK": "Llama 3.3 70B"
+      },
+      "status": "active",
+      "replacement": null,
+      "managed": false,
+      "prices": null,
+      "context": null,
+      "max_output": null,
+      "capabilities": {
+        "tools": true,
+        "streaming": true,
+        "json": true,
+        "json_schema": false,
+        "vision": false,
+        "thinking": false,
+        "reasoning_effort": false
+      },
+      "local": {
+        "param_size": "70B",
+        "download_gb": 43,
+        "min_ram_gb": 64,
+        "description": "Large general-purpose model",
+        "setup": null
+      }
+    },
+    {
+      "id": "speech-02-hd",
+      "provider": "minimax",
+      "kind": "model",
+      "display_name": {
+        "en": "MiniMax Speech-02-HD",
+        "zh-HK": "MiniMax Speech-02-HD"
+      },
+      "status": "active",
+      "replacement": null,
+      "managed": false,
+      "prices": null,
+      "context": null,
+      "max_output": null,
+      "capabilities": {
+        "tools": false,
+        "streaming": true,
+        "json": false,
+        "json_schema": false,
+        "vision": false,
+        "thinking": false,
+        "reasoning_effort": false
+      }
+    },
+    {
+      "id": "ggml-base",
+      "provider": "whisper",
+      "kind": "model",
+      "display_name": {
+        "en": "Whisper base",
+        "zh-HK": "Whisper base"
+      },
+      "status": "active",
+      "replacement": null,
+      "managed": false,
+      "prices": null,
+      "context": null,
+      "max_output": null,
+      "capabilities": {
+        "tools": false,
+        "streaming": false,
+        "json": false,
+        "json_schema": false,
+        "vision": false,
+        "thinking": false,
+        "reasoning_effort": false
+      },
+      "download": {
+        "url": "https://huggingface.co/ggerganov/whisper.cpp/resolve/main/ggml-base.bin",
+        "sha256": "60ed5bc3dd14eea856493d334349b405782ddcaf0028d4b5df4088345fba2efe",
+        "min_bytes": 100000000
+      }
+    },
+    {
+      "id": "jarvis-ai",
+      "provider": "jarvis_ai",
+      "kind": "model",
+      "display_name": {
+        "en": "JARVIS AI",
+        "zh-HK": "JARVIS AI"
+      },
+      "status": "active",
+      "replacement": null,
+      "managed": true,
+      "prices": null,
+      "context": null,
+      "max_output": null,
+      "capabilities": {
+        "tools": true,
+        "streaming": true,
+        "json": false,
+        "json_schema": false,
+        "vision": false,
+        "thinking": false,
+        "reasoning_effort": false
+      }
+    },
+    {
+      "id": "qwen.qwen3-32b-v1:0",
+      "provider": "jarvis_ai",
+      "kind": "model",
+      "display_name": {
+        "en": "Qwen3 32B",
+        "zh-HK": "Qwen3 32B"
+      },
+      "status": "active",
+      "replacement": null,
+      "managed": true,
+      "prices": {
+        "input": 0.18,
+        "output": 0.73,
+        "cache_read": null,
+        "cache_write": null,
+        "tiers": []
+      },
+      "price_source": "AWS Price List for Amazon Bedrock, Asia Pacific (Tokyo), on-demand standard tier, publication 2026-11-11T01:30:37Z (https://pricing.us-east-1.amazonaws.com/offers/v1.0/aws/AmazonBedrock/20261111013037/ap-northeast-1/index.json), read 2026-11-13",
+      "context": null,
+      "max_output": null,
+      "capabilities": {
+        "tools": true,
+        "streaming": true,
+        "json": false,
+        "json_schema": false,
+        "vision": false,
+        "thinking": false,
+        "reasoning_effort": false
+      },
+      "bedrock": {
+        "region": "ap-northeast-1",
+        "model_id": "qwen.qwen3-32b-v1:0",
+        "invoke": "arn:aws:bedrock:ap-northeast-1::foundation-model/qwen.qwen3-32b-v1:0",
+        "hold_text_with_tools": false
+      }
+    },
+    {
+      "id": "apac.amazon.nova-micro-v1:0",
+      "provider": "jarvis_ai",
+      "kind": "model",
+      "display_name": {
+        "en": "Amazon Nova Micro",
+        "zh-HK": "Amazon Nova Micro"
+      },
+      "status": "active",
+      "replacement": null,
+      "managed": true,
+      "prices": {
+        "input": 0.042,
+        "output": 0.168,
+        "cache_read": 0.0105,
+        "cache_write": null,
+        "tiers": []
+      },
+      "price_source": "AWS Price List for Amazon Bedrock, Asia Pacific (Tokyo), on-demand standard tier, publication 2026-11-11T01:30:37Z (https://pricing.us-east-1.amazonaws.com/offers/v1.0/aws/AmazonBedrock/20261111013037/ap-northeast-1/index.json), read 2026-11-13",
+      "context": null,
+      "max_output": null,
+      "capabilities": {
+        "tools": true,
+        "streaming": true,
+        "json": false,
+        "json_schema": false,
+        "vision": false,
+        "thinking": false,
+        "reasoning_effort": false
+      },
+      "bedrock": {
+        "region": "ap-northeast-1",
+        "model_id": "amazon.nova-micro-v1:0",
+        "invoke": "apac.amazon.nova-micro-v1:0",
+        "hold_text_with_tools": false
+      }
+    },
+    {
+      "id": "deepseek.v3.2",
+      "provider": "jarvis_ai",
+      "kind": "model",
+      "display_name": {
+        "en": "DeepSeek V3.2",
+        "zh-HK": "DeepSeek V3.2"
+      },
+      "status": "active",
+      "replacement": null,
+      "managed": true,
+      "prices": {
+        "input": 0.74,
+        "output": 2.22,
+        "cache_read": null,
+        "cache_write": null,
+        "tiers": []
+      },
+      "price_source": "AWS Price List for Amazon Bedrock, Asia Pacific (Tokyo), on-demand standard tier, publication 2026-11-11T01:30:37Z (https://pricing.us-east-1.amazonaws.com/offers/v1.0/aws/AmazonBedrock/20261111013037/ap-northeast-1/index.json), read 2026-11-13",
+      "context": null,
+      "max_output": null,
+      "capabilities": {
+        "tools": true,
+        "streaming": true,
+        "json": false,
+        "json_schema": false,
+        "vision": false,
+        "thinking": true,
+        "reasoning_effort": false
+      },
+      "bedrock": {
+        "region": "ap-northeast-1",
+        "model_id": "deepseek.v3.2",
+        "invoke": "arn:aws:bedrock:ap-northeast-1::foundation-model/deepseek.v3.2",
+        "hold_text_with_tools": true
+      }
+    }
+  ],
+  "features": {
+    "chat": {
+      "openai": "gpt-6-luna",
+      "claude": "claude-sonnet-5-5",
+      "gemini": "gemini-3.7-flash",
+      "bedrock": "global.anthropic.claude-sonnet-4-6",
+      "jarvis_ai": "jarvis-ai"
+    },
+    "premium": {
+      "openai": "gpt-6-luna",
+      "claude": "claude-sonnet-5-5",
+      "gemini": "gemini-3.1-pro-preview",
+      "bedrock": "global.anthropic.claude-sonnet-4-6"
+    },
+    "mail_analysis": {
+      "openai": "gpt-6-luna",
+      "claude": "claude-sonnet-5-5",
+      "gemini": "gemini-3.7-flash",
+      "bedrock": "global.anthropic.claude-sonnet-4-6",
+      "jarvis_ai": "jarvis-ai"
+    },
+    "mail_sort": {
+      "openai": "gpt-6-luna",
+      "claude": "claude-sonnet-5-5",
+      "gemini": "gemini-3.7-flash",
+      "bedrock": "global.anthropic.claude-sonnet-4-6",
+      "typesafe": "jev-latest",
+      "jarvis_ai": "jarvis-ai"
+    },
+    "briefing": {
+      "openai": "gpt-6-luna",
+      "claude": "claude-sonnet-5-5",
+      "gemini": "gemini-3.7-flash",
+      "bedrock": "global.anthropic.claude-sonnet-4-6"
+    },
+    "memory": {
+      "openai": "gpt-6-luna",
+      "claude": "claude-sonnet-5-5",
+      "gemini": "gemini-3.7-flash",
+      "bedrock": "global.anthropic.claude-sonnet-4-6"
+    },
+    "stt": {
+      "gemini": "gemini-3.7-flash",
+      "whisper": "ggml-base"
+    },
+    "tts": {
+      "minimax": "speech-02-hd"
+    },
+    "cloud_triage": {
+      "jarvis_ai": "jarvis-ai"
+    }
+  },
+  "chat_model_filter": {
+    "strip_prefix": "models/",
+    "exclude_words": [
+      "audio",
+      "realtime",
+      "tts",
+      "transcribe",
+      "image",
+      "embedding",
+      "search",
+      "moderation",
+      "dall-e",
+      "whisper",
+      "instruct",
+      "computer-use",
+      "codex",
+      "-live"
+    ],
+    "exclude_dated_snapshots": true
+  },
+  "presets": {
+    "default": "gemini_primary",
+    "chains": {
+      "gemini_primary": {
+        "label": {
+          "en": "Gemini Flash (routine) + Gemini Pro (fallback)",
+          "zh-HK": "Gemini Flash（日常）＋Gemini Pro（後備）"
+        },
+        "entries": [
+          {
+            "provider": "gemini",
+            "model": null
+          },
+          {
+            "provider": "gemini",
+            "model": "gemini-3.1-pro-preview"
+          }
+        ]
+      },
+      "gemini_flash": {
+        "label": {
+          "en": "Gemini Flash (primary) + Pro (fallback)",
+          "zh-HK": "Gemini Flash（主要）＋Pro（後備）"
+        },
+        "entries": [
+          {
+            "provider": "gemini",
+            "model": "gemini-3.7-flash"
+          },
+          {
+            "provider": "gemini",
+            "model": "gemini-3.1-pro-preview"
+          }
+        ]
+      },
+      "gemini_pro_only": {
+        "label": {
+          "en": "Gemini Pro only",
+          "zh-HK": "只用 Gemini Pro"
+        },
+        "entries": [
+          {
+            "provider": "gemini",
+            "model": "gemini-3.1-pro-preview"
+          }
+        ]
+      },
+      "gemini_flash_only": {
+        "label": {
+          "en": "Gemini Flash only",
+          "zh-HK": "只用 Gemini Flash"
+        },
+        "entries": [
+          {
+            "provider": "gemini",
+            "model": "gemini-3.7-flash"
+          }
+        ]
+      }
+    }
+  },
+  "managed": {
+    "paused": false,
+    "markup": 2,
+    "allowances_usd_micros": {
+      "pro": 20000000,
+      "team": 40000000,
+      "grant": 20000000
+    },
+    "top_up_packs_hkd": [
+      50,
+      100,
+      200
+    ],
+    "hkd_per_usd": 7.8,
+    "credit_expiry_months": 12,
+    "per_user_daily_cap": 2000000,
+    "daily_cap_time_zone": "UTC",
+    "global_daily_ceiling": "entitled_users_x_per_user_daily_cap",
+    "budget_alert_percent": [
+      50,
+      80,
+      100
+    ],
+    "budget_kill_percent": 150,
+    "bedrock_region": "ap-northeast-1",
+    "workload_map": {
+      "chat": "qwen.qwen3-32b-v1:0",
+      "mail_analysis": "qwen.qwen3-32b-v1:0",
+      "mail_sort": "apac.amazon.nova-micro-v1:0",
+      "cloud_triage": "apac.amazon.nova-micro-v1:0"
+    },
+    "fallback": "deepseek.v3.2",
+    "default_output_tokens": 2048,
+    "max_output_tokens": 8192
+  }
+}
