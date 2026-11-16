@@ -331,11 +331,12 @@ export function otherIdHelp(place: PickerPlace, fallback: string, text: Text): s
 
 /**
  * The sentence the Mail dialog and the setup guide show under the picker
- * while a model from a list is chosen, since a us., eu. or apac. id can be
- * chosen there from either list: mail sends it for the saved region, as chat
- * does. In the setup guide new keys and their region are saved by the test
- * button before it tests. While "Other" is chosen the help under the ID field
- * (otherIdHelp) says the same, so the sentence is shown once.
+ * whenever "Other" is not chosen (a model from a list is chosen, or nothing
+ * is chosen yet), since a us., eu. or apac. id can be chosen there from
+ * either list: mail sends it for the saved region, as chat does. In the setup
+ * guide new keys and their region are saved by the test button before it
+ * tests. While "Other" is chosen the help under the ID field (otherIdHelp)
+ * says the same, so the sentence is shown once.
  */
 export function formRegionNote(place: Exclude<PickerPlace, 'settings'>, text: Text): string {
   return place === 'mail'
