@@ -1,4 +1,5 @@
 pub mod bedrock;
+pub mod capability;
 pub mod claude;
 pub mod compat;
 pub mod mail_policy;

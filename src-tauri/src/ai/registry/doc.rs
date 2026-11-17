@@ -249,9 +249,17 @@ pub struct Prices {
     pub tiers: Vec<Tier>,
 }
 
+/// What JARVIS uses with a model today (registry/schema.json). P06's
+/// `ai::capability::resolve` reads these before a request is sent.
 #[derive(Debug, Clone, Deserialize, Serialize, PartialEq)]
 pub struct Capabilities {
     pub tools: bool,
+    pub streaming: bool,
+    pub json: bool,
+    pub json_schema: bool,
+    pub vision: bool,
+    pub thinking: bool,
+    pub reasoning_effort: bool,
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize, PartialEq)]
