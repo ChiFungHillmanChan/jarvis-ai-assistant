@@ -179,6 +179,11 @@ fn allowed(db: &Database, entry: &ProviderChainEntry) -> Result<(), Blocked> {
     let Some(provider) = registry_provider(entry) else {
         return Err(Blocked::NotAllowed(entry.provider_type.clone()));
     };
+    // A local row with no model sends the registry's default for the
+    // feature (`ai::run_chosen` puts the resolved model on the row), and
+    // this gate does not know the feature: judged by every default the
+    // registry gives Ollama (review B, m5).
+    let provider = if provider == "ollama" && entry.model_id.is_none() && ollama_defaults_include_a_cloud_model() { "ollama_cloud" } else { provider };
     let base_url = match (provider, entry.base_url.as_deref()) {
         // A "local" endpoint pointing at another machine is a remote
         // service like any other, named by its address.
@@ -479,6 +484,13 @@ fn record_an_allowed_answer(db: &Database) -> Result<(), String> {
     )
     .map(|_| ())
     .map_err(|e| e.to_string())
+}
+
+/// Whether a default the registry gives Ollama, for any feature, is a cloud
+/// model.
+fn ollama_defaults_include_a_cloud_model() -> bool {
+    let registry = super::registry::current();
+    registry.features.values().filter_map(|defaults| defaults.get("ollama")).any(|model| is_ollama_cloud_model(model))
 }
 
 /// Ollama names its cloud models "<name>:cloud" or "<name>:<size>-cloud" and
@@ -1098,6 +1110,26 @@ mod tests {
         }
         for model in ["qwen3:8b", "cloudy-day:latest", "llama3.2"] {
             assert_eq!(check(&with_model(model)), Ok(()), "{model}");
+        }
+    }
+
+    /// A local row with no model sends the registry's default for the
+    /// feature (`ai::run_chosen` puts the resolved model on the row). A
+    /// copy that makes a "-cloud" model a default sends the prompt on to
+    /// ollama.com, so the row is judged as Ollama Cloud (review B, m5).
+    #[test]
+    fn a_local_row_without_a_model_is_judged_by_the_model_it_sends() {
+        let db = db_with(&[("local", None, Some("mac"))], &[]);
+        assert_eq!(check(&db), Ok(()));
+        for feature in ["chat", "mail_analysis"] {
+            let _registry = crate::ai::registry::test_override::with(|r| {
+                r.features.entry(feature.into()).or_default().insert("ollama".into(), "gpt-oss:120b-cloud".into());
+            });
+            assert_eq!(not_sent(&db), "Ollama Cloud", "{feature}");
+            // A model saved on the row is the one sent.
+            db.conn.lock().unwrap().execute("UPDATE provider_chain SET model_id = 'qwen3:8b'", []).unwrap();
+            assert_eq!(check(&db), Ok(()), "{feature}");
+            db.conn.lock().unwrap().execute("UPDATE provider_chain SET model_id = NULL", []).unwrap();
         }
     }
 }
