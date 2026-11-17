@@ -433,8 +433,10 @@ mod tests {
             assert!(matches!(chosen_ai_for_mail(&openai), Ok(Some(_))));
         }
 
-        /// A router with keys for Kimi and OpenAI given to it, so nothing
-        /// is read from the Keychain; `chain` is the saved choice.
+        const QWEN: Option<&str> = Some("https://dashscope-intl.aliyuncs.com/compatible-mode/v1");
+
+        /// A router with keys for Kimi, Qwen and OpenAI given to it, so
+        /// nothing is read from the Keychain; `chain` is the saved choice.
         fn router(chain: &[(&str, Option<&str>)]) -> crate::ai::AiRouter {
             let mut router = crate::ai::AiRouter::new("gemini_primary");
             router.set_provider_chain(
@@ -446,6 +448,7 @@ mod tests {
             );
             router.set_openai_key("test-openai");
             router.set_compat_key(KIMI.unwrap(), "test-kimi");
+            router.set_compat_key(QWEN.unwrap(), "test-qwen");
             router
         }
 
@@ -461,7 +464,8 @@ mod tests {
         /// models that may receive the mail (OpenAI here, not Kimi).
         #[tokio::test]
         async fn mail_analysis_sends_no_mail_to_an_unknown_terms_service() {
-            let both = [("openai", KIMI), ("openai", None)];
+            // Qwen can run mail analysis but may not receive the mail either.
+            let both = [("openai", KIMI), ("openai", QWEN), ("openai", None)];
             let error = assistant_may_analyze(&on_kimi_after_agreeing(), &router(&both)).await.unwrap_err();
             let card = card(&error);
             assert_eq!(card["code"], "google_content");
