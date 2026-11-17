@@ -157,3 +157,6 @@
 .integration-setup, .integration-advanced { margin-top: 18px; font-size: 13px; }
 .integration-setup summary, .integration-advanced summary { cursor: pointer; margin-bottom: 12px; }
 .integration-connection .settings-help { margin-top: 8px; }
+.settings-about { display: grid; grid-template-columns: max-content 1fr; gap: 6px 16px; margin: 0 0 12px; font-size: 13px; }
+.settings-about dt { color: var(--text-secondary); }
+.settings-about dd { margin: 0; color: var(--text-primary); }

@@ -21,7 +21,7 @@ struct OpenAIRequest {
     /// is off ("Function tools with reasoning_effort are not supported"),
     /// verified live 2026-09-25. Not sent to compatible services.
     #[serde(skip_serializing_if = "Option::is_none")]
-    reasoning_effort: Option<&'static str>,
+    reasoning_effort: Option<String>,
     /// "none" on the last allowed round, so the model answers from what the
     /// earlier rounds gathered instead of asking for another tool.
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -36,7 +36,7 @@ struct OpenAIRequest {
 pub struct Target<'a> {
     /// None is api.openai.com.
     pub base_url: Option<&'a str>,
-    /// The chain row's model. On api.openai.com, None follows models::OPENAI_DEFAULT.
+    /// The chain row's model. On api.openai.com, None follows the registry's default.
     pub model: Option<&'a str>,
 }
 
@@ -50,7 +50,7 @@ impl Target<'_> {
 
     fn model(&self) -> Result<String, String> {
         match self.base_url {
-            None => Ok(self.model.map(str::trim).filter(|m| !m.is_empty()).unwrap_or(crate::ai::models::OPENAI_DEFAULT).to_string()),
+            None => Ok(self.model.map(str::trim).filter(|m| !m.is_empty()).map(str::to_string).unwrap_or_else(crate::ai::models::openai_default)),
             Some(base) => self
                 .model
                 .map(str::to_string)
@@ -66,13 +66,16 @@ impl Target<'_> {
 
     fn request(&self, model: String, messages: Vec<OpenAIMessage>, tools: Vec<serde_json::Value>, final_round: bool) -> OpenAIRequest {
         let official = self.base_url.is_none();
+        // The registry's limits: OpenAI's own, or the compatible service's.
+        let limits = crate::ai::models::limits(crate::ai::models::openai_format_provider(self.base_url));
+        let cap = limits.chat_max_output_tokens.unwrap_or_default();
         OpenAIRequest {
             model,
             messages,
             tools,
-            max_completion_tokens: official.then_some(4096),
-            max_tokens: (!official).then_some(4096),
-            reasoning_effort: official.then_some("none"),
+            max_completion_tokens: official.then_some(cap),
+            max_tokens: (!official).then_some(cap),
+            reasoning_effort: if official { limits.chat_reasoning_effort } else { None },
             tool_choice: final_round.then_some("none"),
             stream: true,
             stream_options: StreamOptions { include_usage: true },
@@ -219,7 +222,7 @@ pub async fn send(
             }),
     );
 
-    let max_iterations = 5;
+    let max_iterations = crate::ai::models::max_tool_rounds(crate::ai::models::openai_format_provider(target.base_url));
     for round in 0..max_iterations {
         let final_round = round + 1 == max_iterations;
         // Per-round usage: OpenAI sends one usage chunk per request, so
@@ -536,6 +539,32 @@ fn retry_delay(status: u16, retry_after: Option<&str>) -> Option<std::time::Dura
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The output cap and reasoning effort are the registry's: OpenAI's own
+    /// for api.openai.com, the compatible service's for any other address.
+    #[test]
+    fn request_limits_follow_the_registry() {
+        let _registry = crate::ai::registry::test_override::with(|r| {
+            fn limits<'a>(r: &'a mut crate::ai::registry::Registry, id: &str) -> &'a mut crate::ai::registry::doc::Limits {
+                &mut r.providers.iter_mut().find(|p| p.id == id).unwrap().limits
+            }
+            limits(r, "openai").chat_max_output_tokens = Some(1234);
+            limits(r, "openai").chat_reasoning_effort = Some("low".into());
+            limits(r, "kimi").chat_max_output_tokens = Some(777);
+            limits(r, "openai_compat").chat_max_output_tokens = Some(555);
+        });
+        let wire = |base_url: Option<&str>| {
+            let target = Target { base_url, model: Some("m") };
+            serde_json::to_value(target.request("m".into(), Vec::new(), Vec::new(), false)).unwrap()
+        };
+        let official = wire(None);
+        assert_eq!((official["max_completion_tokens"].as_u64(), official["reasoning_effort"].as_str()), (Some(1234), Some("low")));
+        let kimi = wire(Some("https://api.moonshot.ai/v1"));
+        assert_eq!((kimi["max_tokens"].as_u64(), kimi.get("reasoning_effort")), (Some(777), None));
+        assert_eq!(wire(Some("https://api.deepseek.com/v1"))["max_tokens"].as_u64(), Some(555));
+        let target = Target { base_url: None, model: None };
+        assert_eq!(target.model().unwrap(), crate::ai::models::OPENAI_DEFAULT);
+    }
 
     #[test]
     fn calls_without_an_index_are_kept_apart_by_id() {

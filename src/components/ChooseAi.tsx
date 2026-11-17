@@ -1,26 +1,26 @@
 import { useEffect, useRef, useState } from 'react';
 import { useUiLocale } from '../i18n';
-import { aiServiceLabel, chooseAi, COMPATIBLE_SERVICES, currentAi, listAiModels, type AiProvider, type CurrentAi } from '../lib/ai-choice';
+import { chooseAi, currentAi, listAiModels, type AiProvider, type CurrentAi } from '../lib/ai-choice';
 import { getOptionalPreference, openUrl, setPreference } from '../lib/commands';
-import { useAiModels } from '../lib/ai-models';
+import { aiModels, useAiModels, type AiModelCatalog } from '../lib/ai-models';
+import { localized, serviceFor, serviceLabel, setupOptions, type SetupOption } from '../lib/ai-catalog';
 import LocalMailSetup from './LocalMailSetup';
 import '../styles/setup.css';
 
-type Option = 'ollama' | 'openai' | 'gemini' | 'claude' | 'kimi' | 'qwen' | 'other';
-type Region = 'global' | 'china';
-
-const KEY_PAGES: Partial<Record<Option, string>> = {
-  openai: 'https://platform.openai.com/api-keys',
-  gemini: 'https://aistudio.google.com/apikey',
-  claude: 'https://console.anthropic.com/settings/keys',
-};
+// The services, their hints, key pages and regions are the model
+// registry's (ai_models); this file has the form for each.
+type Option = SetupOption;
+type Region = string;
 
 /** Same key as ai::mail_policy in Rust. */
 const GEMINI_BILLING_CONFIRMED = 'gemini_billing_confirmed';
 
-function optionFor(ai: CurrentAi | null): Option | null {
+function optionFor(ai: CurrentAi | null, catalog: AiModelCatalog | null): Option | null {
   if (!ai) return null;
-  if (ai.provider === 'compatible') return ai.label === 'Kimi' ? 'kimi' : ai.label === 'Qwen' ? 'qwen' : 'other';
+  if (ai.provider === 'compatible') {
+    const service = ai.base_url ? serviceFor(catalog, ai.base_url)?.id : undefined;
+    return service === 'kimi' || service === 'qwen' ? service : 'other';
+  }
   return (['ollama', 'openai', 'gemini', 'claude'] as string[]).includes(ai.provider) ? ai.provider as Option : null;
 }
 
@@ -48,15 +48,14 @@ export default function ChooseAi({ onChosen, onBusyChange }: { onChosen?: (ai: C
 
   useEffect(() => {
     mounted.current = true;
-    void currentAi().then(ai => {
+    void Promise.all([currentAi(), aiModels().catch(() => null)]).then(([ai, models]) => {
       if (!mounted.current) return;
-      setCurrent(ai); setOption(optionFor(ai));
+      setCurrent(ai); setOption(optionFor(ai, models));
       if (ai?.model) { setModel(ai.model); setModels([ai.model]); }
       // Show the saved service, not an empty form.
       const saved = ai?.base_url;
       if (saved) {
-        const regions: readonly { id: Region; baseUrl: string }[] = [...COMPATIBLE_SERVICES.kimi.regions, ...COMPATIBLE_SERVICES.qwen.regions];
-        const known = regions.find(r => r.baseUrl === saved);
+        const known = (models?.compatible ?? []).flatMap(service => service.regions).find(r => r.base_url === saved);
         if (known) setRegion(known.id); else setOtherUrl(saved);
       }
     }).catch(() => {});
@@ -65,18 +64,21 @@ export default function ChooseAi({ onChosen, onBusyChange }: { onChosen?: (ai: C
   }, []);
   useEffect(() => { onBusyChange?.(!!busy); }, [busy]);
 
-  const service = option === 'kimi' || option === 'qwen' ? COMPATIBLE_SERVICES[option].regions.find(r => r.id === region)! : null;
-  const baseUrl = service ? service.baseUrl : option === 'other' ? otherUrl.trim() : '';
-  const needsModel = option === 'ollama' || option === 'kimi' || option === 'qwen' || option === 'other';
+  const offered = setupOptions(catalog);
+  const chosen = offered.find(choice => choice.option === option);
+  const named = option === 'kimi' || option === 'qwen' ? catalog?.compatible.find(s => s.id === option) ?? null : null;
+  const service = named?.regions.find(r => r.id === region) ?? named?.regions[0] ?? null;
+  const baseUrl = service ? service.base_url : option === 'other' ? otherUrl.trim() : '';
+  const needsModel = chosen?.model === 'required';
   // OpenAI, Gemini and Claude may pin a model; left blank, JARVIS follows the
   // latest model it ships with.
-  const optionalModel = option === 'openai' || option === 'gemini' || option === 'claude';
+  const optionalModel = chosen?.model === 'optional';
   const latest = !catalog ? '' : option === 'openai' ? catalog.defaults.openai : option === 'claude' ? catalog.defaults.claude : option === 'gemini' ? catalog.defaults.gemini_flash : '';
   const name = option === 'ollama' ? 'Ollama' : option === 'openai' ? 'OpenAI' : option === 'gemini' ? 'Gemini' : option === 'claude' ? 'Claude'
-    : option === 'kimi' ? 'Kimi' : option === 'qwen' ? 'Qwen' : /^https?:\/\/[^/\s]+/.test(otherUrl.trim()) ? aiServiceLabel(otherUrl.trim()) : text('this service', '該服務');
+    : named ? named.name : /^https?:\/\/[^/\s]+/.test(otherUrl.trim()) ? serviceLabel(catalog, otherUrl.trim()) : text('this service', '該服務');
   // Chinese text puts spaces around Latin names only ("向 Kimi 傳送", "向該服務傳送").
   const zhName = /^[\x00-\x7F]+$/.test(name) ? ` ${name} ` : name;
-  const keyPage = service?.keyPage ?? (option ? KEY_PAGES[option] : undefined);
+  const keyPage = service?.key_page ?? chosen?.key_page ?? undefined;
   const provider: AiProvider | null = !option ? null : option === 'kimi' || option === 'qwen' || option === 'other' ? 'compatible' : option;
 
   function pick(next: Option) {
@@ -112,15 +114,7 @@ export default function ChooseAi({ onChosen, onBusyChange }: { onChosen?: (ai: C
     });
   }
 
-  const options: [Option, string, string][] = [
-    ['ollama', 'Ollama', text('Runs on this Mac. Free; nothing leaves the Mac.', '在此 Mac 執行，免費，資料不會離開此 Mac。')],
-    ['openai', 'OpenAI (GPT)', text('Your own OpenAI API key.', '使用你的 OpenAI API 密鑰。')],
-    ['gemini', 'Google Gemini', text('Your own Gemini API key.', '使用你的 Gemini API 密鑰。')],
-    ['claude', 'Anthropic Claude', text('Your own Claude API key.', '使用你的 Claude API 密鑰。')],
-    ['kimi', 'Kimi', text('Moonshot AI API key.', '使用 Moonshot AI 的 API 密鑰。')],
-    ['qwen', 'Qwen', text('Alibaba Cloud Model Studio API key.', '使用阿里雲百煉（Model Studio）API 密鑰。')],
-    ['other', text('Other service', '其他服務'), text('Any OpenAI-compatible API, e.g. DeepSeek or OpenRouter.', '任何兼容 OpenAI 格式的 API，例如 DeepSeek 或 OpenRouter。')],
-  ];
+  const options: [Option, string, string][] = offered.map(choice => [choice.option, localized(choice.name, text), localized(choice.hint, text)]);
   const ready = !!provider && consent && (!needsModel || !!model) && (option !== 'other' || !!otherUrl.trim());
 
   async function confirmGeminiBilling(checked: boolean) {
@@ -144,13 +138,13 @@ export default function ChooseAi({ onChosen, onBusyChange }: { onChosen?: (ai: C
       {options.map(([id, label, hint]) => <label key={id} className="setup-checkbox"><input type="radio" name="choose-ai" checked={option === id} onChange={() => pick(id)} /><span>{label}<small>{hint}</small></span></label>)}
     </fieldset>
     {option && <div className="choose-ai-details">
-      {(option === 'kimi' || option === 'qwen') && <label>{text('Account region', '帳戶地區')}<select disabled={!!busy} value={region} onChange={e => { setRegion(e.target.value as Region); setModels(null); setModel(''); }}>
-        <option value="global">{text('International', '國際')}</option><option value="china">{text('Mainland China', '中國內地')}</option>
+      {named && named.regions.length > 1 && <label>{text('Account region', '帳戶地區')}<select disabled={!!busy} value={service?.id ?? ''} onChange={e => { setRegion(e.target.value); setModels(null); setModel(''); }}>
+        {named.regions.map(r => <option key={r.id} value={r.id}>{r.id === 'global' ? text('International', '國際') : r.id === 'china' ? text('Mainland China', '中國內地') : r.id}</option>)}
       </select></label>}
       {option === 'other' && <label>{text('API base URL (ends in /v1 for most services)', 'API 基本網址（大多以 /v1 結尾）')}<input value={otherUrl} disabled={!!busy} spellCheck={false} placeholder="https://api.deepseek.com/v1" onChange={e => { setOtherUrl(e.target.value); setModels(null); setModel(''); }} /></label>}
       {option === 'openai' && <p className="setup-hint">{text('Hong Kong is not on the OpenAI API supported list. Use an eligible account, or choose another AI.', 'OpenAI API 支援地區清單未列出香港。請使用合資格帳戶，或選擇其他 AI。')}</p>}
       {option !== 'ollama' && <>
-        <label>{text(`${name} API key`, `${name} API 密鑰`)}<input type="password" autoComplete="off" spellCheck={false} disabled={!!busy} value={apiKey} onChange={e => setApiKey(e.target.value)} placeholder={optionFor(current) === option ? text('Saved. Leave blank to keep it', '已儲存，留空即沿用') : text(`Paste your ${name} API key`, `貼上你的${zhName.trimEnd()} API 密鑰`)} /></label>
+        <label>{text(`${name} API key`, `${name} API 密鑰`)}<input type="password" autoComplete="off" spellCheck={false} disabled={!!busy} value={apiKey} onChange={e => setApiKey(e.target.value)} placeholder={optionFor(current, catalog) === option ? text('Saved. Leave blank to keep it', '已儲存，留空即沿用') : text(`Paste your ${name} API key`, `貼上你的${zhName.trimEnd()} API 密鑰`)} /></label>
         {keyPage && <button type="button" disabled={!!busy} onClick={() => void openUrl(keyPage).catch(() => setError(text('Could not open the page.', '未能開啟頁面。')))}>{text('Get a key', '取得密鑰')}</button>}
       </>}
       {optionalModel && provider && <>

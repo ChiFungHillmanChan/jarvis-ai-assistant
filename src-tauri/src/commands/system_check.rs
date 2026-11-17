@@ -74,7 +74,7 @@ pub fn ram_to_recommendation(total_ram_gb: f64) -> &'static str {
     }
 }
 
-/// Size of a catalog model in ai/models.rs.
+/// Size of a catalog model in the registry.
 pub fn curated_model_size(id: &str) -> Option<f64> {
     crate::ai::models::local_model(id).map(|m| m.download_gb)
 }
@@ -82,7 +82,7 @@ pub fn curated_model_size(id: &str) -> Option<f64> {
 /// Get curated models filtered by available RAM.
 /// `pulled_ids` is a list of model IDs already present on the endpoint.
 pub fn get_curated_models(total_ram_gb: f64, pulled_ids: &[String]) -> Vec<RecommendedModel> {
-    crate::ai::models::LOCAL_MODELS
+    crate::ai::models::local_models()
         .iter()
         .filter(|m| (m.min_ram_gb as f64) <= total_ram_gb)
         .map(|m| RecommendedModel {
@@ -93,7 +93,7 @@ pub fn get_curated_models(total_ram_gb: f64, pulled_ids: &[String]) -> Vec<Recom
             min_ram_gb: m.min_ram_gb,
             tool_capable: m.tool_capable,
             description: m.description.to_string(),
-            already_pulled: pulled_ids.iter().any(|p| p == m.id),
+            already_pulled: pulled_ids.contains(&m.id),
         })
         .collect()
 }

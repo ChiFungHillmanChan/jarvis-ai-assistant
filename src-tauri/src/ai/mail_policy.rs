@@ -17,6 +17,7 @@
 //! train or fine-tune models on prompts or other input.
 
 use super::compat;
+use super::registry::DataTerms;
 use super::ProviderChainEntry;
 use crate::db::Database;
 
@@ -85,15 +86,46 @@ pub fn check(db: &Database) -> Result<(), Blocked> {
     chain.iter().try_for_each(|entry| allowed(db, entry))
 }
 
+/// The registry's data terms decide (`providers[].data_terms`): safe
+/// receives email, Gemini's billing check stands in for
+/// needs_billing_confirmation, and unknown is refused. The bundled registry
+/// is the floor: a fetched copy can tighten a provider, never loosen one.
 fn allowed(db: &Database, entry: &ProviderChainEntry) -> Result<(), Blocked> {
+    let Some(provider) = registry_provider(entry) else {
+        return Err(Blocked::NotAllowed(entry.provider_type.clone()));
+    };
+    let registry = super::registry::current();
+    let (terms, name) = match registry.provider(provider) {
+        Some(p) => (p.data_terms, p.display_name.en.clone()),
+        None => (DataTerms::Unknown, provider.to_string()),
+    };
+    // Another service at a compatible address is named by its host.
+    let label = match (provider, entry.base_url.as_deref()) {
+        ("openai_compat", Some(base)) => compat::label(base),
+        _ => name,
+    };
+    match terms {
+        DataTerms::Safe if provider == "ollama" => local_on_this_mac(db, entry.endpoint_id.as_deref()),
+        DataTerms::Safe => Ok(()),
+        DataTerms::NeedsBillingConfirmation if provider == "gemini" => gemini(db),
+        // Only Gemini has a confirmation to ask for; anything else fails closed.
+        DataTerms::NeedsBillingConfirmation | DataTerms::Unknown => Err(Blocked::NotAllowed(label)),
+    }
+}
+
+/// The registry provider a chain row sends to, or None for a row type this
+/// build does not know.
+pub(crate) fn registry_provider(entry: &ProviderChainEntry) -> Option<&'static str> {
     match (entry.provider_type.as_str(), entry.base_url.as_deref()) {
-        ("claude" | "bedrock", _) | ("openai", None) => Ok(()),
-        ("openai", Some(base)) if compat::host(base) == "api.openai.com" => Ok(()),
-        ("openai", Some(base)) => Err(Blocked::NotAllowed(compat::label(base))),
-        ("gemini", _) => gemini(db),
-        ("local", _) if entry.model_id.as_deref().is_some_and(is_ollama_cloud_model) => Err(Blocked::NotAllowed("Ollama Cloud".into())),
-        ("local", _) => local_on_this_mac(db, entry.endpoint_id.as_deref()),
-        (other, _) => Err(Blocked::NotAllowed(other.to_string())),
+        ("claude", _) => Some("claude"),
+        ("bedrock", _) => Some("bedrock"),
+        ("gemini", _) => Some("gemini"),
+        ("openai", None) => Some("openai"),
+        ("openai", Some(base)) if compat::is_openai(base) => Some("openai"),
+        ("openai", Some(base)) => Some(compat::provider_for(base).unwrap_or("openai_compat")),
+        ("local", _) if entry.model_id.as_deref().is_some_and(is_ollama_cloud_model) => Some("ollama_cloud"),
+        ("local", _) => Some("ollama"),
+        _ => None,
     }
 }
 
@@ -237,7 +269,10 @@ fn line(db: &Database, turn_begins: bool) -> Withheld {
 /// forwards their prompts to ollama.com.
 pub fn is_ollama_cloud_model(model: &str) -> bool {
     let name = model.trim().to_ascii_lowercase();
-    name.ends_with(":cloud") || name.ends_with("-cloud")
+    let registry = super::registry::current();
+    registry
+        .provider("ollama_cloud")
+        .is_some_and(|cloud| cloud.model_id_suffixes.iter().any(|suffix| name.ends_with(&suffix.to_ascii_lowercase())))
 }
 
 /// A local model keeps email on this Mac; a "local" endpoint pointing at
@@ -344,6 +379,28 @@ mod tests {
         assert!(check(&db_with(&[("openai", None, None), ("openai", Some("https://dashscope.aliyuncs.com/compatible-mode/v1"), None)], &[])).is_err());
         // No saved choice means the old Gemini default.
         assert_eq!(check(&db_with(&[], &[])), Err(Blocked::GeminiBillingUnconfirmed));
+    }
+
+    /// The registry's data terms decide. A copy that tightens a provider
+    /// refuses it; needs_billing_confirmation on anything but Gemini fails
+    /// closed, as Gemini's billing check is the only confirmation there is;
+    /// the Ollama endpoint must still be on this Mac.
+    #[test]
+    fn the_registry_data_terms_decide() {
+        let _registry = crate::ai::registry::test_override::with(|r| {
+            let mut terms = |id: &str, t: DataTerms| r.providers.iter_mut().find(|p| p.id == id).unwrap().data_terms = t;
+            terms("claude", DataTerms::Unknown);
+            terms("openai", DataTerms::NeedsBillingConfirmation);
+            terms("kimi", DataTerms::Safe);
+        });
+        assert_eq!(check(&db_with(&[("claude", None, None)], &[])), Err(Blocked::NotAllowed("Anthropic Claude".into())));
+        assert_eq!(check(&db_with(&[("openai", None, None)], &[(GEMINI_BILLING_CONFIRMED, "true")])), Err(Blocked::NotAllowed("OpenAI (GPT)".into())));
+        assert_eq!(check(&db_with(&[("openai", Some("https://api.moonshot.ai/v1"), None)], &[])), Ok(()), "the terms the copy in use states");
+        assert_eq!(check(&db_with(&[("bedrock", None, None)], &[])), Ok(()));
+        assert_eq!(check(&db_with(&[("local", None, Some("lan"))], &[])), Err(Blocked::NotAllowed("llm.example.com".into())));
+        assert_eq!(check(&db_with(&[("gemini", None, None)], &[(GEMINI_BILLING_CONFIRMED, "true")])), Ok(()));
+        let mystery = ProviderChainEntry { position: 0, provider_type: "mystery".into(), endpoint_id: None, model_id: None, enabled: true, base_url: None };
+        assert_eq!(registry_provider(&mystery), None, "a row type this build does not know has no terms");
     }
 
     /// One chat message, one memory and one task, as a turn that read an

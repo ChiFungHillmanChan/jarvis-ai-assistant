@@ -11,10 +11,6 @@ use crate::db::Database;
 use serde_json::{json, Value};
 use std::time::Instant;
 
-/// Context window asked of Ollama: a triaged email (6,000 characters), its
-/// instructions and the sender's known follow-ups fit with room to answer.
-const OLLAMA_CONTEXT: u32 = 8_192;
-
 pub struct Request<'a> {
     pub system: &'a str,
     pub user: &'a str,
@@ -60,6 +56,11 @@ pub async fn complete(router: &AiRouter, db: &Database, request: Request<'_>) ->
     }
     let mut errors = Vec::new();
     for entry in entries {
+        // A saved model the registry disabled: nothing is sent, and no
+        // other entry answers in its place (ai/disabled.rs).
+        if let Err(stopped) = super::disabled::check_entry(entry) {
+            return Err(super::disabled::stop(stopped, super::disabled::is_foreground(request.feature), super::bedrock::UiLanguage::read(db)));
+        }
         let started = Instant::now();
         let answered = complete_one(router, db, entry, &request).await;
         match answered.and_then(|done| store_then_check(db, entry, &request, done, started.elapsed().as_millis() as i64)) {
@@ -126,7 +127,7 @@ async fn complete_one(router: &AiRouter, db: &Database, entry: &ProviderChainEnt
                 }
                 None => {
                     let key = router.openai_key.clone().ok_or("尚未設定 OpenAI API 密鑰。")?;
-                    ("https://api.openai.com/v1/chat/completions".to_string(), key, entry.model_id.clone().unwrap_or_else(|| crate::ai::models::OPENAI_DEFAULT.to_string()), "OpenAI".to_string())
+                    ("https://api.openai.com/v1/chat/completions".to_string(), key, entry.model_id.clone().unwrap_or_else(crate::ai::models::openai_default), "OpenAI".to_string())
                 }
             };
             let body = chat_completions_body(&model, request, entry.base_url.is_none());
@@ -146,7 +147,11 @@ async fn complete_one(router: &AiRouter, db: &Database, entry: &ProviderChainEnt
                     messages.push(json!({"role": "system", "content": request.system}));
                 }
                 messages.push(json!({"role": "user", "content": request.user}));
-                let mut body = json!({"model": model, "messages": messages, "stream": false, "options": {"num_ctx": OLLAMA_CONTEXT, "num_predict": request.max_tokens}});
+                // The context window asked of Ollama (the registry's
+                // completion_context_tokens): a triaged email (6,000
+                // characters), its instructions and the sender's known
+                // follow-ups fit with room to answer.
+                let mut body = json!({"model": model, "messages": messages, "stream": false, "options": {"num_ctx": crate::ai::models::limits("ollama").completion_context_tokens.unwrap_or_default(), "num_predict": request.max_tokens}});
                 if request.json {
                     body["format"] = json!("json");
                 }
@@ -164,7 +169,7 @@ async fn complete_one(router: &AiRouter, db: &Database, entry: &ProviderChainEnt
         }
         "gemini" => {
             let key = router.gemini_key.clone().ok_or("尚未設定 Gemini API 密鑰。")?;
-            let model = super::gemini_model_for(entry.model_id.as_deref(), Workload::Volume).to_string();
+            let model = super::gemini_model_for(entry.model_id.as_deref(), Workload::Volume);
             let mut body = json!({
                 "contents": [{"role": "user", "parts": [{"text": request.user}]}],
                 "generationConfig": {"maxOutputTokens": request.max_tokens},
@@ -181,9 +186,9 @@ async fn complete_one(router: &AiRouter, db: &Database, entry: &ProviderChainEnt
         }
         "claude" => {
             let key = router.claude_key.clone().ok_or("尚未設定 Claude API 密鑰。")?;
-            let model = entry.model_id.clone().unwrap_or_else(|| crate::ai::models::CLAUDE_DEFAULT.to_string());
+            let model = entry.model_id.clone().unwrap_or_else(crate::ai::models::claude_default);
             let body = claude_body(&model, request);
-            let value = post(&client, "https://api.anthropic.com/v1/messages", "Claude", |r| r.header("x-api-key", &key).header("anthropic-version", "2023-06-01"), &body).await?;
+            let value = post(&client, "https://api.anthropic.com/v1/messages", "Claude", |r| r.header("x-api-key", &key).header("anthropic-version", crate::ai::models::anthropic_version()), &body).await?;
             claude_result(&value, model)
         }
         "bedrock" => {
@@ -447,6 +452,28 @@ pub(crate) mod tests {
 
     fn sort_request(json: bool) -> Request<'static> {
         Request { system: "Sort this email.", user: "From: a@example.com", json, max_tokens: 2_048, feature: Feature::MailSort }
+    }
+
+    /// A background job (mail sorting) whose saved model the registry
+    /// disabled does not run: it fails with the message its run records,
+    /// nothing is sent or stored, and neither the replacement nor the next
+    /// entry of the chain answers in its place.
+    #[tokio::test]
+    async fn a_background_job_on_a_disabled_model_records_it_and_does_not_run() {
+        let db = crate::db::test_database();
+        let _registry = crate::ai::registry::test_override::with(|r| {
+            let entry = r.models.iter_mut().find(|m| m.id == "gpt-5.6-luna").unwrap();
+            entry.status = crate::ai::registry::Status::Disabled;
+            entry.replacement = Some("gpt-6-luna".into());
+        });
+        let mut router = AiRouter::new("gemini_primary");
+        router.set_openai_key("sk-test-not-sent");
+        let row = |position: i32, provider_type: &str, model_id: Option<&str>| ProviderChainEntry { position, provider_type: provider_type.into(), endpoint_id: None, model_id: model_id.map(str::to_string), enabled: true, base_url: None };
+        router.set_provider_chain(vec![row(0, "openai", Some("gpt-5.6-luna")), row(1, "claude", None)]);
+        let error = complete(&router, &db, sort_request(true)).await.unwrap_err();
+        let expected = crate::ai::disabled::Disabled { provider: "openai".into(), model: "gpt-5.6-luna".into(), replacement: Some("gpt-6-luna".into()) }.message(super::super::bedrock::UiLanguage::En);
+        assert_eq!(error, expected, "the run records why it did not run");
+        assert!(crate::ai::cost::tests::usage_rows(&db).is_empty(), "nothing was sent");
     }
 
     /// Claude's JSON mode is one forced tool call, so the object arrives as

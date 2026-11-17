@@ -4,7 +4,6 @@ use reqwest::Client;
 
 pub struct OllamaBackend;
 
-use crate::ai::models::TOOL_CAPABLE_FAMILIES;
 
 /// The models in Ollama's /api/tags reply that run on this Mac, by name.
 /// Ollama also lists cloud models there; it forwards their prompts to
@@ -26,9 +25,9 @@ pub fn models_on_this_mac(tags: &serde_json::Value) -> Vec<String> {
 
 fn is_tool_capable_model(model_name: &str) -> bool {
     let lower = model_name.to_lowercase();
-    TOOL_CAPABLE_FAMILIES
+    crate::ai::models::tool_capable_families()
         .iter()
-        .any(|family| lower.contains(family))
+        .any(|family| lower.contains(family.as_str()))
 }
 
 #[async_trait]

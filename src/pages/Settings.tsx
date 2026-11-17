@@ -60,7 +60,9 @@ import { DISPLAY_NAME_KEY, accountSectionVisible, displayNameChanged } from "../
 import LocalAiSetup from "../components/LocalAiSetup";
 import ChooseAi from "../components/ChooseAi";
 import { useAiModels } from "../lib/ai-models";
-import { aiServiceLabel, currentAi, type CurrentAi } from "../lib/ai-choice";
+import { currentAi, type CurrentAi } from "../lib/ai-choice";
+import { localized, serviceLabel } from "../lib/ai-catalog";
+import RegistryAbout from "../components/RegistryAbout";
 import AccountPanel from "../components/AccountPanel";
 import CostPanel from "../components/CostPanel";
 import { sweepSummary } from "../lib/storage-report";
@@ -73,7 +75,7 @@ import { useUserHasActed } from "../lib/user-activity";
 import "./settings-workspace.css";
 import { MAX_ADDRESS_CHARS, MAX_INSTRUCTIONS_CHARS, PERSONA_CHOICES, personaLabel, personaValue, type PersonaKey } from "../lib/persona";
 import { canSwitchListening, voiceStateKind } from "../lib/always-listening";
-import { Cpu, Key, Globe, Gem, Mic, Bot, Palette, HardDrive, BarChart3, Power, GithubMark, NotionMark } from "../components/icons";
+import { Cpu, Key, Globe, Gem, Mic, Bot, Palette, HardDrive, BarChart3, Power, Info, GithubMark, NotionMark } from "../components/icons";
 
 const API_KEY_PROVIDERS = [
   { id: "gemini", label: "Google Gemini", help: "Gemini chat and speech-to-text" },
@@ -91,11 +93,13 @@ function clearApiKey(provider: string): Promise<void> {
 }
 
 export default function Settings() {
-  // Model ids come from src-tauri/src/ai/models.rs, never from this file.
+  // Model ids, presets and services come from the model registry
+  // (ai_models), never from this file.
   const models = useAiModels();
   const { appearance, setAppearance, open } = useWorkspace();
   const { locale, setLocale, saveError: localeSaveError, retrySave: retryLocaleSave, t, text } = useUiLocale();
-  const [aiProvider, setAiProvider] = useState("gemini_primary");
+  // The saved preset; empty means the registry's default preset.
+  const [aiProvider, setAiProvider] = useState("");
   const [displayName, setDisplayName] = useState("");
   const [persona, setPersona] = useState<Record<string, string>>({});
   const [personaText, setPersonaText] = useState({ assistant_address: "", assistant_instructions: "" });
@@ -240,7 +244,7 @@ export default function Settings() {
     setLoadError(false);
     try {
       const s = await getSettings();
-      setAiProvider(s.values["ai_provider"] || "gemini_primary");
+      setAiProvider(s.values["ai_provider"] || "");
       setDisplayName(s.values[DISPLAY_NAME_KEY] ?? "");
       setPersona(Object.fromEntries(Object.keys(PERSONA_CHOICES).map(key => [key, personaValue(key as PersonaKey, s.values[key] ?? null)])));
       setPersonaText({ assistant_address: s.values.assistant_address ?? "", assistant_instructions: s.values.assistant_instructions ?? "" });
@@ -759,12 +763,11 @@ export default function Settings() {
     );
   }
 
-  const options = [
-    { value: "gemini_primary", label: text("Gemini Flash (routine) + Gemini Pro (fallback)", "Gemini Flash（日常）＋Gemini Pro（後備）") },
-    { value: "gemini_flash", label: text("Gemini Flash (primary) + Pro (fallback)", "Gemini Flash（主要）＋Pro（後備）") },
-    { value: "gemini_pro_only", label: text("Gemini Pro only", "只用 Gemini Pro") },
-    { value: "gemini_flash_only", label: text("Gemini Flash only", "只用 Gemini Flash") },
-  ];
+  // The speech model's file, named by the registry (voice/model_manager.rs).
+  const whisperFile = models ? `${models.defaults.whisper}.bin` : "";
+  const options = (models?.presets ?? []).map((preset) => ({ value: preset.id, label: localized(preset.label, text) }));
+  // A saved preset the registry no longer lists runs as the default one (ai::preset_chain).
+  const activePreset = options.some((opt) => opt.value === aiProvider) ? aiProvider : models?.default_preset ?? "";
 
   const modelDownloading =
     typeof voiceState === "object" && "ModelDownloading" in voiceState
@@ -788,6 +791,7 @@ export default function Settings() {
     { id: "background", label: t("backgroundSection"), icon: <Power size={17} /> },
     { id: "appearance", label: text("Appearance", "外觀"), icon: <Palette size={17} /> },
     { id: "storage", label: text("Storage", "儲存空間"), icon: <HardDrive size={17} /> },
+    { id: "about", label: text("About", "關於"), icon: <Info size={17} /> },
   ];
 
   // Mirrors the sidebar: the Account section only appears once accounts are
@@ -838,7 +842,7 @@ export default function Settings() {
                 : entry.provider_type === "claude"
                 ? `Claude (${entry.model_id || text("default", "預設")})`
                 : entry.provider_type === "openai" && entry.base_url
-                ? `${aiServiceLabel(entry.base_url)} (${entry.model_id || text("default", "預設")})`
+                ? `${serviceLabel(models, entry.base_url)} (${entry.model_id || text("default", "預設")})`
                 : entry.provider_type === "openai"
                 ? `OpenAI (${entry.model_id || text("default", "預設")})`
                 : entry.provider_type === "bedrock"
@@ -881,7 +885,7 @@ export default function Settings() {
             <div style={styles.hint}>{text('Used when no provider chain is configured', '未設定供應商次序時使用')}</div>
             {options.map((opt) => (
               <label key={opt.value} style={styles.option}>
-                <input type="radio" name="ai_provider" value={opt.value} checked={aiProvider === opt.value} onChange={() => handleProviderChange(opt.value)} style={styles.radio} />
+                <input type="radio" name="ai_provider" value={opt.value} checked={activePreset === opt.value} onChange={() => handleProviderChange(opt.value)} style={styles.radio} />
                 <span style={styles.optionLabel}>{opt.label}</span>
               </label>
             ))}
@@ -1283,7 +1287,7 @@ export default function Settings() {
             )}
             {wakeStatus?.model_downloaded && modelDownloading === null && (
               <div style={{ ...styles.hint, marginTop: 8 }}>
-                {text("Model file: ~/Library/Application Support/jarvis/models/ggml-base.bin. If transcription keeps failing to load the model, that file is damaged: Download again replaces it in place.", "模型檔案：~/Library/Application Support/jarvis/models/ggml-base.bin。如果語音辨識持續無法載入模型，檔案可能已損壞；「重新下載」會取代原檔。")}
+                {text(`Model file: ~/Library/Application Support/jarvis/models/${whisperFile}. If transcription keeps failing to load the model, that file is damaged: Download again replaces it in place.`, `模型檔案：~/Library/Application Support/jarvis/models/${whisperFile}。如果語音辨識持續無法載入模型，檔案可能已損壞；「重新下載」會取代原檔。`)}
               </div>
             )}
             <div style={styles.privacyText}>
@@ -1574,6 +1578,8 @@ export default function Settings() {
             </p>}
           </div>
         </>)}
+
+        {section === "about" && <RegistryAbout catalog={models} />}
 
       </div>
     </div>

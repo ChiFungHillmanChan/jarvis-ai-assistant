@@ -26,11 +26,11 @@
 | 驗證器 `validate.ts` | PR 檢查（`.github/workflows/registry-check.yml`）；Registry workflow 簽署前；`publish.sh` 上載前 |
 | 型別檢查 `npm run registry:typecheck` | PR 檢查；Registry workflow 簽署前 |
 | `tests/registry-publish.test.ts`：以替身 `aws` 指令測試 `publish.sh`，不連接 AWS | PR 檢查；Registry workflow 簽署前；`npm run test:frontend` |
-| `tests/registry.test.ts`：與 `src-tauri/src/ai/models.rs` 等現有程式碼逐項對照、驗證器的拒絕情況、簽署格式 | PR 檢查；`npm run test:frontend`（本機，以及推送至 `main` 後的 CI）。**不會**在簽署前執行，因此不會阻止發佈 |
+| `tests/registry.test.ts`：驗證器的拒絕情況（包括「App 接受的範圍」）、簽署格式、PR 檢查的觸發範圍 | PR 檢查；`npm run test:frontend`（本機，以及推送至 `main` 後的 CI）。**不會**在簽署前執行，因此不會阻止發佈 |
 
-PR 檢查只讀取，沒有 environment、secret 或 AWS 權限。除了 `registry/`、registry 的測試及 workflow，PR 檢查亦會在測試所對照的程式碼（例如 `src-tauri/src/ai/models.rs`、`src/pages/Settings.tsx`）或 `package.json`、`package-lock.json` 有改動時執行；如測試讀取了 workflow 的 `paths` 沒有列出的檔案，`tests/registry.test.ts` 的最後一項測試會失敗。PR 改動了 `registry.json` 而 base 分支已有該檔案時，版本必須高於 base 分支的版本；`registry.json` 沒有改動的 PR（例如只改說明或測試）毋須提高版本。
+PR 檢查只讀取，沒有 environment、secret 或 AWS 權限。除了 `registry/`、registry 的測試及 workflow，PR 檢查亦會在測試讀取的其他檔案（App 測試所用的凍結副本 `src-tauri/src/ai/registry/fixture.json` 及 `src-tauri/tauri.conf.json`）或 `package.json`、`package-lock.json` 有改動時執行；如測試讀取了 workflow 的 `paths` 沒有列出的檔案，`tests/registry.test.ts` 的最後一項測試會失敗。PR 改動了 `registry.json` 而 base 分支已有該檔案時，版本必須高於 base 分支的版本；`registry.json` 沒有改動的 PR（例如只改說明或測試）毋須提高版本。
 
-P05 令 App 改讀註冊表之前，`tests/registry.test.ts` 會把註冊表與現時程式碼逐項比對：修改 App 目前寫死的數值（例如 `models.rs` 的價格）會令 PR 檢查及 `npm run test:frontend` 失敗，但不會阻止發佈。這是刻意的：在 P05 之前，改動註冊表不會改變 App 的行為。P05 令 App 改讀註冊表時，這些對照 `models.rs` 等程式碼的鎖定會從測試移除。JARVIS AI 的設定（`managed`）及各模型的 `status` 沒有被測試鎖定，可直接修改；它們的數值以擁有人的決定及審查為準，驗證器只檢查必須一直成立的規則。驗證器對 `managed.hkd_per_usd` 的檢查是港元聯繫匯率的兌換範圍 7.75 至 7.85；匯率如須設於這個範圍之外，必須在同一個 PR 一併修改驗證器。
+自 P05 起，App 直接讀取註冊表，測試不再把註冊表與程式碼比對：修改價格、預設模型或上限毋須改動任何測試。App 的 Rust 測試及 `registry/lookup.ts` 的查詢測試使用凍結的副本 `src-tauri/src/ai/registry/fixture.json`（即首次發佈的第 1 版），因此改動 `registry.json` 不會令這些測試失敗；隨 App 發佈的副本則由 `the_bundled_registry_is_usable` 等 Rust 測試檢查是否可用，包括 App 讀取的每個上限。舊用量紀錄的一次性修正（`src-tauri/src/ai/cost.rs` 的 `correct_old_rows`）不讀取註冊表，而是使用凍結的價格表 `src-tauri/src/ai/old_rows_prices.frozen.json`（第 1 版的價格），令每個版本修正舊紀錄的結果相同；該檔案永不修改，新價格只應寫入 `registry.json`。JARVIS AI 的設定（`managed`）及各模型的 `status` 沒有被測試鎖定，可直接修改；它們的數值以擁有人的決定及審查為準，驗證器只檢查必須一直成立的規則。驗證器對 `managed.hkd_per_usd` 的檢查是港元聯繫匯率的兌換範圍 7.75 至 7.85；匯率如須設於這個範圍之外，必須在同一個 PR 一併修改驗證器。
 
 ## 修改流程
 
@@ -88,6 +88,26 @@ P05 令 App 改讀註冊表之前，`tests/registry.test.ts` 會把註冊表與�
 - `min_app_version` 高於 App 版本時，繼續使用 App 內置的資料。
 - 註冊表的 `base_url` 不可改變使用者金鑰的發送目的地；App 須把各服務商的主機名稱固定或列入允許清單。
 - 給 P05：目前沒有任何欄位或機制令註冊表過期。所有已簽署的版本都保留在 bucket 內，而且永遠能通過驗證；能寫入 `registry/*` 的人可以把 `latest.json` 指回較舊的已簽署版本，只有上述下限會拒絕它。
+
+App 的做法（P05，`src-tauri/src/ai/registry/`）：啟動時先用簽章有效、版本高於內置副本、`min_app_version` 符合而且通過「App 接受的範圍」各項檢查的快取副本，否則用內置副本，啟動時不連網。之後在啟動時、每 6 小時及 Mac 喚醒後取得遠端副本；快取副本就是使用中的副本時，會附上它的 `If-None-Match`。只有簽章有效、版本高於使用中的副本、內置副本及快取中簽章可驗證的副本、`min_app_version` 符合而且通過範圍檢查的副本，才會取代快取及使用中的副本；版本與使用中相同的回覆視為未改動。快取檔未能驗證簽章時，它記錄的版本一概不計。被拒的副本只記錄原因（欄位名稱及版本號），不記錄內容。資料條款以內置副本為下限，只可收緊；遠端副本新增的服務商一律視為 `unknown`，其 `base_url`、地區及主機名稱都不會被使用。被停用的模型不會自動改用替代模型：App 會提示使用者確認，確認前使用該模型的請求會停止，背景工作亦不會執行。正式版本的端點於編譯時以 `JARVIS_REGISTRY_URL` 指定；未指定時 App 只使用內置副本，不會查詢任何端點。debug 版本（包括 native-qa）亦可在啟動時以 `JARVIS_REGISTRY_URL` 指定端點，例如在 QA 時指向 dev；這個變數只可在指令行設定，絕不可寫入 `.env`，因為 `scripts/release.sh` 會把 `.env` 的每個變數匯出至正式版本的建置，dev 的網址便會編入正式版本。prod 開始提供註冊表之後，發佈環境必須在執行 `scripts/release.sh` 之前把 `JARVIS_REGISTRY_URL` 設為 prod 的 `RegistryUrl`，絕不可帶有 dev 的網址；QA 或 debug 時只在指令行設定，絕不可寫入 `.env`。
+
+## App 接受的範圍
+
+App 的 `Registry::check`（`src-tauri/src/ai/registry/doc.rs`）拒絕任何一項超出以下範圍的副本，整份不用，使用中的副本不變；`schema.json` 設有相同的範圍，因此 CI 在簽署前已會拒絕。上限以第 1 版的最大值為基準，至少保留約十倍的空間：
+
+| 欄位（除另有註明外，均在 `providers[].limits`） | 範圍 |
+| --- | --- |
+| `chat_max_output_tokens`、`default_max_output_tokens`、`stt_max_output_tokens` | 1 至 131,072（第 1 版最大 4,096） |
+| `completion_context_tokens`、`default_context_tokens` | 1 至 1,048,576（第 1 版最大 8,192） |
+| `max_tool_rounds` | 1 至 50（第 1 版最大 5） |
+| `chat_temperature` | 0 至 2 |
+| `chat_reasoning_effort` | `none`、`minimal`、`low`、`medium`、`high`、`xhigh`、`max` 之一（OpenAI 的 reasoning 指南所列，2026-11-17 閱讀；各模型只接受其中部分） |
+| `api_version` | `YYYY-MM-DD` 格式的日期 |
+| `models[].max_output`（每個模型的輸出上限，Gemini 以 `maxOutputTokens` 送出） | 1 至 1,048,576（第 1 版最大 65,536） |
+
+模型 id（`models[].id`、`replacement`、`built_in_models`、`features` 的預設及 `presets` 的模型）只可包含英文字母、數字及 `.`、`_`、`:`、`/`、`-`，而且不可包含 `..`；`schema.json` 另要求 `models[].id` 為小寫（App 以不分大小寫的方式比對）。各功能的預設模型及 preset 所用的模型必須為 `active`；App 建議的替代模型亦只會是 `active` 的模型。
+
+設定導引的本機模型清單（`provider` 為 `ollama` 而且有 `local.setup` 的 entry）的模型名稱會照原樣傳給 Ollama 下載及執行；App 不會另行核對這份清單，經簽署的註冊表即是依據。
 
 ## 回滾
 
@@ -301,3 +321,4 @@ node --experimental-strip-types registry/validate.ts registry/registry.json
     ```bash
     REGISTRY_URL=<prod 的 RegistryUrl>
     ```
+    prod 開始提供註冊表之後，正式版本的發佈環境必須在執行 `scripts/release.sh` 之前把 `JARVIS_REGISTRY_URL` 設為 prod 的 `RegistryUrl`，絕不可帶有 dev 的網址；QA 或 debug 時只在指令行設定 `JARVIS_REGISTRY_URL`，絕不可寫入 `.env`，因為 `scripts/release.sh` 會把 `.env` 的每個變數匯出至正式版本的建置。未設定時，建置出來的 App 只使用內置副本，不會查詢任何端點。

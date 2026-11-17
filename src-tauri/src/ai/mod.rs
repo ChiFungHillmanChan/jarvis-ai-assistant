@@ -5,11 +5,13 @@ pub mod mail_policy;
 pub mod models;
 pub mod complete;
 pub mod cost;
+pub mod disabled;
 pub mod usage;
 pub mod gemini;
 pub mod local;
 pub mod openai;
 pub mod persona;
+pub mod registry;
 pub mod routing;
 pub mod tools;
 pub use routing::{classify_workload, Workload};
@@ -39,17 +41,14 @@ pub struct ProviderChainEntry {
 /// Gemini model selection: a user-configured provider-chain override wins;
 /// otherwise pick by workload tier. Used by both provider_name display and
 /// dispatch so the emitted label never diverges from the model actually sent.
-fn gemini_model_for(model_override: Option<&str>, workload: Workload) -> &str {
-    model_override.unwrap_or(match workload {
-        Workload::Premium => crate::ai::models::GEMINI_PRO,
-        _ => crate::ai::models::GEMINI_FLASH,
-    })
+/// The tiers are the registry's `premium` and `chat` defaults for Gemini.
+fn gemini_model_for(model_override: Option<&str>, workload: Workload) -> String {
+    match (model_override, workload) {
+        (Some(model), _) => model.to_string(),
+        (None, Workload::Premium) => crate::ai::models::gemini_pro(),
+        (None, _) => crate::ai::models::gemini_flash(),
+    }
 }
-
-/// Geography prefixes used by Bedrock cross-region inference profile ids.
-/// `global.` is deliberately absent -- it is geography-agnostic and must not be
-/// rewritten.
-const INFERENCE_GEOGRAPHIES: [&str; 3] = ["apac", "us", "eu"];
 
 /// Retarget a Bedrock model id at the geography the credentials were saved for.
 ///
@@ -58,9 +57,15 @@ const INFERENCE_GEOGRAPHIES: [&str; 3] = ["apac", "us", "eu"];
 /// send an APAC inference profile to a US endpoint and get a
 /// ValidationException on every request. Ids prefixed `global.`, and ids
 /// with no geography prefix at all, are left untouched.
+///
+/// The geography prefixes are the registry's `inference_geographies` for
+/// Bedrock. `global.` is deliberately absent: it is geography-agnostic and
+/// must not be rewritten.
 pub(crate) fn apply_inference_profile(model: &str, profile: &str) -> String {
+    let registry = registry::current();
+    let geographies = registry.provider("bedrock").map(|p| p.inference_geographies.as_slice()).unwrap_or_default();
     match model.split_once('.') {
-        Some((head, rest)) if INFERENCE_GEOGRAPHIES.contains(&head) && head != profile => {
+        Some((head, rest)) if geographies.iter().any(|g| g == head) && head != profile => {
             format!("{}.{}", profile, rest)
         }
         _ => model.to_string(),
@@ -352,6 +357,31 @@ fn credential_scope(entry: &ProviderChainEntry) -> String {
     }
 }
 
+/// What the chain walk does with a row before anything is sent.
+#[derive(Debug, PartialEq)]
+enum Gate {
+    /// Off, or its credential was already rejected this turn: try the next row.
+    Skip,
+    /// Its saved model is one the registry disabled: the turn ends here and
+    /// the next row is not tried in its place (ai/disabled.rs).
+    Stop(disabled::Disabled),
+    /// Send to it.
+    Send,
+}
+
+/// The walk's pre-send checks, in the order it applies them: enabled, then
+/// a credential rejected this turn, then a disabled saved model. Pure: the
+/// walk turns `Stop` into the message (and the notice) with `disabled::stop`.
+fn gate(entry: &ProviderChainEntry, dead_credentials: &HashSet<String>) -> Gate {
+    if !entry.enabled || dead_credentials.contains(&credential_scope(entry)) {
+        return Gate::Skip;
+    }
+    match disabled::check_entry(entry) {
+        Err(stopped) => Gate::Stop(stopped),
+        Ok(()) => Gate::Send,
+    }
+}
+
 /// Whether the router still has somewhere to go after `idx`: a later entry that
 /// is enabled and whose credential has not already been rejected this turn.
 fn has_live_entry_after(
@@ -414,6 +444,30 @@ fn only_secure_endpoints(endpoints: Vec<LocalEndpoint>) -> Vec<LocalEndpoint> {
         .collect()
 }
 
+/// The provider chain a preset names (Settings, `ai_provider`), from the
+/// registry; an unknown name is the registry's default preset. In the
+/// seeded registry the default leaves position 0 unpinned so the workload
+/// tier picks the model (Pro for premium work, Flash otherwise) and pins
+/// position 1 to Pro, so a Flash outage degrades to a *different* model.
+pub(crate) fn preset_chain(name: &str) -> Vec<ProviderChainEntry> {
+    let registry = registry::current();
+    let preset = registry.preset(name).or_else(|| registry.preset(&registry.presets.default));
+    preset
+        .map(|preset| preset.entries.as_slice())
+        .unwrap_or_default()
+        .iter()
+        .enumerate()
+        .map(|(position, entry)| ProviderChainEntry {
+            position: position as i32,
+            provider_type: entry.provider.clone(),
+            endpoint_id: None,
+            model_id: entry.model.clone(),
+            enabled: true,
+            base_url: None,
+        })
+        .collect()
+}
+
 impl AiRouter {
     pub fn new(provider_setting: &str) -> Self {
         // Keys start env-only; `reload_keys` layers the Keychain in
@@ -421,67 +475,7 @@ impl AiRouter {
         let gemini_key = resolve_key("GEMINI_API_KEY", None);
         let claude_key = resolve_key("ANTHROPIC_API_KEY", None);
         let openai_key = resolve_key("OPENAI_API_KEY", None);
-        let chain = match provider_setting {
-            "gemini_flash" => vec![
-                ProviderChainEntry {
-                    position: 0,
-                    provider_type: "gemini".into(),
-                    endpoint_id: None,
-                    model_id: Some(crate::ai::models::GEMINI_FLASH.into()),
-                    enabled: true,
-                    base_url: None,
-                },
-                ProviderChainEntry {
-                    position: 1,
-                    provider_type: "gemini".into(),
-                    endpoint_id: None,
-                    model_id: Some(crate::ai::models::GEMINI_PRO.into()),
-                    enabled: true,
-                    base_url: None,
-                },
-            ],
-            "gemini_pro_only" => vec![ProviderChainEntry {
-                position: 0,
-                provider_type: "gemini".into(),
-                endpoint_id: None,
-                model_id: Some(crate::ai::models::GEMINI_PRO.into()),
-                enabled: true,
-                base_url: None,
-            }],
-            "gemini_flash_only" => vec![ProviderChainEntry {
-                position: 0,
-                provider_type: "gemini".into(),
-                endpoint_id: None,
-                model_id: Some(crate::ai::models::GEMINI_FLASH.into()),
-                enabled: true,
-                base_url: None,
-            }],
-            _ => vec![
-                // gemini_primary (default): position 0 is left unpinned so the
-                // workload tier picks the model -- Pro for premium work, Flash
-                // for read-only volume and tool turns. Position 1 is pinned to
-                // Pro so a Flash outage degrades to a *different* model; pinning
-                // Flash here made the fallback a retry of the failing call.
-                // Pro is the id with a confirmed public price (cost.rs), so the
-                // chain degrades from the doubtful id to the confirmed one.
-                ProviderChainEntry {
-                    position: 0,
-                    provider_type: "gemini".into(),
-                    endpoint_id: None,
-                    model_id: None,
-                    enabled: true,
-                    base_url: None,
-                },
-                ProviderChainEntry {
-                    position: 1,
-                    provider_type: "gemini".into(),
-                    endpoint_id: None,
-                    model_id: Some(crate::ai::models::GEMINI_PRO.into()),
-                    enabled: true,
-                    base_url: None,
-                },
-            ],
-        };
+        let chain = preset_chain(provider_setting);
 
         AiRouter {
             gemini_key,
@@ -821,11 +815,12 @@ impl AiRouter {
         let mut dead_credentials: HashSet<String> = HashSet::new();
 
         for (idx, entry) in self.provider_chain.iter().enumerate() {
-            if !entry.enabled {
-                continue;
-            }
-            if dead_credentials.contains(&credential_scope(entry)) {
-                continue;
+            // A saved model the registry disabled stops the turn here: no
+            // request is sent, and the next entry is not tried in its place.
+            match gate(entry, &dead_credentials) {
+                Gate::Skip => continue,
+                Gate::Stop(stopped) => return Err(disabled::stop(stopped, disabled::is_foreground(cost::current_feature()), bedrock::UiLanguage::read(db))),
+                Gate::Send => {}
             }
 
             let provider_name = match entry.provider_type.as_str() {
@@ -860,7 +855,7 @@ impl AiRouter {
                         let model = gemini_model_for(entry.model_id.as_deref(), workload);
                         gemini::send(
                             key,
-                            model,
+                            &model,
                             messages.clone(),
                             db,
                             google_auth,
@@ -879,7 +874,7 @@ impl AiRouter {
                     if let Some(ref key) = self.claude_key {
                         claude::send(
                             key,
-                            entry.model_id.as_deref().unwrap_or(crate::ai::models::CLAUDE_DEFAULT),
+                            &entry.model_id.clone().unwrap_or_else(crate::ai::models::claude_default),
                             messages.clone(),
                             db,
                             google_auth,
@@ -1047,7 +1042,7 @@ impl AiRouter {
                                 rusqlite::params![endpoint_id, model_id],
                                 |row| row.get(0),
                             )
-                            .unwrap_or(4096);
+                            .unwrap_or_else(|_| crate::ai::models::limits("ollama").default_context_tokens.unwrap_or_default());
                         let tool_ov: Option<String> = conn
                             .query_row(
                                 "SELECT tool_capability FROM local_model_overrides WHERE endpoint_id = ?1 AND model_id = ?2",
@@ -1688,6 +1683,82 @@ mod tests {
             "anthropic.claude-3-5-sonnet-20241022-v2:0"
         );
         assert_eq!(apply_inference_profile("nova-micro", "us"), "nova-micro");
+    }
+
+    /// The presets, their order and the default are the registry's: a copy
+    /// that adds a preset or changes the tiers is what the router builds.
+    #[test]
+    fn presets_and_the_gemini_tiers_follow_the_registry() {
+        use crate::ai::registry::doc::{Preset, PresetEntry, Text};
+        let _registry = crate::ai::registry::test_override::with(|r| {
+            r.presets.chains.push((
+                "claude_then_gemini".into(),
+                Preset { label: Text { en: "x".into(), zh_hk: "x".into() }, entries: vec![PresetEntry { provider: "claude".into(), model: Some("claude-opus-5-5".into()) }, PresetEntry { provider: "gemini".into(), model: None }] },
+            ));
+            r.presets.default = "claude_then_gemini".into();
+            r.features.get_mut("premium").unwrap().insert("gemini".into(), "gemini-3.5-flash".into());
+        });
+        let rows = |name: &str| AiRouter::new(name).provider_chain().iter().map(|e| (e.position, e.provider_type.clone(), e.model_id.clone())).collect::<Vec<_>>();
+        let expected = vec![(0, "claude".to_string(), Some("claude-opus-5-5".to_string())), (1, "gemini".to_string(), None)];
+        assert_eq!(rows("claude_then_gemini"), expected);
+        assert_eq!(rows("not-a-preset"), expected, "an unknown name is the registry's default preset");
+        assert_eq!(rows("gemini_pro_only"), vec![(0, "gemini".to_string(), Some(crate::ai::models::GEMINI_PRO.to_string()))]);
+        assert_eq!(gemini_model_for(None, Workload::Premium), "gemini-3.5-flash");
+        assert_eq!(gemini_model_for(None, Workload::Volume), crate::ai::models::GEMINI_FLASH);
+        assert_eq!(gemini_model_for(Some("pinned"), Workload::Premium), "pinned");
+    }
+
+    /// The walk's pre-send checks, by behaviour: a disabled saved model
+    /// stops the turn (Stop, not Skip, so the next row is not tried); a row
+    /// that is off or whose credential was rejected keeps being skipped,
+    /// whatever its model; anything else is sent.
+    #[test]
+    fn the_chain_gate_stops_on_a_disabled_model_and_keeps_its_other_outcomes() {
+        let row = |provider_type: &str, model: Option<&str>, enabled: bool| ProviderChainEntry { position: 0, provider_type: provider_type.into(), endpoint_id: None, model_id: model.map(str::to_string), enabled, base_url: None };
+        let none = HashSet::new();
+        assert_eq!(gate(&row("openai", Some("gpt-5.6-luna"), true), &none), Gate::Send);
+        let _registry = crate::ai::registry::test_override::with(|r| {
+            let entry = r.models.iter_mut().find(|m| m.id == "gpt-5.6-luna").unwrap();
+            entry.status = crate::ai::registry::Status::Disabled;
+            entry.replacement = Some("gpt-6-luna".into());
+        });
+        let disabled_row = row("openai", Some("gpt-5.6-luna"), true);
+        let expected = disabled::Disabled { provider: "openai".into(), model: "gpt-5.6-luna".into(), replacement: Some("gpt-6-luna".into()) };
+        assert_eq!(gate(&disabled_row, &none), Gate::Stop(expected.clone()), "stops: the next row is not tried");
+        assert!(expected.message(bedrock::UiLanguage::En).starts_with("The model gpt-5.6-luna has been turned off"));
+        // The checks before it keep their outcomes, in the walk's order.
+        assert_eq!(gate(&row("openai", Some("gpt-5.6-luna"), false), &none), Gate::Skip, "a row that is off is skipped");
+        let dead: HashSet<String> = [credential_scope(&disabled_row)].into();
+        assert_eq!(gate(&disabled_row, &dead), Gate::Skip, "a rejected credential is skipped");
+        // Anything else is sent: another model, no saved model, another provider.
+        assert_eq!(gate(&row("openai", Some("gpt-6-luna"), true), &none), Gate::Send);
+        assert_eq!(gate(&row("openai", None, true), &none), Gate::Send, "no saved model follows the default");
+        assert_eq!(gate(&row("claude", Some("gpt-5.6-luna"), true), &none), Gate::Send, "another provider's id is not this entry's");
+    }
+
+    /// The walk itself needs a running app (`run_provider_chain` takes an
+    /// `AppHandle<Wry>`; Tauri's test feature is off), so its use of the
+    /// gate is read from the source, whitespace ignored: the gate runs
+    /// before any provider is called, and its Stop returns the disabled
+    /// message in the app's language. P06 reworks the walk and must make it
+    /// testable.
+    #[test]
+    fn the_chat_walk_returns_on_the_gates_stop_before_sending() {
+        let source: String = include_str!("mod.rs").split_whitespace().collect();
+        let body = &source[source.find("asyncfnrun_provider_chain(").unwrap()..];
+        let first_send = body.find("letresult=matchentry.provider_type.as_str()").unwrap();
+        let arm = ["matchgate(entry,&dead_credentials){", "Gate::Skip=>continue,", "Gate::Stop(stopped)=>returnErr(disabled::stop(stopped,disabled::is_foreground(cost::current_feature()),bedrock::UiLanguage::read(db))),", "Gate::Send=>{}", "}"].concat();
+        let at = body.find(&arm).expect("the walk matches on the gate and returns on Stop");
+        assert!(at < first_send, "the gate runs before any provider is called");
+    }
+
+    /// The geographies a saved Bedrock id is moved between are the registry's.
+    #[test]
+    fn inference_geographies_follow_the_registry() {
+        assert_eq!(apply_inference_profile("apac.amazon.nova-micro-v1:0", "us"), "us.amazon.nova-micro-v1:0");
+        let _registry = crate::ai::registry::test_override::with(|r| r.providers.iter_mut().find(|p| p.id == "bedrock").unwrap().inference_geographies = vec!["us".into(), "eu".into(), "jp".into()]);
+        assert_eq!(apply_inference_profile("apac.amazon.nova-micro-v1:0", "us"), "apac.amazon.nova-micro-v1:0", "apac is no longer a geography");
+        assert_eq!(apply_inference_profile("jp.amazon.nova-micro-v1:0", "eu"), "eu.amazon.nova-micro-v1:0");
     }
 
     #[test]

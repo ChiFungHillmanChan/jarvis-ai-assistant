@@ -126,7 +126,7 @@ pub async fn send(
         "parts": [{"text": system_prompt}]
     });
 
-    let max_iterations = 5;
+    let max_iterations = crate::ai::models::max_tool_rounds("gemini");
     for round in 0..max_iterations {
         let final_round = round + 1 == max_iterations;
         // Per-round usage: Gemini reports usageMetadata cumulatively within one
@@ -434,11 +434,12 @@ fn history_contents(messages: Vec<(String, String)>) -> Vec<GeminiContent> {
     contents
 }
 
-/// The output cap for a chat request: the model's own limit from
-/// ai/models.rs. Thinking counts against it, so the old fixed 4,096 could be
-/// spent before any answer. A model the list does not know keeps 4,096.
+/// The output cap for a chat request: the model's own limit from the
+/// registry. Thinking counts against it, so a fixed small cap could be spent
+/// before any answer. A model the registry does not know keeps Gemini's
+/// `default_max_output_tokens`.
 fn output_cap(model: &str) -> u32 {
-    crate::ai::models::max_output_tokens(model).unwrap_or(4_096)
+    crate::ai::models::max_output_tokens(model).unwrap_or_else(|| crate::ai::models::limits("gemini").default_max_output_tokens.unwrap_or_default())
 }
 
 /// A reply that ended without text or a tool call. The router retries on

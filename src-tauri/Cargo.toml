@@ -63,6 +63,11 @@ aws-smithy-types = "1.4.7"
 aws-credential-types = "1.2"
 security-framework = "2.11"
 sha2 = "0.10"
+# Ed25519 verification of the signed model registry (ai/registry). Already in
+# the tree through rustls; no new crate is downloaded.
+ring = "0.17"
+# The registry's model_id_pattern (live model lists). Already in the tree.
+regex = "1"
 tauri-plugin-window-state = "2"
 tauri-plugin-deep-link = "2"
 

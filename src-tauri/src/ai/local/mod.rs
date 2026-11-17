@@ -237,7 +237,7 @@ pub async fn send_local(
         Some(json!({"include_usage": true}))
     };
 
-    let max_iterations = 5;
+    let max_iterations = crate::ai::models::max_tool_rounds("ollama");
     for round in 0..max_iterations {
         let final_round = round + 1 == max_iterations;
         // Per-round usage: the OpenAI-compatible stream reports one usage

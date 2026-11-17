@@ -454,13 +454,14 @@ pub(crate) fn roll_up(conn: &Connection, now: i64, per_request_days: i64) -> rus
     tx.execute(
         "INSERT INTO usage_daily
             (day, provider, model_id, feature, price_unknown, requests,
-             input_tokens, output_tokens, cache_read_tokens, cache_write_tokens, usd_cost_micro)
+             input_tokens, output_tokens, cache_read_tokens, cache_write_tokens, usd_cost_micro, registry_version)
          SELECT CAST(ts / 86400 AS INTEGER), provider, model_id, feature, price_unknown, COUNT(*),
                 SUM(input_tokens), SUM(output_tokens), SUM(cache_read_tokens), SUM(cache_write_tokens),
-                CASE WHEN price_unknown = 0 THEN COALESCE(SUM(usd_cost_micro), 0) END
+                CASE WHEN price_unknown = 0 THEN COALESCE(SUM(usd_cost_micro), 0) END,
+                registry_version
          FROM inference_metrics WHERE ts < ?1
-         GROUP BY 1, 2, 3, 4, 5
-         ON CONFLICT (day, provider, model_id, feature, price_unknown) DO UPDATE SET
+         GROUP BY 1, 2, 3, 4, 5, 12
+         ON CONFLICT (day, provider, model_id, feature, price_unknown, registry_version) DO UPDATE SET
             requests = requests + excluded.requests,
             input_tokens = input_tokens + excluded.input_tokens,
             output_tokens = output_tokens + excluded.output_tokens,
@@ -560,9 +561,11 @@ pub fn roll_up_if_due(conn: &Connection, now: i64) {
 #[cfg(any(test, feature = "native-qa"))]
 pub(crate) fn seed_for_qa(conn: &Connection, now: i64) -> rusqlite::Result<()> {
     use crate::ai::models::{is_local, usd_cost_micro};
+    let openai = crate::ai::models::openai_default();
+    let registry_version = crate::ai::registry::current().version as i64;
     // provider, model, feature, workload, input (cache included), output, cache read, cache write
     let kinds = [
-        ("openai", crate::ai::models::OPENAI_DEFAULT, "chat", "tools", 1_200, 300, 200, 0),
+        ("openai", openai.as_str(), "chat", "tools", 1_200, 300, 200, 0),
         ("compat:api.moonshot.ai", "kimi-k2-0905-preview", "mail_sort", "volume", 3_000, 40, 0, 0),
         ("local", "qwen3:4b", "mail_analysis", "volume", 4_000, 900, 0, 0),
         ("bedrock", "apac.anthropic.claude-haiku-4-5-20251001-v1:0", "tools", "tools", 1_320, 45, 800, 400),
@@ -586,9 +589,9 @@ pub(crate) fn seed_for_qa(conn: &Connection, now: i64) -> rusqlite::Result<()> {
         conn.execute(
             "INSERT INTO inference_metrics
                 (ts, workload, model_id, input_tokens, output_tokens, cache_read_tokens, cache_write_tokens,
-                 latency_ms, provider, usd_cost_micro, feature, price_unknown)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, 900, ?8, ?9, ?10, ?11)",
-            rusqlite::params![ts, workload, model, input, output, cache_read, cache_write, provider, cost, feature, cost.is_none()],
+                 latency_ms, provider, usd_cost_micro, feature, price_unknown, registry_version)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, 900, ?8, ?9, ?10, ?11, ?12)",
+            rusqlite::params![ts, workload, model, input, output, cache_read, cache_write, provider, cost, feature, cost.is_none(), registry_version],
         )?;
     }
     Ok(())
@@ -852,16 +855,16 @@ mod tests {
 
     /// U7.2. What the roll-up carries: every column of a request is in its
     /// daily total, or on the list of what a daily total does not keep, and
-    /// the totals have exactly their eleven columns, each written by the
+    /// the totals have exactly their twelve columns, each written by the
     /// roll-up. A column added to requests alone fails here instead of being
     /// dropped without notice at 30 days.
     #[test]
     fn every_request_column_is_in_the_daily_totals_or_listed_as_dropped() {
         // `ts` becomes `day`.
         const DROPPED: [&str; 4] = ["id", "ts", "workload", "latency_ms"];
-        const DAILY: [&str; 11] = [
+        const DAILY: [&str; 12] = [
             "day", "provider", "model_id", "feature", "price_unknown", "requests",
-            "input_tokens", "output_tokens", "cache_read_tokens", "cache_write_tokens", "usd_cost_micro",
+            "input_tokens", "output_tokens", "cache_read_tokens", "cache_write_tokens", "usd_cost_micro", "registry_version",
         ];
         let db = crate::db::test_database();
         let conn = db.conn.lock().unwrap();
@@ -882,6 +885,27 @@ mod tests {
         let listed = &listed[listed.find('(').unwrap() + 1..listed.find(')').unwrap()];
         let listed: Vec<&str> = listed.split(',').map(str::trim).collect();
         assert_eq!(listed, DAILY, "the roll-up writes every column of the totals");
+    }
+
+    /// A day whose requests were priced at two registry versions keeps one
+    /// total per version, and the totals still add up.
+    #[test]
+    fn the_roll_up_keeps_one_total_per_registry_version() {
+        let db = crate::db::test_database();
+        let conn = db.conn.lock().unwrap();
+        let old = 40 * DAY + 3_600;
+        for (version, cost) in [(0, 100), (3, 200), (3, 300), (4, 400)] {
+            conn.execute(
+                "INSERT INTO inference_metrics (ts, workload, model_id, input_tokens, output_tokens, latency_ms, provider, usd_cost_micro, feature, price_unknown, registry_version)
+                 VALUES (?1, 'volume', 'm', 10, 1, 5, 'openai', ?2, 'chat', 0, ?3)",
+                rusqlite::params![old, cost, version],
+            )
+            .unwrap();
+        }
+        roll_up(&conn, 80 * DAY, PER_REQUEST_DAYS).unwrap();
+        let mut stmt = conn.prepare("SELECT registry_version, requests, usd_cost_micro FROM usage_daily ORDER BY registry_version").unwrap();
+        let totals: Vec<(i64, i64, i64)> = stmt.query_map([], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?))).unwrap().map(Result::unwrap).collect();
+        assert_eq!(totals, vec![(0, 1, 100), (3, 2, 500), (4, 1, 400)]);
     }
 
     /// A clean-up window under 30 days moves requests sooner, and they still
@@ -1677,7 +1701,7 @@ mod tests {
     /// The migrations that define the two tables. A new one that changes or
     /// reads them (a view too) is reviewed with this module before it joins
     /// the list.
-    const USAGE_MIGRATIONS: [&str; 3] = ["V13__aws_credentials_and_routing.sql", "V16__cost_telemetry.sql", "V34__usage_feature_and_unknown_price.sql"];
+    const USAGE_MIGRATIONS: [&str; 4] = ["V13__aws_credentials_and_routing.sql", "V16__cost_telemetry.sql", "V34__usage_feature_and_unknown_price.sql", "V35__usage_registry_version.sql"];
 
     fn migration_mentions(file: &str, sql: &str) -> bool {
         let sql = sql.to_lowercase();

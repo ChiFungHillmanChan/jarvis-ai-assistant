@@ -70,6 +70,19 @@ pub fn run() {
         // app back after Stripe; see payments::return_link.
         .plugin(tauri_plugin_deep_link::init())
         .setup(|app| {
+            // The model registry first: every model, price and default below
+            // comes from it. Reads the cached copy (one small file, one
+            // signature check) or uses the bundled copy; the network fetch
+            // runs in the background and never holds startup.
+            ai::registry::start();
+            ai::disabled::init(app.handle().clone());
+            {
+                use tauri::Emitter;
+                let handle = app.handle().clone();
+                ai::registry::fetch::spawn(move |version| {
+                    let _ = handle.emit("registry-updated", version);
+                });
+            }
             tool_approval::init(app.handle().clone());
             {
                 use tauri_plugin_deep_link::DeepLinkExt;
@@ -115,8 +128,9 @@ pub fn run() {
 
             let ai_provider = {
                 let conn = db.conn.lock().unwrap();
+                // None saved: the registry's default preset (ai::preset_chain).
                 conn.query_row("SELECT value FROM user_preferences WHERE key = 'ai_provider'", [], |row| row.get::<_, String>(0))
-                    .unwrap_or_else(|_| "gemini_primary".to_string())
+                    .unwrap_or_default()
             };
             log::info!("AI provider: {}", ai_provider);
             let mut router = AiRouter::new(&ai_provider);
@@ -524,6 +538,8 @@ pub fn run() {
             commands::ai_choice::current_ai,
             commands::ai_choice::list_ai_models,
             ai::models::ai_models,
+            ai::disabled::disabled_models,
+            ai::disabled::confirm_model_replacement,
             commands::local_llm::update_model_override,
             commands::system::open_url,
             tool_approval::resolve_tool_approval,

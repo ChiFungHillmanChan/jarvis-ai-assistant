@@ -131,7 +131,8 @@ pub(crate) fn rebuilt_router(db: &Database) -> AiRouter {
         .lock()
         .ok()
         .and_then(|conn| conn.query_row("SELECT value FROM user_preferences WHERE key='ai_provider'", [], |r| r.get::<_, String>(0)).ok())
-        .unwrap_or_else(|| "gemini_primary".into());
+        // None saved: the registry's default preset (ai::preset_chain).
+        .unwrap_or_default();
     let mut router = AiRouter::new(&provider);
     router.load_from_db(db);
     router.reload_keys();
@@ -194,20 +195,25 @@ fn is_snapshot(id: &str) -> bool {
 }
 
 /// The models a provider lists that can hold a conversation, newest name
-/// first; image, audio, embedding, coding and dated snapshot models are left
-/// out.
+/// first. The registry decides: the provider's `model_id_pattern`, and the
+/// `chat_model_filter` words and dated snapshots left out (image, audio,
+/// embedding, coding and the like).
 fn chat_models(provider: &str, ids: Vec<String>) -> Vec<String> {
-    const NOT_CHAT: [&str; 14] = ["audio", "realtime", "tts", "transcribe", "image", "embedding", "search", "moderation", "dall-e", "whisper", "instruct", "computer-use", "codex", "-live"];
+    let registry = crate::ai::registry::current();
+    let filter = &registry.chat_model_filter;
+    let pattern = registry.provider(provider).and_then(|p| p.model_id_pattern.as_deref()).and_then(|pattern| match regex::Regex::new(pattern) {
+        Ok(re) => Some(re),
+        Err(_) => {
+            log::warn!("registry: model_id_pattern for {provider} is not a valid pattern; listing every model");
+            None
+        }
+    });
     let mut models: Vec<String> = ids
         .into_iter()
-        .map(|id| id.trim_start_matches("models/").to_string())
-        .filter(|id| match provider {
-            "openai" => id.starts_with("gpt-") || (id.starts_with('o') && id.chars().nth(1).is_some_and(|c| c.is_ascii_digit())),
-            "gemini" => id.starts_with("gemini-"),
-            "claude" => id.starts_with("claude-"),
-            _ => true,
-        })
-        .filter(|id| !NOT_CHAT.iter().any(|word| id.contains(word)) && !is_snapshot(id))
+        .map(|id| id.trim_start_matches(filter.strip_prefix.as_str()).to_string())
+        .filter(|id| pattern.as_ref().is_none_or(|re| re.is_match(id)))
+        .filter(|id| !filter.exclude_words.iter().any(|word| id.contains(word.as_str())))
+        .filter(|id| !filter.exclude_dated_snapshots || !is_snapshot(id))
         .collect();
     models.sort_by(|a, b| b.cmp(a));
     models.dedup();
@@ -263,7 +269,7 @@ pub async fn list_ai_models(provider: String, base_url: Option<String>, api_key:
         }
         "claude" => {
             let key = provider_key("claude_api_key", api_key.as_deref(), "Claude").await?;
-            let request = compat::client()?.get("https://api.anthropic.com/v1/models?limit=1000").header("x-api-key", key).header("anthropic-version", "2023-06-01");
+            let request = compat::client()?.get("https://api.anthropic.com/v1/models?limit=1000").header("x-api-key", key).header("anthropic-version", crate::ai::models::anthropic_version());
             let ids = fetch_models("Claude", request, "data", "id").await?;
             Ok(chat_models("claude", ids))
         }
@@ -299,6 +305,8 @@ pub async fn list_ai_models(provider: String, base_url: Option<String>, api_key:
 mod tests {
     use super::*;
 
+    const KIMI_GLOBAL: &str = "https://api.moonshot.ai/v1";
+
     fn choice(provider: &str, base_url: Option<&str>, model: Option<&str>) -> AiChoice {
         AiChoice { provider: provider.into(), api_key: None, base_url: base_url.map(Into::into), model: model.map(Into::into) }
     }
@@ -306,7 +314,7 @@ mod tests {
     #[test]
     fn each_choice_becomes_exactly_one_chain_row() {
         let kimi = entry_for(&choice("compatible", Some("https://api.moonshot.ai/v1/"), Some("kimi-k2"))).unwrap();
-        assert_eq!((kimi.provider_type.as_str(), kimi.base_url.as_deref(), kimi.model_id.as_deref()), ("openai", Some(compat::KIMI_GLOBAL), Some("kimi-k2")));
+        assert_eq!((kimi.provider_type.as_str(), kimi.base_url.as_deref(), kimi.model_id.as_deref()), ("openai", Some(KIMI_GLOBAL), Some("kimi-k2")));
         let ollama = entry_for(&choice("ollama", None, Some("qwen3:8b"))).unwrap();
         assert_eq!((ollama.provider_type.as_str(), ollama.endpoint_id.as_deref()), ("local", Some(OLLAMA_ENDPOINT)));
         assert_eq!(entry_for(&choice("gemini", None, None)).unwrap().model_id, None, "Gemini picks Flash or Pro per task");
@@ -323,11 +331,11 @@ mod tests {
     fn saving_replaces_the_chain_and_points_mail_at_the_same_ai() {
         let db = crate::db::test_database();
         db.conn.lock().unwrap().execute_batch("INSERT INTO provider_chain (position, provider_type) VALUES (0,'gemini'),(1,'claude');").unwrap();
-        let kimi = choice("compatible", Some(compat::KIMI_GLOBAL), Some("kimi-k2"));
+        let kimi = choice("compatible", Some(KIMI_GLOBAL), Some("kimi-k2"));
         save(&db, &kimi, &entry_for(&kimi).unwrap()).unwrap();
         let chain = saved_chain(&db).unwrap();
         assert_eq!(chain.len(), 1, "nothing else is tried behind the user's back");
-        assert_eq!(describe(&chain), Some(CurrentAi { provider: "compatible".into(), label: "Kimi".into(), model: Some("kimi-k2".into()), base_url: Some(compat::KIMI_GLOBAL.into()) }));
+        assert_eq!(describe(&chain), Some(CurrentAi { provider: "compatible".into(), label: "Kimi".into(), model: Some("kimi-k2".into()), base_url: Some(KIMI_GLOBAL.into()) }));
         assert_eq!(crate::mail::store::settings(&db).unwrap().processing_mode, "assistant");
         let ollama = choice("ollama", None, Some("qwen3:8b"));
         db.conn.lock().unwrap().execute("INSERT INTO local_endpoints (id, name, url, backend_type) VALUES ('ollama-local','Ollama','http://localhost:11434','ollama')", []).unwrap();
@@ -361,5 +369,18 @@ mod tests {
             ["gemini-3.7-flash", "gemini-3.1-pro-preview"]
         );
         assert_eq!(chat_models("claude", ids(&["claude-sonnet-5-5", "claude-opus-5-5", "claude-3-5-sonnet-20241022"])), ["claude-sonnet-5-5", "claude-opus-5-5"]);
+    }
+
+    /// The filter is the registry's: a copy that changes it changes the lists.
+    #[test]
+    fn the_chat_model_filter_follows_the_registry() {
+        let ids = |list: &[&str]| list.iter().map(|s| s.to_string()).collect::<Vec<_>>();
+        let _registry = crate::ai::registry::test_override::with(|r| {
+            r.chat_model_filter.exclude_words.push("-mini".into());
+            r.chat_model_filter.exclude_dated_snapshots = false;
+            r.providers.iter_mut().find(|p| p.id == "openai").unwrap().model_id_pattern = Some("^gpt-6".into());
+        });
+        assert_eq!(chat_models("openai", ids(&["gpt-6-luna", "gpt-6-mini", "gpt-5-2025-08-07", "o4"])), ["gpt-6-luna"]);
+        assert_eq!(chat_models("claude", ids(&["claude-3-5-sonnet-20241022"])), ["claude-3-5-sonnet-20241022"], "snapshots stay when the copy says so");
     }
 }

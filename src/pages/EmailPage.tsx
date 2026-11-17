@@ -8,7 +8,7 @@ import { CategoryTag, MailAgenda, MailAiCard } from "../components/mail/MailItem
 import { analysisSource, backendUtc, categoryLabel, decodeEntities, fileSize, formatDue, MAIL_CATEGORIES, mailSourceUrl, parseSender, readableBody, revealMailSource } from "../lib/mail-presentation";
 import { openUrl } from "../lib/commands";
 import { useAiModels } from "../lib/ai-models";
-import { cloudModelFor, formatRate } from "../lib/ai-catalog";
+import { cloudModelFor, formatRate, mailSetupModels } from "../lib/ai-catalog";
 import { useUiLocale } from "../i18n";
 import BedrockModelPicker from "../components/BedrockModelPicker";
 import { useBedrockModelList } from "../hooks/useBedrockModelList";
@@ -28,6 +28,8 @@ const storedState = (data: MailWorkspace) => JSON.stringify([data.accounts.map(a
 
 export default function EmailPage({ onSetup }: { onSetup?: () => void }) {
   const models = useAiModels();
+  // An example Ollama model for the placeholder: the first one mail setup offers.
+  const localExample = mailSetupModels(models)[0]?.id ?? "";
   // The rate comes from ai/models.rs; a model without a price gets no figure.
   const openAiPriceHint = (model: string) => {
     const priced = cloudModelFor(models, model);
@@ -449,7 +451,7 @@ export default function EmailPage({ onSetup }: { onSetup?: () => void }) {
             <p className="mail-hint">{text("Uses the AI chosen in Settings → Your AI, with its saved key.", "使用在「設定 → 你的 AI」選擇的 AI 及其已儲存的密鑰。")}</p>
             <label className="mail-consent"><input type="checkbox" required checked={editor.consent} onChange={e => setEditor({ ...editor, consent: e.target.checked })} />{text("I understand that analysis sends the group's emails, instructions and active memories to that AI (unless it is Ollama on this Mac).", "我明白分析時，群組郵件、指示及有效記憶會傳送至該 AI（如為此 Mac 的 Ollama 則不會離開此 Mac）。")}</label>
           </> : editor.input.processing_mode === "local" ? <>
-            <label>{text("Ollama model name", "Ollama 模型名稱")}<input value={editor.input.local_model} onChange={e => setEditor({ ...editor, input: { ...editor.input, local_model: e.target.value } })} placeholder={text("An installed model, e.g. qwen3:8b", "已安裝的模型，例如 qwen3:8b")} /></label>
+            <label>{text("Ollama model name", "Ollama 模型名稱")}<input value={editor.input.local_model} onChange={e => setEditor({ ...editor, input: { ...editor.input, local_model: e.target.value } })} placeholder={localExample ? text(`An installed model, e.g. ${localExample}`, `已安裝的模型，例如 ${localExample}`) : text("An installed model", "已安裝的模型")} /></label>
             <p className="mail-hint">{text("Install and start Ollama in Settings → Local AI first.", "請先在設定的「本機 AI」安裝並啟動 Ollama。")}</p>
           </> : editor.input.processing_mode === "openai" ? <>
             <label>{text("OpenAI model", "OpenAI 模型")}<input required value={editor.input.openai_model} onChange={e => setEditor({ ...editor, input: { ...editor.input, openai_model: e.target.value } })} placeholder={models?.defaults.openai} /></label>
