@@ -566,6 +566,35 @@ mod tests {
             assert_eq!(card["model"]["pick"]["base_url"], KIMI.unwrap(), "the card names the picked model");
             assert_eq!(offered(&card), [("openai".to_string(), None)]);
         }
+
+        /// A run that waits for an earlier one is judged when its turn
+        /// comes (review B, I-3 and R17): Gemini's consent is withdrawn while
+        /// the earlier run holds the lock, and the waiting run then refuses
+        /// with the consent card. TypeSafe may not receive mail here, so
+        /// whatever key the environment holds only the chosen AI could sort;
+        /// the mailbox is empty, so nothing could be sent anyway.
+        #[tokio::test]
+        async fn a_run_waiting_for_an_earlier_one_is_judged_when_its_turn_comes() {
+            use crate::ai::registry::DataTerms;
+            let _registry = crate::ai::registry::test_override::with(|r| r.providers.iter_mut().find(|p| p.id == "typesafe").unwrap().data_terms = DataTerms::Unknown);
+            let db = crate::db::test_database();
+            crate::mail::store::set_auto_triage(&db, true).unwrap();
+            use_ai(&db, "gemini", None);
+            agree_to_gemini(&db);
+            let earlier_run = super::super::TRIAGE_RUN.lock().await;
+            let db = &db;
+            let (outcome, ()) = tokio::join!(super::super::triage_untriaged(db, Some("en")), async move {
+                // The run reaches the lock and waits.
+                for _ in 0..3 {
+                    tokio::task::yield_now().await;
+                }
+                crate::ai::consent::revoke(db, &crate::ai::consent::Subject { provider: "gemini".into(), base_url: String::new() }).unwrap();
+                drop(earlier_run);
+            });
+            let error = outcome.expect_err("the consent withdrawn while it waited counts");
+            let Err(Blocked::NeedsConsent(request)) = crate::ai::mail_policy::check(db) else { panic!("Gemini needs consent again") };
+            assert_eq!(error, request.to_error(), "the consent card");
+        }
     }
 
     #[test]

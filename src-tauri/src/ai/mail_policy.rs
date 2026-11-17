@@ -1067,6 +1067,13 @@ mod tests {
         let before = saved(&db);
         assert_eq!(crate::commands::chat::save_turn(&db, "s1", "What did Kenny write?").unwrap_err(), refused);
         assert_eq!(saved(&db), before, "nothing of the refused turn is saved");
+        // "Send again" from the error card, for a message saved when it was
+        // first sent (review B, R10).
+        db.conn.lock().unwrap().execute("INSERT INTO conversations (role, content, session_id) VALUES ('user', 'What did Kenny write?', 's2')", []).unwrap();
+        let before = saved(&db);
+        assert_eq!(crate::commands::chat::save_retried_turn(&db, "s2", "What did Kenny write?").unwrap_err(), refused);
+        assert_eq!(crate::commands::chat::save_retried_turn(&db, "s2", "Something else").unwrap_err(), refused);
+        assert_eq!(saved(&db), before, "nothing of the refused retries is saved");
 
         use_ai(&db, "openai", KIMI);
         assert_eq!(withheld_as_turn_begins(&db).unwrap(), Withheld { conversations: 1, memories: 1, tasks: 1 });
