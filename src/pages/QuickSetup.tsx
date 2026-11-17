@@ -56,7 +56,7 @@ export default function QuickSetup({ onDone, onMailSetup }: { onDone: () => void
       </>}
       {step === 2 && <>
         <h1>{text('Connect Google Calendar', '連接 Google 日曆')}</h1>
-        <p>{text('JARVIS reads your events to answer questions about your day, and adds, moves or cancels events only when you ask and approve. It does not ask for Gmail here.', 'JARVIS 會讀取你的活動，以回答有關你日程的問題；只會在你要求並批准後新增、更改或取消活動。這一步不會要求 Gmail 權限。')}</p>
+        <p>{text('JARVIS reads your events to answer questions about your day, and adds, moves or cancels events only when you ask. It does not ask for Gmail here.', 'JARVIS 會讀取你的活動，以回答有關你日程的問題；只會在你要求時新增、更改或取消活動。這一步不會要求 Gmail 權限。')}</p>
         {calendarReady
           ? <p className="setup-notice">{text(`Connected${google.email ? ` as ${google.email}` : ''}. Your calendar is syncing.`, `已連接${google.email ? `（${google.email}）` : ''}，日曆正在同步。`)}</p>
           : <>
@@ -77,7 +77,7 @@ export default function QuickSetup({ onDone, onMailSetup }: { onDone: () => void
           <li>{text('Create a meeting with Alex tomorrow at 3pm', '明天下午三時和 Alex 開會')}</li>
           <li>{text('Move it to 4pm', '改到下午四時')}</li>
         </ul>
-        <p className="setup-hint">{text('JARVIS asks before it changes anything on your calendar. Mail can be added later in Settings.', 'JARVIS 更改日曆前一定會先問你。電郵功能之後可在「設定」加入。')}</p>
+        <p className="setup-hint">{text('JARVIS changes your calendar only when you ask, and asks you to approve before it cancels an event. Mail can be added later in Settings.', 'JARVIS 只會在你要求時更改日曆，取消活動前會請你批准。電郵功能之後可在「設定」加入。')}</p>
       </>}
       {error && <p className="setup-error" role="alert">{error}</p>}
       <footer className="setup-footer">

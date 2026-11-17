@@ -84,8 +84,10 @@ const DEFAULT_TOKEN_LIFETIME: std::time::Duration = std::time::Duration::from_se
 /// connects and then says nothing must not consume the whole consent window.
 const CALLBACK_READ_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(5);
 
-/// Total time the user has to finish consent in the browser.
-const CALLBACK_DEADLINE: std::time::Duration = std::time::Duration::from_secs(180);
+/// Total time the user has to finish consent in the browser. Three minutes
+/// was too short in testing: Google can stop a first sign-in to confirm it on
+/// the user's phone. Cancel ends a wait early.
+const CALLBACK_DEADLINE: std::time::Duration = std::time::Duration::from_secs(600);
 
 /// Returned when the user cancels a sign-in that is waiting for the browser.
 pub const SIGN_IN_CANCELLED: &str = "Google sign-in cancelled";
@@ -133,8 +135,10 @@ async fn wait_for_code(
 ) -> Result<String, String> {
     tokio::select! {
         result = tokio::time::timeout(CALLBACK_DEADLINE, redirect) => result
-            .map_err(|_| "OAuth timeout: no response within 3 minutes. Please try again.".to_string())?
-            .map_err(|_| "OAuth cancelled".to_string())?
+            .map_err(|_| "OAuth timeout: no response within 10 minutes. Please try again.".to_string())?
+            // The listener gave up first (its own deadline, or a broken
+            // socket). Users read "OAuth cancelled" as something they did.
+            .map_err(|_| "Google sign-in did not finish. Please try again.".to_string())?
             .map_err(|e| format!("Google OAuth denied: {}", e)),
         Ok(()) = cancel => Err(SIGN_IN_CANCELLED.to_string()),
     }
