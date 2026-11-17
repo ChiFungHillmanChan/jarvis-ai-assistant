@@ -79,6 +79,31 @@ fn provider_reason(err: &str) -> Option<String> {
     Some(if message.chars().count() > MAX { format!("{}…", message.chars().take(MAX).collect::<String>()) } else { message })
 }
 
+/// The log line for a failed request (P06, review A M-6): the service, the
+/// failure class, the HTTP status and the provider's own error code or type.
+/// Never the error text: a provider's error text can include the model id,
+/// the request parameters it rejected and fragments of the request.
+pub fn log_line(label: &str, err: &str) -> String {
+    let mut line = format!("{label} failed ({:?})", code_of(err));
+    if let Some(status) = status_in(err) {
+        line.push_str(&format!(": HTTP {status}"));
+        for code in provider_codes(err) {
+            line.push_str(&format!(", {code}"));
+        }
+    }
+    line
+}
+
+/// `error.type`, `error.code` and `error.status` of a provider's JSON error
+/// reply, each only when it is a short plain code.
+fn provider_codes(err: &str) -> Vec<String> {
+    let Some(rest) = err.split(" API error ").nth(1) else { return Vec::new() };
+    let Some(start) = rest.find('{') else { return Vec::new() };
+    let Some(Ok(value)) = serde_json::Deserializer::from_str(&rest[start..]).into_iter::<serde_json::Value>().next() else { return Vec::new() };
+    let plain = |code: &&str| !code.is_empty() && code.len() <= 64 && code.chars().all(|c| c.is_ascii_alphanumeric() || matches!(c, '_' | '.' | '-'));
+    ["/error/type", "/error/code", "/error/status"].iter().filter_map(|pointer| value.pointer(pointer)?.as_str()).filter(plain).map(str::to_string).collect()
+}
+
 /// The code for an HTTP status and the lower-cased body, read but never
 /// shown. Gemini reports a bad key, and a retired model id, as 400.
 pub fn status_code(status: u16, body_lower: &str) -> Code {
@@ -301,6 +326,28 @@ pub fn parse(error: &str) -> Option<serde_json::Value> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The chat failure log line names the service, the failure class, the
+    /// HTTP status and the provider's own error code or type, never the body:
+    /// a provider's error text can quote the request (review A, M-6). The
+    /// card still shows the provider's message to the user.
+    #[test]
+    fn a_failed_request_is_logged_without_the_providers_error_text() {
+        let gemini = r#"Google Gemini API error 400: {"error":{"code":400,"message":"MAIL-CANARY Kenny owes HK$12,000","status":"INVALID_ARGUMENT"}}"#;
+        assert_eq!(log_line("Google Gemini", gemini), "Google Gemini failed (BadRequest): HTTP 400, INVALID_ARGUMENT");
+        let openai = r#"OpenAI API error 404: {"error":{"message":"MAIL-CANARY","type":"invalid_request_error","code":"model_not_found"}}"#;
+        assert_eq!(log_line("OpenAI", openai), "OpenAI failed (NotFound): HTTP 404, invalid_request_error, model_not_found");
+        let claude = r#"Claude API error 429: {"type":"error","error":{"type":"rate_limit_error","message":"MAIL-CANARY"}}"#;
+        assert_eq!(log_line("Claude", claude), "Claude failed (RateLimited): HTTP 429, rate_limit_error");
+        // A field that is not a plain code is left out, as is a body that is not JSON.
+        let odd = r#"Kimi API error 400: {"error":{"type":"MAIL-CANARY Kenny owes","code":{"x":1}}}"#;
+        assert_eq!(log_line("Kimi", odd), "Kimi failed (BadRequest): HTTP 400");
+        assert_eq!(log_line("Kimi", "Kimi API error 502: <html>MAIL-CANARY</html>"), "Kimi failed (ServerError): HTTP 502");
+        assert_eq!(log_line("OpenAI", "error sending request: connection refused"), "OpenAI failed (Unreachable)");
+        for error in [gemini, openai, claude, odd] {
+            assert!(!log_line("X", error).contains("CANARY"), "{error}");
+        }
+    }
     use crate::ai::capability::Pick;
 
     fn target(label: &str) -> Target {

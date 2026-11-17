@@ -190,9 +190,15 @@ pub(crate) fn tool_call_key(name: &str, args_str: &str) -> String {
 }
 
 /// Tools whose execution changes state the user can see outside JARVIS.
-/// Falling through to the next provider replays the whole turn from the
-/// original messages, so anything in this list would be carried out twice.
+/// A resend, or a "send again" picked in the error card, replays the whole
+/// turn from the original messages, so anything in this list would be
+/// carried out twice: neither happens once one ran (P06). Every other tool
+/// is read-only (`tests::every_tool_is_listed_as_an_action_or_as_read_only`).
 const SIDE_EFFECTING_TOOLS: &[&str] = &[
+    // On the Mac: an app or a file opened twice, a second notification.
+    "open_app",
+    "open_file",
+    "send_notification",
     "create_event",
     "update_event",
     "delete_event",
@@ -409,7 +415,7 @@ where
                 return Ok(response);
             }
             Err(error) => {
-                log::warn!("{label} failed: {error}");
+                log::warn!("{}", failure::log_line(&label, &error));
                 let code = failure::code_of(&error);
                 let resent_inside = wire_resends && row.provider_type == "openai" && matches!(code, failure::Code::RateLimited | failure::Code::ServerError);
                 let again = !resent && code.transient() && !resent_inside && ledger.count() == 0;
@@ -1037,6 +1043,30 @@ impl AiRouter {
 mod tests {
     use super::*;
     use std::collections::HashSet;
+
+    /// Every tool the app defines is either an action (a resend or a
+    /// picked "send again" would carry it out twice, so neither happens
+    /// after one ran) or read-only. A new tool cannot be left out of both
+    /// (review A, M-5).
+    #[test]
+    fn every_tool_is_listed_as_an_action_or_as_read_only() {
+        const READ_ONLY: &[&str] = &[
+            "run_command", "find_files", "list_tasks", "system_info", "search_emails", "read_email", "list_follow_ups", "list_inbox_triage", "list_events",
+            "search_notion", "read_notion_page", "list_github_items", "search_notes", "read_note", "render_chart", "render_status", "list_memories",
+        ];
+        let defined: Vec<String> = tools::get_tool_definitions().into_iter().map(|tool| tool.name).collect();
+        for name in &defined {
+            let action = SIDE_EFFECTING_TOOLS.contains(&name.as_str());
+            let read_only = READ_ONLY.contains(&name.as_str());
+            assert!(action != read_only, "{name}: listed as an action {action}, as read-only {read_only}");
+        }
+        for name in SIDE_EFFECTING_TOOLS.iter().chain(READ_ONLY) {
+            assert!(defined.iter().any(|d| d == name), "{name} is listed but no longer defined");
+        }
+        for action in ["open_app", "open_file", "send_notification"] {
+            assert!(SIDE_EFFECTING_TOOLS.contains(&action), "{action} acts on the Mac");
+        }
+    }
 
     fn bedrock_entry(model_id: Option<&str>) -> ProviderChainEntry {
         ProviderChainEntry { position: 0, provider_type: "bedrock".into(), endpoint_id: None, model_id: model_id.map(Into::into), enabled: true, base_url: None }
