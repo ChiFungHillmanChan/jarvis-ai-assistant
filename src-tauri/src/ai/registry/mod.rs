@@ -24,7 +24,18 @@ use std::sync::{Arc, LazyLock, RwLock};
 
 /// The registry compiled into this build. Always valid: the Rust test
 /// `the_bundled_registry_is_usable` parses it, and so does every launch.
+/// Under test, a test may put its own copy in its place on its thread
+/// ([`test_override::bundled_with`]); the copy in use at launch
+/// ([`holder`]) is always the compiled one.
 pub fn bundled() -> Arc<Registry> {
+    #[cfg(test)]
+    if let Some(registry) = test_override::bundled() {
+        return registry;
+    }
+    compiled()
+}
+
+fn compiled() -> Arc<Registry> {
     static BUNDLED: LazyLock<Arc<Registry>> =
         LazyLock::new(|| Arc::new(Registry::parse(load::BUNDLED_JSON.as_bytes()).expect("registry/registry.json is a usable registry")));
     Arc::clone(&BUNDLED)
@@ -59,7 +70,7 @@ impl Holder {
 /// The app's copy in use: the bundled copy until [`start`] has read the
 /// cache.
 pub fn holder() -> &'static Holder {
-    static HOLDER: LazyLock<Holder> = LazyLock::new(|| Holder::new(Active { registry: bundled(), source: Source::Bundled }));
+    static HOLDER: LazyLock<Holder> = LazyLock::new(|| Holder::new(Active { registry: compiled(), source: Source::Bundled }));
     &HOLDER
 }
 
@@ -112,6 +123,7 @@ pub(crate) mod test_override {
 
     thread_local! {
         static OVERRIDE: RefCell<Option<Arc<Registry>>> = const { RefCell::new(None) };
+        static BUNDLED: RefCell<Option<Arc<Registry>>> = const { RefCell::new(None) };
     }
 
     pub(crate) fn get() -> Option<Arc<Registry>> {
@@ -137,6 +149,28 @@ pub(crate) mod test_override {
         let mut registry = (*super::fixture()).clone();
         change(&mut registry);
         set(registry)
+    }
+
+    pub(crate) fn bundled() -> Option<Arc<Registry>> {
+        BUNDLED.with(|b| b.borrow().clone())
+    }
+
+    pub(crate) struct BundledGuard(Option<Arc<Registry>>);
+
+    impl Drop for BundledGuard {
+        fn drop(&mut self) {
+            let previous = self.0.take();
+            BUNDLED.with(|b| *b.borrow_mut() = previous);
+        }
+    }
+
+    /// The bundled copy with `change` applied, returned by `bundled()` on
+    /// this thread until the guard is dropped: for a test that shows some
+    /// code does not depend on it.
+    pub(crate) fn bundled_with(change: impl FnOnce(&mut Registry)) -> BundledGuard {
+        let mut registry = (*super::bundled()).clone();
+        change(&mut registry);
+        BundledGuard(BUNDLED.with(|b| b.borrow_mut().replace(Arc::new(registry))))
     }
 }
 

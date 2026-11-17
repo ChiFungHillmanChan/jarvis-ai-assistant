@@ -779,16 +779,18 @@ pub(crate) mod tests {
         }
     }
 
-    /// The same rows end the same way whatever registry is in use: here the
-    /// copy in use differs from the frozen list (a model it did not price
-    /// has a price, a model it priced is gone), and the result is the one
-    /// version 1 gives.
+    /// The same rows end the same way whatever registry is in use or
+    /// bundled: here both differ from the frozen list (a model it did not
+    /// price has a price, a model it priced is gone, and one price has
+    /// changed), and the result is the one version 1 gives.
     #[test]
-    fn old_rows_are_corrected_the_same_whatever_registry_is_in_use() {
+    fn old_rows_are_corrected_the_same_whatever_registry_is_bundled_or_in_use() {
         let llama = "us.meta.llama3-3-70b-instruct-v1:0";
+        let nova = "apac.amazon.nova-pro-v1:0";
         let rows: &[Row] = &[
             (OLD, "bedrock", llama, 1_000, 50, 0, 0, Some(0), "chat", 0),
             (OLD, "bedrock", HAIKU, 120, 45, 800, 400, Some(805), "chat", 0),
+            (OLD, "bedrock", nova, 2_000, 100, 500, 0, Some(1_700), "chat", 0),
         ];
         let correct = || {
             let db = crate::db::test_database();
@@ -797,19 +799,28 @@ pub(crate) mod tests {
             (correct_old_rows(&conn).unwrap(), snapshot(&conn))
         };
         let (corrected, at_v1) = correct();
-        assert_eq!(corrected, Corrected { guessed: 0, billed_at_zero: 1, local_made_free: 0, cache_added: 1 });
+        assert_eq!(corrected, Corrected { guessed: 0, billed_at_zero: 1, local_made_free: 0, cache_added: 2 });
         assert_eq!((at_v1[0].1 .4, at_v1[0].1 .6), (None, 1), "an unpriced model billed at zero is marked unknown");
         assert_eq!(at_v1[1].1 .4, Some(925), "repriced at the Haiku rate of version 1");
+        // 2,000 x 0.80 + 100 x 3.20 + 500 x 0.20, per million: Nova Pro in version 1.
+        assert_eq!(at_v1[2].1 .4, Some(2_020), "repriced at the Nova Pro rate of version 1");
 
-        let _live = crate::ai::registry::test_override::with(|r| {
+        fn differ(r: &mut crate::ai::registry::Registry) {
             let mut priced = r.models.iter().find(|m| m.prices.is_some() && !m.managed).unwrap().clone();
             priced.id = "llama3-3-70b".into();
             r.models.push(priced);
             let haiku = HAIKU.to_lowercase();
             r.models.retain(|m| !haiku.contains(m.id.as_str()));
-        });
-        assert!(crate::ai::models::price_known("bedrock", llama), "the copy in use prices a model version 1 did not");
-        assert!(!crate::ai::models::price_known("bedrock", HAIKU), "and no longer prices one version 1 did");
+            let nova_pro = r.models.iter_mut().find(|m| m.id == "nova-pro").unwrap();
+            nova_pro.prices.as_mut().unwrap().input *= 10.0;
+        }
+        let _live = crate::ai::registry::test_override::with(differ);
+        let _bundled = crate::ai::registry::test_override::bundled_with(differ);
+        for (copy, registry) in [("in use", crate::ai::registry::current()), ("bundled", crate::ai::registry::bundled())] {
+            assert!(registry.price_known("bedrock", llama), "the copy {copy} prices a model version 1 did not");
+            assert!(!registry.price_known("bedrock", HAIKU), "the copy {copy} no longer prices one version 1 did");
+            assert_eq!(registry.usd_cost_micro("bedrock", nova, 2_500, 100, 500, 0), Some(16_420), "the copy {copy} prices Nova Pro differently");
+        }
         assert_eq!(correct(), (corrected, at_v1));
     }
 
