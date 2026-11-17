@@ -1467,9 +1467,19 @@ fn approval_detail(name: &str, args: &serde_json::Value, db: &crate::db::Databas
     let found = match name {
         "remember" => args["content"].as_str().map(str::to_string),
         "archive_email" => lookup("SELECT '\u{201c}' || coalesce(subject, '') || '\u{201d} ' || sender FROM emails WHERE gmail_id = ?1", &id("email_id")),
-        "delete_event" => lookup("SELECT '\u{201c}' || summary || '\u{201d} ' || start_time FROM calendar_events WHERE account_id = '' AND google_id = ?1", &id("event_id")),
+        "delete_event" | "update_event" => {
+            let conn = db.conn.lock().ok();
+            conn.and_then(|conn| {
+                conn.query_row(
+                    "SELECT summary, start_time FROM calendar_events WHERE account_id = '' AND google_id = ?1",
+                    [id("event_id")],
+                    |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?)),
+                )
+                .ok()
+            })
+            .map(|(summary, start)| event_label(&summary, &start, &chrono::Local))
+        }
         "update_follow_up" => lookup("SELECT '\u{201c}' || title || '\u{201d}' FROM mail_items WHERE id = ?1", &id("item_id")),
-        "update_event" => lookup("SELECT '\u{201c}' || summary || '\u{201d} ' || start_time FROM calendar_events WHERE account_id = '' AND google_id = ?1", &id("event_id")),
         "forget" => match args["keyword"].as_str() {
             Some(keyword) => Some(format!("\u{201c}{keyword}\u{201d}")),
             None => lookup("SELECT '\u{201c}' || content || '\u{201d}' FROM user_memory WHERE id = ?1", &id("id")),
@@ -1490,6 +1500,20 @@ fn approval_detail(name: &str, args: &serde_json::Value, db: &crate::db::Databas
         "forget" => "id",
         _ => "item_id",
     })))
+}
+
+/// How the approval card names an event: its title and start in the Mac's
+/// time zone. Google stores the start in the calendar's own zone (or UTC), so
+/// the raw string showed a time the user would not recognise.
+fn event_label<Tz>(summary: &str, start: &str, tz: &Tz) -> String
+where
+    Tz: chrono::TimeZone,
+    Tz::Offset: std::fmt::Display,
+{
+    let when = chrono::DateTime::parse_from_rfc3339(start)
+        .map(|t| t.with_timezone(tz).format("%Y-%m-%d %H:%M").to_string())
+        .unwrap_or_else(|_| start.to_string());
+    format!("\u{201c}{summary}\u{201d} {when}")
 }
 
 async fn execute_tool_inner(
@@ -2398,9 +2422,11 @@ mod outbound_approval_tests {
         let detail = |name: &str, args: serde_json::Value| approval_detail(name, &args, &db);
         assert_eq!(detail("forget", serde_json::json!({"id": 7})), "\u{201c}Accountant is Kenny\u{201d}");
         assert_eq!(detail("forget", serde_json::json!({"keyword": "Kenny"})), "\u{201c}Kenny\u{201d}");
+        // The start is shown in the Mac's time zone; event_label's own test
+        // pins the formatting with a fixed zone.
         assert_eq!(
             detail("update_event", serde_json::json!({"event_id": "evt1"})),
-            "\u{201c}Board meeting\u{201d} 2026-11-02T10:00:00+08:00"
+            event_label("Board meeting", "2026-11-02T10:00:00+08:00", &chrono::Local)
         );
         assert_eq!(
             detail("create_github_issue", serde_json::json!({"repo": "acme/app", "title": "Inbox"})),
@@ -2767,6 +2793,13 @@ mod local_time_tests {
             "the model must not be told to stamp today's offset on a future date, got: {line}"
         );
         assert!(!line.contains('\n'), "must stay a single line, got: {line}");
+    }
+
+    #[test]
+    fn event_label_shows_the_start_in_local_time() {
+        let hk = hong_kong();
+        assert_eq!(event_label("Meeting with Alex", "2026-11-17T07:00:00Z", &hk), "\u{201c}Meeting with Alex\u{201d} 2026-11-17 15:00");
+        assert_eq!(event_label("Offsite", "2026-11-20", &hk), "\u{201c}Offsite\u{201d} 2026-11-20");
     }
 
     #[test]
