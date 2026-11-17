@@ -351,10 +351,31 @@ async fn summarize_with_haiku(
 // TTS dispatch for the briefing
 // ---------------------------------------------------------------------------
 
+/// How the briefing is read out: always on this Mac.
+#[derive(Debug, PartialEq)]
+enum BriefingOutput {
+    /// macOS `say`, with this voice.
+    Say(String),
+    CosyVoice,
+}
+
+/// The briefing is mail and calendar content, so a cloud voice never gets
+/// it (P06, review A I-2 and review B m7): MiniMax selected reads it with
+/// the system voice instead. Its audio was not played anyway (see below).
+fn briefing_output(provider: crate::voice::tts_router::TtsProvider, system_voice: impl FnOnce() -> String) -> BriefingOutput {
+    use crate::voice::tts_router::TtsProvider;
+    match provider {
+        TtsProvider::MacSay { voice } => BriefingOutput::Say(voice),
+        TtsProvider::Minimax => BriefingOutput::Say(system_voice()),
+        TtsProvider::CosyVoice => BriefingOutput::CosyVoice,
+    }
+}
+
 /// Dispatch the briefing summary through TtsRouter.
 ///
 /// MacSay: invokes the macOS `say` binary directly (works immediately).
-/// MiniMax / CosyVoice: the audio byte stream is consumed but not routed to
+/// MiniMax is never sent the briefing ([`briefing_output`]).
+/// CosyVoice: the audio byte stream is consumed but not routed to
 /// an output device in this implementation. Properly wiring cloud/offline
 /// audio output to the system audio sink is the same problem that
 /// `tts.rs::speak` solves and will be addressed in the post-B9 tts.rs
@@ -374,9 +395,13 @@ async fn speak_briefing_via_router(
         language: language.to_string(),
     };
     let provider = router.select_provider(&req)?;
+    let system_voice = || match router.select_provider(&TtsRequest { mode: TtsMode::Ack, ..req.clone() }) {
+        Ok(TtsProvider::MacSay { voice }) => voice,
+        _ => "Samantha".to_string(),
+    };
 
-    match provider {
-        TtsProvider::MacSay { voice } => {
+    match briefing_output(provider, system_voice) {
+        BriefingOutput::Say(voice) => {
             use tokio::io::AsyncWriteExt;
 
             // `text` is the model's markdown summary of email written by
@@ -401,26 +426,7 @@ async fn speak_briefing_via_router(
                 log::warn!("[daily_briefing] say exited with {}", status);
             }
         }
-        TtsProvider::Minimax => {
-            let Some(api_key) = crate::integration_keys::resolve("minimax_api_key") else {
-                log::warn!(
-                    "[daily_briefing] TTS: MiniMax selected but no API key — skipping audio"
-                );
-                return Ok(());
-            };
-            let voice_id = match language {
-                "yue" => "Cantonese_PrettyGirl",
-                _ => "English_FriendlyMan",
-            };
-            let client = crate::voice::minimax::MinimaxClient::new(api_key);
-            let mut rx = client.stream_speak(text, voice_id, db).await?;
-            // Drain stream — audio playback wiring is post-B9.
-            while let Some(_chunk) = rx.recv().await {}
-            log::info!(
-                "[daily_briefing] TTS: MiniMax stream consumed (audio playback wiring is post-B9)"
-            );
-        }
-        TtsProvider::CosyVoice => {
+        BriefingOutput::CosyVoice => {
             let model_path = {
                 let conn = db.conn.lock().map_err(|e| format!("db lock: {e}"))?;
                 conn.query_row(
@@ -542,6 +548,20 @@ mod tests {
         assert!(!classified.get(), "nothing was sent");
         agree_to_gemini(&db);
         assert_eq!(super::each_gated(&db, || async { Ok(1) }, |n| async move { Ok(n + 1) }).await, Ok(Some(2)));
+    }
+
+    /// The briefing is read out on this Mac: by the system voice, or
+    /// CosyVoice when offline mode chose it. A cloud voice never gets the
+    /// text (review A I-2, review B m7): it is mail and calendar content, and
+    /// the cloud voice's audio is not played yet anyway.
+    #[test]
+    fn the_briefing_is_never_sent_to_a_cloud_voice() {
+        use super::{briefing_output, BriefingOutput};
+        use crate::voice::tts_router::TtsProvider;
+        let system = || "Sin-ji".to_string();
+        assert_eq!(briefing_output(TtsProvider::Minimax, system), BriefingOutput::Say("Sin-ji".into()));
+        assert_eq!(briefing_output(TtsProvider::MacSay { voice: "Samantha".into() }, system), BriefingOutput::Say("Samantha".into()));
+        assert_eq!(briefing_output(TtsProvider::CosyVoice, system), BriefingOutput::CosyVoice);
     }
 
     use super::today_local;
