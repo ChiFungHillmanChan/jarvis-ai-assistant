@@ -97,17 +97,21 @@ fn store_then_check(db: &Database, entry: &ProviderChainEntry, request: &Request
                 format!("Bedrock（{}）沒有回覆內容，請重試或改用其他模型。", done.model),
             ));
         }
-        // Bedrock has no JSON mode: the object was asked for in words
-        // (bedrock::JSON_INSTRUCTION), so the reply must be checked for one,
-        // without code fences or prose around it.
-        if request.json {
-            done.text = json_object_text(&done.text).ok_or_else(|| {
-                language.pick(
-                    format!("Bedrock ({}) did not reply with valid JSON. Try again, or choose another model.", done.model),
-                    format!("Bedrock（{}）回覆的不是有效 JSON，請重試或改用其他模型。", done.model),
-                )
-            })?;
-        }
+    }
+    // Bedrock and Claude have no JSON mode this build uses: the object was
+    // asked for in words (bedrock::JSON_INSTRUCTION), so the reply must be
+    // checked for one, without code fences or prose around it. A reply that
+    // is not one fails once; it is not a transient failure, so it is not
+    // sent again.
+    if request.json && matches!(entry.provider_type.as_str(), "bedrock" | "claude") {
+        let language = super::bedrock::UiLanguage::read(db);
+        let name = if entry.provider_type == "bedrock" { "Bedrock" } else { "Claude" };
+        done.text = json_object_text(&done.text).ok_or_else(|| {
+            language.pick(
+                format!("{name} ({}) did not reply with valid JSON. Try again, or choose another model.", done.model),
+                format!("{name}（{}）回覆的不是有效 JSON，請重試或改用其他模型。", done.model),
+            )
+        })?;
     }
     Ok(done)
 }
@@ -224,45 +228,34 @@ async fn complete_one(router: &AiRouter, db: &Database, entry: &ProviderChainEnt
     }
 }
 
-/// The one tool a JSON request to Claude is made to call. Claude has no
-/// JSON switch on every model; a forced tool call always arrives as a JSON
-/// object, so the shape is guaranteed by the API rather than asked for in
-/// words. The schema is open because the instructions carry the real one.
-const CLAUDE_JSON_TOOL: &str = "json_reply";
-
+/// A JSON request to Claude asks for the object in words
+/// (`bedrock::JSON_INSTRUCTION`), as Bedrock does, and the reply is checked
+/// after its row is stored (`store_then_check`). No tool, no forced
+/// `tool_choice` and no prefilled reply: Claude's current models refuse a
+/// forced tool choice and a prefill with a 400 (P06 fix round 4, which
+/// replaced P02's forced tool call).
 fn claude_body(model: &str, request: &Request<'_>) -> Value {
     let mut body = json!({
         "model": model,
         "max_tokens": request.max_tokens,
         "messages": [{"role": "user", "content": request.user}],
     });
-    if !request.system.is_empty() {
-        body["system"] = json!(request.system);
-    }
-    if request.json {
-        body["tools"] = json!([{
-            "name": CLAUDE_JSON_TOOL,
-            "description": "Give your whole answer as this tool's input: one JSON object in the shape the instructions describe.",
-            "input_schema": {"type": "object"},
-        }]);
-        body["tool_choice"] = json!({"type": "tool", "name": CLAUDE_JSON_TOOL});
+    let system = match (request.system.is_empty(), request.json) {
+        (true, false) => None,
+        (true, true) => Some(super::bedrock::JSON_INSTRUCTION.to_string()),
+        (false, false) => Some(request.system.to_string()),
+        (false, true) => Some(format!("{}\n\n{}", request.system, super::bedrock::JSON_INSTRUCTION)),
+    };
+    if let Some(system) = system {
+        body["system"] = json!(system);
     }
     body
 }
 
-/// A JSON answer is the forced tool call's input; anything else is the text
-/// blocks.
+/// The reply's text blocks.
 fn claude_result(value: &Value, model: String) -> Result<Completion, String> {
     let blocks = value.get("content").and_then(Value::as_array).cloned().unwrap_or_default();
-    let tool_input = blocks
-        .iter()
-        .find(|b| b.get("type").and_then(Value::as_str) == Some("tool_use") && b.get("name").and_then(Value::as_str) == Some(CLAUDE_JSON_TOOL))
-        .and_then(|b| b.get("input"))
-        .filter(|input| input.as_object().is_some_and(|fields| !fields.is_empty()));
-    let text = match tool_input {
-        Some(input) => input.to_string(),
-        None => blocks.iter().filter_map(|b| b.get("text").and_then(Value::as_str)).collect::<String>(),
-    };
+    let text = blocks.iter().filter(|b| b.get("type").and_then(Value::as_str) == Some("text")).filter_map(|b| b.get("text").and_then(Value::as_str)).collect::<String>();
     done(text, "Claude".into(), model, value.pointer("/usage/input_tokens"), value.pointer("/usage/output_tokens"))
 }
 
@@ -484,49 +477,66 @@ pub(crate) mod tests {
         assert!(crate::ai::cost::tests::usage_rows(&db).is_empty(), "nothing was sent");
     }
 
-    /// Claude's JSON mode is one forced tool call, so the object arrives as
-    /// structured input rather than text that may carry fences or prose.
+    /// Claude JSON is asked for in words, as for Bedrock: no tool, no forced
+    /// `tool_choice` and no prefilled reply. Claude's current models refuse a
+    /// forced tool choice and a prefill with a 400 (P02's tool path, changed
+    /// in P06 fix round 4, review A I-4). No model id decides this.
     #[test]
-    fn a_claude_json_request_forces_the_reply_tool() {
+    fn a_claude_json_request_asks_in_words_with_no_tool_and_no_prefill() {
         let body = claude_body("claude-sonnet-4-6", &sort_request(true));
         assert_eq!(body["model"], "claude-sonnet-4-6");
         assert_eq!(body["max_tokens"], 2_048);
-        assert_eq!(body["system"], "Sort this email.");
-        assert_eq!(body["messages"], json!([{"role": "user", "content": "From: a@example.com"}]));
-        assert_eq!(body["tools"].as_array().unwrap().len(), 1);
-        assert_eq!(body["tools"][0]["name"], CLAUDE_JSON_TOOL);
-        assert_eq!(body["tools"][0]["input_schema"], json!({"type": "object"}));
-        assert_eq!(body["tool_choice"], json!({"type": "tool", "name": CLAUDE_JSON_TOOL}));
+        assert_eq!(body["system"], format!("Sort this email.\n\n{}", super::super::bedrock::JSON_INSTRUCTION));
+        assert_eq!(body["messages"], json!([{"role": "user", "content": "From: a@example.com"}]), "no assistant prefill");
+        assert!(body.get("tools").is_none() && body.get("tool_choice").is_none(), "{body}");
+        let no_system = claude_body("claude-sonnet-4-6", &Request { system: "", ..sort_request(true) });
+        assert_eq!(no_system["system"], super::super::bedrock::JSON_INSTRUCTION);
 
         let plain = claude_body("claude-sonnet-4-6", &Request { system: "", ..sort_request(false) });
         assert!(plain.get("tools").is_none() && plain.get("tool_choice").is_none());
         assert!(plain.get("system").is_none(), "no empty system prompt");
     }
 
-    /// A Messages API reply to a forced tool call (stop_reason tool_use).
-    fn claude_tool_reply() -> Value {
+    fn claude_entry() -> ProviderChainEntry {
+        ProviderChainEntry { position: 0, provider_type: "claude".into(), endpoint_id: None, model_id: None, enabled: true, base_url: None }
+    }
+
+    fn claude_text_reply(text: &str) -> Value {
         json!({
             "id": "msg_fixture", "type": "message", "role": "assistant", "model": "claude-sonnet-4-6",
-            "content": [{"type": "tool_use", "id": "toolu_fixture", "name": "json_reply", "input": {"category": "action", "summary": "Reply by Friday"}}],
-            "stop_reason": "tool_use",
+            "content": [{"type": "text", "text": text}],
+            "stop_reason": "end_turn",
             "usage": {"input_tokens": 812, "output_tokens": 64}
         })
     }
 
+    /// The reply is checked for one object after its row is stored: a
+    /// fenced object is taken out of the fence; prose is a clear failure,
+    /// which is not sent again (not a transient failure, so `run_chosen`
+    /// does not resend it).
     #[test]
-    fn a_claude_json_reply_is_the_tool_input() {
-        let done = claude_result(&claude_tool_reply(), "claude-sonnet-4-6".into()).unwrap();
-        let parsed: Value = serde_json::from_str(&done.text).unwrap();
-        assert_eq!(parsed, json!({"category": "action", "summary": "Reply by Friday"}));
+    fn a_claude_json_reply_is_checked_for_one_object() {
+        let db = crate::ai::cost::tests::temp_metrics_db("");
+        let fenced = claude_result(&claude_text_reply("```json\n{\"category\": \"action\", \"summary\": \"Reply by Friday\"}\n```"), "claude-sonnet-4-6".into()).unwrap();
+        let done = store_then_check(&db, &claude_entry(), &sort_request(true), fenced, 1).unwrap();
+        assert_eq!(serde_json::from_str::<Value>(&done.text).unwrap(), json!({"category": "action", "summary": "Reply by Friday"}));
         assert_eq!((done.provider.as_str(), done.input_tokens, done.output_tokens), ("Claude", 812, 64));
+
+        let prose = claude_result(&claude_text_reply("This email asks for a reply by Friday."), "claude-sonnet-4-6".into()).unwrap();
+        let error = store_then_check(&db, &claude_entry(), &sort_request(true), prose, 1).unwrap_err();
+        assert_eq!(error, "Claude (claude-sonnet-4-6) did not reply with valid JSON. Try again, or choose another model.");
+        assert!(!crate::ai::failure::code_of(&error).transient(), "not sent again");
+        assert_eq!(crate::ai::cost::tests::usage_rows(&db).len(), 2, "both billed replies are stored");
+        let plain = claude_result(&claude_text_reply("The email asks for a reply."), "m".into()).unwrap();
+        assert_eq!(store_then_check(&db, &claude_entry(), &sort_request(false), plain, 1).unwrap().text, "The email asks for a reply.");
     }
 
     #[test]
     fn a_plain_claude_reply_is_its_text() {
         let value = json!({"content": [{"type": "text", "text": "Reply "}, {"type": "text", "text": "by Friday"}], "usage": {"input_tokens": 10, "output_tokens": 4}});
         assert_eq!(claude_result(&value, "m".into()).unwrap().text, "Reply by Friday");
-        let empty_tool = json!({"content": [{"type": "tool_use", "name": "json_reply", "input": {}}], "usage": {}});
-        assert!(claude_result(&empty_tool, "m".into()).is_err(), "an empty object is no answer");
+        let no_text = json!({"content": [{"type": "tool_use", "name": "json_reply", "input": {"a": 1}}], "usage": {}});
+        assert!(claude_result(&no_text, "m".into()).is_err(), "only text blocks are the answer");
     }
 
     #[test]
