@@ -345,13 +345,23 @@ pub fn deeper_for(entry: &ProviderChainEntry, workload: Workload) -> Option<Deep
     if workload == Workload::Premium { deeper(entry) } else { None }
 }
 
-/// Whether the "Think harder" button is shown: the model the next chat turn
-/// goes to ([`super::chosen_entry`]) can think harder ([`think_harder`]).
+/// The model a "Think harder" turn on `entry` answers with, named for the
+/// button, or None when the button is hidden. An unpinned row answers with
+/// the registry's premium model (a Gemini row moves to the pro model, as
+/// before P06); a pinned row keeps its model. The button names it, so the
+/// move is shown before the user presses it and never happens on its own.
+pub fn think_harder_model(entry: &ProviderChainEntry) -> Option<String> {
+    deeper(entry)?;
+    check(&registry::current(), "premium", entry).ok().map(|target| target.label)
+}
+
+/// The "Think harder" button for the model the next chat turn goes to
+/// ([`super::chosen_entry`]): the model it answers with, or None (hidden).
 #[tauri::command]
-pub async fn think_harder_offered(db: tauri::State<'_, std::sync::Arc<crate::db::Database>>, router: tauri::State<'_, std::sync::Mutex<super::AiRouter>>) -> Result<bool, String> {
+pub async fn think_harder_offered(db: tauri::State<'_, std::sync::Arc<crate::db::Database>>, router: tauri::State<'_, std::sync::Mutex<super::AiRouter>>) -> Result<Option<String>, String> {
     let router = router.lock().map_err(|e| e.to_string())?.clone();
     let configured = router.configured(&db).await;
-    Ok(super::chosen_entry(&router.provider_chain, router.chain_loaded_from_db, &configured).is_some_and(|row| think_harder(&row)))
+    Ok(super::chosen_entry(&router.provider_chain, router.chain_loaded_from_db, &configured).and_then(|row| think_harder_model(&row)))
 }
 
 #[cfg(test)]
@@ -552,6 +562,22 @@ mod tests {
         });
         assert!(think_harder(&row("claude", None, None)));
         assert!(!think_harder(&row("gemini", None, None)));
+    }
+
+    /// The button names the model a Think harder turn answers with: the
+    /// registry's premium model for an unpinned row, the pinned model for a
+    /// pinned one, and nothing where the button is hidden.
+    #[test]
+    fn the_think_harder_button_names_the_model_that_answers() {
+        let registry = registry::current();
+        let premium = registry.feature_default("premium", "gemini").unwrap().to_string();
+        let chat = registry.feature_default("chat", "gemini").unwrap().to_string();
+        assert_ne!(premium, chat, "an unpinned Gemini row moves to another model for Think harder");
+        let unpinned = think_harder_model(&row("gemini", None, None)).unwrap();
+        assert_eq!(unpinned, check(&registry, "premium", &row("gemini", Some(&premium), None)).unwrap().label);
+        let pinned = think_harder_model(&row("gemini", Some(&chat), None)).unwrap();
+        assert_eq!(pinned, check(&registry, "chat", &row("gemini", Some(&chat), None)).unwrap().label, "a pinned row keeps its model");
+        assert_eq!(think_harder_model(&row("openai", None, None)), None);
     }
 
     /// What a marked turn asks for follows the registry flags; an unmarked

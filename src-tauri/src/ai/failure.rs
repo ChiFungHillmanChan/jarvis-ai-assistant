@@ -59,6 +59,21 @@ fn status_in(err: &str) -> Option<u16> {
     err.split('（').skip(1).find_map(|rest| digits(rest).filter(|s: &u16| (100..600).contains(s)))
 }
 
+/// The `error.message` of a provider's JSON error reply
+/// ("<provider> API error <status>: {...}"), on one line and capped. The
+/// rest of the reply is never read out.
+fn provider_reason(err: &str) -> Option<String> {
+    let rest = err.split(" API error ").nth(1)?;
+    let body = &rest[rest.find('{')?..];
+    let value: serde_json::Value = serde_json::Deserializer::from_str(body).into_iter().next()?.ok()?;
+    let message = value.pointer("/error/message")?.as_str()?.split_whitespace().collect::<Vec<_>>().join(" ");
+    if message.is_empty() {
+        return None;
+    }
+    const MAX: usize = 300;
+    Some(if message.chars().count() > MAX { format!("{}…", message.chars().take(MAX).collect::<String>()) } else { message })
+}
+
 /// The code for an HTTP status and the lower-cased body, read but never
 /// shown. Gemini reports a bad key, and a retired model id, as 400.
 pub fn status_code(status: u16, body_lower: &str) -> Code {
@@ -159,6 +174,10 @@ pub struct Failure {
     pub capability: Option<String>,
     /// Why, in the app's language, naming the model.
     pub message: String,
+    /// For a refused request (bad request, unknown model), the provider's
+    /// own reason: its `error.message`, on one line, at most 300 characters.
+    /// Nothing else of the provider's reply reaches the card.
+    pub provider_reason: Option<String>,
     /// Models the user can pick; empty after an action already ran.
     pub alternatives: Vec<Alternative>,
     /// Actions (a calendar event, a draft) completed before the failure.
@@ -175,7 +194,7 @@ impl Failure {
             Reason::NoModel | Reason::UnknownProvider => (Code::NoModel, None),
         };
         let message = reason_text(code, &unsupported.target.label, key, None, language);
-        Failure { feature: key.to_string(), model: unsupported.target, code, capability, message, alternatives: unsupported.alternatives, actions_ran: 0 }
+        Failure { feature: key.to_string(), model: unsupported.target, code, capability, message, provider_reason: None, alternatives: unsupported.alternatives, actions_ran: 0 }
     }
 
     /// A request the model failed. After an action ran nothing is offered:
@@ -184,7 +203,8 @@ impl Failure {
         let code = code_of(error);
         let message = reason_text(code, &model.label, key, status_in(error), language);
         let alternatives = if actions_ran > 0 { Vec::new() } else { alternatives.into_iter().filter(|a| a.pick != model.pick).collect() };
-        Failure { feature: key.to_string(), model, code, capability: None, message, alternatives, actions_ran }
+        let provider_reason = matches!(code, Code::BadRequest | Code::NotFound).then(|| provider_reason(error)).flatten();
+        Failure { feature: key.to_string(), model, code, capability: None, message, provider_reason, alternatives, actions_ran }
     }
 
     /// The error a foreground request fails with: the card's data.
@@ -334,6 +354,24 @@ mod tests {
         assert_eq!(zh.message, "Gemini 3.7 Flash (Google Gemini) 暫時限速或額度不足（429），請稍後重試，或改用其他模型。");
         let parsed = parse(&zh.to_error()).unwrap();
         assert_eq!((parsed["feature"].as_str(), parsed["code"].as_str()), (Some("mail_analysis"), Some("rate_limited")));
+    }
+
+    /// A refused request (a Think harder turn Google does not take, a model
+    /// id it does not know) shows the provider's own reason: its
+    /// `error.message`, on one line and capped, and nothing else of the body.
+    #[test]
+    fn the_card_shows_the_providers_own_reason_for_a_refused_request() {
+        let google = "Gemini API error 400 Bad Request: {\"error\":{\"code\":400,\"message\":\"Thinking level is not supported\\nfor this model.\",\"status\":\"INVALID_ARGUMENT\",\"details\":[{\"echo\":\"PRIVATE-MAIL-CANARY\"}]}}";
+        let failure = Failure::failed("premium", target("Gemini 2.5 Flash (Google Gemini)"), google, 0, vec![], UiLanguage::En);
+        assert_eq!(failure.provider_reason.as_deref(), Some("Thinking level is not supported for this model."));
+        assert!(!failure.to_error().contains("CANARY"));
+        let anthropic = "Claude API error 404 Not Found: {\"type\":\"error\",\"error\":{\"type\":\"not_found_error\",\"message\":\"model: claude-x\"}}";
+        assert_eq!(Failure::failed("chat", target("Claude"), anthropic, 0, vec![], UiLanguage::En).provider_reason.as_deref(), Some("model: claude-x"));
+        let long = format!("OpenAI API error 400: {{\"error\":{{\"message\":\"{}\"}}}}", "x".repeat(500));
+        assert_eq!(Failure::failed("chat", target("GPT"), &long, 0, vec![], UiLanguage::En).provider_reason.map(|r| r.chars().count()), Some(301));
+        // No message field, a server error, or a rate limit: nothing is quoted.
+        assert_eq!(Failure::failed("chat", target("Gemini"), "Gemini API error 400 Bad Request: {\"error\":\"PRIVATE-MAIL-CANARY\"}", 0, vec![], UiLanguage::En).provider_reason, None);
+        assert_eq!(Failure::failed("chat", target("Gemini"), "Gemini API error 503: {\"error\":{\"message\":\"overloaded\"}}", 0, vec![], UiLanguage::En).provider_reason, None);
     }
 
     /// After an action ran, the card offers nothing: no model, not even the

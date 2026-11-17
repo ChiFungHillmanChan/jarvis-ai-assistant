@@ -124,10 +124,11 @@ export function useChat() {
   const acceptsRun = useCallback((payload: Scoped) => matchesRun(payload, stream.current), []);
   // The card's pick (or, after the consent card, the saved choice): the
   // last request once more. The backend refuses it if an action already ran.
-  const retry = useCallback((pick: Pick | null) => {
+  // `workload`: the error card's "Send again without Think harder".
+  const retry = useCallback((pick: Pick | null, workload?: 'tools' | 'premium') => {
     const last = sessions[selected.current]?.last;
     if (!last) return Promise.resolve();
-    return send(last.text, last.workload, { pick, retryOf: last.runId });
+    return send(last.text, workload ?? last.workload, { pick, retryOf: last.runId });
   }, [sessions, send]);
   const dismissProblem = useCallback(() => update(selected.current, s => ({ ...s, problem: null })), [update]);
   // After the database rows are deleted, drop the cached copy too; a view left

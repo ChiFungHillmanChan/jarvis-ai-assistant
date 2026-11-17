@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { addNotice, consentCopy, consentStatus, offeredModels, parseAiError, pickAction, GEMINI_BILLING_PAGE, type ConsentRequest, type Failure, type GivenConsent } from '../src/lib/ai-error.ts';
+import { addNotice, consentCopy, consentStatus, offeredModels, offersPlainResend, parseAiError, pickAction, GEMINI_BILLING_PAGE, type ConsentRequest, type Failure, type GivenConsent } from '../src/lib/ai-error.ts';
 import { chatStatusText } from '../src/lib/chat-status.ts';
 
 // P06: a request that fails, or email held back by a provider's data
@@ -37,8 +37,8 @@ test('the envelopes the backend sends become cards; anything else stays an error
 
 test("the consent card uses the registry's copy keys and names the service", () => {
   const billing = consentCopy(gemini, 'en');
-  assert.match(billing.blocked, /^Email and calendar content is not sent to Google Gemini yet\. Gemini’s free tier/);
-  assert.equal(billing.confirm, 'My Gemini API key has billing set up. Send email and calendar content to Google Gemini');
+  assert.match(billing.blocked, /^Email, calendar content and voice recordings are not sent to Google Gemini yet\. Gemini’s free tier/);
+  assert.equal(billing.confirm, 'My Gemini API key has billing set up. Send email, calendar content and voice to Google Gemini');
   assert.equal(billing.billingPage, GEMINI_BILLING_PAGE);
   const unknown = consentCopy(kimi, 'zh-HK');
   assert.equal(unknown.blocked, '電郵及日曆內容暫未傳送至 Kimi。JARVIS 無法確認 Kimi 如何處理收到的內容，對方可能會保留內容或用作訓練模型。請在接受這一點後才傳送。');
@@ -84,4 +84,10 @@ test('Settings says when a consent was given and when the terms changed since', 
 test('the one resend to the same model is shown as such, never as a switch', () => {
   assert.equal(chatStatusText('Trying the same model again...', zh), '正在重試同一個模型…');
   assert.equal(chatStatusText('Trying the same model again...', en), 'Trying the same model again…');
+});
+
+test('a refused Think harder turn can be sent again without it, unless an action ran', () => {
+  assert.equal(offersPlainResend(failure({ feature: 'premium', provider_reason: 'Thinking level is not supported for this model.' })), true);
+  assert.equal(offersPlainResend(failure({ feature: 'premium', actions_ran: 1 })), false);
+  assert.equal(offersPlainResend(failure({ feature: 'chat' })), false);
 });

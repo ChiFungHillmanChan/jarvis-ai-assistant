@@ -111,12 +111,18 @@ fn allowed(db: &Database, entry: &ProviderChainEntry) -> Result<(), Blocked> {
         ("openai", _) | (_, None) => String::new(),
         (_, Some(base)) => base.to_string(),
     };
-    let subject = Subject { provider: provider.to_string(), base_url };
+    gate(db, Subject { provider: provider.to_string(), base_url }).map_err(Blocked::NeedsConsent)
+}
+
+/// Whether content may go to `subject`: its terms are safe, or the user
+/// agreed to them under terms at least as strict as those in force now.
+/// Otherwise the consent card to show.
+pub(crate) fn gate(db: &Database, subject: Subject) -> Result<(), Box<consent::Request>> {
     let (label, terms) = describe(&subject);
     if consent::holds(db, &subject, terms) {
         return Ok(());
     }
-    Err(Blocked::NeedsConsent(Box::new(consent::Request::new(subject, label, terms))))
+    Err(Box::new(consent::Request::new(subject, label, terms)))
 }
 
 /// The name the card gives a subject, and the terms in force for it. An
@@ -455,6 +461,27 @@ mod tests {
         let again = card(&db);
         assert_eq!(again.terms, DataTerms::Unknown);
         assert_eq!(again.blocked_key, "consentUnknownTermsBlocked");
+    }
+
+    /// A consent is for one provider at one address: pointing the same
+    /// service type at another address asks again, and coming back to the
+    /// first address finds the consent still there until it is revoked.
+    #[test]
+    fn a_consent_stops_holding_when_the_address_changes() {
+        const OTHER: &str = "https://llm.example.org/v1";
+        let db = db_with(&[("openai", KIMI, None)], &[]);
+        let kimi = card(&db);
+        consent::give(&db, &kimi.subject(), kimi.terms).unwrap();
+        assert_eq!(check(&db), Ok(()));
+
+        test_support::use_ai(&db, "openai", Some(OTHER));
+        let other = card(&db);
+        assert_eq!((other.provider.as_str(), other.base_url.as_str()), ("openai_compat", OTHER), "another address is asked about");
+
+        test_support::use_ai(&db, "openai", KIMI);
+        assert_eq!(check(&db), Ok(()), "Kimi's consent is untouched");
+        consent::revoke(&db, &kimi.subject()).unwrap();
+        assert_eq!(card(&db).base_url, KIMI.unwrap());
     }
 
     /// P05's rule still holds at the gate: a fetched copy that calls every

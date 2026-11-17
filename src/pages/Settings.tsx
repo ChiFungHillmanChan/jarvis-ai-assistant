@@ -111,8 +111,17 @@ export default function Settings() {
   const [apiKeyStatus, setApiKeyStatus] = useState<Record<string, boolean>>({});
   // The cloud speech-to-text a spoken request uses (voice::cloud_speech): the
   // registry's model for the chosen AI, when its key is saved; else local.
-  const [cloudSpeech, setCloudSpeech] = useState<string | null>(null);
-  useEffect(() => { void invoke<string | null>("cloud_speech").then(setCloudSpeech).catch(() => setCloudSpeech(null)); }, [apiKeyStatus]);
+  // consent_needed: the recording waits for the user's agreement to its data
+  // terms (Settings → Your AI), and stays on this Mac until then.
+  const [speechService, setSpeechService] = useState<{ label: string; consent_needed: boolean } | null>(null);
+  useEffect(() => {
+    const refresh = () => void invoke<{ label: string; consent_needed: boolean } | null>("cloud_speech").then(setSpeechService).catch(() => setSpeechService(null));
+    refresh();
+    const stop = listen("ai-consent-changed", refresh);
+    return () => { void stop.then(unlisten => unlisten()).catch(() => {}); };
+  }, [apiKeyStatus]);
+  const cloudSpeech = speechService && !speechService.consent_needed ? speechService.label : null;
+  const speechWaits = speechService?.consent_needed ? speechService.label : null;
   const [apiKeyError, setApiKeyError] = useState<string | null>(null);
   // Whether accounts are available in this build -- unknown until this loads,
   // and unknown reads as unavailable so the Account section never flashes in
@@ -737,6 +746,7 @@ export default function Settings() {
     if (cloud && local) return text(`Speech-to-text ready -- cloud ${cloud}, with the local Whisper model as fallback.`, `語音辨識可用：雲端 ${cloud}，並以本機 Whisper 作後備。`);
     if (cloud) return text(`Speech-to-text ready -- cloud ${cloud}.`, `語音辨識可用：雲端 ${cloud}。`);
     if (local) return text("Speech-to-text ready -- local Whisper model.", "語音辨識可用：本機 Whisper 模型。");
+    if (speechWaits) return text(`Your voice goes to ${speechWaits} only after you agree to its data terms in Your AI above. Until then, voice input needs the speech model on this Mac (about 148 MB).`, `你的語音只會在你於上方「你的 AI」同意 ${speechWaits} 的資料條款後才傳送。在此之前，語音輸入需要此 Mac 上的語音模型（約 148 MB）。`);
     return chosenAi && chosenAi.provider !== "gemini"
       ? text(`Voice input uses a speech model on this Mac, so your voice does not go to ${chosenAi.label}. Download it once (about 148 MB).`, `語音輸入使用此 Mac 上的語音模型，聲音不會傳送至 ${chosenAi.label}。請先下載一次（約 148 MB）。`)
       : text("Voice input needs a Gemini key (Settings → Your AI) or the speech model on this Mac (about 148 MB).", "語音輸入需要 Gemini 密鑰（設定 → 你的 AI），或此 Mac 上的語音模型（約 148 MB）。");
@@ -1298,7 +1308,9 @@ export default function Settings() {
             <div style={styles.privacyText}>
               {cloudSpeech
                 ? text(`Wake-word detection runs on this Mac. After it wakes, the full request goes to ${cloudSpeech}, the speech-to-text of the AI you chose.`, `喚醒詞偵測會在本機處理音訊。喚醒後，完整指示會傳送至 ${cloudSpeech}，即你選擇的 AI 的語音辨識。`)
-                : text("Wake-word detection runs on this Mac, and so does the full request after it wakes: the AI you chose has no cloud speech-to-text in JARVIS.", "喚醒詞偵測會在本機處理音訊，喚醒後的完整指示亦只在此 Mac 處理：你選擇的 AI 在 JARVIS 中沒有雲端語音辨識。")}
+                : speechWaits
+                  ? text(`Wake-word detection runs on this Mac, and so does the full request after it wakes, until you agree to ${speechWaits}'s data terms.`, `喚醒詞偵測會在本機處理音訊；在你同意 ${speechWaits} 的資料條款前，喚醒後的完整指示亦只在此 Mac 處理。`)
+                  : text("Wake-word detection runs on this Mac, and so does the full request after it wakes: the AI you chose has no cloud speech-to-text in JARVIS.", "喚醒詞偵測會在本機處理音訊，喚醒後的完整指示亦只在此 Mac 處理：你選擇的 AI 在 JARVIS 中沒有雲端語音辨識。")}
             </div>
             {wakeError && <div style={styles.errorText}>{wakeError}</div>}
           </div>

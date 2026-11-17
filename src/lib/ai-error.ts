@@ -20,7 +20,8 @@ export interface AiTarget { pick: Pick; provider: string; model: string | null; 
 /** A model the card offers. `saves_at`: the replacement for a disabled model, saved at that chain position when picked. */
 export interface Alternative { pick: Pick; label: string; saves_at: number | null }
 export type FailureCode = 'no_key' | 'bad_key' | 'rate_limited' | 'bad_request' | 'not_found' | 'unreachable' | 'empty_reply' | 'server_error' | 'failed' | 'disabled' | 'unsupported' | 'no_model';
-export interface Failure { feature: string; model: AiTarget; code: FailureCode; capability: string | null; message: string; alternatives: Alternative[]; actions_ran: number }
+/** provider_reason: the provider's own words for a refused request (ai/failure.rs), shown as they are. */
+export interface Failure { feature: string; model: AiTarget; code: FailureCode; capability: string | null; message: string; provider_reason?: string | null; alternatives: Alternative[]; actions_ran: number }
 export type DataTerms = 'needs_billing_confirmation' | 'unknown';
 export interface ConsentRequest { provider: string; base_url: string; label: string; terms: DataTerms; blocked_key: string; confirm_key: string }
 export type AiProblem = { kind: 'failure'; failure: Failure } | { kind: 'consent'; consent: ConsentRequest };
@@ -70,6 +71,15 @@ export function pickAction(failure: Failure, choice: Alternative): { save: { pla
 /** The models the card offers. None once an action ran: the request is never sent again. */
 export function offeredModels(failure: Failure): Alternative[] {
   return failure.actions_ran > 0 ? [] : failure.alternatives;
+}
+
+/**
+ * Whether the card offers the same message once more without "Think
+ * harder" (P06): a Think harder turn the model refused, or failed, with
+ * no action carried out.
+ */
+export function offersPlainResend(failure: Failure): boolean {
+  return failure.feature === 'premium' && failure.actions_ran === 0;
 }
 
 /** A consent as Settings lists it (ai::consent::Given). */
