@@ -78,8 +78,8 @@ pub(crate) fn triage_ready(db: &Database) -> bool {
     }
     match chosen_ai_for_mail(db) {
         Ok(chosen) => chosen.is_some(),
-        // Not skipped silently (P06): the consent card is raised once per
-        // launch until the user agrees.
+        // Not skipped silently (P06): the consent card, or for content that
+        // is not sent to this AI at all a notice, once per launch.
         Err(blocked) => {
             blocked.raise("mail_sort");
             false
