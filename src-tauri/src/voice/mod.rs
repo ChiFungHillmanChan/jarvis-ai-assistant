@@ -182,25 +182,51 @@ impl VoiceEngine {
     }
 }
 
-/// Gemini hears the user only when Gemini is the AI they chose, or when they
-/// have not chosen one (installs from before setup asked). Anyone else gets
-/// the local Whisper model, so no other AI receives their voice.
-fn speech_allowed_for(chosen: Option<&crate::commands::ai_choice::CurrentAi>) -> bool {
-    chosen.is_none_or(|ai| ai.provider == "gemini")
+/// Where a spoken request is transcribed in the cloud (P06): the registry's
+/// `stt` model for the provider of the AI the user chose, on a wire this
+/// build has. No choice yet (installs from before setup asked) counts as
+/// Gemini, as before. Any other choice, or a provider the registry names no
+/// `stt` model for (OpenAI today), gets None: local Whisper, so no other AI
+/// receives the user's voice.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct SpeechRoute {
+    pub wire: transcribe::SpeechWire,
+    pub model: String,
+    /// "Gemini 3.7 Flash (Google Gemini)", for Settings.
+    pub label: String,
 }
 
-/// Build the cloud speech-to-text transcriber from the currently configured
-/// Gemini key, or return None when there is none or Gemini is not the chosen AI.
+fn speech_route(chosen: Option<&crate::commands::ai_choice::CurrentAi>) -> Option<SpeechRoute> {
+    let (provider, wire) = match chosen {
+        None => ("gemini", transcribe::SpeechWire::Gemini),
+        Some(ai) if ai.provider == "gemini" => ("gemini", transcribe::SpeechWire::Gemini),
+        Some(ai) if ai.provider == "openai" && ai.base_url.is_none() => ("openai", transcribe::SpeechWire::OpenAi),
+        Some(_) => return None,
+    };
+    let entry = crate::ai::ProviderChainEntry { position: 0, provider_type: provider.into(), endpoint_id: None, model_id: None, enabled: true, base_url: None };
+    let target = crate::ai::capability::resolve("stt", &entry, &[]).ready()?;
+    Some(SpeechRoute { wire, model: target.model?, label: target.label })
+}
+
+/// The cloud route for the AI the user chose, when its key is in place.
+fn cloud_route(db: &crate::db::Database) -> Option<(SpeechRoute, String)> {
+    let chain = crate::commands::ai_choice::saved_chain(db).ok()?;
+    let route = speech_route(crate::commands::ai_choice::describe(&chain).as_ref())?;
+    let key = match route.wire {
+        transcribe::SpeechWire::Gemini => resolve_key("GEMINI_API_KEY", "gemini_api_key"),
+        transcribe::SpeechWire::OpenAi => resolve_key("OPENAI_API_KEY", "openai_api_key"),
+    }?;
+    Some((route, key))
+}
+
+/// Build the cloud speech-to-text transcriber for the AI the user chose
+/// ([`speech_route`]), or None when there is none or its key is missing.
 ///
 /// Resolved on every use rather than once at startup: users paste the key into
 /// Settings after first launch, which writes it to the Keychain only.
 pub fn cloud_transcriber(db: &crate::db::Database) -> Option<Transcriber> {
-    let chain = crate::commands::ai_choice::saved_chain(db).ok()?;
-    if !speech_allowed_for(crate::commands::ai_choice::describe(&chain).as_ref()) {
-        return None;
-    }
-    let key = resolve_gemini_key()?;
-    match Transcriber::new(key) {
+    let (route, key) = cloud_route(db)?;
+    match Transcriber::new(route.wire, key, route.model) {
         Ok(t) => Some(t),
         Err(e) => {
             log::warn!("STT init failed: {}", e);
@@ -209,14 +235,17 @@ pub fn cloud_transcriber(db: &crate::db::Database) -> Option<Transcriber> {
     }
 }
 
+/// Which cloud speech-to-text a spoken request would use, for Settings:
+/// the model's label, or None (local Whisper; the download is offered).
+#[tauri::command]
+pub fn cloud_speech(db: tauri::State<'_, std::sync::Arc<crate::db::Database>>) -> Option<String> {
+    cloud_route(&db).map(|(route, _)| route.label)
+}
+
 /// Same lookup order as `ai::resolve_key`: process env first, then the
 /// Keychain the Settings screen writes to.
-fn resolve_gemini_key() -> Option<String> {
-    pick_key(
-        std::env::var("GEMINI_API_KEY").ok(),
-        crate::security::keychain::KeychainStore::get(crate::ai::KEY_SERVICE, "gemini_api_key")
-            .ok(),
-    )
+fn resolve_key(env_var: &str, account: &str) -> Option<String> {
+    pick_key(std::env::var(env_var).ok(), crate::security::keychain::KeychainStore::get(crate::ai::KEY_SERVICE, account).ok())
 }
 
 /// Env value wins over the Keychain value; a blank value counts as absent.
@@ -230,16 +259,30 @@ fn pick_key(env_value: Option<String>, keychain_value: Option<String>) -> Option
 
 #[cfg(test)]
 mod tests {
+    /// The voice goes to the registry's `stt` model of the chosen AI's
+    /// provider and to no other AI: Gemini (or no choice yet) to Gemini's;
+    /// OpenAI only once the registry names an OpenAI model; everyone else
+    /// to local Whisper.
     #[test]
-    fn only_a_gemini_choice_or_no_choice_sends_speech_to_gemini() {
-        use super::speech_allowed_for;
+    fn speech_goes_to_the_stt_model_of_the_chosen_ai_or_stays_on_this_mac() {
+        use super::{speech_route, transcribe::SpeechWire};
         use crate::commands::ai_choice::CurrentAi;
-        let ai = |provider: &str| CurrentAi { provider: provider.into(), label: provider.into(), model: None, base_url: None };
-        assert!(speech_allowed_for(None), "installs from before setup asked keep Gemini speech");
-        assert!(speech_allowed_for(Some(&ai("gemini"))));
-        for other in ["ollama", "openai", "claude", "compatible"] {
-            assert!(!speech_allowed_for(Some(&ai(other))), "{other} users get local Whisper");
+        let ai = |provider: &str, base_url: Option<&str>| CurrentAi { provider: provider.into(), label: provider.into(), model: None, base_url: base_url.map(str::to_string) };
+        let gemini_stt = crate::ai::registry::current().feature_default("stt", "gemini").unwrap().to_string();
+        for chosen in [None, Some(ai("gemini", None))] {
+            let route = speech_route(chosen.as_ref()).expect("Gemini transcribes");
+            assert_eq!((route.wire, route.model.as_str()), (SpeechWire::Gemini, gemini_stt.as_str()), "installs from before setup asked keep Gemini speech");
         }
+        for other in [ai("ollama", None), ai("openai", None), ai("claude", None), ai("compatible", Some("https://api.moonshot.ai/v1"))] {
+            assert_eq!(speech_route(Some(&other)), None, "{} users get local Whisper", other.provider);
+        }
+
+        let _registry = crate::ai::registry::test_override::with(|r| {
+            r.features.get_mut("stt").unwrap().insert("openai".into(), "transcribe-model".into());
+        });
+        let route = speech_route(Some(&ai("openai", None))).expect("a registry that names an OpenAI model turns it on");
+        assert_eq!((route.wire, route.model.as_str()), (SpeechWire::OpenAi, "transcribe-model"));
+        assert_eq!(speech_route(Some(&ai("openai", Some("https://api.moonshot.ai/v1")))), None, "a compatible service is not OpenAI");
     }
 
     use super::pick_key;
