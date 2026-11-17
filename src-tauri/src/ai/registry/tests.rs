@@ -782,13 +782,33 @@ fn a_copy_without_the_output_caps_of_version_3_keeps_the_bundled_values() {
     assert_eq!(partial.feature_limits("mail_analysis").max_output_tokens, Some(1234), "a cap the copy sends is used");
     assert_eq!(one_left_out.feature_limits("mail_analysis").max_output_tokens, own("mail_analysis"), "a feature left out");
     assert_eq!(one_left_out.feature_limits("mail_sort").max_output_tokens, Some(4321));
-    // What the call sites then send: the bundled values, as before the copy.
-    let _in_use = test_override::set(without_all);
+}
+
+/// What the call sites send when the copy in use lacks the caps: the bundled
+/// copy's values. The bundled copy here holds three values that are not
+/// `OUTPUT_TOKENS_WHEN_UNSET`, so a copy left unfilled (the constant) cannot
+/// pass for a filled one.
+#[test]
+fn the_accessors_give_the_bundled_caps_when_the_copy_in_use_lacks_them() {
     use crate::ai::cost::Feature;
-    use crate::ai::models::{feature_max_output_tokens, local_chat_max_output_tokens};
-    assert_eq!(Some(feature_max_output_tokens(Feature::MailAnalysis)), own("mail_analysis"));
-    assert_eq!(Some(feature_max_output_tokens(Feature::MailSort)), own("mail_sort"));
-    assert_eq!(Some(local_chat_max_output_tokens(u32::MAX)), own_local);
+    use crate::ai::models::{feature_max_output_tokens, local_chat_max_output_tokens, OUTPUT_TOKENS_WHEN_UNSET};
+    let (analysis, sort, local) = (1_111, 2_222, 3_333);
+    for value in [analysis, sort, local] {
+        assert_ne!(value, OUTPUT_TOKENS_WHEN_UNSET);
+    }
+    let _bundled = test_override::bundled_with(|r| {
+        r.feature_limits.insert("mail_analysis".into(), super::doc::FeatureLimits { max_output_tokens: Some(analysis) });
+        r.feature_limits.insert("mail_sort".into(), super::doc::FeatureLimits { max_output_tokens: Some(sort) });
+        r.providers.iter_mut().find(|p| p.id == "ollama").unwrap().limits.chat_max_output_tokens = Some(local);
+    });
+    let without_all = accepted(|doc| {
+        doc.as_object_mut().unwrap().remove("feature_limits");
+        provider(doc, "ollama")["limits"].as_object_mut().unwrap().remove("chat_max_output_tokens");
+    });
+    let _in_use = test_override::set(without_all);
+    assert_eq!(feature_max_output_tokens(Feature::MailAnalysis), analysis);
+    assert_eq!(feature_max_output_tokens(Feature::MailSort), sort);
+    assert_eq!(local_chat_max_output_tokens(u32::MAX), local);
 }
 
 /// When neither the copy in use nor the bundled copy carries a cap (the app's
@@ -846,6 +866,61 @@ fn the_local_chat_request_takes_its_cap_from_the_accessor() {
     let source = include_str!("../local/mod.rs");
     assert_eq!(source.matches("max_tokens: Some(crate::ai::models::local_chat_max_output_tokens(context_length)),").count(), 1);
     assert!(!source.contains("4096.min(") && !source.contains("4_096.min("), "no fixed cap is left beside it");
+}
+
+/// Every call of the feature cap accessor in the app's Rust sources names a
+/// feature the bundled copy must carry (`REQUIRED_FEATURE_LIMITS`), so no
+/// caller can reach `OUTPUT_TOKENS_WHEN_UNSET` in a release. The argument
+/// must be a `Feature::<Name>` literal (with or without a path before it); a
+/// variable or anything else this cannot read fails the test.
+#[test]
+fn every_feature_whose_cap_the_app_reads_is_carried_by_the_bundled_copy() {
+    use crate::ai::cost::Feature;
+    // Every feature, by the name the code writes. A name not listed here
+    // fails below, so a new feature is added here before it can be passed.
+    let features = [Feature::Chat, Feature::Tools, Feature::MailAnalysis, Feature::MailSort, Feature::Briefing, Feature::Stt, Feature::Tts, Feature::Memory, Feature::Other];
+    // Built in two parts, so this test's own source holds no call to find.
+    let call = concat!("feature_max_output_tokens", "(");
+    fn rust_files(dir: &std::path::Path, out: &mut Vec<PathBuf>) {
+        for entry in std::fs::read_dir(dir).unwrap() {
+            let path = entry.unwrap().path();
+            if path.is_dir() {
+                rust_files(&path, out);
+            } else if path.extension().is_some_and(|e| e == "rs") {
+                out.push(path);
+            }
+        }
+    }
+    let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src");
+    let mut files = Vec::new();
+    rust_files(&root, &mut files);
+    let mut calls: Vec<(String, &'static str)> = Vec::new();
+    for path in &files {
+        let source = std::fs::read_to_string(path).unwrap();
+        let file = path.strip_prefix(&root).unwrap().to_string_lossy().replace('\\', "/");
+        for (at, _) in source.match_indices(call) {
+            if source[..at].ends_with("fn ") {
+                continue; // the definition in ai/models.rs
+            }
+            let rest = &source[at + call.len()..];
+            let argument = rest[..rest.find(')').unwrap_or(rest.len())].trim().trim_end_matches(',').trim();
+            let parts: Vec<&str> = argument.split("::").collect();
+            let readable = parts.len() >= 2
+                && parts[parts.len() - 2] == "Feature"
+                && parts[..parts.len() - 2].iter().all(|p| !p.is_empty() && p.bytes().all(|c| c.is_ascii_lowercase() || c == b'_'));
+            assert!(readable, "{file}: a call of the feature cap accessor whose argument is not a Feature::<Name> literal: {argument:?}");
+            let name = parts[parts.len() - 1];
+            let feature = features.iter().find(|f| format!("{f:?}") == name).unwrap_or_else(|| panic!("{file}: Feature::{name} is not a feature this test knows"));
+            calls.push((file.clone(), feature.as_str()));
+        }
+    }
+    for (file, feature) in &calls {
+        assert!(super::doc::REQUIRED_FEATURE_LIMITS.contains(feature), "{file} reads the cap of {feature}, which the bundled copy is not required to carry (REQUIRED_FEATURE_LIMITS)");
+    }
+    for file in ["mail/openai.rs", "mail/analysis.rs", "mail/triage.rs"] {
+        assert!(calls.iter().any(|(f, _)| f == file), "the call in {file} was found");
+    }
+    assert!(calls.len() >= 3, "{calls:?}");
 }
 
 #[test]
