@@ -1170,6 +1170,17 @@ mod tests {
         assert_eq!(router.chosen(&configured).unwrap().provider_type, "openai");
     }
 
+    /// Outside test builds the mail gate reads the process-wide snapshot,
+    /// so `reload_keys` must write it, as well as this thread's copy. Only
+    /// presence is checked: tests running side by side also write it.
+    #[test]
+    fn reloading_keys_writes_the_process_wide_snapshot() {
+        let mut router = AiRouter::new("");
+        router.reload_keys();
+        assert!(KEYS_FOUND.read().unwrap().is_some());
+        assert_eq!(keys_found::get(), Some(router.keys_found()));
+    }
+
     /// Every tool the app defines is either an action (a resend or a
     /// picked "send again" would carry it out twice, so neither happens
     /// after one ran) or read-only. A new tool cannot be left out of both
