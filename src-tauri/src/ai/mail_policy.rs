@@ -246,7 +246,8 @@ const WITHHELD_THROUGH: &str = "mail_withheld_through";
 /// saved so far is withheld, which covers what a turn still running at the
 /// move saves when it ends.
 pub fn withheld(db: &Database) -> Withheld {
-    line(db, false)
+    // Only a turn beginning refuses (see `withheld_as_turn_begins`).
+    line(db, false).unwrap_or(EVERYTHING)
 }
 
 /// [`withheld`] for a tool or prompt block that leaves the withheld rows
@@ -264,11 +265,30 @@ pub fn withheld_shown(db: &Database, feature: &str) -> Withheld {
 
 /// [`withheld`], for a chat turn that is about to save the user's message:
 /// after a move this draws the line under everything saved so far.
-pub fn withheld_as_turn_begins(db: &Database) -> Withheld {
-    line(db, true)
+///
+/// On an AI that may receive email the turn is refused, before it saves
+/// anything, when the record that such an AI answered cannot be written:
+/// what the turn saves could quote an email, and without the record the next
+/// AI that may not receive email would be shown it (review B, I-2).
+pub fn withheld_as_turn_begins(db: &Database) -> Result<Withheld, String> {
+    line(db, true).map_err(|NotRecorded| {
+        UiLanguage::read(db).pick(
+            "JARVIS could not record which AI answers this chat, so this message was not sent. Try again.".to_string(),
+            "JARVIS 未能記錄由哪個 AI 回覆這段對話，因此沒有傳送這則訊息。請再試一次。".to_string(),
+        )
+    })
 }
 
-fn line(db: &Database, turn_begins: bool) -> Withheld {
+/// Fail closed: what a database that cannot be read, or a line that cannot
+/// be saved, withholds.
+const EVERYTHING: Withheld = Withheld { conversations: i64::MAX, memories: i64::MAX, tasks: i64::MAX };
+
+/// An AI that may receive email is answering, and that could not be
+/// recorded.
+#[derive(Clone, Copy)]
+struct NotRecorded;
+
+fn line(db: &Database, turn_begins: bool) -> Result<Withheld, NotRecorded> {
     let allowed = check(db).is_ok();
     // A model picked once in the error card (P06) answers one request: what
     // it may be shown is worked out here, but nothing is recorded. What the
@@ -281,7 +301,7 @@ fn line(db: &Database, turn_begins: bool) -> Withheld {
         .filter(|entry| entry.enabled)
         .all(|entry| entry.provider_type == "gemini");
     // Fail closed: a database that cannot be read withholds everything.
-    let everything = Withheld { conversations: i64::MAX, memories: i64::MAX, tasks: i64::MAX };
+    let everything = Ok(EVERYTHING);
     let Ok(conn) = db.conn.lock() else { return everything };
     let pref = |key: &str| {
         conn.query_row("SELECT value FROM user_preferences WHERE key = ?1", [key], |row| row.get::<_, String>(0)).ok()
@@ -297,10 +317,15 @@ fn line(db: &Database, turn_begins: bool) -> Withheld {
     let recorded = pref(MAIL_AI_WAS_ALLOWED);
     if allowed {
         if records && recorded.as_deref() != Some("true") {
+            // The record first, then the line is lifted: the other way round,
+            // a failed write would leave "never allowed, no line", and the
+            // next AI that may not receive email would be shown everything.
+            if !set(MAIL_AI_WAS_ALLOWED, "true") {
+                return if turn_begins { Err(NotRecorded) } else { Ok(Withheld::default()) };
+            }
             let _ = conn.execute("DELETE FROM user_preferences WHERE key = ?1", [WITHHELD_THROUGH]);
-            set(MAIL_AI_WAS_ALLOWED, "true");
         }
-        return Withheld::default();
+        return Ok(Withheld::default());
     }
     // No record: a build from before this existed. If Google data is on this
     // Mac, an allowed AI may have read it, so treat this as a move -- unless
@@ -331,17 +356,17 @@ fn line(db: &Database, turn_begins: bool) -> Withheld {
         if turn_begins && records && (!set(WITHHELD_THROUGH, &format!("{conversations},{memories},{tasks}")) || !set(MAIL_AI_WAS_ALLOWED, "false")) {
             return everything;
         }
-        return Withheld { conversations, memories, tasks };
+        return Ok(Withheld { conversations, memories, tasks });
     }
     if records && recorded.is_none() {
         set(MAIL_AI_WAS_ALLOWED, "false");
     }
     match pref(WITHHELD_THROUGH) {
-        None => Withheld::default(),
+        None => Ok(Withheld::default()),
         Some(saved) => {
             let ids: Vec<i64> = saved.split(',').filter_map(|id| id.parse().ok()).collect();
             match ids[..] {
-                [conversations, memories, tasks] => Withheld { conversations, memories, tasks },
+                [conversations, memories, tasks] => Ok(Withheld { conversations, memories, tasks }),
                 _ => everything,
             }
         }
@@ -724,24 +749,24 @@ mod tests {
         assert_eq!(withheld(&db), Withheld::default());
         save_a_turn(&db, "Kenny owes HK$12,000");
         use_ai(&db, "gemini", None);
-        assert_eq!(withheld_as_turn_begins(&db), Withheld { conversations: 1, memories: 1, tasks: 1 });
+        assert_eq!(withheld_as_turn_begins(&db).unwrap(), Withheld { conversations: 1, memories: 1, tasks: 1 });
 
         agree_to_gemini(&db);
-        assert_eq!(withheld_as_turn_begins(&db), Withheld::default());
+        assert_eq!(withheld_as_turn_begins(&db).unwrap(), Withheld::default());
         save_a_turn(&db, "As Kenny wrote, HK$12,000 is due");
 
         let gemini = Subject { provider: "gemini".into(), base_url: String::new() };
         consent::revoke(&db, &gemini).unwrap();
-        assert_eq!(withheld_as_turn_begins(&db), Withheld { conversations: 2, memories: 2, tasks: 2 });
+        assert_eq!(withheld_as_turn_begins(&db).unwrap(), Withheld { conversations: 2, memories: 2, tasks: 2 });
 
         // Unknown terms: withheld before and after agreeing.
         use_ai(&db, "openai", None);
-        assert_eq!(withheld_as_turn_begins(&db), Withheld::default());
+        assert_eq!(withheld_as_turn_begins(&db).unwrap(), Withheld::default());
         use_ai(&db, "openai", KIMI);
-        let line = withheld_as_turn_begins(&db);
+        let line = withheld_as_turn_begins(&db).unwrap();
         assert_eq!(line, Withheld { conversations: 2, memories: 2, tasks: 2 });
         agree_to_kimi(&db);
-        assert_eq!(withheld_as_turn_begins(&db), line);
+        assert_eq!(withheld_as_turn_begins(&db).unwrap(), line);
         assert_eq!(withheld(&db), line);
     }
 
@@ -769,7 +794,7 @@ mod tests {
         assert_eq!(withheld(&db), Withheld::default(), "an AI that may read email sees everything");
 
         use_ai(&db, "openai", KIMI);
-        let line = withheld_as_turn_begins(&db);
+        let line = withheld_as_turn_begins(&db).unwrap();
         assert_eq!(line, Withheld { conversations: 1, memories: 1, tasks: 1 });
 
         // What is saved while Kimi is in use cannot quote an email, and the
@@ -784,14 +809,84 @@ mod tests {
         assert_eq!(withheld(&db), Withheld::default());
         save_a_turn(&db, "first");
         use_ai(&db, "openai", KIMI);
-        assert_eq!(withheld_as_turn_begins(&db).conversations, 1);
+        assert_eq!(withheld_as_turn_begins(&db).unwrap().conversations, 1);
 
         use_ai(&db, "openai", None);
         assert_eq!(withheld(&db), Withheld::default());
         save_a_turn(&db, "second");
 
         use_ai(&db, "openai", KIMI);
-        assert_eq!(withheld_as_turn_begins(&db), Withheld { conversations: 2, memories: 2, tasks: 2 });
+        assert_eq!(withheld_as_turn_begins(&db).unwrap(), Withheld { conversations: 2, memories: 2, tasks: 2 });
+    }
+
+    /// Every write of `key` (with `value`, if given) to user_preferences
+    /// fails from here on, as on a full disk.
+    fn fail_writes(db: &Database, key: &str, value: Option<&str>) {
+        let when = match value {
+            Some(value) => format!("NEW.key = '{key}' AND NEW.value = '{value}'"),
+            None => format!("NEW.key = '{key}'"),
+        };
+        let name = uuid::Uuid::new_v4().simple().to_string();
+        db.conn
+            .lock()
+            .unwrap()
+            .execute_batch(&format!(
+                "CREATE TRIGGER insert_{name} BEFORE INSERT ON user_preferences WHEN {when} BEGIN SELECT RAISE(ABORT, 'disk full'); END;
+                 CREATE TRIGGER update_{name} BEFORE UPDATE ON user_preferences WHEN {when} BEGIN SELECT RAISE(ABORT, 'disk full'); END;"
+            ))
+            .unwrap();
+    }
+
+    /// Back on an AI that may receive email, the record that it answered
+    /// cannot be written. The line drawn for Kimi stays where it was, and a
+    /// chat turn is refused before it saves anything: what it saved could
+    /// quote an email, with nothing to say so. The next Kimi turn is shown
+    /// neither the turn from before the move nor anything after it.
+    #[test]
+    fn a_record_that_cannot_be_written_keeps_the_line_and_refuses_the_turn() {
+        let db = db_with(&[("openai", None, None)], &[]);
+        assert_eq!(withheld(&db), Withheld::default());
+        save_a_turn(&db, "MAIL-CANARY-1");
+        use_ai(&db, "openai", KIMI);
+        assert_eq!(withheld_as_turn_begins(&db).unwrap(), Withheld { conversations: 1, memories: 1, tasks: 1 });
+
+        fail_writes(&db, MAIL_AI_WAS_ALLOWED, Some("true"));
+        use_ai(&db, "openai", None);
+        assert_eq!(withheld(&db), Withheld::default(), "OpenAI may still be shown everything");
+        let refused = withheld_as_turn_begins(&db).unwrap_err();
+        assert_eq!(refused, "JARVIS could not record which AI answers this chat, so this message was not sent. Try again.");
+        let saved = |db: &Database| db.conn.lock().unwrap().query_row("SELECT COUNT(*) FROM conversations", [], |row| row.get::<_, i64>(0)).unwrap();
+        let before = saved(&db);
+        assert_eq!(crate::commands::chat::save_turn(&db, "s1", "What did Kenny write?").unwrap_err(), refused);
+        assert_eq!(saved(&db), before, "nothing of the refused turn is saved");
+
+        use_ai(&db, "openai", KIMI);
+        assert_eq!(withheld_as_turn_begins(&db).unwrap(), Withheld { conversations: 1, memories: 1, tasks: 1 });
+    }
+
+    /// A line that cannot be written when a Kimi turn begins withholds
+    /// everything from that turn (review B, m3).
+    #[test]
+    fn a_line_that_cannot_be_written_withholds_everything() {
+        let db = db_with(&[("openai", None, None)], &[]);
+        assert_eq!(withheld(&db), Withheld::default());
+        save_a_turn(&db, "MAIL-CANARY-1");
+        use_ai(&db, "openai", KIMI);
+        fail_writes(&db, WITHHELD_THROUGH, None);
+        assert_eq!(withheld_as_turn_begins(&db).unwrap(), EVERYTHING);
+    }
+
+    /// A database lock that cannot be taken withholds everything (review B,
+    /// m3).
+    #[test]
+    fn a_database_that_cannot_be_read_withholds_everything() {
+        let db = db_with(&[("openai", KIMI, None)], &[]);
+        let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            let _held = db.conn.lock().unwrap();
+            panic!("poisons the lock on purpose");
+        }));
+        assert_eq!(withheld(&db), EVERYTHING);
+        assert_eq!(withheld_as_turn_begins(&db).unwrap(), EVERYTHING);
     }
 
     /// The AI can be changed while a turn that read an email is still
@@ -809,7 +904,7 @@ mod tests {
         assert_eq!(withheld(&db), Withheld { conversations: 1, memories: 1, tasks: 1 });
         save_a_turn(&db, "As Kenny wrote, HK$12,000 is due");
 
-        let line = withheld_as_turn_begins(&db);
+        let line = withheld_as_turn_begins(&db).unwrap();
         assert_eq!(line, Withheld { conversations: 2, memories: 2, tasks: 2 });
         save_a_turn(&db, "Prefers short replies");
         assert_eq!(withheld(&db), line);
@@ -822,14 +917,14 @@ mod tests {
     fn without_a_recorded_switch_only_an_install_holding_google_data_withholds() {
         let db = db_with(&[("openai", KIMI, None)], &[]);
         save_a_turn(&db, "no Google account was ever connected");
-        assert_eq!(withheld_as_turn_begins(&db), Withheld::default());
+        assert_eq!(withheld_as_turn_begins(&db).unwrap(), Withheld::default());
         save_a_turn(&db, "still nothing to withhold");
-        assert_eq!(withheld_as_turn_begins(&db), Withheld::default());
+        assert_eq!(withheld_as_turn_begins(&db).unwrap(), Withheld::default());
 
         let db = db_with(&[("openai", KIMI, None)], &[]);
         save_a_turn(&db, "saved while another AI could read email");
         add_a_calendar_event(&db);
-        assert_eq!(withheld_as_turn_begins(&db), Withheld { conversations: 1, memories: 1, tasks: 1 });
+        assert_eq!(withheld_as_turn_begins(&db).unwrap(), Withheld { conversations: 1, memories: 1, tasks: 1 });
     }
 
     fn add_a_calendar_event(db: &Database) {
@@ -851,8 +946,8 @@ mod tests {
             let db = db_with(chain, &[]);
             save_a_turn(&db, "Prefers short replies");
             add_a_calendar_event(&db);
-            assert_eq!(withheld_as_turn_begins(&db), Withheld::default());
-            assert_eq!(withheld_as_turn_begins(&db), Withheld::default());
+            assert_eq!(withheld_as_turn_begins(&db).unwrap(), Withheld::default());
+            assert_eq!(withheld_as_turn_begins(&db).unwrap(), Withheld::default());
 
             let db = db_with(chain, &[]);
             save_a_turn(&db, "Kenny owes HK$12,000");
@@ -862,7 +957,7 @@ mod tests {
                 .unwrap()
                 .execute("INSERT INTO inference_metrics(ts, workload, model_id, input_tokens, output_tokens, latency_ms, provider) VALUES (1, 'volume', 'gpt-5', 1, 1, 1, 'openai')", [])
                 .unwrap();
-            assert_eq!(withheld_as_turn_begins(&db), Withheld { conversations: 1, memories: 1, tasks: 1 });
+            assert_eq!(withheld_as_turn_begins(&db).unwrap(), Withheld { conversations: 1, memories: 1, tasks: 1 });
         }
     }
 
@@ -885,7 +980,7 @@ mod tests {
             let left: i64 = conn.query_row("SELECT COUNT(*) FROM inference_metrics", [], |r| r.get(0)).unwrap();
             assert_eq!(left, 0, "the answer is only in the daily totals now");
         }
-        assert_eq!(withheld_as_turn_begins(&db), Withheld { conversations: 1, memories: 1, tasks: 1 });
+        assert_eq!(withheld_as_turn_begins(&db).unwrap(), Withheld { conversations: 1, memories: 1, tasks: 1 });
     }
 
     /// Ollama on this Mac forwards a "-cloud" model's prompt to ollama.com, so

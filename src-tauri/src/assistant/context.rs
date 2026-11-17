@@ -564,7 +564,7 @@ mod tests {
                 .unwrap();
         }));
         // The first turn after the move draws the line; this task is added after it.
-        crate::ai::mail_policy::withheld_as_turn_begins(&db);
+        crate::ai::mail_policy::withheld_as_turn_begins(&db).unwrap();
         db.conn.lock().unwrap().execute("INSERT INTO tasks(title, deadline) VALUES ('Buy milk', date('now', 'localtime'))", []).unwrap();
         let context = DayContext::gather(&db).unwrap();
         let sent = format!("{}{}", context.inline_context(), context.to_prompt());

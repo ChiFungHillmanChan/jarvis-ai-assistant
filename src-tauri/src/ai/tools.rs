@@ -3332,7 +3332,7 @@ mod withheld_tests {
                 )
                 .unwrap();
         });
-        crate::ai::mail_policy::withheld_as_turn_begins(&db);
+        crate::ai::mail_policy::withheld_as_turn_begins(&db).unwrap();
         db
     }
 

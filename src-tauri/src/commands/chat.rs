@@ -429,7 +429,7 @@ pub(crate) fn save_turn_with(
     also_save: impl FnOnce(&rusqlite::Connection, i64),
 ) -> Result<(i64, Vec<(String, String)>), String> {
     // Before the lock below: this takes it too.
-    let withheld = crate::ai::mail_policy::withheld_as_turn_begins(db);
+    let withheld = crate::ai::mail_policy::withheld_as_turn_begins(db)?;
     let conn = db.conn.lock().map_err(|e| e.to_string())?;
     conn.execute(
         "INSERT INTO conversations (role, content, session_id) VALUES ('user', ?1, ?2)",
@@ -467,7 +467,7 @@ pub(crate) fn save_retried_turn(db: &Database, session_id: &str, message: &str) 
     match last {
         Some((id, role, content)) if role == "user" && content == message => {
             // Before the lock below: this takes it too.
-            let withheld = crate::ai::mail_policy::withheld_as_turn_begins(db);
+            let withheld = crate::ai::mail_policy::withheld_as_turn_begins(db)?;
             let conn = db.conn.lock().map_err(|e| e.to_string())?;
             Ok((id, history_through(&conn, session_id, withheld.conversations, id)?))
         }
