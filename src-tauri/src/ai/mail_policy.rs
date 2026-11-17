@@ -85,9 +85,20 @@ impl Blocked {
     }
 
     /// Show the consent card for `feature` (see [`consent::Request::raise`]).
+    /// Content that is not sent at all raises one notice per launch for
+    /// each service and feature: in the chat a refused tool call ends the
+    /// turn on the error card (`ai::run_chosen`), and the notice says once
+    /// that the content stays back from the AI in use.
     pub fn raise(&self, feature: &str) {
-        if let Blocked::NeedsConsent(request) = self {
-            request.raise(feature);
+        match self {
+            Blocked::NeedsConsent(request) => request.raise(feature),
+            Blocked::NotForGoogleContent { label, message } => {
+                if super::notify::first_time(&format!("google_content|{label}|{feature}")) {
+                    log::info!("[mail_policy] {feature}: Gmail and Calendar content is not sent to the AI in use");
+                    super::notify::emit("ai-needs-model", serde_json::json!({ "feature": feature, "message": message, "model": label, "code": "google_content" }));
+                }
+            }
+            Blocked::NotAllowed(_) => {}
         }
     }
 }
@@ -112,6 +123,12 @@ pub fn check(db: &Database) -> Result<(), Blocked> {
     // Gemini by default.
     let chosen = chosen.unwrap_or(ProviderChainEntry { position: 0, provider_type: "gemini".into(), endpoint_id: None, model_id: None, enabled: true, base_url: None });
     allowed(db, &chosen)
+}
+
+/// Whether Gmail and Calendar content may go to `entry` now: the models
+/// the error card offers when a request needed it.
+pub fn may_receive(db: &Database, entry: &ProviderChainEntry) -> bool {
+    allowed(db, entry).is_ok()
 }
 
 /// The registry's data terms decide (`providers[].data_terms`): safe
@@ -574,6 +591,17 @@ mod tests {
         let _registry = crate::ai::registry::test_override::with(|r| r.providers.iter_mut().find(|p| p.id == "gemini").unwrap().data_terms = DataTerms::Unknown);
         assert_eq!(not_sent(&db), "Google Gemini");
         assert_eq!(describe(&Subject { provider: "brand_new".into(), base_url: String::new() }).1, DataTerms::Unknown);
+    }
+
+    /// Content that is not sent at all raises one notice per launch for the
+    /// feature that kept it back (mail sorting, the briefing, the chat's
+    /// held-back context); a refused tool call ends on the error card.
+    #[test]
+    fn content_not_sent_raises_one_notice_per_launch() {
+        let db = db_with(&[("openai", KIMI, None)], &[]);
+        let feature = format!("test-{}", uuid::Uuid::new_v4());
+        check(&db).unwrap_err().raise(&feature);
+        assert!(!crate::ai::notify::first_time(&format!("google_content|Kimi|{feature}")), "the notice was raised");
     }
 
     /// A request goes only to the first enabled row, so only that row is

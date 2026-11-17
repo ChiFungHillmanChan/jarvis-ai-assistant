@@ -336,6 +336,32 @@ fn a_provider_new_in_a_remote_copy_is_unknown_and_has_no_addresses() {
     assert!(newcomer.consent_copy_keys.is_some());
 }
 
+/// P06, Google Limited Use (DECISIONS 2026-11-17): a provider new in a
+/// remote copy never receives Gmail and Calendar content, whatever terms
+/// the copy gives it. A copy naming terms this build does not know is
+/// refused whole, and a provider no copy in use lists is unknown too.
+#[test]
+fn a_provider_new_in_a_remote_copy_never_receives_google_content() {
+    let newcomer = |terms: Value| {
+        move |doc: &mut Value| {
+            let mut new = provider(doc, "openai").clone();
+            new["id"] = json!("newcomer");
+            new["data_terms"] = terms;
+            doc["providers"].as_array_mut().unwrap().push(new);
+        }
+    };
+    let subject = crate::ai::consent::Subject { provider: "newcomer".into(), base_url: String::new() };
+    let _active = test_override::set(accepted(newcomer(json!("safe"))));
+    assert_eq!(crate::ai::mail_policy::describe(&subject).1, DataTerms::Unknown, "listed as safe by the copy");
+
+    let key = Key::new();
+    let bytes = newer(1, newcomer(json!("contractual")));
+    let b = bundled();
+    assert!(load::accept(&bytes, Some(&key.sign(&bytes)), &key.public(), b.version, APP, &b).is_err(), "terms this build does not know");
+    let _active = test_override::set((*b).clone());
+    assert_eq!(crate::ai::mail_policy::describe(&subject).1, DataTerms::Unknown, "not listed at all");
+}
+
 #[test]
 fn a_limit_left_out_of_a_remote_copy_keeps_the_bundled_value() {
     let registry = accepted(|doc| {

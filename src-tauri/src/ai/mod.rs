@@ -242,6 +242,9 @@ const UNTRUSTED_READ_TOOLS: &[&str] = &[
 pub struct SideEffectLedger {
     side_effects: Arc<AtomicUsize>,
     untrusted_read: Arc<AtomicBool>,
+    /// Why a tool call was refused Gmail or Calendar content this turn
+    /// (P06, Google Limited Use), if one was.
+    google_content_refused: Arc<std::sync::Mutex<Option<String>>>,
 }
 
 impl SideEffectLedger {
@@ -279,6 +282,19 @@ impl SideEffectLedger {
     /// True once this turn has read content authored off this device.
     pub fn saw_untrusted_read(&self) -> bool {
         self.untrusted_read.load(Ordering::Relaxed)
+    }
+
+    /// A tool call needed Gmail or Calendar content the model may not
+    /// receive; `message` says why. The turn ends on the error card
+    /// ([`run_chosen`]).
+    pub fn refuse_google_content(&self, message: String) {
+        if let Ok(mut refused) = self.google_content_refused.lock() {
+            refused.get_or_insert(message);
+        }
+    }
+
+    pub fn google_content_refused(&self) -> Option<String> {
+        self.google_content_refused.lock().ok().and_then(|refused| refused.clone())
     }
 }
 
@@ -333,6 +349,7 @@ pub(crate) async fn run_chosen<T, F, Fut>(
     ledger: &SideEffectLedger,
     language: bedrock::UiLanguage,
     wire_resends: bool,
+    may_receive_google_content: &(dyn Fn(&ProviderChainEntry) -> bool + Sync),
     mut emit: impl FnMut(&str, serde_json::Value),
     mut send: F,
 ) -> Result<T, String>
@@ -379,6 +396,15 @@ where
                 // would carry its actions out twice.
                 if ledger.count() > 0 {
                     failure::note_current_run_acted();
+                }
+                // A tool call was refused Gmail or Calendar content (P06,
+                // Google Limited Use): the turn ends on the card, which
+                // offers the models that may receive it, rather than on an
+                // answer given without it.
+                if let Some(message) = ledger.google_content_refused() {
+                    emit("chat-token", json!({"token": "", "done": true, "discard": true}));
+                    let alternatives = capability::offered_for(key, configured).into_iter().filter(|a| may_receive_google_content(&a.pick.entry())).collect();
+                    return Err(failure::Failure::google_content(key, target, message, ledger.count(), alternatives).surface(foreground, language));
                 }
                 return Ok(response);
             }
@@ -844,6 +870,23 @@ impl AiRouter {
         rows
     }
 
+    /// The error card for a request the user waits on that needs Gmail or
+    /// Calendar content the model it would run on may not receive (P06,
+    /// Google Limited Use): the model, why (`message`), and the configured
+    /// models that may receive the content. Nothing is sent.
+    pub(crate) async fn google_content_card(&self, db: &crate::db::Database, feature: cost::Feature, message: String) -> String {
+        let configured = self.configured(db).await;
+        let key = capability::feature_key(feature, Workload::Volume);
+        let entry = capability::picked().map(|pick| pick.entry()).or_else(|| chosen_entry(&self.provider_chain, self.chain_loaded_from_db, &configured));
+        let Some(entry) = entry else { return message };
+        let target = match capability::resolve(key, &entry, &configured) {
+            capability::Resolved::Ready(target) => target,
+            capability::Resolved::Unsupported(unsupported) => unsupported.target,
+        };
+        let alternatives = capability::offered_for(key, &configured).into_iter().filter(|a| mail_policy::may_receive(db, &a.pick.entry())).collect();
+        failure::Failure::google_content(key, target, message, 0, alternatives).to_error()
+    }
+
     /// The request on the chosen model ([`run_chosen`]): the providers'
     /// calls for each row type, nothing else tried in its place.
     #[allow(clippy::too_many_arguments)]
@@ -870,6 +913,7 @@ impl AiRouter {
             &ledger,
             bedrock::UiLanguage::read(db),
             true,
+            &|row| mail_policy::may_receive(db, row),
             |event, payload| {
                 let _ = app_handle.emit(event, payload);
             },
@@ -1067,7 +1111,7 @@ mod tests {
         let sent = std::cell::RefCell::new(Vec::new());
         let replies = std::cell::RefCell::new(replies.into_iter());
         let mut events = Vec::new();
-        let result = run_chosen(chosen, picked, configured, feature, Workload::Volume, ledger, bedrock::UiLanguage::En, true, |event, payload| events.push((event.to_string(), payload)), |row| {
+        let result = run_chosen(chosen, picked, configured, feature, Workload::Volume, ledger, bedrock::UiLanguage::En, true, &|row| row.base_url.is_none(), |event, payload| events.push((event.to_string(), payload)), |row| {
             sent.borrow_mut().push(row);
             let reply = replies.borrow_mut().next().expect("sent more often than expected").map(str::to_string).map_err(str::to_string);
             async move { reply }
@@ -1128,6 +1172,35 @@ mod tests {
         let openai = [chosen_row("openai", None)];
         let (_, sent, _) = run_fake(Some(openai[0].clone()), None, &openai, cost::Feature::Chat, &ledger, vec![Err("OpenAI API error 503 Service Unavailable: x")]).await;
         assert_eq!(sent.len(), 1, "openai::send_retrying already resent it");
+    }
+
+    /// A turn whose tool call was refused Gmail or Calendar content (P06,
+    /// Google Limited Use) ends on the card, not on the answer given without
+    /// it. The card offers only the models that may receive the content (the
+    /// fake's rule: no address of its own), and none after an action ran.
+    #[tokio::test]
+    async fn a_turn_refused_google_content_ends_on_the_card_with_the_models_that_may_receive_it() {
+        let at = |base_url: &str| ProviderChainEntry { base_url: Some(base_url.into()), model_id: Some("m".into()), ..chosen_row("openai", None) };
+        let kimi = at("https://api.moonshot.ai/v1");
+        let chain = [kimi.clone(), at("https://dashscope-intl.aliyuncs.com/compatible-mode/v1"), chosen_row("claude", None)];
+        let ledger = SideEffectLedger::new();
+        ledger.refuse_google_content("Gmail and Calendar content is not sent to Kimi: ...".into());
+        let (result, sent, events) = run_fake(Some(kimi.clone()), None, &chain, cost::Feature::Chat, &ledger, vec![Ok("Reading your email needs another AI.")]).await;
+        assert_eq!(sent.len(), 1);
+        let card = failure::parse(&result.unwrap_err()).expect("the error card");
+        assert_eq!(card["code"], "google_content");
+        assert_eq!(card["message"], "Gmail and Calendar content is not sent to Kimi: ...");
+        assert_eq!(offered(&card), ["claude"], "Qwen may not receive it either");
+        assert!(events.contains(&("chat-token".to_string(), json!({"token": "", "done": true, "discard": true}))), "the answer without it is not kept");
+
+        ledger.note("create_event");
+        let (result, _, _) = run_fake(Some(kimi), None, &chain, cost::Feature::Chat, &ledger, vec![Ok("Done.")]).await;
+        let card = failure::parse(&result.unwrap_err()).unwrap();
+        assert_eq!((card["code"].as_str(), card["actions_ran"].as_u64()), (Some("google_content"), Some(1)));
+        assert!(offered(&card).is_empty(), "no model is offered to run it again");
+
+        let (result, _, _) = run_fake(Some(chosen_row("claude", None)), None, &chain, cost::Feature::Chat, &SideEffectLedger::new(), vec![Ok("answer")]).await;
+        assert_eq!(result.unwrap(), "answer", "a turn that was refused nothing keeps its answer");
     }
 
     /// After an action tool ran (a calendar event, a draft), the request is

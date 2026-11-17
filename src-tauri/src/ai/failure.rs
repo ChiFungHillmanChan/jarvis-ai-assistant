@@ -40,6 +40,9 @@ pub enum Code {
     Unsupported,
     /// The service has no model for the feature.
     NoModel,
+    /// The request needed Gmail or Calendar content, which is not sent to
+    /// this service (P06, Google Limited Use).
+    GoogleContent,
 }
 
 impl Code {
@@ -162,6 +165,7 @@ pub(crate) fn reason_text(code: Code, name: &str, key: &str, status: Option<u16>
         Code::Disabled => language.pick(format!("{name} has been turned off. Choose a replacement; JARVIS does not switch models until you choose."), format!("{name} 已停用，請選擇替代模型。未選擇前不會改用其他模型。")),
         Code::Unsupported => language.pick(format!("{name} cannot be used for {feature}. Pick a model that supports it."), format!("{name} 不支援{feature}，請改用支援這項功能的模型。")),
         Code::NoModel => language.pick(format!("{name} has no model for {feature}. Pick a model that supports it."), format!("{name} 沒有可用於{feature}的模型，請改用支援這項功能的模型。")),
+        Code::GoogleContent => super::mail_policy::not_for_google_content(name, language),
     }
 }
 
@@ -209,6 +213,15 @@ impl Failure {
         Failure { feature: key.to_string(), model, code, capability: None, message, provider_reason, alternatives, actions_ran }
     }
 
+    /// A request that needed Gmail or Calendar content `model` may not
+    /// receive (P06, Google Limited Use). `message` says why, naming the
+    /// service; `alternatives` are the models that may receive it. After an
+    /// action ran nothing is offered, as for any failure.
+    pub(crate) fn google_content(key: &str, model: Target, message: String, actions_ran: usize, alternatives: Vec<Alternative>) -> Failure {
+        let alternatives = if actions_ran > 0 { Vec::new() } else { alternatives.into_iter().filter(|a| a.pick != model.pick).collect() };
+        Failure { feature: key.to_string(), model, code: Code::GoogleContent, capability: None, message, provider_reason: None, alternatives, actions_ran }
+    }
+
     /// The error a foreground request fails with: the card's data.
     pub fn to_error(&self) -> String {
         serde_json::json!({ "jarvis_ai": { "kind": "failure", "failure": self } }).to_string()
@@ -233,7 +246,7 @@ impl Failure {
         };
         let key = format!("{}|{}|{:?}|{:?}", self.feature, self.model.label, self.code, self.capability);
         if super::notify::first_time(&key) {
-            super::notify::emit("ai-needs-model", serde_json::json!({ "feature": self.feature, "message": sentence, "model": self.model.label }));
+            super::notify::emit("ai-needs-model", serde_json::json!({ "feature": self.feature, "message": sentence, "model": self.model.label, "code": self.code }));
         }
         sentence
     }

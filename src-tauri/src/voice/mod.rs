@@ -265,11 +265,20 @@ fn cloud_speech_for(db: &crate::db::Database) -> CloudSpeech {
 /// (ai::mail_policy::gate): the provider's terms are safe, or the user
 /// agreed to them.
 fn speech_gate(db: &crate::db::Database, wire: transcribe::SpeechWire) -> Result<(), Box<crate::ai::consent::Request>> {
-    let provider = match wire {
+    crate::ai::mail_policy::gate(db, crate::ai::consent::Subject { provider: speech_provider(wire).into(), base_url: String::new() })
+}
+
+fn speech_provider(wire: transcribe::SpeechWire) -> &'static str {
+    match wire {
         transcribe::SpeechWire::Gemini => "gemini",
         transcribe::SpeechWire::OpenAi => "openai",
-    };
-    crate::ai::mail_policy::gate(db, crate::ai::consent::Subject { provider: provider.into(), base_url: String::new() })
+    }
+}
+
+/// Whether a consent to `provider` can let a voice recording through: it
+/// is one of the services a recording is sent to.
+pub(crate) fn is_speech_provider(provider: &str) -> bool {
+    [transcribe::SpeechWire::Gemini, transcribe::SpeechWire::OpenAi].into_iter().any(|wire| speech_provider(wire) == provider)
 }
 
 /// The first step for a spoken request.

@@ -64,6 +64,7 @@ pub async fn complete(router: &AiRouter, db: &Database, request: Request<'_>) ->
         &ledger,
         super::bedrock::UiLanguage::read(db),
         false,
+        &|row| super::mail_policy::may_receive(db, row),
         |_, _| {},
         move |row| async move {
             let started = Instant::now();

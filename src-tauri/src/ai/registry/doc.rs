@@ -26,8 +26,9 @@ pub enum DataTerms {
     /// Email may be sent once the user confirms paid billing on the consent
     /// card.
     NeedsBillingConfirmation,
-    /// Not checked: email is sent once the user agrees on the consent card
-    /// (ai/consent.rs).
+    /// JARVIS cannot confirm how the provider uses data: Gmail and Calendar
+    /// content is never sent (ai::mail_policy); a voice recording waits for
+    /// the user's consent (ai/consent.rs).
     Unknown,
 }
 

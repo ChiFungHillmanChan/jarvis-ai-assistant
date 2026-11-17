@@ -1529,8 +1529,14 @@ async fn execute_tool_inner(
     // model only when the chosen AI does not train on it (see ai::mail_policy).
     if matches!(name, "search_emails" | "read_email" | "list_follow_ups" | "update_follow_up" | "list_inbox_triage" | "list_events") {
         if let Err(blocked) = crate::ai::mail_policy::check(db) {
-            // The consent card goes up in the chat (P06); the model is told why.
-            blocked.raise("chat");
+            // The model is told why. Content that waits for consent puts the
+            // consent card up in the chat; content that is not sent to this
+            // service ends the turn on the error card, with the models that
+            // may receive it (P06).
+            match &blocked {
+                crate::ai::mail_policy::Blocked::NotForGoogleContent { message, .. } => ledger.refuse_google_content(message.clone()),
+                _ => blocked.raise("chat"),
+            }
             return blocked.tool_message();
         }
     }
@@ -3006,10 +3012,14 @@ mod local_data_tests {
         let db = mail_db();
         use_ai(&db, "openai", KIMI);
         agree_to_kimi(&db);
+        let auth = Arc::new(crate::auth::google::GoogleAuth::new_empty());
         for tool in MAIL.into_iter().chain(["list_events"]) {
-            let out = run(tool, serde_json::json!({}), &db).await;
+            // The turn's ledger records why: the turn ends on the error card.
+            let ledger = crate::ai::SideEffectLedger::new();
+            let out = execute_tool(tool, "{}", &db, &auth, &ledger).await;
             assert!(out.starts_with("Gmail and Calendar content is not sent to Kimi"), "{tool}: {out}");
             assert!(!out.contains("Gold Badge"), "{tool} leaked mail content");
+            assert!(ledger.google_content_refused().is_some_and(|why| why.starts_with("Gmail and Calendar content is not sent to Kimi")), "{tool}");
         }
         for (provider, agree) in [("gemini", Some(agree_to_gemini as fn(&crate::db::Database))), ("openai", None)] {
             let db = mail_db();
@@ -3018,8 +3028,10 @@ mod local_data_tests {
                 agree(&db);
             }
             for tool in MAIL.into_iter().chain(["list_events"]) {
-                let out = run(tool, serde_json::json!({}), &db).await;
+                let ledger = crate::ai::SideEffectLedger::new();
+                let out = execute_tool(tool, "{}", &db, &auth, &ledger).await;
                 assert!(!refused(&out), "{provider} {tool}: {out}");
+                assert_eq!(ledger.google_content_refused(), None, "{provider} {tool}");
             }
             assert!(run("list_inbox_triage", serde_json::json!({}), &db).await.contains("Gold Badge"), "{provider}");
         }

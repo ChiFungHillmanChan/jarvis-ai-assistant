@@ -543,6 +543,7 @@ pub fn run() {
             ai::disabled::disabled_models,
             ai::disabled::confirm_model_replacement,
             ai::consent::ai_consent_needed,
+            ai::consent::ai_google_content_note,
             ai::consent::give_ai_consent,
             ai::consent::revoke_ai_consent,
             ai::consent::list_ai_consents,

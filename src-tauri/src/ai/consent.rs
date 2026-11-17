@@ -3,13 +3,18 @@
 //!
 //! The registry classifies each provider (`providers[].data_terms`). `safe`
 //! providers just work. `needs_billing_confirmation` (Gemini: its free tier
-//! may use what it is sent to improve Google's models) and `unknown` (JARVIS
-//! cannot vouch for the provider: compatible services, Ollama Cloud, an
-//! Ollama on another machine, a provider new in a fetched registry) wait
-//! for one click on the consent card. A consent is stored per provider and
+//! may use what it is sent to improve Google's models) waits for one click
+//! on the consent card. `unknown` (JARVIS cannot confirm how the provider
+//! uses data: compatible services, Ollama Cloud, an Ollama on another
+//! machine, a provider new in a fetched registry) never receives Gmail and
+//! Calendar content, consent or not (DECISIONS, P06 "Google Limited Use",
+//! 2026-11-17; `ai::mail_policy` refuses it before asking here). A voice
+//! recording is not Google content: the speech gate (`voice`) still asks
+//! for consent under any terms. A consent is stored per provider and
 //! address, with the terms and the registry version it was given under
 //! (V36), and holds while the terms in force are not stricter than those.
-//! It is revoked in Settings. `ai::mail_policy` asks [`holds`].
+//! It is revoked in Settings. `ai::mail_policy` and the speech gate ask
+//! [`holds`].
 
 use super::registry::{self, DataTerms};
 use crate::db::Database;
@@ -152,6 +157,10 @@ pub struct Given {
     pub holds: bool,
 }
 
+/// The consents that let something through now, for Settings. One that
+/// has no effect is not listed: a consent for terms that are safe now, and
+/// one under `unknown` terms for a service no voice recording goes to (an
+/// `unknown` service never receives Gmail and Calendar content).
 pub fn list(db: &Database) -> Result<Vec<Given>, String> {
     let rows: Vec<(String, String, String, i64, String)> = {
         let conn = db.conn.lock().map_err(|e| e.to_string())?;
@@ -169,7 +178,12 @@ pub fn list(db: &Database) -> Result<Vec<Given>, String> {
             let terms = parse_terms(&terms)?;
             let subject = Subject { provider, base_url };
             let (label, terms_now) = super::mail_policy::describe(&subject);
-            Some(Given { holds: terms >= terms_now, provider: subject.provider, base_url: subject.base_url, label, terms, terms_now, registry_version, consented_at })
+            let has_effect = match terms_now {
+                DataTerms::Safe => false,
+                DataTerms::NeedsBillingConfirmation => true,
+                DataTerms::Unknown => crate::voice::is_speech_provider(&subject.provider),
+            };
+            has_effect.then(|| Given { holds: terms >= terms_now, provider: subject.provider, base_url: subject.base_url, label, terms, terms_now, registry_version, consented_at })
         })
         .collect())
 }
@@ -181,6 +195,26 @@ pub fn ai_consent_needed(db: tauri::State<'_, std::sync::Arc<Database>>) -> Opti
         Err(super::mail_policy::Blocked::NeedsConsent(request)) => Some(*request),
         _ => None,
     }
+}
+
+/// The plain line setup and Settings show when Gmail and Calendar content
+/// is not sent to the AI in use at all (P06, Google Limited Use): there is
+/// nothing to agree to, so no button.
+#[tauri::command]
+pub fn ai_google_content_note(db: tauri::State<'_, std::sync::Arc<Database>>) -> Option<String> {
+    google_content_note(&db)
+}
+
+pub(crate) fn google_content_note(db: &Database) -> Option<String> {
+    use super::mail_policy::Blocked;
+    let label = match super::mail_policy::check(db) {
+        Err(Blocked::NotForGoogleContent { label, .. } | Blocked::NotAllowed(label)) => label,
+        _ => return None,
+    };
+    Some(super::bedrock::UiLanguage::read(db).pick(
+        format!("Gmail and Calendar content is not sent to {label}: JARVIS cannot confirm how this service uses data. Chat and voice requests work with {label}; mail features, reading your calendar and the daily briefing need another AI."),
+        format!("Gmail 及日曆內容不會傳送至 {label}：JARVIS 無法確認這個服務如何使用資料。你仍可用 {label} 對話及發出語音指令；郵件功能、讀取日曆及每日簡報則須改用其他 AI。"),
+    ))
 }
 
 /// The consent card's button. The terms are the ones in force now, read
@@ -242,6 +276,46 @@ mod tests {
         assert_eq!(listed.len(), 1);
         assert_eq!((listed[0].provider.as_str(), listed[0].terms, listed[0].holds), ("gemini", DataTerms::NeedsBillingConfirmation, true));
         assert_eq!(listed[0].registry_version, registry::current().version as i64);
+    }
+
+    /// A consent row for a service JARVIS cannot confirm (one an earlier
+    /// build stored for Kimi) unlocks nothing: no Gmail or Calendar content
+    /// goes to Kimi, and Settings does not list it. One for Gemini, which
+    /// voice recordings go to, still lets a recording through when a
+    /// registry copy has tightened Gemini to unknown, and stays listed so it
+    /// can be withdrawn; Gmail and Calendar content stays back.
+    #[test]
+    fn an_unknown_terms_consent_unlocks_no_google_content_and_is_listed_only_when_voice_uses_it() {
+        let db = crate::db::test_database();
+        crate::ai::mail_policy::test_support::use_ai(&db, "openai", crate::ai::mail_policy::test_support::KIMI);
+        crate::ai::mail_policy::test_support::agree_to_kimi(&db);
+        assert!(matches!(crate::ai::mail_policy::check(&db), Err(crate::ai::mail_policy::Blocked::NotForGoogleContent { .. })));
+        assert!(list(&db).unwrap().is_empty(), "a consent with no effect is not listed");
+
+        let _registry = registry::test_override::with(|r| r.providers.iter_mut().find(|p| p.id == "gemini").unwrap().data_terms = DataTerms::Unknown);
+        crate::ai::mail_policy::test_support::use_ai(&db, "gemini", None);
+        let gemini = subject("gemini", "");
+        give(&db, &gemini, DataTerms::Unknown).unwrap();
+        assert!(holds(&db, &gemini, DataTerms::Unknown), "the speech gate's consent");
+        assert!(matches!(crate::ai::mail_policy::check(&db), Err(crate::ai::mail_policy::Blocked::NotForGoogleContent { .. })));
+        let listed: Vec<String> = list(&db).unwrap().into_iter().map(|g| g.provider).collect();
+        assert_eq!(listed, ["gemini"]);
+    }
+
+    /// Setup and Settings say plainly, with no button, when the AI in use
+    /// receives no Gmail and Calendar content; nothing for one that does or
+    /// one that waits for consent (its card is shown instead).
+    #[test]
+    fn setup_says_plainly_when_google_content_is_not_sent() {
+        let db = crate::db::test_database();
+        crate::ai::mail_policy::test_support::use_ai(&db, "openai", crate::ai::mail_policy::test_support::KIMI);
+        let note = google_content_note(&db).unwrap();
+        assert!(note.starts_with("Gmail and Calendar content is not sent to Kimi: JARVIS cannot confirm how this service uses data."), "{note}");
+        assert!(note.contains("mail features, reading your calendar and the daily briefing need another AI"), "{note}");
+        crate::ai::mail_policy::test_support::use_ai(&db, "gemini", None);
+        assert_eq!(google_content_note(&db), None, "Gemini has its consent card");
+        crate::ai::mail_policy::test_support::use_ai(&db, "openai", None);
+        assert_eq!(google_content_note(&db), None);
     }
 
     /// The card's keys are the registry's for the provider; an Ollama on
