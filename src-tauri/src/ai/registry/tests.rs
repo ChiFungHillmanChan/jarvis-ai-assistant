@@ -650,11 +650,8 @@ fn the_endpoint_is_the_launch_value_else_the_compiled_one_and_https_only() {
 // What a signed copy may hold: bounded limits, safe ids, active defaults,
 // and each model's status from its own provider's entries.
 
-/// Each bound of each limit (registry/README.md, "Limits"): a copy just
-/// outside is rejected whole, the reason names the field and never the
-/// value, and the copy in use stays; a copy just inside is used.
 /// A model's own output cap, which Gemini sends as maxOutputTokens: the
-/// same path as the limits below. The model is the first the bundled copy
+/// same path as the limits in the next test. The model is the first the bundled copy
 /// gives a cap to.
 #[tokio::test]
 async fn a_models_max_output_outside_its_bound_rejects_the_whole_copy() {
@@ -674,6 +671,9 @@ async fn a_models_max_output_outside_its_bound_rejects_the_whole_copy() {
     }
 }
 
+/// Each bound of each limit (registry/README.md, "Limits"): a copy just
+/// outside is rejected whole, the reason names the field and never the
+/// value, and the copy in use stays; a copy just inside is used.
 #[tokio::test]
 async fn a_limit_outside_its_bound_rejects_the_whole_copy() {
     use super::doc::{MAX_CONTEXT_TOKENS, MAX_OUTPUT_TOKENS, MAX_TOOL_ROUNDS};
