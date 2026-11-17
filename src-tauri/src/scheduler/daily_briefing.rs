@@ -89,8 +89,10 @@ pub async fn run_briefing(
     }
 
     // The briefing sends senders, subjects and snippets to the AI.
+    // Not skipped silently (P06): the consent card is raised once per launch.
     if let Err(blocked) = crate::ai::mail_policy::check(&db) {
         log::info!("[daily_briefing] email is not shared with the chosen AI ({}), skipping", blocked.code());
+        blocked.raise("briefing");
         return Ok(());
     }
 

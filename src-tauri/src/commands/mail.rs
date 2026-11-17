@@ -70,8 +70,21 @@ fn chosen_ai_for_mail(db: &Database) -> Result<Option<crate::commands::ai_choice
 /// Whether the background sync should sort new mail: the user opted in, and
 /// either a TypeSafe key or a chosen AI that may read email can classify it.
 pub(crate) fn triage_ready(db: &Database) -> bool {
-    store::auto_triage_enabled(db).unwrap_or(false)
-        && (typesafe_key().is_some() || matches!(chosen_ai_for_mail(db), Ok(Some(_))))
+    if !store::auto_triage_enabled(db).unwrap_or(false) {
+        return false;
+    }
+    if typesafe_key().is_some() {
+        return true;
+    }
+    match chosen_ai_for_mail(db) {
+        Ok(chosen) => chosen.is_some(),
+        // Not skipped silently (P06): the consent card is raised once per
+        // launch until the user agrees.
+        Err(blocked) => {
+            blocked.raise("mail_sort");
+            false
+        }
+    }
 }
 
 pub(crate) async fn triage_untriaged(db: &Database, language: Option<&str>) -> Result<MailTriageRun, String> {

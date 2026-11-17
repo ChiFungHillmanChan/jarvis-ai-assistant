@@ -1,5 +1,6 @@
 pub mod bedrock;
 pub mod capability;
+pub mod consent;
 pub mod failure;
 pub mod notify;
 pub mod claude;

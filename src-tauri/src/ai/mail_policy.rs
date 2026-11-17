@@ -2,115 +2,149 @@
 //!
 //! Google's Limited Use rules for Gmail data forbid transferring it to be used
 //! to train AI models. OpenAI, Anthropic and Amazon Bedrock do not train on API
-//! traffic by default, and a model on this Mac keeps email local (an Ollama
-//! cloud model does not run on this Mac and is refused). Gemini's
-//! unpaid tier may use submitted content to improve Google's models (outside
-//! the EEA, Switzerland and the UK), so Gemini needs the user's confirmation
-//! that billing is on. Kimi, Qwen and other services have not been checked and
-//! do not receive email. Every path that sends email text to the chosen AI
-//! (sorting, analysis, briefings, chat context and tools) asks `check` first.
-//! Google Calendar data falls under the same Google rules, so event titles and
-//! places in the chat context and `list_events` ask it too.
+//! traffic by default, and a model on this Mac keeps email local. The
+//! registry classifies every provider's data terms (`providers[].data_terms`):
+//! a `safe` provider receives email; Gemini (`needs_billing_confirmation`:
+//! its unpaid tier may use submitted content to improve Google's models,
+//! outside the EEA, Switzerland and the UK) and every provider JARVIS cannot
+//! vouch for (`unknown`: Kimi, Qwen and other compatible services, Ollama
+//! Cloud, an Ollama on another machine) receive it once the user agrees on
+//! the consent card (ai/consent.rs, P06). Every path that sends email text to
+//! the chosen AI (sorting, analysis, briefings, chat context and tools) asks
+//! `check` first. Google Calendar data falls under the same Google rules, so
+//! event titles and places in the chat context and `list_events` ask it too.
 //!
 //! TypeSafe, which classifies mail when the user adds its key, is not the
 //! chosen AI and is not checked here: its privacy policy says it does not
 //! train or fine-tune models on prompts or other input.
 
 use super::compat;
+use super::consent::{self, Subject};
 use super::registry::DataTerms;
 use super::ProviderChainEntry;
 use crate::db::Database;
 
-/// user_preferences key set when the user confirms their Gemini key is billed.
-pub const GEMINI_BILLING_CONFIRMED: &str = "gemini_billing_confirmed";
-
 #[derive(Debug, PartialEq)]
 pub enum Blocked {
-    /// Gemini, before the user confirmed that billing is enabled.
-    GeminiBillingUnconfirmed,
-    /// A service that may use email to train models, or has not been checked.
+    /// The provider's terms need the user's consent, not given yet (or
+    /// given under milder terms than those now in force).
+    NeedsConsent(consent::Request),
+    /// A row type this build does not know: there is nothing to agree to.
     NotAllowed(String),
 }
 
 impl Blocked {
     pub fn code(&self) -> &'static str {
         match self {
-            Blocked::GeminiBillingUnconfirmed => "gemini_billing_unconfirmed",
+            Blocked::NeedsConsent(_) => "consent_needed",
             Blocked::NotAllowed(_) => "mail_ai_not_allowed",
         }
     }
 
-    /// For the model, which explains it to the user in their language.
+    /// For the model, which explains it to the user in their language. The
+    /// consent card is shown in the chat at the same time ([`Blocked::raise`]).
     pub fn tool_message(&self) -> String {
         match self {
-            Blocked::GeminiBillingUnconfirmed => "Email and calendar content is not shared with Gemini yet. \
-                Gemini's free tier may use submitted content to train Google's models, so the user \
-                must first confirm in Settings > Models that their Gemini API key has billing enabled."
-                .to_string(),
-            Blocked::NotAllowed(label) => format!(
-                "Email and calendar content is not shared with {label}. Google's rules for Gmail and Calendar \
-                 data do not allow sending it to an AI service that may use it for training. Email and calendar \
-                 features work with \
-                 OpenAI, Claude, AWS Bedrock, a local Ollama model, or Gemini with billing enabled; \
-                 the user can choose one in Settings > Models."
+            Blocked::NeedsConsent(request) if request.terms == DataTerms::NeedsBillingConfirmation => format!(
+                "Email and calendar content is not shared with {} yet: its free tier may use submitted content to \
+                 improve its models. JARVIS has shown the user a consent card in this chat; once they confirm \
+                 there that their API key has billing enabled, this works. Do not ask them to change settings.",
+                request.label
             ),
+            Blocked::NeedsConsent(request) => format!(
+                "Email and calendar content is not shared with {} yet: JARVIS cannot vouch for how this service \
+                 uses the data it receives. JARVIS has shown the user a consent card in this chat; once they agree \
+                 there, this works. Do not ask them to change settings.",
+                request.label
+            ),
+            Blocked::NotAllowed(label) => format!("Email and calendar content is not shared with {label}, an AI service this version of JARVIS does not know."),
         }
     }
 
-    /// For errors shown in the app, next to the other mail messages.
+    /// The error a page the user is on fails with: the consent card's data,
+    /// or a sentence when there is nothing to agree to.
     pub fn user_message(&self) -> String {
         match self {
-            Blocked::GeminiBillingUnconfirmed => "Gemini 免費額度可能以提交的內容訓練 Google 的模型。\
-                請先在「設定 → 模型」確認你的 Gemini API 金鑰已啟用付費，JARVIS 才會把電郵傳送給 Gemini。"
-                .to_string(),
-            Blocked::NotAllowed(label) => format!(
-                "為符合 Google 對 Gmail 資料的規定，電郵內容不會傳送至 {label}。\
-                 請在「設定 → 模型」改用 OpenAI、Claude、AWS Bedrock、本機 Ollama 模型，或已啟用付費的 Gemini。"
-            ),
+            Blocked::NeedsConsent(request) => request.to_error(),
+            Blocked::NotAllowed(label) => format!("電郵內容不會傳送至 {label}：這個版本的 JARVIS 不認識這個 AI 服務。"),
+        }
+    }
+
+    /// Show the consent card for `feature` (see [`consent::Request::raise`]).
+    pub fn raise(&self, feature: &str) {
+        if let Blocked::NeedsConsent(request) = self {
+            request.raise(feature);
         }
     }
 }
 
-/// Whether email content may go to the AI the user chose.
+/// Whether email content may go to the AI this request uses: a model
+/// picked in the error card for this one request, else the first enabled
+/// row of the saved list (the only one a request is sent to).
 pub fn check(db: &Database) -> Result<(), Blocked> {
-    let chain: Vec<ProviderChainEntry> = crate::commands::ai_choice::saved_chain(db)
-        .unwrap_or_default()
-        .into_iter()
-        .filter(|entry| entry.enabled)
-        .collect();
+    if let Some(pick) = super::capability::picked() {
+        return allowed(db, &pick.entry());
+    }
+    let chosen = crate::commands::ai_choice::saved_chain(db).unwrap_or_default().into_iter().find(|entry| entry.enabled);
     // No saved choice: an install from before setup asked, which chats with
     // Gemini by default.
-    if chain.is_empty() {
-        return gemini(db);
-    }
-    chain.iter().try_for_each(|entry| allowed(db, entry))
+    let chosen = chosen.unwrap_or(ProviderChainEntry { position: 0, provider_type: "gemini".into(), endpoint_id: None, model_id: None, enabled: true, base_url: None });
+    allowed(db, &chosen)
 }
 
 /// The registry's data terms decide (`providers[].data_terms`): safe
-/// receives email, Gemini's billing check stands in for
-/// needs_billing_confirmation, and unknown is refused. The bundled registry
-/// is the floor: a fetched copy can tighten a provider, never loosen one.
+/// receives email, anything else once the user agreed under those terms.
+/// The bundled registry is the floor: a fetched copy can tighten a
+/// provider, never loosen one (registry::load::apply_floor).
 fn allowed(db: &Database, entry: &ProviderChainEntry) -> Result<(), Blocked> {
     let Some(provider) = registry_provider(entry) else {
         return Err(Blocked::NotAllowed(entry.provider_type.clone()));
     };
-    let registry = super::registry::current();
-    let (terms, name) = match registry.provider(provider) {
-        Some(p) => (p.data_terms, p.display_name.en.clone()),
-        None => (DataTerms::Unknown, provider.to_string()),
+    let base_url = match (provider, entry.base_url.as_deref()) {
+        // A "local" endpoint pointing at another machine is a remote
+        // service like any other, named by its address.
+        ("ollama", _) => match endpoint_off_this_mac(db, entry.endpoint_id.as_deref()) {
+            Ok(None) => return Ok(()),
+            Ok(Some(url)) => url,
+            Err(label) => return Err(Blocked::NotAllowed(label)),
+        },
+        ("openai", _) | (_, None) => String::new(),
+        (_, Some(base)) => base.to_string(),
     };
-    // Another service at a compatible address is named by its host.
-    let label = match (provider, entry.base_url.as_deref()) {
-        ("openai_compat", Some(base)) => compat::label(base),
-        _ => name,
-    };
-    match terms {
-        DataTerms::Safe if provider == "ollama" => local_on_this_mac(db, entry.endpoint_id.as_deref()),
-        DataTerms::Safe => Ok(()),
-        DataTerms::NeedsBillingConfirmation if provider == "gemini" => gemini(db),
-        // Only Gemini has a confirmation to ask for; anything else fails closed.
-        DataTerms::NeedsBillingConfirmation | DataTerms::Unknown => Err(Blocked::NotAllowed(label)),
+    let subject = Subject { provider: provider.to_string(), base_url };
+    let (label, terms) = describe(&subject);
+    if consent::holds(db, &subject, terms) {
+        return Ok(());
     }
+    Err(Blocked::NeedsConsent(consent::Request::new(subject, label, terms)))
+}
+
+/// The name the card gives a subject, and the terms in force for it. An
+/// Ollama on another machine is not vouched for; a provider this registry
+/// does not list is unknown.
+pub(crate) fn describe(subject: &Subject) -> (String, DataTerms) {
+    let registry = super::registry::current();
+    let host = || compat::host(&subject.base_url);
+    match (subject.provider.as_str(), registry.provider(&subject.provider)) {
+        ("ollama", Some(p)) if !subject.base_url.is_empty() => (host(), p.data_terms.max(DataTerms::Unknown)),
+        ("openai_compat", Some(p)) if !subject.base_url.is_empty() => (compat::label(&subject.base_url), p.data_terms),
+        (_, Some(p)) => (p.display_name.en.clone(), p.data_terms),
+        (id, None) => (id.to_string(), DataTerms::Unknown),
+    }
+}
+
+/// A subject sent back by the consent card: a provider this registry lists,
+/// and an address or none.
+pub(crate) fn subject_for(provider: &str, base_url: &str) -> Result<Subject, String> {
+    let invalid = || "Unknown AI service.".to_string();
+    if super::registry::current().provider(provider).is_none() {
+        return Err(invalid());
+    }
+    let base_url = base_url.trim();
+    if base_url.len() > 2_048 || (!base_url.is_empty() && reqwest::Url::parse(base_url).is_err()) {
+        return Err(invalid());
+    }
+    Ok(Subject { provider: provider.to_string(), base_url: base_url.to_string() })
 }
 
 /// The registry provider a chain row sends to, or None for a row type this
@@ -126,27 +160,6 @@ pub(crate) fn registry_provider(entry: &ProviderChainEntry) -> Option<&'static s
         ("local", _) if entry.model_id.as_deref().is_some_and(is_ollama_cloud_model) => Some("ollama_cloud"),
         ("local", _) => Some("ollama"),
         _ => None,
-    }
-}
-
-fn gemini(db: &Database) -> Result<(), Blocked> {
-    let confirmed = db
-        .conn
-        .lock()
-        .ok()
-        .and_then(|conn| {
-            conn.query_row(
-                "SELECT value FROM user_preferences WHERE key = ?1",
-                [GEMINI_BILLING_CONFIRMED],
-                |row| row.get::<_, String>(0),
-            )
-            .ok()
-        })
-        .is_some_and(|value| value == "true");
-    if confirmed {
-        Ok(())
-    } else {
-        Err(Blocked::GeminiBillingUnconfirmed)
     }
 }
 
@@ -181,6 +194,19 @@ const WITHHELD_THROUGH: &str = "mail_withheld_through";
 /// move saves when it ends.
 pub fn withheld(db: &Database) -> Withheld {
     line(db, false)
+}
+
+/// [`withheld`] for a tool or prompt block that leaves the withheld rows
+/// out. When it hides anything, the consent card is shown for `feature`
+/// (P06): nothing is held back silently.
+pub fn withheld_shown(db: &Database, feature: &str) -> Withheld {
+    let line = withheld(db);
+    if line != Withheld::default() {
+        if let Err(blocked) = check(db) {
+            blocked.raise(feature);
+        }
+    }
+    line
 }
 
 /// [`withheld`], for a chat turn that is about to save the user's message:
@@ -275,18 +301,19 @@ pub fn is_ollama_cloud_model(model: &str) -> bool {
         .is_some_and(|cloud| cloud.model_id_suffixes.iter().any(|suffix| name.ends_with(&suffix.to_ascii_lowercase())))
 }
 
-/// A local model keeps email on this Mac; a "local" endpoint pointing at
-/// another machine is a remote service like any other.
-fn local_on_this_mac(db: &Database, endpoint_id: Option<&str>) -> Result<(), Blocked> {
-    let Some(id) = endpoint_id else { return Ok(()) };
+/// A local model keeps email on this Mac. The address of an endpoint on
+/// another machine, None for one on this Mac (or no endpoint named), or
+/// the label to refuse an endpoint that is not saved.
+fn endpoint_off_this_mac(db: &Database, endpoint_id: Option<&str>) -> Result<Option<String>, String> {
+    let Some(id) = endpoint_id else { return Ok(None) };
     let url: Option<String> = db.conn.lock().ok().and_then(|conn| {
         conn.query_row("SELECT url FROM local_endpoints WHERE id = ?1", [id], |row| row.get(0)).ok()
     });
-    let host = url.as_deref().map(compat::host).unwrap_or_default();
-    if matches!(host.as_str(), "localhost" | "127.0.0.1" | "[::1]" | "::1") {
-        Ok(())
+    let Some(url) = url else { return Err("this AI endpoint".to_string()) };
+    if matches!(compat::host(&url).as_str(), "localhost" | "127.0.0.1" | "[::1]" | "::1") {
+        Ok(None)
     } else {
-        Err(Blocked::NotAllowed(if host.is_empty() { "this AI endpoint".to_string() } else { host }))
+        Ok(Some(url))
     }
 }
 
@@ -363,28 +390,95 @@ mod tests {
         }
     }
 
-    #[test]
-    fn gemini_needs_billing_confirmed_and_unchecked_services_are_refused() {
-        assert_eq!(check(&db_with(&[("gemini", None, None)], &[])), Err(Blocked::GeminiBillingUnconfirmed));
-        assert_eq!(check(&db_with(&[("gemini", None, None)], &[(GEMINI_BILLING_CONFIRMED, "true")])), Ok(()));
-        assert_eq!(
-            check(&db_with(&[("openai", Some("https://api.moonshot.ai/v1"), None)], &[])),
-            Err(Blocked::NotAllowed("Kimi".into()))
-        );
-        assert_eq!(
-            check(&db_with(&[("local", None, Some("lan"))], &[])),
-            Err(Blocked::NotAllowed("llm.example.com".into()))
-        );
-        // A refused fallback blocks the chain: a request can land on any entry.
-        assert!(check(&db_with(&[("openai", None, None), ("openai", Some("https://dashscope.aliyuncs.com/compatible-mode/v1"), None)], &[])).is_err());
-        // No saved choice means the old Gemini default.
-        assert_eq!(check(&db_with(&[], &[])), Err(Blocked::GeminiBillingUnconfirmed));
+    /// The consent card `check` asks for.
+    fn card(db: &Database) -> consent::Request {
+        match check(db) {
+            Err(Blocked::NeedsConsent(request)) => request,
+            other => panic!("expected a consent card, got {other:?}"),
+        }
     }
 
-    /// The registry's data terms decide. A copy that tightens a provider
-    /// refuses it; needs_billing_confirmation on anything but Gemini fails
-    /// closed, as Gemini's billing check is the only confirmation there is;
-    /// the Ollama endpoint must still be on this Mac.
+    fn summary(request: &consent::Request) -> (&str, &str, &str, DataTerms) {
+        (request.provider.as_str(), request.base_url.as_str(), request.label.as_str(), request.terms)
+    }
+
+    /// Each data_terms level: safe just works (above); the others ask for
+    /// consent, are allowed after it and ask again after it is revoked.
+    #[test]
+    fn each_data_terms_level_before_and_after_consent_and_after_revocation() {
+        let cases: [(&[(&str, Option<&str>, Option<&str>)], (&str, &str, &str, DataTerms)); 3] = [
+            (&[("gemini", None, None)], ("gemini", "", "Google Gemini", DataTerms::NeedsBillingConfirmation)),
+            (&[("openai", KIMI, None)], ("kimi", "https://api.moonshot.ai/v1", "Kimi", DataTerms::Unknown)),
+            (&[("local", None, Some("lan"))], ("ollama", "https://llm.example.com", "llm.example.com", DataTerms::Unknown)),
+        ];
+        for (chain, expected) in cases {
+            let db = db_with(chain, &[]);
+            let request = card(&db);
+            assert_eq!(summary(&request), expected, "before consent");
+            consent::give(&db, &request.subject(), request.terms).unwrap();
+            assert_eq!(check(&db), Ok(()), "after consent: {expected:?}");
+            consent::revoke(&db, &request.subject()).unwrap();
+            assert_eq!(summary(&card(&db)), expected, "after revocation");
+        }
+        // No saved choice means the old Gemini default.
+        assert_eq!(card(&db_with(&[], &[])).provider, "gemini");
+    }
+
+    /// A request goes only to the first enabled row, so only that row is
+    /// asked about; a model picked in the error card is asked about for the
+    /// request it runs.
+    #[test]
+    fn the_gate_asks_about_the_model_the_request_uses() {
+        const QWEN: &str = "https://dashscope-intl.aliyuncs.com/compatible-mode/v1";
+        let db = db_with(&[("openai", None, None), ("openai", Some(QWEN), None)], &[]);
+        assert_eq!(check(&db), Ok(()), "a later row is only offered in the error card");
+        let qwen = crate::ai::capability::Pick { provider_type: "openai".into(), base_url: Some(QWEN.into()), endpoint_id: None, model_id: Some("qwen-plus".into()) };
+        let runtime = tokio::runtime::Builder::new_current_thread().build().unwrap();
+        let picked = runtime.block_on(crate::ai::capability::with_pick(Some(qwen), async { check(&db) }));
+        assert!(matches!(picked, Err(Blocked::NeedsConsent(ref r)) if r.provider == "qwen" && r.base_url == QWEN), "{picked:?}");
+    }
+
+    /// A consent holds while the terms in force are not stricter: a registry
+    /// that moves Gemini from billing to unknown asks again, with the
+    /// unknown-terms card.
+    #[test]
+    fn tightened_terms_ask_for_consent_again() {
+        let db = db_with(&[("gemini", None, None)], &[]);
+        let request = card(&db);
+        assert_eq!((request.blocked_key.as_str(), request.confirm_key.as_str()), ("consentGeminiBillingBlocked", "consentGeminiBillingConfirm"));
+        consent::give(&db, &request.subject(), request.terms).unwrap();
+        assert_eq!(check(&db), Ok(()));
+        let _registry = crate::ai::registry::test_override::with(|r| r.providers.iter_mut().find(|p| p.id == "gemini").unwrap().data_terms = DataTerms::Unknown);
+        let again = card(&db);
+        assert_eq!(again.terms, DataTerms::Unknown);
+        assert_eq!(again.blocked_key, "consentUnknownTermsBlocked");
+    }
+
+    /// P05's rule still holds at the gate: a fetched copy that calls every
+    /// provider safe is floored by the bundled copy, so Gemini, Kimi and
+    /// Ollama Cloud still wait for consent.
+    #[test]
+    fn a_fetched_registry_cannot_loosen_the_gate() {
+        let bundled = crate::ai::registry::fixture();
+        let mut loose = (*bundled).clone();
+        for p in &mut loose.providers {
+            p.data_terms = DataTerms::Safe;
+            p.consent_copy_keys = None;
+        }
+        crate::ai::registry::load::apply_floor(&bundled, &mut loose);
+        let _registry = crate::ai::registry::test_override::set(loose);
+        assert_eq!(card(&db_with(&[("gemini", None, None)], &[])).terms, DataTerms::NeedsBillingConfirmation);
+        assert_eq!(card(&db_with(&[("openai", KIMI, None)], &[])).terms, DataTerms::Unknown);
+        let cloud = db_with(&[("local", None, Some("mac"))], &[]);
+        cloud.conn.lock().unwrap().execute("UPDATE provider_chain SET model_id = 'gpt-oss:120b-cloud'", []).unwrap();
+        assert_eq!(card(&cloud).terms, DataTerms::Unknown);
+        assert_eq!(check(&db_with(&[("claude", None, None)], &[])), Ok(()));
+    }
+
+    /// The registry's data terms decide. A copy that tightens a provider asks
+    /// for consent under the stricter terms, and a consent given for one
+    /// provider is not another's; the Ollama endpoint must still be on this
+    /// Mac.
     #[test]
     fn the_registry_data_terms_decide() {
         let _registry = crate::ai::registry::test_override::with(|r| {
@@ -393,14 +487,34 @@ mod tests {
             terms("openai", DataTerms::NeedsBillingConfirmation);
             terms("kimi", DataTerms::Safe);
         });
-        assert_eq!(check(&db_with(&[("claude", None, None)], &[])), Err(Blocked::NotAllowed("Anthropic Claude".into())));
-        assert_eq!(check(&db_with(&[("openai", None, None)], &[(GEMINI_BILLING_CONFIRMED, "true")])), Err(Blocked::NotAllowed("OpenAI (GPT)".into())));
+        assert_eq!(summary(&card(&db_with(&[("claude", None, None)], &[]))), ("claude", "", "Anthropic Claude", DataTerms::Unknown));
+        let openai = db_with(&[("openai", None, None)], &[]);
+        consent::give(&openai, &Subject { provider: "gemini".into(), base_url: String::new() }, DataTerms::NeedsBillingConfirmation).unwrap();
+        assert_eq!(summary(&card(&openai)), ("openai", "", "OpenAI (GPT)", DataTerms::NeedsBillingConfirmation), "Gemini's consent is not OpenAI's");
         assert_eq!(check(&db_with(&[("openai", Some("https://api.moonshot.ai/v1"), None)], &[])), Ok(()), "the terms the copy in use states");
         assert_eq!(check(&db_with(&[("bedrock", None, None)], &[])), Ok(()));
-        assert_eq!(check(&db_with(&[("local", None, Some("lan"))], &[])), Err(Blocked::NotAllowed("llm.example.com".into())));
-        assert_eq!(check(&db_with(&[("gemini", None, None)], &[(GEMINI_BILLING_CONFIRMED, "true")])), Ok(()));
+        assert_eq!(card(&db_with(&[("local", None, Some("lan"))], &[])).label, "llm.example.com");
         let mystery = ProviderChainEntry { position: 0, provider_type: "mystery".into(), endpoint_id: None, model_id: None, enabled: true, base_url: None };
         assert_eq!(registry_provider(&mystery), None, "a row type this build does not know has no terms");
+    }
+
+    /// After consent, everything `withheld` hid from that AI is shown again;
+    /// revoking it draws the line again.
+    #[test]
+    fn consent_lifts_what_was_withheld_and_revoking_it_withholds_again() {
+        let db = db_with(&[("openai", None, None)], &[]);
+        assert_eq!(withheld(&db), Withheld::default());
+        save_a_turn(&db, "Kenny owes HK$12,000");
+        use_ai(&db, "openai", KIMI);
+        assert_eq!(withheld_as_turn_begins(&db), Withheld { conversations: 1, memories: 1, tasks: 1 });
+
+        let kimi = card(&db).subject();
+        consent::give(&db, &kimi, DataTerms::Unknown).unwrap();
+        assert_eq!(withheld_as_turn_begins(&db), Withheld::default());
+        save_a_turn(&db, "As Kenny wrote, HK$12,000 is due");
+
+        consent::revoke(&db, &kimi).unwrap();
+        assert_eq!(withheld_as_turn_begins(&db), Withheld { conversations: 2, memories: 2, tasks: 2 });
     }
 
     /// One chat message, one memory and one task, as a turn that read an
@@ -556,7 +670,7 @@ mod tests {
             db
         };
         for model in ["gpt-oss:120b-cloud", "qwen3-coder:480b-cloud", "glm-4.6:cloud", "GPT-OSS:20B-CLOUD"] {
-            assert_eq!(check(&with_model(model)), Err(Blocked::NotAllowed("Ollama Cloud".into())), "{model}");
+            assert_eq!(summary(&card(&with_model(model))), ("ollama_cloud", "", "Ollama Cloud", DataTerms::Unknown), "{model}");
         }
         for model in ["qwen3:8b", "cloudy-day:latest", "llama3.2"] {
             assert_eq!(check(&with_model(model)), Ok(()), "{model}");

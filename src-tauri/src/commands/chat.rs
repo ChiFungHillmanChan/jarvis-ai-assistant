@@ -129,8 +129,8 @@ async fn send_scoped(
     let msg_lower = message.to_lowercase();
     let history_session = session_id.clone();
 
-    let (history, context_messages, message_id) = tokio::task::spawn_blocking(
-        move || -> Result<(Vec<(String, String)>, Vec<(String, String)>, i64), String> {
+    let (history, context_messages, message_id, held_back) = tokio::task::spawn_blocking(
+        move || -> Result<(Vec<(String, String)>, Vec<(String, String)>, i64, Option<crate::ai::mail_policy::Blocked>), String> {
             let (message_id, history) = if retrying { save_retried_turn(&db_arc, &history_session, &msg_clone)? } else { save_turn(&db_arc, &history_session, &msg_clone)? };
 
             // Only add context for questions about personal data (saves tokens)
@@ -144,11 +144,20 @@ async fn send_scoped(
                 }
             }
 
-            Ok((history, ctx_msgs, message_id))
+            // Email and calendar content this turn leaves out (the senders
+            // and titles of [CONTEXT], earlier chat that quoted email): not
+            // silently (P06), the consent card goes up below.
+            let leaves_out = needs_context || crate::ai::mail_policy::withheld(&db_arc) != crate::ai::mail_policy::Withheld::default();
+            let held_back = if leaves_out { crate::ai::mail_policy::check(&db_arc).err() } else { None };
+
+            Ok((history, ctx_msgs, message_id, held_back))
         },
     )
     .await
     .map_err(|e| e.to_string())??;
+    if let Some(blocked) = held_back {
+        blocked.raise("chat");
+    }
 
     // Clone router for async operations (Mutex can't be held across await)
     let router = router.lock().map_err(|e| e.to_string())?.clone();

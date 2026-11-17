@@ -22,6 +22,8 @@ pub struct CapabilityStatus {
     pub checked_at: Option<String>,
     pub error_code: Option<&'static str>,
     pub credential_available: bool,
+    /// The consent card the chosen AI needs before mail goes to it (P06).
+    pub consent: Option<crate::ai::consent::Request>,
 }
 
 #[derive(Serialize)]
@@ -222,6 +224,7 @@ fn capability(
             None
         },
         credential_available,
+        consent: None,
     }
 }
 
@@ -334,6 +337,9 @@ pub async fn test_mail_ai_connection(
         if let Err(blocked) = crate::ai::mail_policy::check(&db) {
             status.state = "action_required";
             status.error_code = Some(blocked.code());
+            if let crate::ai::mail_policy::Blocked::NeedsConsent(request) = blocked {
+                status.consent = Some(request);
+            }
             return Ok(status);
         }
     }

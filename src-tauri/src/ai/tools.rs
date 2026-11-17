@@ -634,7 +634,7 @@ fn execute_memory_tool(
     // any message mentioning a meeting pulls in [CONTEXT] -- after they had
     // already clicked Allow.
     // Read before the lock below: `withheld` takes it too.
-    let withheld = crate::ai::mail_policy::withheld(db);
+    let withheld = crate::ai::mail_policy::withheld_shown(db, "memory");
     let conn = match db.conn.lock() {
         Ok(c) => c,
         Err(e) => return format!("Memory error: {}", e),
@@ -911,7 +911,7 @@ fn execute_local_data_tool(
         "list_tasks" => {
             // A task made from an email is not shown to an AI that may not
             // read email (ai::mail_policy::withheld).
-            let withheld = crate::ai::mail_policy::withheld(db);
+            let withheld = crate::ai::mail_policy::withheld_shown(db, "chat");
             let conn = db.conn.lock().map_err(|e| e.to_string())?;
             let mut stmt = conn
                 .prepare(
@@ -1529,6 +1529,8 @@ async fn execute_tool_inner(
     // model only when the chosen AI does not train on it (see ai::mail_policy).
     if matches!(name, "search_emails" | "read_email" | "list_follow_ups" | "update_follow_up" | "list_inbox_triage" | "list_events") {
         if let Err(blocked) = crate::ai::mail_policy::check(db) {
+            // The consent card goes up in the chat (P06); the model is told why.
+            blocked.raise("chat");
             return blocked.tool_message();
         }
     }
@@ -1796,7 +1798,7 @@ where
 /// The memory block of the system prompt. Memories the chosen AI must not be
 /// shown are left out (ai::mail_policy::withheld).
 fn load_memory_block(db: &crate::db::Database) -> String {
-    let withheld = crate::ai::mail_policy::withheld(db);
+    let withheld = crate::ai::mail_policy::withheld_shown(db, "memory");
     let conn = match db.conn.lock() {
         Ok(c) => c,
         Err(_) => return String::new(),

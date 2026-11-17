@@ -23,9 +23,11 @@ pub struct Text {
 pub enum DataTerms {
     /// Email may be sent.
     Safe,
-    /// Email may be sent once the user confirms paid billing.
+    /// Email may be sent once the user confirms paid billing on the consent
+    /// card.
     NeedsBillingConfirmation,
-    /// Not checked: email is not sent (the consent card is P06).
+    /// Not checked: email is sent once the user agrees on the consent card
+    /// (ai/consent.rs).
     Unknown,
 }
 
