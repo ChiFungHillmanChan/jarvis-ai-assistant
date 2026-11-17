@@ -43,7 +43,8 @@ fn own_model_only(key: &str) -> Option<&'static [&'static str]> {
 
 /// The capability flag a feature needs (registry `models[].capabilities`).
 /// Every chat request offers the tool list, so chat and the briefing need
-/// tools; mail analysis and sorting ask for one JSON object. A local model
+/// tools; sorting asks for one JSON object. Mail analysis asks for prose
+/// (`json: false`), so it needs nothing beyond a chat model. A local model
 /// is best effort (DECISIONS.md section 5, "Parity bar"): it runs with tools
 /// written into the prompt, so it is not refused here.
 fn needs(key: &str, provider: &str) -> Option<&'static str> {
@@ -52,7 +53,7 @@ fn needs(key: &str, provider: &str) -> Option<&'static str> {
     }
     match key {
         "chat" | "premium" | "briefing" => Some("tools"),
-        "mail_analysis" | "mail_sort" => Some("json"),
+        "mail_sort" => Some("json"),
         _ => None,
     }
 }
@@ -499,9 +500,10 @@ mod tests {
         ready("mail_analysis", &no_tools);
         ready("memory", &no_tools);
         let no_json = row("claude", Some("claude-haiku-4-5"), None);
-        for key in ["mail_analysis", "mail_sort"] {
-            assert_eq!(reason(key, &no_json), Reason::Missing { capability: "json".into() }, "{key}");
-        }
+        assert_eq!(reason("mail_sort", &no_json), Reason::Missing { capability: "json".into() });
+        // Mail analysis asks for prose (`json: false`), so JSON mode is not
+        // needed for it (review A, M-4).
+        ready("mail_analysis", &no_json);
         ready("chat", &no_json);
         // A Bedrock id is described by its own entry, or by the vendor's.
         assert_eq!(reason("chat", &row("bedrock", Some("apac.amazon.nova-pro-v1:0"), None)), Reason::Missing { capability: "tools".into() });
