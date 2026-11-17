@@ -368,6 +368,11 @@ where
         match send(row.clone()).await {
             Ok(response) => {
                 emit("chat-provider", json!({"provider": &label, "status": "active"}));
+                // Sending this run again (the consent card's "Send again")
+                // would carry its actions out twice.
+                if ledger.count() > 0 {
+                    failure::note_current_run_acted();
+                }
                 return Ok(response);
             }
             Err(error) => {
@@ -387,9 +392,7 @@ where
                 emit("chat-provider", json!({"provider": &label, "status": "failed"}));
                 if ledger.count() > 0 {
                     log::warn!("{} action(s) already ran this turn; the request is not offered again", ledger.count());
-                    if let Ok(run) = crate::chat_session::CONTEXT.try_with(|c| c.run_id.clone()) {
-                        failure::note_acted(&run);
-                    }
+                    failure::note_current_run_acted();
                 }
                 let alternatives = capability::offered_for(key, configured);
                 return Err(failure::Failure::failed(key, target, &error, ledger.count(), alternatives, language).surface(foreground, language));
@@ -1133,6 +1136,30 @@ mod tests {
         assert_eq!(card["actions_ran"], 1);
         assert!(offered(&card).is_empty(), "no model is offered to run it again");
         assert!(events.contains(&("chat-token".to_string(), json!({"token": "", "done": true, "discard": false}))));
+    }
+
+    /// A chat run that carried out an action, whether its last model call
+    /// failed or the run answered (the consent card's "Send again"), is
+    /// recorded, so send_message refuses to send it again; a run that did
+    /// nothing may be sent again.
+    #[tokio::test]
+    async fn a_run_that_carried_out_an_action_is_never_sent_again() {
+        let chain = [chosen_row("gemini", None)];
+        let acted = |replies: Vec<Result<&'static str, &'static str>>| {
+            let chain = chain.clone();
+            async move {
+                let run = uuid::Uuid::new_v4().to_string();
+                let ledger = SideEffectLedger::new();
+                ledger.note("create_event");
+                let _ = failure::TEST_RUN.scope(run.clone(), run_fake(chosen_entry(&chain, true, &chain), None, &chain, cost::Feature::Chat, &ledger, replies)).await;
+                run
+            }
+        };
+        assert!(!failure::may_retry(&acted(vec![Err(OVERLOADED)]).await), "failed after an action");
+        assert!(!failure::may_retry(&acted(vec![Ok("Done.")]).await), "answered after an action");
+        let clean = uuid::Uuid::new_v4().to_string();
+        let _ = failure::TEST_RUN.scope(clean.clone(), run_fake(chosen_entry(&chain, true, &chain), None, &chain, cost::Feature::Chat, &SideEffectLedger::new(), vec![Err(BAD_REQUEST)])).await;
+        assert!(failure::may_retry(&clean), "nothing ran");
     }
 
     /// A saved model the registry disabled is not sent. A request the user

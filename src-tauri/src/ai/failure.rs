@@ -217,7 +217,7 @@ impl Failure {
     }
 }
 
-/// Chat runs that failed after an action ran. A retry of one is refused
+/// Chat runs that carried out an action. A retry of one is refused
 /// whatever the frontend sends (commands::chat): it would carry the action
 /// out twice.
 fn acted_runs() -> &'static std::sync::Mutex<std::collections::HashSet<String>> {
@@ -230,6 +230,26 @@ pub fn note_acted(run_id: &str) {
         runs.insert(run_id.to_string());
     }
 }
+
+/// Record that the chat run this task belongs to carried out an action.
+pub fn note_current_run_acted() {
+    if let Some(run) = current_run() {
+        note_acted(&run);
+    }
+}
+
+/// The chat run this task belongs to, if it is one. Tests set it without
+/// an app (`TEST_RUN`), since a chat context carries an AppHandle.
+fn current_run() -> Option<String> {
+    #[cfg(test)]
+    if let Ok(run) = TEST_RUN.try_with(Clone::clone) {
+        return Some(run);
+    }
+    crate::chat_session::CONTEXT.try_with(|c| c.run_id.clone()).ok()
+}
+
+#[cfg(test)]
+tokio::task_local! { pub static TEST_RUN: String; }
 
 /// Whether the run `retry_of` names may be sent again.
 pub fn may_retry(retry_of: &str) -> bool {
