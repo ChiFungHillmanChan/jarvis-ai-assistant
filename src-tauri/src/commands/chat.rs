@@ -79,16 +79,7 @@ pub async fn send_message(
 ) -> Result<ChatMessage, String> {
     let session_id = chat_session::identity(session_id, "legacy")?;
     let run_id = chat_session::identity(run_id, &uuid::Uuid::new_v4().to_string())?;
-    // A request sent again from the error card (P06): never one that had
-    // already carried out an action, whatever the frontend sends.
-    if let Some(retry_of) = retry_of.as_deref() {
-        if !crate::ai::failure::may_retry(retry_of) {
-            return Err(crate::ai::bedrock::UiLanguage::read(&db).pick(
-                "This request already carried out an action, such as creating an event or a draft. JARVIS does not send it again, so the action is not done twice.",
-                "這個請求已執行了操作，例如建立日曆事件或草稿。為免重複執行，JARVIS 不會再次傳送。",
-            ));
-        }
-    }
+    refuse_acted_retry(retry_of.as_deref(), crate::ai::bedrock::UiLanguage::read(&db))?;
     let _guard = chat_session::FOREGROUND.try_lock().map_err(|_| "另一個助理任務進行中，請等完成後再試。".to_string())?;
     let context = chat_session::Context { session_id: session_id.clone(), run_id, app: app_handle.clone() };
     let retrying = retry_of.is_some();
@@ -97,6 +88,18 @@ pub async fn send_message(
     let _ = app_handle.emit("chat-state", json!({"state":"idle"}));
     result
     })).await
+}
+
+/// A request sent again from the error card (P06): never one that had
+/// already carried out an action, whatever the frontend sends.
+fn refuse_acted_retry(retry_of: Option<&str>, language: crate::ai::bedrock::UiLanguage) -> Result<(), String> {
+    match retry_of {
+        Some(retry_of) if !crate::ai::failure::may_retry(retry_of) => Err(language.pick(
+            "This request already carried out an action, such as creating an event or a draft. JARVIS does not send it again, so the action is not done twice.",
+            "這個請求已執行了操作，例如建立日曆事件或草稿。為免重複執行，JARVIS 不會再次傳送。",
+        )),
+        _ => Ok(()),
+    }
 }
 
 /// A chat turn, on the model picked in the error card if the user picked
@@ -911,6 +914,20 @@ mod tests {
 
     /// What the chosen AI is shown on its next turn: none of the picked
     /// turn (the question, the answer, the memory and the task it saved).
+    /// "Send again" for a run that carried out an action is refused in
+    /// both languages; a run that did not, and a first send, go ahead
+    /// (review A, M-1).
+    #[test]
+    fn sending_again_a_run_that_carried_out_an_action_is_refused() {
+        use crate::ai::bedrock::UiLanguage;
+        let acted = uuid::Uuid::new_v4().to_string();
+        crate::ai::failure::note_acted(&acted);
+        assert_eq!(refuse_acted_retry(Some(&acted), UiLanguage::En).unwrap_err(), "This request already carried out an action, such as creating an event or a draft. JARVIS does not send it again, so the action is not done twice.");
+        assert_eq!(refuse_acted_retry(Some(&acted), UiLanguage::ZhHk).unwrap_err(), "這個請求已執行了操作，例如建立日曆事件或草稿。為免重複執行，JARVIS 不會再次傳送。");
+        assert_eq!(refuse_acted_retry(Some(&uuid::Uuid::new_v4().to_string()), UiLanguage::En), Ok(()));
+        assert_eq!(refuse_acted_retry(None, UiLanguage::En), Ok(()));
+    }
+
     fn assert_next_turn_sees_none_of_it(db: &Database) {
         let (_, history) = save_turn(db, "s1", "And the deadline?").unwrap();
         assert_eq!(contents(history), ["And the deadline?"]);
