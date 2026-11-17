@@ -83,7 +83,7 @@ fn provider_reason(err: &str) -> Option<String> {
 /// the voice indicator and Settings (review A, I-1). A failure card gives its
 /// message and where to pick another model; a consent card says where to
 /// agree. Any other error is returned as it is.
-pub fn plain(error: &str, language: UiLanguage) -> String {
+pub(crate) fn plain(error: &str, language: UiLanguage) -> String {
     let Ok(value) = serde_json::from_str::<serde_json::Value>(error) else { return error.to_string() };
     let text = |pointer: &str| value.pointer(pointer).and_then(|v| v.as_str()).unwrap_or_default().to_string();
     match value.pointer("/jarvis_ai/kind").and_then(|kind| kind.as_str()) {
