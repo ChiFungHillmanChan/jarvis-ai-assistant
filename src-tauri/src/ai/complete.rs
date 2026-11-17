@@ -11,9 +11,6 @@ use crate::db::Database;
 use serde_json::{json, Value};
 use std::time::Instant;
 
-/// Context window asked of Ollama: a triaged email (6,000 characters), its
-/// instructions and the sender's known follow-ups fit with room to answer.
-
 pub struct Request<'a> {
     pub system: &'a str,
     pub user: &'a str,
@@ -150,6 +147,10 @@ async fn complete_one(router: &AiRouter, db: &Database, entry: &ProviderChainEnt
                     messages.push(json!({"role": "system", "content": request.system}));
                 }
                 messages.push(json!({"role": "user", "content": request.user}));
+                // The context window asked of Ollama (the registry's
+                // completion_context_tokens): a triaged email (6,000
+                // characters), its instructions and the sender's known
+                // follow-ups fit with room to answer.
                 let mut body = json!({"model": model, "messages": messages, "stream": false, "options": {"num_ctx": crate::ai::models::limits("ollama").completion_context_tokens.unwrap_or_default(), "num_predict": request.max_tokens}});
                 if request.json {
                     body["format"] = json!("json");
