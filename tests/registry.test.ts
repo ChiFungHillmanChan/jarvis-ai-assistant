@@ -150,7 +150,7 @@ test('the validator refuses a limit outside its bound, as the app does, and acce
     ['claude', 'max_tool_rounds', 51, 50],
     ['bedrock', 'chat_temperature', -0.01, 0],
     ['bedrock', 'chat_temperature', 2.01, 2],
-    ['openai', 'chat_reasoning_effort', 'maximal', 'xhigh'],
+    ['openai', 'chat_reasoning_effort', 'maximal', 'max'],
     ['claude', 'api_version', '2023-6-01', '2099-12-31'],
   ];
   for (const [id, field, outside, inside] of cases) {

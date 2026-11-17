@@ -101,7 +101,7 @@ App 的 `Registry::check`（`src-tauri/src/ai/registry/doc.rs`）拒絕任何一
 | `completion_context_tokens`、`default_context_tokens` | 1 至 1,048,576（第 1 版最大 8,192） |
 | `max_tool_rounds` | 1 至 50（第 1 版最大 5） |
 | `chat_temperature` | 0 至 2 |
-| `chat_reasoning_effort` | `none`、`minimal`、`low`、`medium`、`high`、`xhigh` 之一 |
+| `chat_reasoning_effort` | `none`、`minimal`、`low`、`medium`、`high`、`xhigh`、`max` 之一（OpenAI 的 reasoning 指南所列，2026-11-17 閱讀；各模型只接受其中部分） |
 | `api_version` | `YYYY-MM-DD` 格式的日期 |
 
 模型 id（`models[].id`、`replacement`、`built_in_models`、`features` 的預設及 `presets` 的模型）只可包含英文字母、數字及 `.`、`_`、`:`、`/`、`-`，而且不可包含 `..`；`schema.json` 另要求 `models[].id` 為小寫（App 以不分大小寫的方式比對）。各功能的預設模型及 preset 所用的模型必須為 `active`；App 建議的替代模型亦只會是 `active` 的模型。

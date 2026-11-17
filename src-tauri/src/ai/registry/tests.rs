@@ -670,7 +670,7 @@ async fn a_limit_outside_its_bound_rejects_the_whole_copy() {
         ("claude", "max_tool_rounds", json!(MAX_TOOL_ROUNDS + 1), json!(MAX_TOOL_ROUNDS), range(MAX_TOOL_ROUNDS)),
         ("bedrock", "chat_temperature", json!(-0.01), json!(0.0), "is outside 0 to 2".into()),
         ("bedrock", "chat_temperature", json!(2.01), json!(2.0), "is outside 0 to 2".into()),
-        ("openai", "chat_reasoning_effort", json!("maximal"), json!("xhigh"), "is not one of none, minimal, low, medium, high, xhigh".into()),
+        ("openai", "chat_reasoning_effort", json!("maximal"), json!("max"), "is not one of none, minimal, low, medium, high, xhigh, max".into()),
         ("claude", "api_version", json!("2023-6-01"), json!("2023-06-01"), "is not a date (YYYY-MM-DD)".into()),
         ("claude", "api_version", json!("v2023-06-01"), json!("2099-12-31"), "is not a date (YYYY-MM-DD)".into()),
         ("claude", "api_version", json!("2023-06-011"), json!("2023-06-01"), "is not a date (YYYY-MM-DD)".into()),
@@ -819,6 +819,7 @@ fn a_model_takes_its_status_only_from_its_own_providers_entries() {
         models.extend([bedrock_only, compat_gemini, compat_openai]);
         set_status(models, "gemini-3.6-flash", Status::Disabled, None);
         set_status(models, "gpt-4o", Status::Disabled, None);
+        set_status(models, "qwen3.5:2b", Status::Disabled, None);
     });
     assert!(matches!(registry.model_state("bedrock", "us.vendor.future-9-v1:0"), ModelState::Disabled { .. }), "the Bedrock entry stops Bedrock");
     assert_eq!(registry.model_state("claude", "claude-future-9"), ModelState::Active);
@@ -830,6 +831,13 @@ fn a_model_takes_its_status_only_from_its_own_providers_entries() {
     }
     assert!(matches!(registry.model_state("gemini_compat", "gemini-2.0-x"), ModelState::Disabled { .. }));
     assert!(matches!(registry.model_state("openai", "gpt-4o"), ModelState::Disabled { .. }));
+
+    // A compatible service's or Ollama's entry matches only its exact id: a
+    // longer id the user typed there is their own pick.
+    assert_eq!(registry.model_state("gemini_compat", "gemini-2.0-x-turbo"), ModelState::Active);
+    assert_eq!(registry.model_state("openai_compat", "gpt-oss-x-large"), ModelState::Active);
+    assert_eq!(registry.model_state("ollama", "qwen3.5:2b-instruct"), ModelState::Active);
+    assert!(matches!(registry.model_state("ollama", "qwen3.5:2b"), ModelState::Disabled { .. }));
 }
 
 /// The replacement offered is always active: the named one when it is an

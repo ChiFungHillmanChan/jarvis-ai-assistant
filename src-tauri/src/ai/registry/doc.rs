@@ -130,9 +130,11 @@ pub(crate) const MAX_OUTPUT_TOKENS: u32 = 131_072;
 pub(crate) const MAX_CONTEXT_TOKENS: u32 = 1_048_576;
 pub(crate) const MAX_TOOL_ROUNDS: u32 = 50;
 pub(crate) const MAX_TEMPERATURE: f32 = 2.0;
-/// The values OpenAI's Chat Completions API takes for `reasoning_effort`,
-/// which ai/openai.rs sends as written.
-pub(crate) const REASONING_EFFORTS: &[&str] = &["none", "minimal", "low", "medium", "high", "xhigh"];
+/// The values OpenAI lists for reasoning effort ("Supported values are
+/// model-dependent and can include none, minimal, low, medium, high, xhigh,
+/// and max": developers.openai.com/api/docs/guides/reasoning, read
+/// 2026-11-17). ai/openai.rs sends the value as written and holds no list.
+pub(crate) const REASONING_EFFORTS: &[&str] = &["none", "minimal", "low", "medium", "high", "xhigh", "max"];
 
 /// YYYY-MM-DD in shape (Anthropic's `anthropic-version` header).
 fn is_date(value: &str) -> bool {
