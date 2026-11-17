@@ -109,6 +109,24 @@ impl Pick {
     }
 }
 
+tokio::task_local! {
+    /// The model the user picked in the error card, for the one request
+    /// that click retries.
+    static PICKED: Option<Pick>;
+}
+
+/// Run `request` on the model picked in the error card. The pick is
+/// checked against the models the card could offer before it is used
+/// (`ai::run_chosen`, `ai::complete`); nothing is saved.
+pub async fn with_pick<F: std::future::Future>(pick: Option<Pick>, request: F) -> F::Output {
+    PICKED.scope(pick, request).await
+}
+
+/// The pick of the request in progress, if the user made one.
+pub fn picked() -> Option<Pick> {
+    PICKED.try_with(Clone::clone).ok().flatten()
+}
+
 /// A model a request would run on: the row, the registry provider and the
 /// model id that is sent.
 #[derive(Debug, Clone, Serialize, PartialEq)]

@@ -1,5 +1,7 @@
 pub mod bedrock;
 pub mod capability;
+pub mod failure;
+pub mod notify;
 pub mod claude;
 pub mod compat;
 pub mod mail_policy;
@@ -21,7 +23,7 @@ use crate::voice::tts::TtsCommand;
 use local::backend::{BackendType, LocalEndpoint};
 use serde::{Deserialize, Serialize};
 use serde_json::json;
-use std::collections::{HashMap, HashSet};
+use std::collections::HashMap;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::Arc;
 use crate::chat_session::ScopedEmitter;
@@ -279,121 +281,120 @@ impl SideEffectLedger {
     }
 }
 
-/// What the router should do with a failed chain entry.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum ErrorDisposition {
-    /// Transport fault, rate limit or server-side error: the next entry is
-    /// worth trying.
-    Retry,
-    /// The credential this provider type uses was rejected. Later entries of
-    /// the same provider type read the same key, so they would fail
-    /// identically; a different vendor may still work.
-    SkipSameProvider,
-    /// The request itself cannot be accepted. Replaying it anywhere is a
-    /// guaranteed second failure.
-    StopChain,
-}
-
-/// Pull the HTTP status out of the `"<provider> API error <status>: <body>"`
-/// strings the providers build. Transport errors, SDK errors and the router's
-/// own messages carry no status and return `None`.
-fn http_status_in(err: &str) -> Option<u16> {
-    let rest = err.split(" API error ").nth(1)?;
-    rest.split(|c: char| !c.is_ascii_digit())
-        .next()?
-        .parse()
-        .ok()
-}
-
-/// Decide whether a provider error is worth replaying against the rest of the
-/// chain. Anything unrecognised stays retryable, which is the pre-existing
-/// behaviour and the safe direction.
-pub(crate) fn classify_provider_error(err: &str) -> ErrorDisposition {
-    let lower = err.to_lowercase();
-    // An empty final candidate (`gemini.rs`) carries no HTTP status. It is a
-    // provider fault, not a request fault, so the next entry is worth trying.
-    if lower.contains("returned no text") {
-        return ErrorDisposition::Retry;
+/// The model a request runs on (P06): the first enabled row of the chain the
+/// user saved. The other rows are never tried in its place; they are offered
+/// in the error card. For the built-in chain nobody saved (an install from
+/// before setup asked), the first row with credentials counts as the choice,
+/// since nobody chose and there is nothing to switch away from. None: no AI
+/// chosen.
+pub(crate) fn chosen_entry(chain: &[ProviderChainEntry], saved: bool, configured: &[ProviderChainEntry]) -> Option<ProviderChainEntry> {
+    let mut enabled = chain.iter().filter(|entry| entry.enabled);
+    if saved {
+        return enabled.next().cloned();
     }
-    match http_status_in(err) {
-        // Gemini reports a revoked or mistyped key as 400 API_KEY_INVALID;
-        // any other 400 is a malformed or oversized request.
-        Some(400) => {
-            if lower.contains("api_key_invalid") || lower.contains("api key not valid") {
-                ErrorDisposition::SkipSameProvider
-            } else if lower.contains("not found") || lower.contains("not supported") {
-                // A retired or unknown model id. Google has been observed
-                // reporting this as 400 INVALID_ARGUMENT (e.g. "models/x is
-                // not found for API version v1beta") rather than 404 -- if
-                // that fell to StopChain, the default chain's position-1
-                // fallback (default_chain_fallback_is_a_different_model_than_
-                // the_volume_tier_uses) would never be reached for a dead
-                // model id reported this way, making that fix inert. Every
-                // other 400 is a malformed or oversized request and still
-                // stops the chain below.
-                ErrorDisposition::Retry
-            } else {
-                ErrorDisposition::StopChain
+    let has_credentials = |entry: &&ProviderChainEntry| configured.iter().any(|c| c.provider_type == entry.provider_type && c.base_url == entry.base_url && c.endpoint_id == entry.endpoint_id);
+    enabled.find(has_credentials).cloned()
+}
+
+/// The wait before the one resend to the same model after a transient
+/// failure.
+#[cfg(not(test))]
+const RESEND_DELAY: std::time::Duration = std::time::Duration::from_secs(1);
+#[cfg(test)]
+const RESEND_DELAY: std::time::Duration = std::time::Duration::from_millis(0);
+
+/// One request on the chosen model, with no other model tried in its place
+/// (DECISIONS.md section 5, "Failure handling"). Before anything is sent the
+/// model must support the feature (`capability::resolve`). A transient
+/// failure (rate limit, server error, no connection, an empty reply) is sent
+/// once more to the same model, unless an action already ran. Otherwise the
+/// request fails with the error card's data, or, for a background job, the
+/// sentence its run records ([`failure::Failure::surface`]).
+///
+/// `send` sends to one row; the router and `complete` pass the provider
+/// calls, the tests pass their own. `emit` gets the HUD events.
+/// `wire_resends`: the router's OpenAI-format wire already resends a 429 or
+/// 5xx once (openai::send_retrying), so this does not resend it again.
+#[allow(clippy::too_many_arguments)]
+pub(crate) async fn run_chosen<T, F, Fut>(
+    chosen: Option<ProviderChainEntry>,
+    picked: Option<capability::Pick>,
+    configured: &[ProviderChainEntry],
+    feature: cost::Feature,
+    workload: Workload,
+    ledger: &SideEffectLedger,
+    language: bedrock::UiLanguage,
+    wire_resends: bool,
+    mut emit: impl FnMut(&str, serde_json::Value),
+    mut send: F,
+) -> Result<T, String>
+where
+    F: FnMut(ProviderChainEntry) -> Fut,
+    Fut: std::future::Future<Output = Result<T, String>>,
+{
+    let key = capability::feature_key(feature, workload);
+    // A model picked in the error card runs this one request, and only if
+    // the card could have offered it: the frontend cannot name a model or
+    // an address of its own.
+    let chosen = match picked {
+        Some(pick) if capability::is_offered(key, &pick, configured) => Some(pick.entry()),
+        Some(_) => return Err(language.pick("That model cannot be used for this request. Choose another one.", "這個模型不能用於這個請求，請另選模型。")),
+        None => chosen,
+    };
+    let Some(entry) = chosen else { return Err(NO_AI_CHOSEN.into()) };
+    let foreground = disabled::is_foreground(feature);
+    let target = match capability::resolve(key, &entry, configured) {
+        capability::Resolved::Ready(target) => target,
+        // A background job on a disabled model keeps P05's notice, which
+        // saves the replacement once the user confirms it.
+        capability::Resolved::Unsupported(capability::Unsupported { reason: capability::Reason::Disabled { replacement }, .. }) if !foreground => {
+            let provider = mail_policy::registry_provider(&entry).unwrap_or_default().to_string();
+            let model = entry.model_id.clone().unwrap_or_default();
+            return Err(disabled::stop(disabled::Disabled { provider, model, replacement }, false, language));
+        }
+        capability::Resolved::Unsupported(unsupported) => return Err(failure::Failure::unsupported(key, unsupported, language).surface(foreground, language)),
+    };
+    // The model resolved is the one sent, so the card and the usage row name
+    // what ran. Bedrock without a saved model keeps bedrock::default_model.
+    let mut row = entry.clone();
+    if !(row.provider_type == "bedrock" && row.model_id.is_none()) {
+        row.model_id = target.model.clone();
+    }
+    let label = target.label.clone();
+    emit("chat-provider", json!({"provider": &label, "status": "trying"}));
+    let mut resent = false;
+    loop {
+        match send(row.clone()).await {
+            Ok(response) => {
+                emit("chat-provider", json!({"provider": &label, "status": "active"}));
+                return Ok(response);
+            }
+            Err(error) => {
+                log::warn!("{label} failed: {error}");
+                let code = failure::code_of(&error);
+                let resent_inside = wire_resends && row.provider_type == "openai" && matches!(code, failure::Code::RateLimited | failure::Code::ServerError);
+                let again = !resent && code.transient() && !resent_inside && ledger.count() == 0;
+                // `discard` drops what this attempt streamed, only when the
+                // resend is about to replace it.
+                emit("chat-token", json!({"token": "", "done": true, "discard": again}));
+                if again {
+                    resent = true;
+                    emit("chat-status", json!({"status": "Trying the same model again...", "phase": "thinking"}));
+                    tokio::time::sleep(RESEND_DELAY).await;
+                    continue;
+                }
+                emit("chat-provider", json!({"provider": &label, "status": "failed"}));
+                if ledger.count() > 0 {
+                    log::warn!("{} action(s) already ran this turn; the request is not offered again", ledger.count());
+                    if let Ok(run) = crate::chat_session::CONTEXT.try_with(|c| c.run_id.clone()) {
+                        failure::note_acted(&run);
+                    }
+                }
+                let alternatives = capability::offered_for(key, configured);
+                return Err(failure::Failure::failed(key, target, &error, ledger.count(), alternatives, language).surface(foreground, language));
             }
         }
-        Some(401) | Some(403) => ErrorDisposition::SkipSameProvider,
-        Some(413) | Some(422) => ErrorDisposition::StopChain,
-        _ => ErrorDisposition::Retry,
     }
-}
-
-/// Key identifying the credential a chain entry authenticates with.
-///
-/// `gemini`, `claude` and `openai` each read one shared key off the router, and
-/// `bedrock` reads one credential row, so a rejected credential really does kill
-/// every remaining entry of that provider type. `local` is different: each
-/// chain entry names its own `LocalEndpoint`, which carries its own `api_key`
-/// and is sent as a per-endpoint bearer token, so one unreachable or
-/// misconfigured server must not disable the other local endpoints.
-fn credential_scope(entry: &ProviderChainEntry) -> String {
-    match (entry.provider_type.as_str(), entry.base_url.as_deref()) {
-        ("local", _) => format!("local:{}", entry.endpoint_id.as_deref().unwrap_or("")),
-        ("openai", Some(base)) => format!("openai:{}", compat::host(base)),
-        (other, _) => other.to_string(),
-    }
-}
-
-/// What the chain walk does with a row before anything is sent.
-#[derive(Debug, PartialEq)]
-enum Gate {
-    /// Off, or its credential was already rejected this turn: try the next row.
-    Skip,
-    /// Its saved model is one the registry disabled: the turn ends here and
-    /// the next row is not tried in its place (ai/disabled.rs).
-    Stop(disabled::Disabled),
-    /// Send to it.
-    Send,
-}
-
-/// The walk's pre-send checks, in the order it applies them: enabled, then
-/// a credential rejected this turn, then a disabled saved model. Pure: the
-/// walk turns `Stop` into the message (and the notice) with `disabled::stop`.
-fn gate(entry: &ProviderChainEntry, dead_credentials: &HashSet<String>) -> Gate {
-    if !entry.enabled || dead_credentials.contains(&credential_scope(entry)) {
-        return Gate::Skip;
-    }
-    match disabled::check_entry(entry) {
-        Err(stopped) => Gate::Stop(stopped),
-        Ok(()) => Gate::Send,
-    }
-}
-
-/// Whether the router still has somewhere to go after `idx`: a later entry that
-/// is enabled and whose credential has not already been rejected this turn.
-fn has_live_entry_after(
-    chain: &[ProviderChainEntry],
-    idx: usize,
-    dead_credentials: &HashSet<String>,
-) -> bool {
-    chain
-        .iter()
-        .skip(idx + 1)
-        .any(|next| next.enabled && !dead_credentials.contains(&credential_scope(next)))
 }
 
 // Briefing and other non-chat callers propagate router errors directly. Finish
@@ -788,6 +789,7 @@ impl AiRouter {
                     app_handle,
                     tts_tx,
                     workload,
+                    feature,
                     ledger,
                 ),
                 streaming_tts,
@@ -799,6 +801,41 @@ impl AiRouter {
         .await
     }
 
+    /// The rows the user has credentials for: what the error card offers,
+    /// and what a model picked in it is checked against. Each service with a
+    /// key, on the registry's default for the feature, and every saved row
+    /// whose credential is there (a compatible service or a local model is
+    /// offered only on the model the user saved for it).
+    pub(crate) async fn configured(&self, db: &crate::db::Database) -> Vec<ProviderChainEntry> {
+        let bedrock = db.conn.lock().ok().is_some_and(|conn| conn.query_row("SELECT 1 FROM aws_credentials WHERE id = 1", [], |_| Ok(())).is_ok());
+        let keyed = |provider_type: &str| match provider_type {
+            "gemini" => self.gemini_key.is_some(),
+            "claude" => self.claude_key.is_some(),
+            "openai" => self.openai_key.is_some(),
+            "bedrock" => bedrock,
+            _ => false,
+        };
+        let mut rows: Vec<ProviderChainEntry> = ["gemini", "claude", "openai", "bedrock"]
+            .into_iter()
+            .filter(|provider_type| keyed(provider_type))
+            .map(|provider_type| ProviderChainEntry { position: 0, provider_type: provider_type.into(), endpoint_id: None, model_id: None, enabled: true, base_url: None })
+            .collect();
+        for entry in &self.provider_chain {
+            let present = match (entry.provider_type.as_str(), entry.base_url.as_deref()) {
+                ("openai", Some(base)) => self.compat_key(base).await.is_some(),
+                ("local", _) => entry.endpoint_id.as_deref().is_some_and(|id| self.find_endpoint(id).is_some()),
+                (provider_type, _) => keyed(provider_type),
+            };
+            if present {
+                rows.push(ProviderChainEntry { enabled: true, ..entry.clone() });
+            }
+        }
+        rows
+    }
+
+    /// The request on the chosen model ([`run_chosen`]): the providers'
+    /// calls for each row type, nothing else tried in its place.
+    #[allow(clippy::too_many_arguments)]
     async fn run_provider_chain(
         &self,
         messages: Vec<(String, String)>,
@@ -807,376 +844,141 @@ impl AiRouter {
         app_handle: &tauri::AppHandle,
         tts_tx: Option<tokio::sync::mpsc::Sender<TtsCommand>>,
         workload: Workload,
+        feature: cost::Feature,
         ledger: SideEffectLedger,
     ) -> Result<String, String> {
-        let mut errors: Vec<String> = Vec::new();
-        // Credentials already rejected this turn, keyed by `credential_scope`
-        // so a dead local endpoint does not take the other local endpoints
-        // down with it.
-        let mut dead_credentials: HashSet<String> = HashSet::new();
+        let configured = self.configured(db).await;
+        let chosen = chosen_entry(&self.provider_chain, self.chain_loaded_from_db, &configured);
+        let (messages, tts_tx, ledger_ref) = (&messages, &tts_tx, &ledger);
+        run_chosen(
+            chosen,
+            capability::picked(),
+            &configured,
+            feature,
+            workload,
+            &ledger,
+            bedrock::UiLanguage::read(db),
+            true,
+            |event, payload| {
+                let _ = app_handle.emit(event, payload);
+            },
+            move |row| self.send_one(row, messages.clone(), db, google_auth, app_handle, tts_tx.clone(), workload, ledger_ref),
+        )
+        .await
+    }
 
-        for (idx, entry) in self.provider_chain.iter().enumerate() {
-            // A saved model the registry disabled stops the turn here: no
-            // request is sent, and the next entry is not tried in its place.
-            match gate(entry, &dead_credentials) {
-                Gate::Skip => continue,
-                Gate::Stop(stopped) => return Err(disabled::stop(stopped, disabled::is_foreground(cost::current_feature()), bedrock::UiLanguage::read(db))),
-                Gate::Send => {}
+    /// Send the request to one row.
+    #[allow(clippy::too_many_arguments)]
+    async fn send_one(
+        &self,
+        entry: ProviderChainEntry,
+        messages: Vec<(String, String)>,
+        db: &crate::db::Database,
+        google_auth: &std::sync::Arc<crate::auth::google::GoogleAuth>,
+        app_handle: &tauri::AppHandle,
+        tts_tx: Option<tokio::sync::mpsc::Sender<TtsCommand>>,
+        workload: Workload,
+        ledger: &SideEffectLedger,
+    ) -> Result<String, String> {
+        match entry.provider_type.as_str() {
+            "gemini" => {
+                let Some(ref key) = self.gemini_key else { return Err("No Gemini API key configured".to_string()) };
+                let model = gemini_model_for(entry.model_id.as_deref(), workload);
+                gemini::send(key, &model, messages, db, google_auth, app_handle, tts_tx, workload, ledger).await.map_err(|e| e.to_string())
             }
-
-            let provider_name = match entry.provider_type.as_str() {
-                "gemini" => {
-                    let model = gemini_model_for(entry.model_id.as_deref(), workload);
-                    format!("gemini ({})", model)
-                }
-                "local" => {
-                    let model = entry.model_id.as_deref().unwrap_or("unknown");
-                    format!("{} (local)", model)
-                }
-                "bedrock" => format!("bedrock ({})", bedrock_model(entry)),
-                "openai" if entry.base_url.is_some() => format!(
-                    "{} ({})",
-                    compat::label(entry.base_url.as_deref().unwrap_or_default()),
-                    entry.model_id.as_deref().unwrap_or("?")
-                ),
-                other => other.to_string(),
-            };
-
-            let _ = app_handle.emit(
-                "chat-provider",
-                json!({
-                    "provider": &provider_name,
-                    "status": "trying"
-                }),
-            );
-
-            let result = match entry.provider_type.as_str() {
-                "gemini" => {
-                    if let Some(ref key) = self.gemini_key {
-                        let model = gemini_model_for(entry.model_id.as_deref(), workload);
-                        gemini::send(
-                            key,
-                            &model,
-                            messages.clone(),
-                            db,
-                            google_auth,
-                            app_handle,
-                            tts_tx.clone(),
-                            workload,
-                            &ledger,
-                        )
-                        .await
-                        .map_err(|e| e.to_string())
-                    } else {
-                        Err("No Gemini API key configured".to_string())
-                    }
-                }
-                "claude" => {
-                    if let Some(ref key) = self.claude_key {
-                        claude::send(
-                            key,
-                            &entry.model_id.clone().unwrap_or_else(crate::ai::models::claude_default),
-                            messages.clone(),
-                            db,
-                            google_auth,
-                            app_handle,
-                            tts_tx.clone(),
-                            workload,
-                            &ledger,
-                        )
-                        .await
-                        .map_err(|e| e.to_string())
-                    } else {
-                        Err("No Claude API key configured".to_string())
-                    }
-                }
-                "openai" if entry.base_url.is_some() => {
-                    let base = entry.base_url.clone().unwrap_or_default();
-                    match self.compat_key(&base).await {
-                        Some(key) => openai::send(
-                            &key,
-                            openai::Target { base_url: Some(&base), model: entry.model_id.as_deref() },
-                            messages.clone(),
-                            db,
-                            google_auth,
-                            app_handle,
-                            tts_tx.clone(),
-                            workload,
-                            &ledger,
-                        )
-                        .await
-                        .map_err(|e| e.to_string()),
-                        None => Err(format!("No {} API key configured", compat::label(&base))),
-                    }
-                }
-                "openai" => {
-                    if let Some(ref key) = self.openai_key {
-                        openai::send(
-                            key,
-                            openai::Target { base_url: None, model: entry.model_id.as_deref() },
-                            messages.clone(),
-                            db,
-                            google_auth,
-                            app_handle,
-                            tts_tx.clone(),
-                            workload,
-                            &ledger,
-                        )
-                        .await
-                        .map_err(|e| e.to_string())
-                    } else {
-                        Err("No OpenAI API key configured".to_string())
-                    }
-                }
-                "bedrock" => {
-                    // Load AwsCredentials directly from sqlite + keychain.  We do the
-                    // lookups inline rather than going through `AwsCredsRepo::new(Arc)`
-                    // because `AiRouter::send` only holds `&Database` -- routing one
-                    // borrow through an `Arc` would require restructuring every caller
-                    // of `AiRouter`.  This is a thin equivalent of `AwsCredsRepo::load`.
-                    let creds_row = {
-                        let conn = match db.conn.lock() {
-                            Ok(c) => c,
-                            Err(e) => {
-                                errors.push(format!("bedrock db lock: {e}"));
-                                continue;
-                            }
-                        };
-                        conn.query_row(
-                            "SELECT access_key_id, region, inference_profile \
-                             FROM aws_credentials WHERE id = 1",
-                            [],
-                            |r| {
-                                Ok((
-                                    r.get::<_, String>(0)?,
-                                    r.get::<_, String>(1)?,
-                                    r.get::<_, String>(2)?,
-                                ))
-                            },
-                        )
-                        .ok()
-                    };
-                    let Some((akid, region, profile)) = creds_row else {
-                        errors.push(
-                            "bedrock: AWS credentials not configured in Settings".to_string(),
-                        );
-                        continue;
-                    };
-                    let secret = match crate::security::keychain::KeychainStore::get(
-                        "com.jarvis.aws",
-                        "secret_access_key",
-                    ) {
-                        Ok(s) => s,
-                        Err(e) => {
-                            errors.push(format!("bedrock keychain load: {e}"));
-                            continue;
-                        }
-                    };
-                    let creds = crate::aws::credentials::AwsCredentials {
-                        access_key_id: akid,
-                        secret_access_key: secret,
-                        region,
-                        inference_profile: profile,
-                    };
-
-                    // The model the user saved in the chain, as for every other
-                    // provider. The V13 `workload_routing` table (Nova Micro /
-                    // Haiku 4.5 / Sonnet 4.6 per tier) used to override it here,
-                    // so Bedrock silently ran a different model from the one
-                    // chosen. The table is kept as history and no longer read;
-                    // per-feature defaults come from the model registry (P05).
-                    let model = bedrock_model(entry);
-                    // A saved id can carry another geography's prefix; point it
-                    // at the region these credentials were saved for.
-                    let model = apply_inference_profile(&model, &creds.inference_profile);
-                    log::info!(
-                        "Bedrock workload={:?} -> model={} (region={})",
-                        workload,
-                        model,
-                        creds.region
-                    );
-                    bedrock::send(
-                        &creds,
-                        &model,
-                        workload,
-                        messages.clone(),
-                        db,
-                        google_auth,
-                        app_handle,
-                        tts_tx.clone(),
-                        &ledger,
-                    )
+            "claude" => {
+                let Some(ref key) = self.claude_key else { return Err("No Claude API key configured".to_string()) };
+                let model = entry.model_id.clone().unwrap_or_else(crate::ai::models::claude_default);
+                claude::send(key, &model, messages, db, google_auth, app_handle, tts_tx, workload, ledger).await.map_err(|e| e.to_string())
+            }
+            "openai" if entry.base_url.is_some() => {
+                let base = entry.base_url.clone().unwrap_or_default();
+                let Some(key) = self.compat_key(&base).await else { return Err(format!("No {} API key configured", compat::label(&base))) };
+                openai::send(&key, openai::Target { base_url: Some(&base), model: entry.model_id.as_deref() }, messages, db, google_auth, app_handle, tts_tx, workload, ledger)
                     .await
                     .map_err(|e| e.to_string())
-                }
-                "local" => {
-                    let endpoint_id = match &entry.endpoint_id {
-                        Some(id) => id,
-                        None => {
-                            errors.push("Local provider missing endpoint_id".to_string());
-                            continue;
-                        }
-                    };
-                    let model_id = match &entry.model_id {
-                        Some(id) => id,
-                        None => {
-                            errors.push("Local provider missing model_id".to_string());
-                            continue;
-                        }
-                    };
-                    let endpoint = match self.find_endpoint(endpoint_id) {
-                        Some(ep) => ep,
-                        None => {
-                            errors.push(format!(
-                                "Endpoint '{}' not found or inactive",
-                                endpoint_id
-                            ));
-                            continue;
-                        }
-                    };
-
-                    let (context_length, tool_override) = {
-                        let conn = db.conn.lock().map_err(|e| e.to_string())?;
-                        let ctx_len: u32 = conn
-                            .query_row(
-                                "SELECT context_length FROM local_model_overrides WHERE endpoint_id = ?1 AND model_id = ?2",
-                                rusqlite::params![endpoint_id, model_id],
-                                |row| row.get(0),
-                            )
-                            .unwrap_or_else(|_| crate::ai::models::limits("ollama").default_context_tokens.unwrap_or_default());
-                        let tool_ov: Option<String> = conn
-                            .query_row(
-                                "SELECT tool_capability FROM local_model_overrides WHERE endpoint_id = ?1 AND model_id = ?2",
-                                rusqlite::params![endpoint_id, model_id],
-                                |row| row.get(0),
-                            )
-                            .ok();
-                        (ctx_len, tool_ov)
-                    };
-
-                    let backend = local::get_backend(&endpoint.backend_type);
-                    let detected_cap = backend
-                        .detect_tool_capability(&endpoint.url, model_id)
-                        .await;
-
-                    local::send_local(
-                        endpoint,
-                        model_id,
-                        messages.clone(),
-                        detected_cap,
-                        context_length,
-                        tool_override.as_deref(),
-                        db,
-                        google_auth,
-                        app_handle,
-                        tts_tx.clone(),
-                        workload,
-                        &ledger,
-                    )
+            }
+            "openai" => {
+                let Some(ref key) = self.openai_key else { return Err("No OpenAI API key configured".to_string()) };
+                openai::send(key, openai::Target { base_url: None, model: entry.model_id.as_deref() }, messages, db, google_auth, app_handle, tts_tx, workload, ledger)
                     .await
                     .map_err(|e| e.to_string())
-                }
-                unknown => Err(format!("Unknown provider type: {}", unknown)),
-            };
-
-            match result {
-                Ok(response) => {
-                    let _ = app_handle.emit(
-                        "chat-provider",
-                        json!({
-                            "provider": &provider_name,
-                            "status": "active"
-                        }),
-                    );
-                    return Ok(response);
-                }
-                Err(e) => {
-                    log::warn!("{} failed: {}", provider_name, e);
-                    let _ = app_handle.emit(
-                        "chat-provider",
-                        json!({
-                            "provider": &provider_name,
-                            "status": "failed"
-                        }),
-                    );
-                    errors.push(format!("{}: {}", provider_name, e));
-
-                    let disposition = classify_provider_error(&e);
-                    if disposition == ErrorDisposition::SkipSameProvider {
-                        log::warn!(
-                            "{} rejected the credential; skipping remaining entries using '{}'",
-                            provider_name,
-                            credential_scope(entry)
-                        );
-                        dead_credentials.insert(credential_scope(entry));
-                    }
-
-                    // `discard` tells the frontend to throw away whatever this
-                    // provider already streamed. Without it the next provider's
-                    // tokens are appended to half an answer from this one -- but
-                    // when no other provider is going to run, that half answer is
-                    // all the user gets, so discarding it just deletes what they
-                    // were reading.
-                    let will_retry = ledger.count() == 0
-                        && disposition != ErrorDisposition::StopChain
-                        && has_live_entry_after(&self.provider_chain, idx, &dead_credentials);
-                    let _ = app_handle.emit(
-                        "chat-token",
-                        json!({"token": "", "done": true, "discard": will_retry}),
-                    );
-
-                    // The next provider would replay this turn from the original
-                    // messages, which carry no record of what already ran. If a
-                    // side-effecting tool has fired, replaying it creates a second
-                    // calendar event or a second draft, so stop and show the error.
-                    if ledger.count() > 0 {
-                        log::warn!(
-                            "halting provider fallback: {} side-effecting tool call(s) already executed this turn",
-                            ledger.count()
-                        );
-                        return Err(format!(
-                            "Stopped after {} completed action(s) so they are not repeated: {}",
-                            ledger.count(),
-                            errors.join("; ")
-                        ));
-                    }
-
-                    if disposition == ErrorDisposition::StopChain {
-                        log::warn!(
-                            "{} returned a terminal error; not trying further providers",
-                            provider_name
-                        );
-                        break;
-                    }
-
-                    if will_retry {
-                        let _ = app_handle.emit(
-                            "chat-status",
-                            json!({
-                                "status": "Retrying with next provider...",
-                                "phase": "thinking"
-                            }),
-                        );
-                    }
-                }
             }
-        }
+            "bedrock" => {
+                // Load AwsCredentials directly from sqlite + keychain.  We do the
+                // lookups inline rather than going through `AwsCredsRepo::new(Arc)`
+                // because `AiRouter::send` only holds `&Database` -- routing one
+                // borrow through an `Arc` would require restructuring every caller
+                // of `AiRouter`.  This is a thin equivalent of `AwsCredsRepo::load`.
+                let creds_row = {
+                    let conn = db.conn.lock().map_err(|e| format!("bedrock db lock: {e}"))?;
+                    conn.query_row(
+                        "SELECT access_key_id, region, inference_profile \
+                         FROM aws_credentials WHERE id = 1",
+                        [],
+                        |r| Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?, r.get::<_, String>(2)?)),
+                    )
+                    .ok()
+                };
+                let Some((akid, region, profile)) = creds_row else {
+                    return Err("bedrock: AWS credentials not configured in Settings".to_string());
+                };
+                let secret = crate::security::keychain::KeychainStore::get("com.jarvis.aws", "secret_access_key").map_err(|e| format!("bedrock keychain load: {e}"))?;
+                let creds = crate::aws::credentials::AwsCredentials { access_key_id: akid, secret_access_key: secret, region, inference_profile: profile };
 
-        // Nothing set up yet: every entry lacked a key and the user never
-        // chose an AI. Say what to do instead of listing missing keys.
-        if !self.chain_loaded_from_db && !errors.is_empty() && errors.iter().all(|e| e.contains("API key configured")) {
-            return Err(NO_AI_CHOSEN.into());
+                // The model the user saved in the chain, as for every other
+                // provider. The V13 `workload_routing` table (Nova Micro /
+                // Haiku 4.5 / Sonnet 4.6 per tier) used to override it here,
+                // so Bedrock silently ran a different model from the one
+                // chosen. The table is kept as history and no longer read;
+                // per-feature defaults come from the model registry (P05).
+                let model = bedrock_model(&entry);
+                // A saved id can carry another geography's prefix; point it
+                // at the region these credentials were saved for.
+                let model = apply_inference_profile(&model, &creds.inference_profile);
+                log::info!("Bedrock workload={:?} -> model={} (region={})", workload, model, creds.region);
+                bedrock::send(&creds, &model, workload, messages, db, google_auth, app_handle, tts_tx, ledger).await.map_err(|e| e.to_string())
+            }
+            "local" => {
+                let Some(endpoint_id) = entry.endpoint_id.as_deref() else { return Err("Local provider missing endpoint_id".to_string()) };
+                let Some(model_id) = entry.model_id.as_deref() else { return Err("Local provider missing model_id".to_string()) };
+                let Some(endpoint) = self.find_endpoint(endpoint_id) else { return Err(format!("Endpoint '{}' not found or inactive", endpoint_id)) };
+
+                let (context_length, tool_override) = {
+                    let conn = db.conn.lock().map_err(|e| e.to_string())?;
+                    let ctx_len: u32 = conn
+                        .query_row(
+                            "SELECT context_length FROM local_model_overrides WHERE endpoint_id = ?1 AND model_id = ?2",
+                            rusqlite::params![endpoint_id, model_id],
+                            |row| row.get(0),
+                        )
+                        .unwrap_or_else(|_| crate::ai::models::limits("ollama").default_context_tokens.unwrap_or_default());
+                    let tool_ov: Option<String> = conn
+                        .query_row(
+                            "SELECT tool_capability FROM local_model_overrides WHERE endpoint_id = ?1 AND model_id = ?2",
+                            rusqlite::params![endpoint_id, model_id],
+                            |row| row.get(0),
+                        )
+                        .ok();
+                    (ctx_len, tool_ov)
+                };
+
+                let backend = local::get_backend(&endpoint.backend_type);
+                let detected_cap = backend.detect_tool_capability(&endpoint.url, model_id).await;
+
+                local::send_local(endpoint, model_id, messages, detected_cap, context_length, tool_override.as_deref(), db, google_auth, app_handle, tts_tx, workload, ledger)
+                    .await
+                    .map_err(|e| e.to_string())
+            }
+            unknown => Err(format!("Unknown provider type: {}", unknown)),
         }
-        Err(format!(
-            "All providers failed: {}",
-            errors.join("; ")
-        ))
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::collections::HashSet;
 
     fn bedrock_entry(model_id: Option<&str>) -> ProviderChainEntry {
         ProviderChainEntry { position: 0, provider_type: "bedrock".into(), endpoint_id: None, model_id: model_id.map(Into::into), enabled: true, base_url: None }
@@ -1230,6 +1032,191 @@ mod tests {
             body.contains("cost::with_feature( feature, finish_request_with_hud( self.run_provider_chain("),
             "send_with_ledger must run the provider chain inside cost::with_feature: {body}"
         );
+    }
+
+    fn chosen_row(provider_type: &str, model: Option<&str>) -> ProviderChainEntry {
+        ProviderChainEntry { position: 0, provider_type: provider_type.into(), endpoint_id: None, model_id: model.map(str::to_string), enabled: true, base_url: None }
+    }
+
+    type Events = Vec<(String, serde_json::Value)>;
+
+    /// `run_chosen` with a fake provider: each send returns the next of
+    /// `replies`. Returns the result, the rows sent to and the HUD events.
+    async fn run_fake(
+        chosen: Option<ProviderChainEntry>,
+        picked: Option<capability::Pick>,
+        configured: &[ProviderChainEntry],
+        feature: cost::Feature,
+        ledger: &SideEffectLedger,
+        replies: Vec<Result<&str, &str>>,
+    ) -> (Result<String, String>, Vec<ProviderChainEntry>, Events) {
+        let sent = std::cell::RefCell::new(Vec::new());
+        let replies = std::cell::RefCell::new(replies.into_iter());
+        let mut events = Vec::new();
+        let result = run_chosen(chosen, picked, configured, feature, Workload::Volume, ledger, bedrock::UiLanguage::En, true, |event, payload| events.push((event.to_string(), payload)), |row| {
+            sent.borrow_mut().push(row);
+            let reply = replies.borrow_mut().next().expect("sent more often than expected").map(str::to_string).map_err(str::to_string);
+            async move { reply }
+        })
+        .await;
+        (result, sent.into_inner(), events)
+    }
+
+    fn providers(rows: &[ProviderChainEntry]) -> Vec<&str> {
+        rows.iter().map(|r| r.provider_type.as_str()).collect()
+    }
+
+    fn offered(card: &serde_json::Value) -> Vec<String> {
+        card["alternatives"].as_array().unwrap().iter().map(|a| a["pick"]["provider_type"].as_str().unwrap().to_string()).collect()
+    }
+
+    const BAD_REQUEST: &str = "Gemini API error 400 Bad Request: {\"message\":\"Request contains an invalid argument\"}";
+    const OVERLOADED: &str = "Gemini API error 503 Service Unavailable: overloaded";
+
+    /// P06: a failed request ends on the error card. The next row of the
+    /// chain is not tried in its place; it is offered.
+    #[tokio::test]
+    async fn a_failed_request_shows_the_error_card_and_no_other_model_is_tried() {
+        let chain = [chosen_row("gemini", None), chosen_row("claude", None)];
+        let chosen = chosen_entry(&chain, true, &chain);
+        let (result, sent, events) = run_fake(chosen, None, &chain, cost::Feature::Chat, &SideEffectLedger::new(), vec![Err(BAD_REQUEST)]).await;
+        assert_eq!(providers(&sent), ["gemini"], "the next row is not tried");
+        assert_eq!(sent[0].model_id.as_deref(), Some(crate::ai::models::GEMINI_FLASH), "the model resolved for the feature is the one sent");
+        let card = failure::parse(&result.unwrap_err()).expect("the error card");
+        assert_eq!(card["code"], "bad_request");
+        assert_eq!(card["model"]["label"], "Gemini 3.7 Flash (Google Gemini)");
+        assert_eq!(offered(&card), ["claude"], "the other configured model is offered, not used");
+        assert!(events.contains(&("chat-token".to_string(), json!({"token": "", "done": true, "discard": false}))), "what streamed stays on screen");
+        assert!(events.contains(&("chat-provider".to_string(), json!({"provider": "Gemini 3.7 Flash (Google Gemini)", "status": "failed"}))));
+    }
+
+    /// A transient failure is sent once more to the same model, and only
+    /// once; anything else ends on the card at once. OpenAI's own wire
+    /// already resends a 429 or 5xx.
+    #[tokio::test]
+    async fn a_transient_failure_is_sent_once_more_to_the_same_model_only() {
+        let chain = [chosen_row("gemini", None), chosen_row("claude", None)];
+        let chosen = || chosen_entry(&chain, true, &chain);
+        let ledger = SideEffectLedger::new();
+
+        let (result, sent, events) = run_fake(chosen(), None, &chain, cost::Feature::Chat, &ledger, vec![Err(OVERLOADED), Ok("answer")]).await;
+        assert_eq!(result.unwrap(), "answer");
+        assert_eq!(providers(&sent), ["gemini", "gemini"]);
+        assert!(events.contains(&("chat-token".to_string(), json!({"token": "", "done": true, "discard": true}))), "the resend replaces what streamed");
+
+        let (result, sent, _) = run_fake(chosen(), None, &chain, cost::Feature::Chat, &ledger, vec![Err(OVERLOADED), Err(OVERLOADED)]).await;
+        assert_eq!(providers(&sent), ["gemini", "gemini"], "one resend, then the card");
+        assert_eq!(failure::parse(&result.unwrap_err()).unwrap()["code"], "server_error");
+
+        let (_, sent, _) = run_fake(chosen(), None, &chain, cost::Feature::Chat, &ledger, vec![Err(BAD_REQUEST)]).await;
+        assert_eq!(sent.len(), 1, "a refused request is not sent again");
+
+        let openai = [chosen_row("openai", None)];
+        let (_, sent, _) = run_fake(Some(openai[0].clone()), None, &openai, cost::Feature::Chat, &ledger, vec![Err("OpenAI API error 503 Service Unavailable: x")]).await;
+        assert_eq!(sent.len(), 1, "openai::send_retrying already resent it");
+    }
+
+    /// After an action tool ran (a calendar event, a draft), the request is
+    /// never sent again: not to the same model, and the card offers none.
+    #[tokio::test]
+    async fn no_request_is_sent_again_after_an_action_ran() {
+        let chain = [chosen_row("gemini", None), chosen_row("claude", None)];
+        let ledger = SideEffectLedger::new();
+        ledger.note("create_event");
+        let (result, sent, events) = run_fake(chosen_entry(&chain, true, &chain), None, &chain, cost::Feature::Chat, &ledger, vec![Err(OVERLOADED)]).await;
+        assert_eq!(sent.len(), 1, "no resend after an action");
+        let card = failure::parse(&result.unwrap_err()).unwrap();
+        assert_eq!(card["actions_ran"], 1);
+        assert!(offered(&card).is_empty(), "no model is offered to run it again");
+        assert!(events.contains(&("chat-token".to_string(), json!({"token": "", "done": true, "discard": false}))));
+    }
+
+    /// A saved model the registry disabled is not sent. A request the user
+    /// waits on gets the card with the replacement first (choosing it saves
+    /// it, as P05's notice did); a background job keeps P05's notice.
+    #[tokio::test]
+    async fn a_disabled_model_is_not_sent_and_the_card_offers_its_replacement() {
+        let _registry = crate::ai::registry::test_override::with(|r| {
+            let entry = r.models.iter_mut().find(|m| m.id == "gpt-5.6-luna").unwrap();
+            entry.status = crate::ai::registry::Status::Disabled;
+            entry.replacement = Some("gpt-6-luna".into());
+        });
+        let saved = ProviderChainEntry { position: 3, ..chosen_row("openai", Some("gpt-5.6-luna")) };
+        let configured = [saved.clone(), chosen_row("claude", None)];
+
+        let (result, sent, _) = run_fake(Some(saved.clone()), None, &configured, cost::Feature::Chat, &SideEffectLedger::new(), vec![]).await;
+        assert!(sent.is_empty(), "nothing is sent to a disabled model");
+        let card = failure::parse(&result.unwrap_err()).unwrap();
+        assert_eq!(card["code"], "disabled");
+        assert_eq!(card["alternatives"][0]["pick"]["model_id"], "gpt-6-luna");
+        assert_eq!(card["alternatives"][0]["saves_at"], 3);
+        assert_eq!(offered(&card), ["openai", "claude"]);
+
+        let (result, sent, _) = run_fake(Some(saved), None, &configured, cost::Feature::MailSort, &SideEffectLedger::new(), vec![]).await;
+        assert!(sent.is_empty());
+        let error = result.unwrap_err();
+        assert!(failure::parse(&error).is_none(), "a background job does not prompt");
+        assert!(error.starts_with("The model gpt-5.6-luna has been turned off"), "{error}");
+    }
+
+    /// The capability check runs before anything is sent: a model without
+    /// what the feature needs is never asked.
+    #[tokio::test]
+    async fn a_model_without_the_capability_the_feature_needs_is_not_sent() {
+        let _registry = crate::ai::registry::test_override::with(|r| {
+            let flash = r.models.iter_mut().find(|m| m.id == crate::ai::models::GEMINI_FLASH).unwrap();
+            flash.capabilities.tools = false;
+            flash.capabilities.json = false;
+        });
+        let configured = [chosen_row("gemini", None), chosen_row("claude", None)];
+        let (result, sent, _) = run_fake(Some(configured[0].clone()), None, &configured, cost::Feature::Chat, &SideEffectLedger::new(), vec![]).await;
+        assert!(sent.is_empty());
+        let card = failure::parse(&result.unwrap_err()).unwrap();
+        assert_eq!((card["code"].as_str(), card["capability"].as_str()), (Some("unsupported"), Some("tools")));
+        assert_eq!(offered(&card), ["claude"]);
+
+        // A background job records what it needs; no card.
+        let (result, sent, _) = run_fake(Some(configured[0].clone()), None, &configured, cost::Feature::MailSort, &SideEffectLedger::new(), vec![]).await;
+        assert!(sent.is_empty());
+        let recorded = result.unwrap_err();
+        assert!(failure::parse(&recorded).is_none());
+        assert!(recorded.starts_with("Needs a model that supports mail sorting: "), "{recorded}");
+    }
+
+    /// A model picked in the card runs that request, only when the card
+    /// could have offered it.
+    #[tokio::test]
+    async fn a_picked_model_runs_only_when_the_card_offered_it() {
+        let configured = [chosen_row("gemini", None), chosen_row("claude", None)];
+        let claude = capability::Pick::of(&chosen_row("claude", None));
+        let (result, sent, _) = run_fake(Some(configured[0].clone()), Some(claude), &configured, cost::Feature::Chat, &SideEffectLedger::new(), vec![Ok("from claude")]).await;
+        assert_eq!(result.unwrap(), "from claude");
+        assert_eq!(providers(&sent), ["claude"]);
+
+        let elsewhere = capability::Pick { provider_type: "openai".into(), base_url: Some("https://attacker.example/v1".into()), endpoint_id: None, model_id: Some("x".into()) };
+        let (result, sent, _) = run_fake(Some(configured[0].clone()), Some(elsewhere), &configured, cost::Feature::Chat, &SideEffectLedger::new(), vec![]).await;
+        assert!(sent.is_empty(), "a pick the card did not offer is refused");
+        assert!(result.unwrap_err().starts_with("That model cannot be used"));
+    }
+
+    /// The model is the first enabled row of the saved chain, with or
+    /// without credentials (no key ends on the card naming it). Only the
+    /// built-in chain nobody saved starts at the first row with credentials.
+    #[tokio::test]
+    async fn the_chosen_model_is_the_first_enabled_saved_row() {
+        let off = ProviderChainEntry { enabled: false, ..chosen_row("gemini", None) };
+        let saved = [off, chosen_row("claude", None), chosen_row("openai", None)];
+        let keys = [chosen_row("openai", None)];
+        assert_eq!(chosen_entry(&saved, true, &keys).map(|r| r.provider_type), Some("claude".into()));
+        let (result, _, _) = run_fake(chosen_entry(&saved, true, &keys), None, &keys, cost::Feature::Chat, &SideEffectLedger::new(), vec![Err("No Claude API key configured")]).await;
+        assert_eq!(failure::parse(&result.unwrap_err()).unwrap()["code"], "no_key");
+
+        let built_in = [chosen_row("gemini", None), chosen_row("gemini", Some(crate::ai::models::GEMINI_PRO)), chosen_row("openai", None)];
+        assert_eq!(chosen_entry(&built_in, false, &keys).map(|r| r.provider_type), Some("openai".into()));
+        assert!(chosen_entry(&built_in, false, &[]).is_none());
+        let (result, sent, _) = run_fake(None, None, &[], cost::Feature::Chat, &SideEffectLedger::new(), vec![]).await;
+        assert!(sent.is_empty());
+        assert_eq!(result.unwrap_err(), NO_AI_CHOSEN);
     }
 
     /// The table stays as history (P05 replaces it with the registry), but
@@ -1557,100 +1544,6 @@ mod tests {
     }
 
     #[test]
-    fn error_classifier_separates_terminal_from_retryable() {
-        // Retryable: transport, rate limit, server-side.
-        assert_eq!(
-            classify_provider_error("Stream error: error decoding response body"),
-            ErrorDisposition::Retry
-        );
-        assert_eq!(
-            classify_provider_error("Gemini API error 429 Too Many Requests: {\"error\":{}}"),
-            ErrorDisposition::Retry
-        );
-        assert_eq!(
-            classify_provider_error("Claude API error 503 Service Unavailable: overloaded"),
-            ErrorDisposition::Retry
-        );
-        assert_eq!(
-            classify_provider_error("Local LLM API error 500 Internal Server Error: "),
-            ErrorDisposition::Retry
-        );
-        // A missing key is provider-scoped, not request-scoped: another vendor
-        // in the chain may still be configured.
-        assert_eq!(
-            classify_provider_error("No Gemini API key configured"),
-            ErrorDisposition::Retry
-        );
-        // A retired or unknown model id reported as 404 is retryable: a later
-        // chain entry pointing at a different, live model can still succeed.
-        assert_eq!(
-            classify_provider_error(
-                "Gemini API error 404 Not Found: models/gemini-3-flash-preview is not found for API version v1beta"
-            ),
-            ErrorDisposition::Retry
-        );
-
-        // Rejected credential: every later entry of the same provider type
-        // reads the same key.
-        assert_eq!(
-            classify_provider_error(
-                "Gemini API error 400 Bad Request: {\"error\":{\"status\":\"INVALID_ARGUMENT\",\"message\":\"API_KEY_INVALID\"}}"
-            ),
-            ErrorDisposition::SkipSameProvider
-        );
-        assert_eq!(
-            classify_provider_error("Claude API error 401 Unauthorized: invalid x-api-key"),
-            ErrorDisposition::SkipSameProvider
-        );
-        assert_eq!(
-            classify_provider_error("OpenAI API error 403 Forbidden: country not supported"),
-            ErrorDisposition::SkipSameProvider
-        );
-
-        // The request itself cannot be accepted anywhere.
-        assert_eq!(
-            classify_provider_error("OpenAI API error 400 Bad Request: context_length_exceeded"),
-            ErrorDisposition::StopChain
-        );
-        assert_eq!(
-            classify_provider_error("Claude API error 413 Payload Too Large: "),
-            ErrorDisposition::StopChain
-        );
-    }
-
-    /// A 400 whose body says the model id itself is unrecognised must stay
-    /// retryable -- see the comment on the `Some(400)` arm of
-    /// `classify_provider_error`. Everything else at 400 is a malformed or
-    /// oversized request and must keep stopping the chain, or a client bug
-    /// turns into a retry loop across every remaining entry.
-    #[test]
-    fn classify_provider_error_retries_a_400_reported_dead_model_id() {
-        assert_eq!(
-            classify_provider_error(
-                "Gemini API error 400 Bad Request: {\"error\":{\"status\":\"INVALID_ARGUMENT\",\"message\":\"models/gemini-3-flash-preview is not found for API version v1beta, or is not supported for content generation\"}}"
-            ),
-            ErrorDisposition::Retry
-        );
-        assert_eq!(
-            classify_provider_error(
-                "Gemini API error 400 Bad Request: {\"error\":{\"status\":\"INVALID_ARGUMENT\",\"message\":\"Request contains an invalid argument\"}}"
-            ),
-            ErrorDisposition::StopChain
-        );
-    }
-
-    /// An empty final candidate is a provider fault, not a request fault:
-    /// the next chain entry is worth trying. Retry is also what makes the
-    /// router emit `discard` and move on instead of leaving a blank bubble.
-    #[test]
-    fn classify_provider_error_retries_an_empty_gemini_reply() {
-        assert_eq!(
-            classify_provider_error("Gemini returned no text (finish_reason=Some(\"STOP\"))"),
-            ErrorDisposition::Retry
-        );
-    }
-
-    #[test]
     fn inference_profile_retargets_only_a_geography_prefix() {
         // The V13 volume seed is pinned to apac; a us-east-1 user must not send
         // an APAC inference profile id to a US endpoint.
@@ -1709,50 +1602,6 @@ mod tests {
         assert_eq!(gemini_model_for(Some("pinned"), Workload::Premium), "pinned");
     }
 
-    /// The walk's pre-send checks, by behaviour: a disabled saved model
-    /// stops the turn (Stop, not Skip, so the next row is not tried); a row
-    /// that is off or whose credential was rejected keeps being skipped,
-    /// whatever its model; anything else is sent.
-    #[test]
-    fn the_chain_gate_stops_on_a_disabled_model_and_keeps_its_other_outcomes() {
-        let row = |provider_type: &str, model: Option<&str>, enabled: bool| ProviderChainEntry { position: 0, provider_type: provider_type.into(), endpoint_id: None, model_id: model.map(str::to_string), enabled, base_url: None };
-        let none = HashSet::new();
-        assert_eq!(gate(&row("openai", Some("gpt-5.6-luna"), true), &none), Gate::Send);
-        let _registry = crate::ai::registry::test_override::with(|r| {
-            let entry = r.models.iter_mut().find(|m| m.id == "gpt-5.6-luna").unwrap();
-            entry.status = crate::ai::registry::Status::Disabled;
-            entry.replacement = Some("gpt-6-luna".into());
-        });
-        let disabled_row = row("openai", Some("gpt-5.6-luna"), true);
-        let expected = disabled::Disabled { provider: "openai".into(), model: "gpt-5.6-luna".into(), replacement: Some("gpt-6-luna".into()) };
-        assert_eq!(gate(&disabled_row, &none), Gate::Stop(expected.clone()), "stops: the next row is not tried");
-        assert!(expected.message(bedrock::UiLanguage::En).starts_with("The model gpt-5.6-luna has been turned off"));
-        // The checks before it keep their outcomes, in the walk's order.
-        assert_eq!(gate(&row("openai", Some("gpt-5.6-luna"), false), &none), Gate::Skip, "a row that is off is skipped");
-        let dead: HashSet<String> = [credential_scope(&disabled_row)].into();
-        assert_eq!(gate(&disabled_row, &dead), Gate::Skip, "a rejected credential is skipped");
-        // Anything else is sent: another model, no saved model, another provider.
-        assert_eq!(gate(&row("openai", Some("gpt-6-luna"), true), &none), Gate::Send);
-        assert_eq!(gate(&row("openai", None, true), &none), Gate::Send, "no saved model follows the default");
-        assert_eq!(gate(&row("claude", Some("gpt-5.6-luna"), true), &none), Gate::Send, "another provider's id is not this entry's");
-    }
-
-    /// The walk itself needs a running app (`run_provider_chain` takes an
-    /// `AppHandle<Wry>`; Tauri's test feature is off), so its use of the
-    /// gate is read from the source, whitespace ignored: the gate runs
-    /// before any provider is called, and its Stop returns the disabled
-    /// message in the app's language. P06 reworks the walk and must make it
-    /// testable.
-    #[test]
-    fn the_chat_walk_returns_on_the_gates_stop_before_sending() {
-        let source: String = include_str!("mod.rs").split_whitespace().collect();
-        let body = &source[source.find("asyncfnrun_provider_chain(").unwrap()..];
-        let first_send = body.find("letresult=matchentry.provider_type.as_str()").unwrap();
-        let arm = ["matchgate(entry,&dead_credentials){", "Gate::Skip=>continue,", "Gate::Stop(stopped)=>returnErr(disabled::stop(stopped,disabled::is_foreground(cost::current_feature()),bedrock::UiLanguage::read(db))),", "Gate::Send=>{}", "}"].concat();
-        let at = body.find(&arm).expect("the walk matches on the gate and returns on Stop");
-        assert!(at < first_send, "the gate runs before any provider is called");
-    }
-
     /// The geographies a saved Bedrock id is moved between are the registry's.
     #[test]
     fn inference_geographies_follow_the_registry() {
@@ -1785,10 +1634,11 @@ mod tests {
         );
     }
 
-    /// Position 1 exists to survive position 0's model being unavailable. If both
-    /// positions resolve to the same id with the same key, a retired model id is a
-    /// total outage rather than a degraded one -- which is exactly what shipped
-    /// while `gemini-3-flash-preview` was pinned in both slots.
+    /// Position 1 is what the error card offers when position 0's model is
+    /// unavailable (P06: it is no longer tried by itself). If both positions
+    /// resolved to the same id, the card would offer the model that just
+    /// failed -- which is what shipped while `gemini-3-flash-preview` was
+    /// pinned in both slots.
     #[test]
     fn default_chain_fallback_is_a_different_model_than_the_volume_tier_uses() {
         let router = AiRouter::new("gemini_primary");
@@ -1801,11 +1651,10 @@ mod tests {
         );
     }
 
-    /// Onboarding and Settings both promise "JARVIS uses whichever is
-    /// available, falling back automatically", but the built-in default chain
-    /// is Gemini-only. A tester who pastes only a Claude or an OpenAI key must
-    /// still get a working fallback instead of "No Gemini API key configured"
-    /// on every message.
+    /// The built-in default chain is Gemini-only. A tester who pastes only a
+    /// Claude or an OpenAI key, and never saved a chain, must still get an
+    /// answer instead of "No Gemini API key configured" on every message: the
+    /// first row with a key is the model used (`chosen_entry`).
     #[test]
     fn default_chain_gains_claude_and_openai_when_keys_exist() {
         let mut router = AiRouter::new("gemini_primary");
@@ -2184,85 +2033,6 @@ mod tests {
             description.as_deref(),
             Some("Archives new mail from senders whose rules you accepted")
         );
-    }
-
-    fn entry(position: i32, provider_type: &str, endpoint_id: Option<&str>) -> ProviderChainEntry {
-        ProviderChainEntry {
-            position,
-            provider_type: provider_type.to_string(),
-            endpoint_id: endpoint_id.map(|s| s.to_string()),
-            model_id: None,
-            enabled: true,
-            base_url: None,
-        }
-    }
-
-    /// The router loop skips an entry whose `credential_scope` is already dead
-    /// and marks that scope on a `SkipSameProvider` failure. Two local chain
-    /// entries point at two different `LocalEndpoint`s, each carrying its own
-    /// bearer token, so a 401 from the first must not disable the second.
-    /// (`send` itself needs an `AppHandle`, so the loop's two decisions are
-    /// asserted through the helpers it calls.)
-    #[test]
-    fn a_dead_local_endpoint_does_not_disable_the_other_local_endpoints() {
-        let chain = vec![
-            entry(0, "local", Some("endpoint-a")),
-            entry(1, "local", Some("endpoint-b")),
-        ];
-        assert_eq!(
-            classify_provider_error("Local LLM API error 401 Unauthorized: invalid api key"),
-            ErrorDisposition::SkipSameProvider
-        );
-
-        let mut dead: HashSet<String> = HashSet::new();
-        dead.insert(credential_scope(&chain[0]));
-
-        assert!(dead.contains(&credential_scope(&chain[0])));
-        assert!(
-            !dead.contains(&credential_scope(&chain[1])),
-            "endpoint-b has its own credential and must still be attempted"
-        );
-        assert!(
-            has_live_entry_after(&chain, 0, &dead),
-            "the router must fall through to the second local endpoint"
-        );
-    }
-
-    /// The other half: gemini, claude, openai and bedrock all read one shared
-    /// credential, so a rejected key really does kill the rest of that type.
-    #[test]
-    fn a_rejected_shared_key_still_kills_the_rest_of_that_provider() {
-        let chain = vec![entry(0, "gemini", None), entry(1, "gemini", None)];
-        let mut dead: HashSet<String> = HashSet::new();
-        dead.insert(credential_scope(&chain[0]));
-
-        assert!(dead.contains(&credential_scope(&chain[1])));
-        assert!(!has_live_entry_after(&chain, 0, &dead));
-
-        // Two entries of different types stay independent.
-        let mixed = vec![entry(0, "gemini", None), entry(1, "claude", None)];
-        let mut dead_mixed: HashSet<String> = HashSet::new();
-        dead_mixed.insert(credential_scope(&mixed[0]));
-        assert!(has_live_entry_after(&mixed, 0, &dead_mixed));
-    }
-
-    /// `discard` wipes the partial answer already on screen, which is only
-    /// justified when another provider is about to overwrite it.
-    #[test]
-    fn no_provider_is_left_to_run_after_the_last_enabled_entry() {
-        let dead: HashSet<String> = HashSet::new();
-        let single = vec![entry(0, "gemini", None)];
-        assert!(!has_live_entry_after(&single, 0, &dead));
-
-        // A later entry that the user disabled is not a fallback either.
-        let mut disabled_tail = vec![entry(0, "gemini", None), entry(1, "claude", None)];
-        disabled_tail[1].enabled = false;
-        assert!(!has_live_entry_after(&disabled_tail, 0, &dead));
-
-        // An enabled, live entry is.
-        let two = vec![entry(0, "gemini", None), entry(1, "claude", None)];
-        assert!(has_live_entry_after(&two, 0, &dead));
-        assert!(!has_live_entry_after(&two, 1, &dead));
     }
 
     /// R2-01: the Keychain lookup moved out of the row mapper, which must not

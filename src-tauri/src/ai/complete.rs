@@ -1,7 +1,7 @@
 //! One plain request (no tools) to the AI the user chose, for features that
-//! are not a chat turn: mail analysis, and triage next. It walks the same
-//! provider chain as chat, so whichever single provider the user set up in
-//! step 1 answers, and nothing else is tried behind their back.
+//! are not a chat turn: mail analysis and mail sorting. It runs on the same
+//! chosen model as chat (`ai::run_chosen`): checked for the feature before
+//! anything is sent, and nothing else is tried behind the user's back.
 //!
 //! Error bodies can echo the request (mail text), so they are never
 //! surfaced: only the provider and the HTTP status are.
@@ -47,28 +47,31 @@ pub struct Completion {
     pub price_unknown: bool,
 }
 
-/// The chosen AI, tried in chain order. An empty chain means the user has not
-/// chosen one yet.
+/// The request on the chosen model, or on the model picked in the error
+/// card. A request the user waits on (mail analysis) fails with the card;
+/// a background job (mail sorting) records why and raises one notice.
 pub async fn complete(router: &AiRouter, db: &Database, request: Request<'_>) -> Result<Completion, String> {
-    let entries: Vec<&ProviderChainEntry> = router.provider_chain.iter().filter(|e| e.enabled).collect();
-    if entries.is_empty() {
-        return Err(super::NO_AI_CHOSEN.into());
-    }
-    let mut errors = Vec::new();
-    for entry in entries {
-        // A saved model the registry disabled: nothing is sent, and no
-        // other entry answers in its place (ai/disabled.rs).
-        if let Err(stopped) = super::disabled::check_entry(entry) {
-            return Err(super::disabled::stop(stopped, super::disabled::is_foreground(request.feature), super::bedrock::UiLanguage::read(db)));
-        }
-        let started = Instant::now();
-        let answered = complete_one(router, db, entry, &request).await;
-        match answered.and_then(|done| store_then_check(db, entry, &request, done, started.elapsed().as_millis() as i64)) {
-            Ok(done) => return Ok(done),
-            Err(error) => errors.push(error),
-        }
-    }
-    Err(errors.join("；"))
+    let configured = router.configured(db).await;
+    let chosen = super::chosen_entry(&router.provider_chain, router.chain_loaded_from_db, &configured);
+    let ledger = super::SideEffectLedger::new();
+    let request = &request;
+    super::run_chosen(
+        chosen,
+        super::capability::picked(),
+        &configured,
+        request.feature,
+        Workload::Volume,
+        &ledger,
+        super::bedrock::UiLanguage::read(db),
+        false,
+        |_, _| {},
+        move |row| async move {
+            let started = Instant::now();
+            let done = complete_one(router, db, &row, request).await?;
+            store_then_check(db, &row, request, done, started.elapsed().as_millis() as i64)
+        },
+    )
+    .await
 }
 
 /// Store the completion, then check it. The row comes first because the
@@ -457,7 +460,8 @@ pub(crate) mod tests {
     /// A background job (mail sorting) whose saved model the registry
     /// disabled does not run: it fails with the message its run records,
     /// nothing is sent or stored, and neither the replacement nor the next
-    /// entry of the chain answers in its place.
+    /// entry of the chain answers in its place. Mail analysis, which the
+    /// user waits on, gets the error card instead.
     #[tokio::test]
     async fn a_background_job_on_a_disabled_model_records_it_and_does_not_run() {
         let db = crate::db::test_database();
@@ -473,6 +477,9 @@ pub(crate) mod tests {
         let error = complete(&router, &db, sort_request(true)).await.unwrap_err();
         let expected = crate::ai::disabled::Disabled { provider: "openai".into(), model: "gpt-5.6-luna".into(), replacement: Some("gpt-6-luna".into()) }.message(super::super::bedrock::UiLanguage::En);
         assert_eq!(error, expected, "the run records why it did not run");
+        let analysis = complete(&router, &db, Request { feature: Feature::MailAnalysis, ..sort_request(false) }).await.unwrap_err();
+        let card = crate::ai::failure::parse(&analysis).expect("the error card");
+        assert_eq!((card["code"].as_str(), card["alternatives"][0]["pick"]["model_id"].as_str()), (Some("disabled"), Some("gpt-6-luna")));
         assert!(crate::ai::cost::tests::usage_rows(&db).is_empty(), "nothing was sent");
     }
 
@@ -592,18 +599,24 @@ pub(crate) mod tests {
         assert_eq!(store_then_check(&db, &bedrock_entry(), &sort_request(false), plain, 1).unwrap().text, "The email asks for a reply.");
     }
 
+    /// The name the error card gives the model a Bedrock row runs.
+    fn bedrock_label(entry: &ProviderChainEntry) -> String {
+        crate::ai::capability::resolve("mail_sort", entry, &[]).ready().expect("Bedrock runs mail sorting").label
+    }
+
     /// No AWS credentials saved: Bedrock asks for them instead of saying it is
     /// not supported. (No credentials row, so the Keychain is never read.)
     #[tokio::test]
     async fn bedrock_without_credentials_asks_for_them() {
         let db = crate::db::test_database();
         let mut router = AiRouter::new("gemini_primary");
-        router.set_provider_chain(vec![ProviderChainEntry { position: 0, provider_type: "bedrock".into(), endpoint_id: None, model_id: None, enabled: true, base_url: None }]);
+        router.set_provider_chain(vec![bedrock_entry()]);
+        let label = bedrock_label(&bedrock_entry());
         let error = complete(&router, &db, sort_request(true)).await.unwrap_err();
-        assert_eq!(error, "AWS credentials are not set up. Add them in Settings and try again.");
+        assert_eq!(error, format!("{label} has no usable API key or credentials. Add them in Settings, or pick another model."));
         db.conn.lock().unwrap().execute("INSERT OR REPLACE INTO user_preferences (key, value) VALUES ('ui_locale', 'zh-HK')", []).unwrap();
         let error = complete(&router, &db, sort_request(true)).await.unwrap_err();
-        assert_eq!(error, "尚未設定 AWS 憑證，請在設定中加入後重試。");
+        assert_eq!(error, format!("{label} 沒有可用的 API 密鑰或憑證，請在設定中加入，或改用其他模型。"));
     }
 
     /// The new Bedrock messages of a completion are in the interface
@@ -666,7 +679,8 @@ pub(crate) mod tests {
             let creds = crate::ai::bedrock::tests::fixture_creds("ap-southeast-1");
             crate::aws::credentials::AwsCredsRepo::new(db.clone()).save(&creds).await.unwrap();
             let mut router = AiRouter::new("gemini_primary");
-            router.set_provider_chain(vec![ProviderChainEntry { position: 0, provider_type: "bedrock".into(), endpoint_id: None, model_id: Some("us.anthropic.claude-haiku-4-5-20251001-v1:0".into()), enabled: true, base_url: None }]);
+            let saved = ProviderChainEntry { model_id: Some("us.anthropic.claude-haiku-4-5-20251001-v1:0".into()), ..bedrock_entry() };
+            router.set_provider_chain(vec![saved.clone()]);
 
             let server = crate::ai::bedrock::tests::aws_loopback(200, None, crate::ai::bedrock::tests::converse_json("{\"category\": \"action\"}")).await;
             let done = complete(&router, &db, sort_request(true)).await.unwrap();
@@ -687,7 +701,8 @@ pub(crate) mod tests {
             let server = crate::ai::bedrock::tests::aws_loopback(403, Some("AccessDeniedException"), json!({"message": "PRIVATE-MAIL-CANARY"})).await;
             let error = complete(&router, &db, sort_request(true)).await.unwrap_err();
             server.await.unwrap();
-            assert_eq!(error, "Bedrock refused the AWS credentials or access to the model. Check them in Settings and try again.");
+            assert_eq!(error, format!("{} rejected the API key or credentials. Check them in Settings, or pick another model.", bedrock_label(&saved)));
+            assert!(!error.contains("CANARY"));
             assert_eq!(crate::ai::cost::tests::usage_rows(&db).len(), 1, "nothing stored for the refused request");
         });
         let _ = crate::security::keychain::KeychainStore::delete("com.jarvis.aws", "secret_access_key");
@@ -705,13 +720,14 @@ pub(crate) mod tests {
             crate::aws::credentials::AwsCredsRepo::new(db.clone()).save(&crate::ai::bedrock::tests::fixture_creds("ap-southeast-1")).await.unwrap();
             crate::security::keychain::KeychainStore::delete("com.jarvis.aws", "secret_access_key").unwrap();
             let mut router = AiRouter::new("gemini_primary");
-            router.set_provider_chain(vec![ProviderChainEntry { position: 0, provider_type: "bedrock".into(), endpoint_id: None, model_id: None, enabled: true, base_url: None }]);
+            router.set_provider_chain(vec![bedrock_entry()]);
+            let label = bedrock_label(&bedrock_entry());
 
             let error = complete(&router, &db, sort_request(true)).await.unwrap_err();
-            assert_eq!(error, "JARVIS could not read your saved AWS credentials. Save them again in Settings and try again.");
+            assert_eq!(error, format!("{label} has no usable API key or credentials. Add them in Settings, or pick another model."));
             db.conn.lock().unwrap().execute("INSERT OR REPLACE INTO user_preferences (key, value) VALUES ('ui_locale', 'zh-HK')", []).unwrap();
             let error = complete(&router, &db, sort_request(true)).await.unwrap_err();
-            assert_eq!(error, "JARVIS 未能讀取已儲存的 AWS 憑證，請在設定中重新儲存後重試。");
+            assert_eq!(error, format!("{label} 沒有可用的 API 密鑰或憑證，請在設定中加入，或改用其他模型。"));
             assert!(!error.to_lowercase().contains("keychain"));
             assert!(crate::ai::cost::tests::usage_rows(&db).is_empty());
         });

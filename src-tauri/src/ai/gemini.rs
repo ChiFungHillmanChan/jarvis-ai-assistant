@@ -442,10 +442,9 @@ fn output_cap(model: &str) -> u32 {
     crate::ai::models::max_output_tokens(model).unwrap_or_else(|| crate::ai::models::limits("gemini").default_max_output_tokens.unwrap_or_default())
 }
 
-/// A reply that ended without text or a tool call. The router retries on
-/// "returned no text" (`classify_provider_error`), and the chat shows it as a
-/// zh-HK/en message naming Gemini and suggesting another model
-/// (src/lib/chat-error.ts).
+/// A reply that ended without text or a tool call. The router sends the
+/// request once more to the same model on "returned no text"
+/// (`failure::code_of`), then shows the error card naming the model.
 fn empty_reply_error(model: &str, finish_reason: Option<&str>) -> String {
     format!("Gemini ({model}) returned no text (finish_reason={})", finish_reason.unwrap_or("none"))
 }
@@ -707,13 +706,14 @@ mod tests {
         assert_eq!(output_cap("gemini-unlisted"), 4_096);
     }
 
-    /// The router retries on "returned no text", and the chat names Gemini
-    /// (src/lib/chat-error.ts reads the same words).
+    /// The router sends the request once more to the same model on
+    /// "returned no text", and the card names Gemini and the model.
     #[test]
     fn an_empty_reply_names_gemini_and_the_model() {
         let error = empty_reply_error("gemini-3.6-flash", Some("STOP"));
         assert_eq!(error, "Gemini (gemini-3.6-flash) returned no text (finish_reason=STOP)");
-        assert_eq!(crate::ai::classify_provider_error(&error), crate::ai::ErrorDisposition::Retry);
+        assert_eq!(crate::ai::failure::code_of(&error), crate::ai::failure::Code::EmptyReply);
+        assert!(crate::ai::failure::Code::EmptyReply.transient());
         assert_eq!(empty_reply_error("m", None), "Gemini (m) returned no text (finish_reason=none)");
     }
 

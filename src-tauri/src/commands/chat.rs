@@ -70,16 +70,29 @@ pub async fn send_message(
     workload: Option<String>,
     session_id: Option<String>,
     run_id: Option<String>,
+    pick: Option<crate::ai::capability::Pick>,
+    retry_of: Option<String>,
 ) -> Result<ChatMessage, String> {
     let session_id = chat_session::identity(session_id, "legacy")?;
     let run_id = chat_session::identity(run_id, &uuid::Uuid::new_v4().to_string())?;
+    // A request sent again from the error card (P06): never one that had
+    // already carried out an action, whatever the frontend sends.
+    if let Some(retry_of) = retry_of.as_deref() {
+        if !crate::ai::failure::may_retry(retry_of) {
+            return Err(crate::ai::bedrock::UiLanguage::read(&db).pick(
+                "This request already carried out an action, so JARVIS does not send it again.",
+                "這個請求已完成了操作，為免重複執行，不會再次傳送。",
+            ));
+        }
+    }
     let _guard = chat_session::FOREGROUND.try_lock().map_err(|_| "另一個助理任務進行中，請等完成後再試。".to_string())?;
     let context = chat_session::Context { session_id: session_id.clone(), run_id, app: app_handle.clone() };
-    chat_session::CONTEXT.scope(context, async {
-    let result = send_scoped(&app_handle, &db, &router, &google_auth, &engine, message, workload, session_id).await;
+    let retrying = retry_of.is_some();
+    chat_session::CONTEXT.scope(context, crate::ai::capability::with_pick(pick, async {
+    let result = send_scoped(&app_handle, &db, &router, &google_auth, &engine, message, workload, session_id, retrying).await;
     let _ = app_handle.emit("chat-state", json!({"state":"idle"}));
     result
-    }).await
+    })).await
 }
 
 async fn send_scoped(
@@ -91,6 +104,7 @@ async fn send_scoped(
     message: String,
     workload: Option<String>,
     session_id: String,
+    retrying: bool,
 ) -> Result<ChatMessage, String> {
     let selected_workload = classify_workload(&message, workload.as_deref() == Some("premium"));
     // Cancel any in-progress TTS and emit thinking state FIRST for immediate UI feedback
@@ -117,7 +131,7 @@ async fn send_scoped(
 
     let (history, context_messages, message_id) = tokio::task::spawn_blocking(
         move || -> Result<(Vec<(String, String)>, Vec<(String, String)>, i64), String> {
-            let (message_id, history) = save_turn(&db_arc, &history_session, &msg_clone)?;
+            let (message_id, history) = if retrying { save_retried_turn(&db_arc, &history_session, &msg_clone)? } else { save_turn(&db_arc, &history_session, &msg_clone)? };
 
             // Only add context for questions about personal data (saves tokens)
             let needs_context = needs_personal_context(&msg_lower, &msg_clone);
@@ -385,16 +399,41 @@ pub(crate) fn save_turn_with(
     .map_err(|e| e.to_string())?;
     let saved = conn.last_insert_rowid();
     also_save(&conn, saved);
+    Ok((saved, history_through(&conn, session_id, withheld.conversations, saved)?))
+}
+
+/// The last 20 messages of the session the AI may be shown, with `saved`
+/// (the message being answered) always among them.
+fn history_through(conn: &rusqlite::Connection, session_id: &str, withheld_through: i64, saved: i64) -> Result<Vec<(String, String)>, String> {
     let mut stmt = conn
         .prepare("SELECT role, content FROM conversations WHERE session_id = ?1 AND (id > ?2 OR id = ?3) ORDER BY id DESC LIMIT 20")
         .map_err(|e| e.to_string())?;
     let mut messages: Vec<(String, String)> = stmt
-        .query_map(rusqlite::params![session_id, withheld.conversations, saved], |row| Ok((row.get(0)?, row.get(1)?)))
+        .query_map(rusqlite::params![session_id, withheld_through, saved], |row| Ok((row.get(0)?, row.get(1)?)))
         .map_err(|e| e.to_string())?
         .collect::<Result<Vec<_>, _>>()
         .map_err(|e| e.to_string())?;
     messages.reverse();
-    Ok((saved, messages))
+    Ok(messages)
+}
+
+/// `save_turn` for a request sent again from the error card (P06): the
+/// message the failed request saved is the session's last row, so it is
+/// answered again rather than saved twice. Saved as usual otherwise.
+pub(crate) fn save_retried_turn(db: &Database, session_id: &str, message: &str) -> Result<(i64, Vec<(String, String)>), String> {
+    let last: Option<(i64, String, String)> = {
+        let conn = db.conn.lock().map_err(|e| e.to_string())?;
+        conn.query_row("SELECT id, role, content FROM conversations WHERE session_id = ?1 ORDER BY id DESC LIMIT 1", [session_id], |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?))).ok()
+    };
+    match last {
+        Some((id, role, content)) if role == "user" && content == message => {
+            // Before the lock below: this takes it too.
+            let withheld = crate::ai::mail_policy::withheld_as_turn_begins(db);
+            let conn = db.conn.lock().map_err(|e| e.to_string())?;
+            Ok((id, history_through(&conn, session_id, withheld.conversations, id)?))
+        }
+        _ => save_turn(db, session_id, message),
+    }
 }
 
 /// Up to ten of the session's messages that mention `topic`, newest first, as
@@ -531,6 +570,22 @@ mod tests {
         let saved: String = db.conn.lock().unwrap().query_row("SELECT content FROM conversations WHERE id = ?1", [id], |r| r.get(0)).unwrap();
         assert_eq!(saved, "what is on my calendar");
         assert_eq!(history.len(), 2);
+    }
+
+    /// A request sent again from the error card answers the message the
+    /// failed request saved; it is not saved a second time.
+    #[test]
+    fn a_retried_turn_is_not_saved_twice() {
+        let db = crate::db::test_database();
+        let (failed, _) = save_turn(&db, "s1", "move my 3pm").unwrap();
+        let (retried, history) = save_retried_turn(&db, "s1", "move my 3pm").unwrap();
+        assert_eq!(retried, failed);
+        assert_eq!(history, [("user".to_string(), "move my 3pm".to_string())]);
+        // Anything after it (a reply, another message) means a new turn.
+        persist_scoped_reply(&db.conn.lock().unwrap(), "done", "s1").unwrap();
+        let (again, history) = save_retried_turn(&db, "s1", "move my 3pm").unwrap();
+        assert_ne!(again, failed);
+        assert_eq!(history.len(), 3);
     }
 
     /// A recording is saved with its message: a history read landing between

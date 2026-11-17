@@ -76,6 +76,7 @@ pub fn run() {
             // runs in the background and never holds startup.
             ai::registry::start();
             ai::disabled::init(app.handle().clone());
+            ai::notify::init(app.handle().clone());
             {
                 use tauri::Emitter;
                 let handle = app.handle().clone();

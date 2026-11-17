@@ -305,6 +305,7 @@ pub async fn mail_analyze_group(
     db: State<'_, Arc<Database>>,
     router: State<'_, std::sync::Mutex<crate::ai::AiRouter>>,
     group_id: i64,
+    pick: Option<crate::ai::capability::Pick>,
 ) -> Result<MailAnalysis, String> {
     let context = store::context(&db, group_id)?;
     if context.messages.is_empty() {
@@ -335,7 +336,8 @@ pub async fn mail_analyze_group(
     } else {
         None
     };
-    analysis::analyze(context, creds, openai_key, assistant, Some(&db)).await
+    // A model picked in the error card runs this analysis once (P06).
+    crate::ai::capability::with_pick(pick, analysis::analyze(context, creds, openai_key, assistant, Some(&db))).await
 }
 
 fn select_openai_key(
