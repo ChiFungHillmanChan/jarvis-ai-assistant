@@ -59,6 +59,11 @@ pub async fn complete(router: &AiRouter, db: &Database, request: Request<'_>) ->
     }
     let mut errors = Vec::new();
     for entry in entries {
+        // A saved model the registry disabled: nothing is sent, and no
+        // other entry answers in its place (ai/disabled.rs).
+        if let Err(stopped) = super::disabled::check_entry(entry) {
+            return Err(super::disabled::stop(stopped, super::disabled::is_foreground(request.feature)));
+        }
         let started = Instant::now();
         let answered = complete_one(router, db, entry, &request).await;
         match answered.and_then(|done| store_then_check(db, entry, &request, done, started.elapsed().as_millis() as i64)) {
@@ -446,6 +451,28 @@ pub(crate) mod tests {
 
     fn sort_request(json: bool) -> Request<'static> {
         Request { system: "Sort this email.", user: "From: a@example.com", json, max_tokens: 2_048, feature: Feature::MailSort }
+    }
+
+    /// A background job (mail sorting) whose saved model the registry
+    /// disabled does not run: it fails with the message its run records,
+    /// nothing is sent or stored, and neither the replacement nor the next
+    /// entry of the chain answers in its place.
+    #[tokio::test]
+    async fn a_background_job_on_a_disabled_model_records_it_and_does_not_run() {
+        let db = crate::db::test_database();
+        let _registry = crate::ai::registry::test_override::with(|r| {
+            let entry = r.models.iter_mut().find(|m| m.id == "gpt-5.6-luna").unwrap();
+            entry.status = crate::ai::registry::Status::Disabled;
+            entry.replacement = Some("gpt-6-luna".into());
+        });
+        let mut router = AiRouter::new("gemini_primary");
+        router.set_openai_key("sk-test-not-sent");
+        let row = |position: i32, provider_type: &str, model_id: Option<&str>| ProviderChainEntry { position, provider_type: provider_type.into(), endpoint_id: None, model_id: model_id.map(str::to_string), enabled: true, base_url: None };
+        router.set_provider_chain(vec![row(0, "openai", Some("gpt-5.6-luna")), row(1, "claude", None)]);
+        let error = complete(&router, &db, sort_request(true)).await.unwrap_err();
+        let expected = crate::ai::disabled::Disabled { provider: "openai".into(), model: "gpt-5.6-luna".into(), replacement: Some("gpt-6-luna".into()) }.message();
+        assert_eq!(error, expected, "the run records why it did not run");
+        assert!(crate::ai::cost::tests::usage_rows(&db).is_empty(), "nothing was sent");
     }
 
     /// Claude's JSON mode is one forced tool call, so the object arrives as

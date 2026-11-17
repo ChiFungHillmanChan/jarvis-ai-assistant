@@ -5,6 +5,7 @@ pub mod mail_policy;
 pub mod models;
 pub mod complete;
 pub mod cost;
+pub mod disabled;
 pub mod usage;
 pub mod gemini;
 pub mod local;
@@ -794,6 +795,11 @@ impl AiRouter {
             }
             if dead_credentials.contains(&credential_scope(entry)) {
                 continue;
+            }
+            // A saved model the registry disabled stops the turn here: no
+            // request is sent, and the next entry is not tried in its place.
+            if let Err(stopped) = disabled::check_entry(entry) {
+                return Err(disabled::stop(stopped, disabled::is_foreground(cost::current_feature())));
             }
 
             let provider_name = match entry.provider_type.as_str() {
@@ -1679,6 +1685,20 @@ mod tests {
         assert_eq!(gemini_model_for(None, Workload::Premium), "gemini-3.5-flash");
         assert_eq!(gemini_model_for(None, Workload::Volume), crate::ai::models::GEMINI_FLASH);
         assert_eq!(gemini_model_for(Some("pinned"), Workload::Premium), "pinned");
+    }
+
+    /// The chat chain checks each row's saved model before anything is sent
+    /// and returns at once when the registry disabled it: no request, and no
+    /// fallback to the next row. (The loop needs a running app, so this reads
+    /// the loop's source; the check itself is tested in ai/disabled.rs and,
+    /// on the completion path, in ai/complete.rs.)
+    #[test]
+    fn the_chat_chain_stops_on_a_disabled_model_before_sending() {
+        let source = include_str!("mod.rs");
+        let body = &source[source.find("async fn run_provider_chain(").unwrap()..];
+        let guard = body.find("if let Err(stopped) = disabled::check_entry(entry) {\n                return Err(disabled::stop(").expect("the chain loop checks the saved model and returns");
+        let first_send = body.find("let result = match entry.provider_type.as_str()").unwrap();
+        assert!(guard < first_send, "the check runs before any provider is called");
     }
 
     /// The geographies a saved Bedrock id is moved between are the registry's.

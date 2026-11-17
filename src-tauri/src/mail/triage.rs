@@ -731,7 +731,11 @@ async fn triage_one(
         // Summaries and dates come from the chosen AI; api.openai.com keeps
         // the Responses API path with a strict schema.
         let instructions = luna_instructions(language, &today_text, &received_local);
-        let answer: Option<Result<(Value, String), String>> = if let Some(openai_key) = keys.openai.as_deref() {
+        let answer: Option<Result<(Value, String), String>> = if let (Some(_), Err(stopped)) = (keys.openai.as_deref(), crate::ai::disabled::check("openai", &keys.openai_model)) {
+            // The saved OpenAI model is disabled: not sent, no other model
+            // in its place (ai/disabled.rs). The message stays untriaged.
+            Some(Err(crate::ai::disabled::stop(stopped, false)))
+        } else if let Some(openai_key) = keys.openai.as_deref() {
             let started = Instant::now();
             Some(openai::send_json(openai_key, &keys.openai_model, &instructions, &input, "mail_triage", luna_schema(), OpenAiEndpoint::Production).await.map(|(value, usage)| {
                 outcome.luna_input = usage.input_tokens;

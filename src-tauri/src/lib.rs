@@ -75,6 +75,7 @@ pub fn run() {
             // signature check) or uses the bundled copy; the network fetch
             // runs in the background and never holds startup.
             ai::registry::start();
+            ai::disabled::init(app.handle().clone());
             {
                 use tauri::Emitter;
                 let handle = app.handle().clone();
@@ -536,6 +537,8 @@ pub fn run() {
             commands::ai_choice::current_ai,
             commands::ai_choice::list_ai_models,
             ai::models::ai_models,
+            ai::disabled::disabled_models,
+            ai::disabled::confirm_model_replacement,
             commands::local_llm::update_model_override,
             commands::system::open_url,
             tool_approval::resolve_tool_approval,

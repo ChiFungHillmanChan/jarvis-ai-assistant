@@ -249,6 +249,12 @@ fn prepare_request(context: MailContext, now: DateTime<Utc>) -> Result<PreparedR
     };
     if mode != "assistant" {
         validate_model(model)?;
+        let provider = match mode.as_str() {
+            "local" => "ollama",
+            "openai" => "openai",
+            _ => "bedrock",
+        };
+        crate::ai::disabled::check(provider, model).map_err(|stopped| crate::ai::disabled::stop(stopped, true))?;
     }
 
     let available_count = usize::try_from(context.group.message_count.max(0))
@@ -2114,6 +2120,22 @@ mod tests {
         assert_eq!(wire["options"]["num_ctx"], 16_384);
         assert_eq!(wire["options"]["num_predict"], 1_024);
         assert!(wire.get("tools").is_none());
+    }
+
+    /// Mail analysis on a saved model the registry disabled stops before
+    /// the request is built, with the message the notice explains; the
+    /// replacement is not used until the user confirms it.
+    #[test]
+    fn analysis_on_a_disabled_model_stops_before_anything_is_sent() {
+        let now = Utc.with_ymd_and_hms(2026, 9, 10, 12, 0, 0).unwrap();
+        assert!(prepare_request(context("openai", "gpt-5.6-luna", vec![message(1, "正文")]), now).is_ok());
+        let _registry = crate::ai::registry::test_override::with(|r| {
+            let entry = r.models.iter_mut().find(|m| m.id == "gpt-5.6-luna").unwrap();
+            entry.status = crate::ai::registry::Status::Disabled;
+            entry.replacement = Some("gpt-6-luna".into());
+        });
+        let error = prepare_request(context("openai", "gpt-5.6-luna", vec![message(1, "正文")]), now).err().unwrap();
+        assert!(error.contains("gpt-5.6-luna 已停用") && error.contains("gpt-6-luna"), "{error}");
     }
 
     #[test]
