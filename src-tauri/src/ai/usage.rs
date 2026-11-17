@@ -561,9 +561,11 @@ pub fn roll_up_if_due(conn: &Connection, now: i64) {
 #[cfg(any(test, feature = "native-qa"))]
 pub(crate) fn seed_for_qa(conn: &Connection, now: i64) -> rusqlite::Result<()> {
     use crate::ai::models::{is_local, usd_cost_micro};
+    let openai = crate::ai::models::openai_default();
+    let registry_version = crate::ai::registry::current().version as i64;
     // provider, model, feature, workload, input (cache included), output, cache read, cache write
     let kinds = [
-        ("openai", crate::ai::models::OPENAI_DEFAULT, "chat", "tools", 1_200, 300, 200, 0),
+        ("openai", openai.as_str(), "chat", "tools", 1_200, 300, 200, 0),
         ("compat:api.moonshot.ai", "kimi-k2-0905-preview", "mail_sort", "volume", 3_000, 40, 0, 0),
         ("local", "qwen3:4b", "mail_analysis", "volume", 4_000, 900, 0, 0),
         ("bedrock", "apac.anthropic.claude-haiku-4-5-20251001-v1:0", "tools", "tools", 1_320, 45, 800, 400),
@@ -587,9 +589,9 @@ pub(crate) fn seed_for_qa(conn: &Connection, now: i64) -> rusqlite::Result<()> {
         conn.execute(
             "INSERT INTO inference_metrics
                 (ts, workload, model_id, input_tokens, output_tokens, cache_read_tokens, cache_write_tokens,
-                 latency_ms, provider, usd_cost_micro, feature, price_unknown)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, 900, ?8, ?9, ?10, ?11)",
-            rusqlite::params![ts, workload, model, input, output, cache_read, cache_write, provider, cost, feature, cost.is_none()],
+                 latency_ms, provider, usd_cost_micro, feature, price_unknown, registry_version)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, 900, ?8, ?9, ?10, ?11, ?12)",
+            rusqlite::params![ts, workload, model, input, output, cache_read, cache_write, provider, cost, feature, cost.is_none(), registry_version],
         )?;
     }
     Ok(())
