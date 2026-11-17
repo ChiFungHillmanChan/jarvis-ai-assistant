@@ -12,11 +12,11 @@
     "test": "node --experimental-strip-types --test lambda/*/*.test.ts",
     "synth": "cdk synth",
     "diff": "cdk diff",
-    "deploy:sandbox": "cdk deploy --profile jarvis --context env=sandbox --require-approval broadening",
-    "deploy:dev": "cdk deploy --profile jarvis --context env=dev --require-approval broadening",
-    "deploy:prod": "cdk deploy --profile jarvis --context env=prod --require-approval any-change",
-    "destroy:sandbox": "cdk destroy --profile jarvis --context env=sandbox",
-    "bootstrap": "cdk bootstrap --profile jarvis aws://759626151650/ap-southeast-1"
+    "deploy:sandbox": "cdk deploy --profile jarvis-deploy --context env=sandbox --require-approval broadening",
+    "deploy:dev": "cdk deploy --profile jarvis-deploy --context env=dev --require-approval broadening",
+    "deploy:prod": "cdk deploy --profile jarvis-deploy --context env=prod --require-approval any-change",
+    "destroy:sandbox": "cdk destroy --profile jarvis-deploy --context env=sandbox",
+    "bootstrap": "cdk bootstrap --profile jarvis-deploy aws://759626151650/ap-southeast-1"
   },
   "devDependencies": {
     "@types/aws-lambda": "^8.10.161",
