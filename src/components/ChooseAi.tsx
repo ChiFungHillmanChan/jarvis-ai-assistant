@@ -46,6 +46,9 @@ export default function ChooseAi({ onChosen, onBusyChange }: { onChosen?: (ai: C
   // The consent card the chosen AI needs before email and calendar content
   // goes to it (ai::consent::ai_consent_needed), or null.
   const [consentNeeded, setConsentNeeded] = useState<ConsentRequest | null>(null);
+  // The plain line when Gmail and Calendar content is not sent to the chosen
+  // AI at all (ai::consent::ai_google_content_note): no button.
+  const [googleNote, setGoogleNote] = useState<string | null>(null);
   const mounted = useRef(true);
   const catalog = useAiModels();
 
@@ -66,7 +69,10 @@ export default function ChooseAi({ onChosen, onBusyChange }: { onChosen?: (ai: C
   }, []);
   useEffect(() => {
     let live = true;
-    const refresh = () => void invoke<ConsentRequest | null>('ai_consent_needed').then(needed => { if (live) setConsentNeeded(needed); }).catch(() => {});
+    const refresh = () => {
+      void invoke<ConsentRequest | null>('ai_consent_needed').then(needed => { if (live) setConsentNeeded(needed); }).catch(() => {});
+      void invoke<string | null>('ai_google_content_note').then(note => { if (live) setGoogleNote(note); }).catch(() => {});
+    };
     refresh();
     const stop = listen('ai-consent-changed', refresh);
     return () => { live = false; void stop.then(unlisten => unlisten()).catch(() => {}); };
@@ -137,6 +143,7 @@ export default function ChooseAi({ onChosen, onBusyChange }: { onChosen?: (ai: C
       ? text(`Now using: ${current.label}${current.model ? ` · ${current.model}` : ['openai', 'gemini', 'claude'].includes(current.provider) ? ' · latest model' : ''}. Choose again to switch; only one AI is used at a time.`, `目前使用：${current.label}${current.model ? `・${current.model}` : ['openai', 'gemini', 'claude'].includes(current.provider) ? '・最新模型' : ''}。重新選擇即可更換；每次只會使用一個 AI。`)
       : text('Choose the AI you already use. Only this AI is used for the assistant, voice replies and mail. You can change it later in Settings.', '請選擇你已在使用的 AI。AI 助理、語音回覆及電郵都只會使用這一個 AI，之後可在設定中更換。')}</p>
     {current && consentNeeded && <ConsentCard request={consentNeeded} onAgreed={consentGiven} />}
+    {current && googleNote && <p className="setup-hint" role="note">{googleNote}</p>}
     <fieldset className="choose-ai-options" disabled={!!busy}>
       <legend>{text('Your AI', '你的 AI')}</legend>
       {options.map(([id, label, hint]) => <label key={id} className="setup-checkbox"><input type="radio" name="choose-ai" checked={option === id} onChange={() => pick(id)} /><span>{label}<small>{hint}</small></span></label>)}
@@ -172,7 +179,7 @@ export default function ChooseAi({ onChosen, onBusyChange }: { onChosen?: (ai: C
       <label className="setup-checkbox"><input type="checkbox" checked={consent} disabled={!!busy} onChange={e => setConsent(e.target.checked)} />{option === 'ollama'
         ? text('Testing sends a short message to Ollama on this Mac. Everything stays on this Mac.', '測試會向此 Mac 上的 Ollama 傳送一句簡短訊息，所有資料都留在此 Mac。')
         : option === 'kimi' || option === 'qwen' || option === 'other'
-          ? text(`Testing sends one short message to ${name}. After that, your chats and voice requests are sent to ${name} with your key, and ${name}'s charges apply. JARVIS cannot vouch for ${name}'s data terms, so email and calendar content is sent only after you agree on a card.`, `測試會向${zhName}傳送一句簡短訊息。之後你的對話及語音指令會以你的密鑰傳送至${zhName.trimEnd()}，並按${zhName}的收費計算。JARVIS 無法確認${zhName.trimEnd()}的資料條款，因此電郵及日曆內容只會在你按卡片同意後才傳送。`)
+          ? text(`Testing sends one short message to ${name}. After that, your chats and voice requests are sent to ${name} with your key, and ${name}'s charges apply. JARVIS cannot confirm how ${name} uses data, so Gmail and Calendar content is not sent to it: mail features, reading your calendar and the daily briefing need another AI.`, `測試會向${zhName}傳送一句簡短訊息。之後你的對話及語音指令會以你的密鑰傳送至${zhName.trimEnd()}，並按${zhName}的收費計算。JARVIS 無法確認${zhName}如何使用資料，因此 Gmail 及日曆內容不會傳送至${zhName.trimEnd()}：郵件功能、讀取日曆及每日簡報須改用其他 AI。`)
           : option === 'gemini'
             ? text('Testing sends one short message to Gemini. After that, your chats and voice requests are sent to Gemini with your key, and Gemini\'s charges apply. Email and calendar content is sent only after you confirm on a card that your key has billing set up.', '測試會向 Gemini 傳送一句簡短訊息。之後你的對話及語音指令會以你的密鑰傳送至 Gemini，並按 Gemini 的收費計算。電郵及日曆內容只會在你按卡片確認密鑰已設定付費後才傳送。')
             : text(`Testing sends one short message to ${name}. After that, your chats, voice requests and the mail you ask JARVIS to analyse or sort are sent to ${name} with your key, and ${name}'s charges apply.`, `測試會向${zhName}傳送一句簡短訊息。之後你的對話、語音指令，以及你要求 JARVIS 分析或整理的郵件，會以你的密鑰傳送至${zhName.trimEnd()}，並按${zhName}的收費計算。`)}</label>

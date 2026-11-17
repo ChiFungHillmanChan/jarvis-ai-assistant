@@ -111,8 +111,10 @@ export function useChat() {
       const response = await sendMessage(text, workload, id, run.runId, retry?.pick ?? undefined, retry?.retryOf);
       update(id, s => ({ ...s, messages: [...s.messages, run.steps.length ? { ...response, steps: run.steps } : response], streamingText: '' }));
     } catch (error) {
-      const partial = run.text + run.buffer || run.held;
       const problem = parseAiError(error);
+      // An answer given without the Gmail or Calendar content it needed is
+      // replaced by the card, not kept as an incomplete one.
+      const partial = problem?.kind === 'failure' && problem.failure.code === 'google_content' ? '' : run.text + run.buffer || run.held;
       update(id, s => ({ ...s, error: problem ? null : String(error), problem: problem ?? s.problem, streamingText: partial ? `${partial}\n\n[Incomplete response]` : '' }));
     } finally {
       if (frame.current !== null) cancelAnimationFrame(frame.current);

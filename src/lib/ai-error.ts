@@ -10,8 +10,9 @@ import { catalog, interpolate, type MessageKey, type UiLocale } from '../i18n/ca
  *   The card names it, says why and offers the models that can, with keys.
  *   JARVIS never moves the request to another model on its own.
  * - consent: email and calendar content waits for the user's agreement to
- *   the provider's data terms (Gemini's billing, a service JARVIS cannot
- *   vouch for).
+ *   the provider's data terms (Gemini's billing). A service whose terms
+ *   JARVIS cannot confirm never receives it (a failure, google_content);
+ *   only a voice recording can still wait for consent to such terms.
  */
 
 /** A model as a chain row holds it (capability::Pick). */
@@ -19,7 +20,8 @@ export interface Pick { provider_type: string; base_url?: string | null; endpoin
 export interface AiTarget { pick: Pick; provider: string; model: string | null; label: string }
 /** A model the card offers. `saves_at`: the replacement for a disabled model, saved at that chain position when picked. */
 export interface Alternative { pick: Pick; label: string; saves_at: number | null }
-export type FailureCode = 'no_key' | 'bad_key' | 'rate_limited' | 'bad_request' | 'not_found' | 'unreachable' | 'empty_reply' | 'server_error' | 'failed' | 'disabled' | 'unsupported' | 'no_model';
+/** google_content: the request needed Gmail or Calendar content, which is not sent to this service (P06, Google Limited Use). */
+export type FailureCode = 'no_key' | 'bad_key' | 'rate_limited' | 'bad_request' | 'not_found' | 'unreachable' | 'empty_reply' | 'server_error' | 'failed' | 'disabled' | 'unsupported' | 'no_model' | 'google_content';
 /** provider_reason: the provider's own words for a refused request (ai/failure.rs), shown as they are. */
 export interface Failure { feature: string; model: AiTarget; code: FailureCode; capability: string | null; message: string; provider_reason?: string | null; alternatives: Alternative[]; actions_ran: number }
 export type DataTerms = 'needs_billing_confirmation' | 'unknown';
@@ -74,6 +76,22 @@ export function offeredModels(failure: Failure): Alternative[] {
 }
 
 /**
+ * The line above the card's models, and the line when it has none. For
+ * content that is not sent to the model (google_content) the models are
+ * the ones that may receive it.
+ */
+export function pickerText(failure: Failure, text: (en: string, zh: string) => string): { intro: string; none: string } {
+  if (failure.code === 'google_content') return {
+    intro: text('Answer this with an AI that may receive Gmail and Calendar content (your saved choice stays as it is):', '改用可接收 Gmail 及日曆內容的 AI 回答這個請求（已儲存的選擇不會更改）：'),
+    none: text('No AI with a saved key may receive Gmail and Calendar content. Choose one in Settings → Your AI.', '沒有已儲存密鑰的 AI 可接收 Gmail 及日曆內容。請在「設定 → 你的 AI」選擇。'),
+  };
+  return {
+    intro: text('Run this request on another model (your saved choice stays as it is):', '改用其他模型執行這個請求（已儲存的選擇不會更改）：'),
+    none: text('No other model with a saved key can run this request. Add a key in Settings → Your AI.', '沒有其他已儲存密鑰的模型可以執行這個請求。請在「設定 → 你的 AI」加入密鑰。'),
+  };
+}
+
+/**
  * Whether the card offers the same message once more without "Think
  * harder" (P06): a Think harder turn the model refused, or failed, with
  * no action carried out.
@@ -97,6 +115,13 @@ export function problemText(problem: AiProblem, text: (en: string, zh: string) =
   return problem.kind === 'failure'
     ? problem.failure.message
     : text(`Email and calendar content waits for your agreement to ${problem.consent.label}'s data terms.`, `電郵及日曆內容須待你同意 ${problem.consent.label} 的資料條款後才會傳送。`);
+}
+
+/** The heading of a background notice (ai-needs-model): content not sent at all, or a job that could not run. */
+export function noticeHeading(code: string | undefined, text: (en: string, zh: string) => string): string {
+  return code === 'google_content'
+    ? text('Gmail and Calendar content stays back', 'Gmail 及日曆內容未有傳送')
+    : text('A job could not run on your AI', '一項背景工作未能使用你的 AI 執行');
 }
 
 /** One background notice per launch for each message (ai-needs-model, ai-consent-needed). */

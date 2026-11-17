@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { addNotice, consentCopy, consentStatus, offeredModels, offersPlainResend, parseAiError, pickAction, GEMINI_BILLING_PAGE, type ConsentRequest, type Failure, type GivenConsent } from '../src/lib/ai-error.ts';
+import { addNotice, consentCopy, consentStatus, noticeHeading, offeredModels, offersPlainResend, parseAiError, pickAction, pickerText, problemText, GEMINI_BILLING_PAGE, type ConsentRequest, type Failure, type GivenConsent } from '../src/lib/ai-error.ts';
 import { chatStatusText } from '../src/lib/chat-status.ts';
 
 // P06: a request that fails, or email held back by a provider's data
@@ -90,4 +90,31 @@ test('a refused Think harder turn can be sent again without it, unless an action
   assert.equal(offersPlainResend(failure({ feature: 'premium', provider_reason: 'Thinking level is not supported for this model.' })), true);
   assert.equal(offersPlainResend(failure({ feature: 'premium', actions_ran: 1 })), false);
   assert.equal(offersPlainResend(failure({ feature: 'chat' })), false);
+});
+
+// Google Limited Use (DECISIONS, P06, 2026-11-17): Gmail and Calendar
+// content is not sent to a service JARVIS cannot confirm. The request ends
+// on the card, which offers the models that may receive the content.
+test('a request refused Google content offers the models that may receive it', () => {
+  const card = failure({
+    code: 'google_content',
+    message: 'Gmail and Calendar content is not sent to Kimi: JARVIS cannot confirm how this service uses data. Choose an AI whose terms JARVIS can confirm for this.',
+  });
+  const parsed = parseAiError(JSON.stringify({ jarvis_ai: { kind: 'failure', failure: card } }));
+  assert.equal(parsed?.kind, 'failure');
+  assert.equal(problemText(parsed!, en), card.message);
+  assert.deepEqual(pickerText(card, en), {
+    intro: 'Answer this with an AI that may receive Gmail and Calendar content (your saved choice stays as it is):',
+    none: 'No AI with a saved key may receive Gmail and Calendar content. Choose one in Settings → Your AI.',
+  });
+  assert.equal(pickerText(card, zh).intro, '改用可接收 Gmail 及日曆內容的 AI 回答這個請求（已儲存的選擇不會更改）：');
+  assert.equal(pickerText(failure(), en).intro, 'Run this request on another model (your saved choice stays as it is):');
+  assert.deepEqual(offeredModels({ ...card, actions_ran: 1 }), [], 'never sent again after an action ran');
+});
+
+test('a background notice for content not sent says so in its heading', () => {
+  assert.equal(noticeHeading('google_content', en), 'Gmail and Calendar content stays back');
+  assert.equal(noticeHeading('google_content', zh), 'Gmail 及日曆內容未有傳送');
+  assert.equal(noticeHeading('unsupported', en), 'A job could not run on your AI');
+  assert.equal(noticeHeading(undefined, zh), '一項背景工作未能使用你的 AI 執行');
 });

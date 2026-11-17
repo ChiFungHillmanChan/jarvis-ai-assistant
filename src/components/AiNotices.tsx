@@ -2,9 +2,10 @@ import { useEffect, useState } from 'react';
 import { listen } from '@tauri-apps/api/event';
 import { useUiLocale } from '../i18n';
 import ConsentCard from './ConsentCard';
-import { addNotice, type ConsentRequest } from '../lib/ai-error';
+import { addNotice, noticeHeading, type ConsentRequest } from '../lib/ai-error';
 
-interface NeedsModel { feature: string; message: string; model: string }
+/** `code`: the failure code, or google_content for content not sent to the AI in use. */
+interface NeedsModel { feature: string; message: string; model: string; code?: string }
 interface NeedsConsent { consent: ConsentRequest; feature: string }
 
 const consentKey = (n: NeedsConsent) => `${n.consent.provider}|${n.consent.base_url}`;
@@ -39,7 +40,7 @@ export default function AiNotices() {
     <div className="update-toast-body">
       {consent
         ? <><strong>{text('Held back until you agree', '待你同意後才處理')}</strong><ConsentCard request={consent.consent} onAgreed={() => setConsents(previous => previous.slice(1))} onClose={() => setConsents(previous => previous.slice(1))} /></>
-        : <><strong>{text('A job could not run on your AI', '一項背景工作未能使用你的 AI 執行')}</strong><span className="tool-approval-detail">{model.message}</span>
+        : <><strong>{noticeHeading(model.code, text)}</strong><span className="tool-approval-detail">{model.message}</span>
           <div className="tool-approval-actions"><button type="button" className="tool-approval-decline" onClick={() => setModels(previous => previous.slice(1))}>{text('Close', '關閉')}</button></div></>}
     </div>
   </div>;

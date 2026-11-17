@@ -1,7 +1,7 @@
 import { useState } from 'react';
 import { invoke } from '@tauri-apps/api/core';
 import { useUiLocale } from '../i18n';
-import { offeredModels, offersPlainResend, pickAction, type Alternative, type Failure, type Pick } from '../lib/ai-error';
+import { offeredModels, offersPlainResend, pickAction, pickerText, type Alternative, type Failure, type Pick } from '../lib/ai-error';
 
 /**
  * A request that did not get an answer (P06): the model, why, and the
@@ -17,6 +17,7 @@ export default function ModelErrorCard({ failure, onRetry, onPlainResend }: { fa
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState('');
   const offered = offeredModels(failure);
+  const picker = pickerText(failure, text);
 
   async function choose(choice: Alternative) {
     if (busy) return;
@@ -48,9 +49,9 @@ export default function ModelErrorCard({ failure, onRetry, onPlainResend }: { fa
     {failure.actions_ran > 0
       ? <p>{text('Actions already carried out are kept. JARVIS does not send this request again, so nothing is done twice. Check the result before asking again.', '已完成的操作會保留。為免重複執行，JARVIS 不會再次傳送這個請求。請先檢查結果，再重新提出要求。')}</p>
       : offered.length > 0
-        ? <><p>{text('Run this request on another model (your saved choice stays as it is):', '改用其他模型執行這個請求（已儲存的選擇不會更改）：')}</p>
+        ? <><p>{picker.intro}</p>
           <div className="ai-card-picks">{offered.map(choice => <button key={`${choice.pick.provider_type}|${choice.pick.base_url ?? ''}|${choice.pick.endpoint_id ?? ''}|${choice.pick.model_id ?? ''}`} type="button" className="update-toast-action" disabled={busy} onClick={() => void choose(choice)}>{choice.saves_at !== null ? text(`Use ${choice.label} from now on`, `之後改用 ${choice.label}`) : choice.label}</button>)}</div></>
-        : <p>{text('No other model with a saved key can run this request. Add a key in Settings → Your AI.', '沒有其他已儲存密鑰的模型可以執行這個請求。請在「設定 → 你的 AI」加入密鑰。')}</p>}
+        : <p>{picker.none}</p>}
     {error && <p className="setup-error">{error}</p>}
   </div>;
 }
