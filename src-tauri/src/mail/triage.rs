@@ -1364,6 +1364,59 @@ mod tests {
         assert!(!outcome.summarized);
     }
 
+    /// A router whose chosen AI is an Ollama cloud model reached through the
+    /// Ollama on 127.0.0.1:`port` (it forwards the prompt to ollama.com,
+    /// whose terms the registry marks unknown), saved as the choice in `db`.
+    fn local_ai_saved(db: &Database, port: u16) -> crate::ai::AiRouter {
+        use crate::ai::local::backend::{BackendType, LocalEndpoint};
+        db.conn
+            .lock()
+            .unwrap()
+            .execute_batch(&format!(
+                "INSERT INTO local_endpoints(id, name, url, backend_type) VALUES ('loopback', 'Loopback', 'http://127.0.0.1:{port}', 'ollama');
+                 DELETE FROM provider_chain;
+                 INSERT INTO provider_chain(position, provider_type, endpoint_id, model_id, enabled, base_url) VALUES (0, 'local', 'loopback', 'fixture-model:cloud', 1, NULL);"
+            ))
+            .unwrap();
+        let mut router = crate::ai::AiRouter::new("gemini_primary");
+        router.set_local_endpoints(vec![LocalEndpoint {
+            id: "loopback".into(),
+            name: "Loopback".into(),
+            url: format!("http://127.0.0.1:{port}"),
+            backend_type: BackendType::Ollama,
+            api_key: None,
+            use_tls: false,
+            connection_timeout_ms: 5_000,
+            keep_alive_minutes: 5,
+            is_active: true,
+            last_health_check: None,
+            last_health_status: None,
+        }]);
+        router.set_provider_chain(vec![crate::ai::ProviderChainEntry { position: 0, provider_type: "local".into(), endpoint_id: Some("loopback".into()), model_id: Some("fixture-model:cloud".into()), enabled: true, base_url: None }]);
+        router
+    }
+
+    /// The chosen AI is asked about again before each message, on both of
+    /// its paths: classifying with the summary in one call, and the summary
+    /// after Jev classified (review B, I-3). Asked here, about a model that
+    /// may not receive mail, it stops both before anything is sent.
+    #[tokio::test]
+    async fn the_chosen_ai_is_asked_about_before_each_message_it_would_get() {
+        let db = crate::db::test_database();
+        let (port, paths) = sorting_fixture().await;
+        let client = reqwest::Client::builder().timeout(Duration::from_secs(10)).build().unwrap();
+        let owners = ["me@example.com".to_string()];
+        let chosen_only = TriageKeys { typesafe: None, openai: None, openai_model: String::new(), assistant: Some(local_ai_saved(&db, port)) };
+        let outcome = triage_one(&db, &client, Endpoints::Loopback(port), &chosen_only, &owners, "en", ann(9)).await;
+        assert!(paths.lock().unwrap().is_empty(), "nothing sent: {:?}", paths.lock().unwrap());
+        assert!(outcome.error.as_deref().is_some_and(|e| e.starts_with("Gmail and Calendar content is not sent to ")), "{:?}", outcome.error);
+
+        let with_jev = TriageKeys { typesafe: Some("ts-test-not-real".into()), ..chosen_only };
+        let outcome = triage_one(&db, &client, Endpoints::Loopback(port), &with_jev, &owners, "en", ann(10)).await;
+        assert_eq!(paths.lock().unwrap().as_slice(), ["/v1/systemone"], "Jev classified; the summary was not asked of the chosen AI");
+        assert!(outcome.error.as_deref().is_some_and(|e| e.starts_with("Gmail and Calendar content is not sent to ")), "{:?}", outcome.error);
+    }
+
     /// A consent withdrawn while a sort run is going stops the messages not
     /// sent yet (review B, I-3): the gate is asked again before each one.
     /// Ann's two emails are sorted one after the other (one sender's mail
