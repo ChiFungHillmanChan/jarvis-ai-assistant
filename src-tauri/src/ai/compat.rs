@@ -157,7 +157,13 @@ mod tests {
                 assert_eq!(label(&region.base_url), provider.display_name.en);
             }
         }
-        let _renamed = crate::ai::registry::test_override::with(|r| r.providers.iter_mut().find(|p| p.id == "kimi").unwrap().display_name.en = "Moonshot".into());
-        assert_eq!(label(KIMI_GLOBAL), "Moonshot");
+        let _renamed = crate::ai::registry::test_override::with(|r| {
+            let kimi = r.providers.iter_mut().find(|p| p.id == "kimi").unwrap();
+            kimi.display_name.en = "Moonshot".into();
+            kimi.host_suffixes = vec!["kimi.example".into()];
+        });
+        assert_eq!(label(KIMI_GLOBAL), host(KIMI_GLOBAL), "a host the registry no longer lists is not the service");
+        assert_eq!(provider_for("https://api.kimi.example/v1"), Some("kimi"), "the hosts are the registry's");
+        assert_eq!(label("https://api.kimi.example/v1"), "Moonshot");
     }
 }

@@ -107,11 +107,13 @@ pub struct Context<'a> {
 pub async fn refresh(transport: &dyn Transport, url: &str, cx: &Context<'_>) -> Outcome {
     let active = cx.holder.get();
     let cache = load::read_cache(cx.cache_dir);
-    // The ETag names the cached copy. Send it only while that copy is the
-    // one in use: after an app update the cache may have been set aside
-    // (min_app_version, or the bundled copy caught up), and a 304 would then
-    // keep a copy this build can now use from ever being fetched.
-    let etag = cache.as_ref().filter(|c| active.source != Source::Bundled && cache_version(c) == Some(active.registry.version)).and_then(|c| c.etag.clone());
+    // The ETag names the cached copy. Send it only while that copy's version
+    // is the one in use: after an app update the cache may have been set
+    // aside (min_app_version), and a 304 would then keep a copy this build
+    // can now use from ever being fetched. A cache set aside because the
+    // bundled copy caught up has the version in use, so a 304 for it is
+    // still right: the endpoint has nothing newer.
+    let etag = cache.as_ref().filter(|c| cache_version(c) == Some(active.registry.version)).and_then(|c| c.etag.clone());
     let outcome = match transport.get(url, etag.as_deref()).await {
         Err(why) => Outcome::Failed(why),
         Ok(reply) if reply.status == 304 => Outcome::NotModified,
