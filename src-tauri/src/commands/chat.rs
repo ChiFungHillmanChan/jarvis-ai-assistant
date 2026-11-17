@@ -950,6 +950,22 @@ mod tests {
         .unwrap();
     }
 
+    /// Another turn on the saved choice can begin while a picked turn runs
+    /// (a spoken request) and draw the line there. What the picked turn
+    /// saves after that line is still withheld once it ends.
+    #[tokio::test]
+    async fn a_line_drawn_while_a_picked_turn_runs_still_covers_what_it_saves_later() {
+        let db = moved_and_answered(kimi);
+        let turn = db.clone();
+        on_pick(&db, Some(openai_pick(None)), async move {
+            crate::ai::capability::unpicked(|| save_turn(&turn, "legacy", "Set a timer")).unwrap();
+            a_mail_turn(turn.clone()).await
+        })
+        .await
+        .unwrap();
+        assert_next_turn_sees_none_of_it(&db);
+    }
+
     /// (3) Gemini as the chosen AI, its billing not confirmed.
     #[tokio::test]
     async fn a_picked_answer_is_not_replayed_to_gemini_before_consent() {
