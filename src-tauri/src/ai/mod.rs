@@ -638,6 +638,16 @@ impl AiRouter {
         }
     }
 
+    /// The router with no key of its own, whatever the environment holds:
+    /// a request a test lets through then fails on this Mac.
+    #[cfg(test)]
+    pub(crate) fn without_keys(mut self) -> Self {
+        self.gemini_key = None;
+        self.claude_key = None;
+        self.openai_key = None;
+        self
+    }
+
     /// Which of the router's own keys exist.
     pub(crate) fn keys_found(&self) -> KeysFound {
         KeysFound { gemini: self.gemini_key.is_some(), claude: self.claude_key.is_some(), openai: self.openai_key.is_some() }
@@ -651,6 +661,16 @@ impl AiRouter {
             return chosen_entry(&self.provider_chain, true, configured);
         }
         chosen_entry(&unsaved_chain(&self.preset, self.keys_found()), false, configured)
+    }
+
+    /// [`chosen`](Self::chosen) as a request would take it now. The
+    /// configured rows are looked up (a Keychain read for each compatible
+    /// service) only for a chain nobody saved, the one case they decide.
+    pub(crate) async fn chosen_now(&self, db: &crate::db::Database) -> Option<ProviderChainEntry> {
+        if self.chain_loaded_from_db {
+            return self.chosen(&[]);
+        }
+        self.chosen(&self.configured(db).await)
     }
 
     /// Load provider chain from database (call after construction)

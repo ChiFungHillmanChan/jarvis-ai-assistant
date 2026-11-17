@@ -648,18 +648,22 @@ async fn ask_chosen_ai(router: &crate::ai::AiRouter, db: &Database, instructions
 
 /// Asked again just before each message is sent (review B, I-3 and I-4): a
 /// consent withdrawn, or terms tightened by a fetched registry copy, during a
-/// run stops every message not sent yet. `to`: a service used on its own key
-/// (TypeSafe, the OpenAI summary); None for the chosen AI. Refused: the
-/// message stays untriaged with the reason, raised once per launch.
-fn still_allowed(db: &Database, to: Option<&str>) -> Result<(), String> {
-    let judged = match to {
-        Some(provider) => crate::ai::mail_policy::may_send_to(db, provider),
-        None => crate::ai::mail_policy::check(db),
-    };
-    judged.map_err(|blocked| {
-        blocked.raise("mail_sort");
-        blocked.user_message()
-    })
+/// run stops every message not sent yet. For a service used on its own key
+/// (TypeSafe, the OpenAI summary). Refused: the message stays untriaged with
+/// the reason, raised once per launch.
+fn still_allowed(db: &Database, provider: &str) -> Result<(), String> {
+    crate::ai::mail_policy::may_send_to(db, provider).map_err(refused)
+}
+
+/// [`still_allowed`] for the chosen AI: the row the run's own router sends
+/// to, not the choice saved since the run began (review B, r4-m1).
+async fn still_allowed_on(db: &Database, router: &crate::ai::AiRouter) -> Result<(), String> {
+    crate::ai::mail_policy::may_send_on(db, router).await.map_err(refused)
+}
+
+fn refused(blocked: crate::ai::mail_policy::Blocked) -> String {
+    blocked.raise("mail_sort");
+    blocked.user_message()
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -714,7 +718,7 @@ async fn triage_one(
     let mut combined: Option<(LunaExtraction, String)> = None;
     let jev = match (keys.typesafe.as_deref(), keys.assistant.as_ref()) {
         (Some(key), _) => {
-            if let Err(error) = still_allowed(db, Some("typesafe")) {
+            if let Err(error) = still_allowed(db, "typesafe") {
                 outcome.error = Some(error);
                 return outcome;
             }
@@ -733,7 +737,7 @@ async fn triage_one(
             }
         }
         (None, Some(router)) => {
-            if let Err(error) = still_allowed(db, None) {
+            if let Err(error) = still_allowed_on(db, router).await {
                 outcome.error = Some(error);
                 return outcome;
             }
@@ -789,7 +793,7 @@ async fn triage_one(
             // The saved OpenAI model is disabled: not sent, no other model
             // in its place (ai/disabled.rs). The message stays untriaged.
             Some(Err(crate::ai::disabled::stop(stopped, false, crate::ai::bedrock::UiLanguage::read(db))))
-        } else if let (Some(_), Err(error)) = (keys.openai.as_deref(), still_allowed(db, Some("openai"))) {
+        } else if let (Some(_), Err(error)) = (keys.openai.as_deref(), still_allowed(db, "openai")) {
             Some(Err(error))
         } else if let Some(openai_key) = keys.openai.as_deref() {
             let started = Instant::now();
@@ -800,10 +804,11 @@ async fn triage_one(
                 outcome.price_unknown |= !crate::ai::models::price_known("openai", &keys.openai_model);
                 (value, keys.openai_model.clone())
             }))
-        } else if let (Some(_), Err(error)) = (keys.assistant.as_ref(), still_allowed(db, None)) {
-            Some(Err(error))
         } else if let Some(router) = keys.assistant.as_ref() {
-            Some(ask_chosen_ai(router, db, &instructions, &input, luna_schema()).await.map(|(value, done)| {
+            Some(match still_allowed_on(db, router).await {
+                Err(error) => Err(error),
+                Ok(()) => ask_chosen_ai(router, db, &instructions, &input, luna_schema()).await,
+            }.map(|(value, done)| {
                 outcome.luna_input = done.input_tokens;
                 outcome.luna_output = done.output_tokens;
                 add_cost(&mut outcome.cost_micro, done.cost_micro);
@@ -1415,6 +1420,44 @@ mod tests {
         let outcome = triage_one(&db, &client, Endpoints::Loopback(port), &with_jev, &owners, "en", ann(10)).await;
         assert_eq!(paths.lock().unwrap().as_slice(), ["/v1/systemone"], "Jev classified; the summary was not asked of the chosen AI");
         assert!(outcome.error.as_deref().is_some_and(|e| e.starts_with("Gmail and Calendar content is not sent to ")), "{:?}", outcome.error);
+    }
+
+    /// Whether a refusal is Gemini's consent card.
+    fn asks_consent_for_gemini(error: &Option<String>) -> bool {
+        error.as_deref().and_then(|e| serde_json::from_str::<Value>(e).ok()).is_some_and(|v| v["jarvis_ai"]["kind"] == "consent" && v["jarvis_ai"]["consent"]["provider"] == "gemini")
+    }
+
+    /// The gate before each message judges the row the run sends on, the
+    /// router the run built when it began, not a choice saved since (review
+    /// B, r4-m1). Gemini is chosen and agreed to and a run begins; the user
+    /// then chooses Claude and withdraws Gemini. The run would still send to
+    /// Gemini, so its messages stop, on both of the chosen AI's paths. The
+    /// router holds no key: a message let through would fail on this Mac.
+    #[tokio::test]
+    async fn a_run_judges_the_ai_it_sends_on_not_one_chosen_since() {
+        use crate::ai::mail_policy::test_support::{agree_to_gemini, use_ai};
+        let db = crate::db::test_database();
+        use_ai(&db, "gemini", None);
+        agree_to_gemini(&db);
+        let mut router = crate::ai::AiRouter::new("").without_keys();
+        router.load_from_db(&db);
+        // In Settings, while the run goes on.
+        use_ai(&db, "claude", None);
+        crate::ai::consent::revoke(&db, &crate::ai::consent::Subject { provider: "gemini".into(), base_url: String::new() }).unwrap();
+        assert_eq!(crate::ai::mail_policy::check(&db), Ok(()), "the choice saved now, Claude, may receive mail");
+
+        let (port, paths) = sorting_fixture().await;
+        let client = reqwest::Client::builder().timeout(Duration::from_secs(10)).build().unwrap();
+        let owners = ["me@example.com".to_string()];
+        let chosen_only = TriageKeys { typesafe: None, openai: None, openai_model: String::new(), assistant: Some(router) };
+        let outcome = triage_one(&db, &client, Endpoints::Loopback(port), &chosen_only, &owners, "en", ann(11)).await;
+        assert!(asks_consent_for_gemini(&outcome.error), "{:?}", outcome.error);
+        assert!(paths.lock().unwrap().is_empty(), "{:?}", paths.lock().unwrap());
+
+        let with_jev = TriageKeys { typesafe: Some("ts-test-not-real".into()), ..chosen_only };
+        let outcome = triage_one(&db, &client, Endpoints::Loopback(port), &with_jev, &owners, "en", ann(12)).await;
+        assert_eq!(paths.lock().unwrap().as_slice(), ["/v1/systemone"], "Jev classified; the summary was not asked of Gemini");
+        assert!(asks_consent_for_gemini(&outcome.error), "{:?}", outcome.error);
     }
 
     /// A consent withdrawn while a sort run is going stops the messages not

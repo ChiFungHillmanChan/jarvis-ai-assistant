@@ -163,6 +163,27 @@ pub(crate) fn receiver(db: &Database) -> Result<ProviderChainEntry, Blocked> {
     super::unsaved_choice(&preset, keys, super::bedrock_saved(db)).ok_or_else(none_set_up)
 }
 
+/// Whether Gmail and Calendar content may go out on `router` now: the row
+/// its next request is sent to (a model picked in the error card, or the
+/// router's own choice, as `ai::complete` and `run_chosen` take it), judged
+/// as [`check`] judges the saved one. A job that built its router when it
+/// began (a sort run, the briefing) asks this before each send, so a choice
+/// saved in Settings since then does not change what is judged (review B,
+/// r4-m1).
+pub(crate) async fn may_send_on(db: &Database, router: &super::AiRouter) -> Result<(), Blocked> {
+    let entry = match super::capability::picked() {
+        Some(pick) => Some(pick.entry()),
+        None => router.chosen_now(db).await,
+    };
+    match entry {
+        Some(entry) => allowed(db, &entry),
+        None => Err(Blocked::Undecided(UiLanguage::read(db).pick(
+            "No AI is set up to answer, so Gmail and Calendar content was not sent. Add a key or choose an AI in Settings.",
+            "尚未設定回覆的 AI，因此沒有傳送 Gmail 及日曆內容。請在設定中加入密鑰或選擇 AI。",
+        ))),
+    }
+}
+
 /// Whether Gmail content may go to `provider` used on the user's own key
 /// rather than as the chosen AI: the Email page's OpenAI-key and Bedrock
 /// modes, TypeSafe sorting and the OpenAI summary in sorting. The registry's

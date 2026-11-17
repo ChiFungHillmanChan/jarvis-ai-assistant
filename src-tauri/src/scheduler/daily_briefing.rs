@@ -88,17 +88,18 @@ pub async fn run_briefing(
         }
     }
 
-    // Asked again before each request below (`each_gated`).
-    if !may_read_google_content(&db) {
-        return Ok(());
-    }
-
     // Clone router out of the Mutex so its async calls below do not hold a
     // non-Send MutexGuard across .await points.
     let router_val: AiRouter = router
         .lock()
         .map_err(|e| format!("router lock: {e}"))?
         .clone();
+
+    // About the router the briefing runs on; asked again before each
+    // request below (`each_gated`).
+    if !may_read_google_content(&db, &router_val).await {
+        return Ok(());
+    }
 
     // Fetch Gmail access token.
     let access_token = match auth.ensure_access_token().await {
@@ -148,6 +149,7 @@ pub async fn run_briefing(
     let (router_ref, db_ref, auth_ref, app_ref, language_ref) = (&router_val, &db, &auth, &app_handle, &language);
     let Some((summary_md, actions_json)) = each_gated(
         &db,
+        &router_val,
         || classify_with_nova(&messages, router_ref, db_ref, auth_ref, app_ref),
         |classified| async move { summarize_with_haiku(&classified, router_ref, db_ref, auth_ref, app_ref, language_ref).await },
     )
@@ -466,26 +468,26 @@ async fn speak_briefing_via_router(
 /// The briefing's two requests, each with the gate asked again just before it
 /// is sent (review B, I-3): a consent withdrawn, or terms tightened, while
 /// the first runs stops the second. None: stopped, nothing more sent.
-async fn each_gated<A, B, FA, FB>(db: &crate::db::Database, classify: impl FnOnce() -> FA, summarize: impl FnOnce(A) -> FB) -> Result<Option<B>, String>
+async fn each_gated<A, B, FA, FB>(db: &crate::db::Database, router: &AiRouter, classify: impl FnOnce() -> FA, summarize: impl FnOnce(A) -> FB) -> Result<Option<B>, String>
 where
     FA: std::future::Future<Output = Result<A, String>>,
     FB: std::future::Future<Output = Result<B, String>>,
 {
-    if !may_read_google_content(db) {
+    if !may_read_google_content(db, router).await {
         return Ok(None);
     }
     let classified = classify().await?;
-    if !may_read_google_content(db) {
+    if !may_read_google_content(db, router).await {
         return Ok(None);
     }
     summarize(classified).await.map(Some)
 }
 
-/// Whether the briefing may read Gmail and Calendar content for the chosen AI
-/// (ai::mail_policy). Not skipped silently (P06): what stands in the way is
-/// raised once per launch.
-fn may_read_google_content(db: &crate::db::Database) -> bool {
-    match crate::ai::mail_policy::check(db) {
+/// Whether the briefing may read Gmail and Calendar content on `router`,
+/// the one it runs on (ai::mail_policy::may_send_on; review B, r4-m1). Not
+/// skipped silently (P06): what stands in the way is raised once per launch.
+async fn may_read_google_content(db: &crate::db::Database, router: &AiRouter) -> bool {
+    match crate::ai::mail_policy::may_send_on(db, router).await {
         Ok(()) => true,
         Err(blocked) => {
             log::info!("[daily_briefing] email is not shared with the chosen AI ({}), skipping", blocked.code());
@@ -501,19 +503,25 @@ mod tests {
     /// 2026-11-17): no briefing goes to a service JARVIS cannot confirm
     /// (Kimi), even after the user agreed to its terms; Gemini with billing
     /// confirmed and a safe provider (OpenAI) get it.
-    #[test]
-    fn the_briefing_runs_only_on_an_ai_that_may_receive_google_content() {
+    #[tokio::test]
+    async fn the_briefing_runs_only_on_an_ai_that_may_receive_google_content() {
         use crate::ai::mail_policy::test_support::{agree_to_gemini, agree_to_kimi, use_ai, KIMI};
         let db = crate::db::test_database();
+        // The router a briefing starting now would run on.
+        let runs_on = |db: &crate::db::Database| {
+            let mut router = crate::ai::AiRouter::new("").without_keys();
+            router.load_from_db(db);
+            router
+        };
         use_ai(&db, "openai", KIMI);
         agree_to_kimi(&db);
-        assert!(!super::may_read_google_content(&db));
+        assert!(!super::may_read_google_content(&db, &runs_on(&db)).await);
         use_ai(&db, "gemini", None);
-        assert!(!super::may_read_google_content(&db), "billing not confirmed yet");
+        assert!(!super::may_read_google_content(&db, &runs_on(&db)).await, "billing not confirmed yet");
         agree_to_gemini(&db);
-        assert!(super::may_read_google_content(&db));
+        assert!(super::may_read_google_content(&db, &runs_on(&db)).await);
         use_ai(&db, "openai", None);
-        assert!(super::may_read_google_content(&db));
+        assert!(super::may_read_google_content(&db, &runs_on(&db)).await);
     }
 
     /// The gate is asked again before each of the briefing's two requests
@@ -527,8 +535,11 @@ mod tests {
         use_ai(&db, "gemini", None);
         agree_to_gemini(&db);
         let summarized = std::cell::Cell::new(false);
+        let mut router = crate::ai::AiRouter::new("").without_keys();
+        router.load_from_db(&db);
         let done = super::each_gated(
             &db,
+            &router,
             || async {
                 crate::ai::consent::revoke(&db, &gemini).unwrap();
                 Ok("classified")
@@ -543,11 +554,43 @@ mod tests {
         assert!(!summarized.get(), "the summary was not asked for");
 
         let classified = std::cell::Cell::new(false);
-        let done = super::each_gated(&db, || async { classified.set(true); Ok(1) }, |n| async move { Ok(n + 1) }).await;
+        let done = super::each_gated(&db, &router, || async { classified.set(true); Ok(1) }, |n| async move { Ok(n + 1) }).await;
         assert_eq!(done, Ok(None));
         assert!(!classified.get(), "nothing was sent");
         agree_to_gemini(&db);
-        assert_eq!(super::each_gated(&db, || async { Ok(1) }, |n| async move { Ok(n + 1) }).await, Ok(Some(2)));
+        assert_eq!(super::each_gated(&db, &router, || async { Ok(1) }, |n| async move { Ok(n + 1) }).await, Ok(Some(2)));
+    }
+
+    /// The briefing's gates judge the router it runs on (review B, r4-m1).
+    /// Gemini is chosen and agreed to and the briefing begins; while it
+    /// classifies, the user chooses Claude and withdraws Gemini. The summary
+    /// would still go to Gemini, so it is not asked for.
+    #[tokio::test]
+    async fn a_briefing_judges_the_ai_it_runs_on_not_one_chosen_since() {
+        use crate::ai::mail_policy::test_support::{agree_to_gemini, use_ai};
+        let db = crate::db::test_database();
+        use_ai(&db, "gemini", None);
+        agree_to_gemini(&db);
+        let mut router = crate::ai::AiRouter::new("").without_keys();
+        router.load_from_db(&db);
+        let summarized = std::cell::Cell::new(false);
+        let done = super::each_gated(
+            &db,
+            &router,
+            || async {
+                use_ai(&db, "claude", None);
+                crate::ai::consent::revoke(&db, &crate::ai::consent::Subject { provider: "gemini".into(), base_url: String::new() }).unwrap();
+                Ok("classified")
+            },
+            |_classified| async {
+                summarized.set(true);
+                Ok("summary")
+            },
+        )
+        .await;
+        assert_eq!(crate::ai::mail_policy::check(&db), Ok(()), "the choice saved now, Claude, may receive mail");
+        assert_eq!(done, Ok(None));
+        assert!(!summarized.get(), "the summary was not asked of Gemini");
     }
 
     /// The briefing is read out on this Mac: by the system voice, or
