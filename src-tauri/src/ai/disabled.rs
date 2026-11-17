@@ -15,6 +15,7 @@
 //! Only a model the user saved is checked. An empty choice follows the
 //! registry's default, which registry/validate.ts keeps active.
 
+use super::bedrock::UiLanguage;
 use super::ProviderChainEntry;
 use crate::db::Database;
 use serde::{Deserialize, Serialize};
@@ -33,11 +34,19 @@ pub struct Disabled {
 }
 
 impl Disabled {
-    /// What a stopped request reports and a background run records.
-    pub fn message(&self) -> String {
+    /// What a stopped request reports and a background run records, in the
+    /// app's language (Settings, as the Bedrock errors are).
+    pub(crate) fn message(&self, language: UiLanguage) -> String {
+        let model = &self.model;
         match &self.replacement {
-            Some(replacement) => format!("模型 {} 已停用，請選擇替代模型（建議：{replacement}）。未確認前不會改用其他模型。", self.model),
-            None => format!("模型 {} 已停用，請在設定選擇替代模型。未選擇前不會改用其他模型。", self.model),
+            Some(replacement) => language.pick(
+                format!("The model {model} has been turned off. Choose a replacement (suggested: {replacement}); JARVIS will not switch to another model until you confirm."),
+                format!("模型 {model} 已停用，請選擇替代模型（建議：{replacement}）。未確認前不會改用其他模型。"),
+            ),
+            None => language.pick(
+                format!("The model {model} has been turned off. Choose a replacement in Settings; JARVIS will not switch to another model until you choose one."),
+                format!("模型 {model} 已停用，請在設定選擇替代模型。未選擇前不會改用其他模型。"),
+            ),
         }
     }
 }
@@ -89,8 +98,8 @@ fn should_raise(disabled: &Disabled, foreground: bool) -> bool {
 }
 
 /// Stop the request: log it (the model id only), raise the notice, and
-/// return the message the request fails with.
-pub fn stop(disabled: Disabled, foreground: bool) -> String {
+/// return the message the request fails with, in `language`.
+pub(crate) fn stop(disabled: Disabled, foreground: bool, language: UiLanguage) -> String {
     log::warn!(
         "registry: {} model {} is disabled; request not sent ({})",
         disabled.provider,
@@ -103,7 +112,7 @@ pub fn stop(disabled: Disabled, foreground: bool) -> String {
             let _ = app.emit("model-disabled", &disabled);
         }
     }
-    disabled.message()
+    disabled.message(language)
 }
 
 // ---------------------------------------------------------------------------
@@ -270,11 +279,22 @@ mod tests {
     }
 
     #[test]
-    fn the_message_names_the_replacement_and_never_switches() {
+    fn the_message_names_the_replacement_and_never_switches_in_the_apps_language() {
         let with = Disabled { provider: "openai".into(), model: "gpt-5.6-luna".into(), replacement: Some("gpt-6-luna".into()) };
-        assert!(with.message().contains("gpt-5.6-luna") && with.message().contains("gpt-6-luna") && with.message().contains("請選擇替代模型"));
+        let zh = with.message(UiLanguage::ZhHk);
+        assert!(zh.contains("gpt-5.6-luna") && zh.contains("gpt-6-luna") && zh.contains("請選擇替代模型"), "{zh}");
+        let en = with.message(UiLanguage::En);
+        assert!(en.contains("gpt-5.6-luna") && en.contains("gpt-6-luna") && en.contains("Choose a replacement") && en.contains("until you confirm"), "{en}");
+        assert!(!en.chars().any(|c| ('\u{4e00}'..='\u{9fff}').contains(&c)), "the English message has no Chinese: {en}");
         let without = Disabled { replacement: None, ..with };
-        assert!(without.message().contains("請在設定選擇替代模型"));
+        assert!(without.message(UiLanguage::ZhHk).contains("請在設定選擇替代模型"));
+        assert!(without.message(UiLanguage::En).contains("Choose a replacement in Settings"));
+        // The language is the one Settings saved.
+        let db = crate::db::test_database();
+        let stopped = || stop(without.clone(), true, UiLanguage::read(&db));
+        assert!(stopped().starts_with("The model "));
+        db.conn.lock().unwrap().execute("INSERT OR REPLACE INTO user_preferences (key, value) VALUES ('ui_locale', 'zh-HK')", []).unwrap();
+        assert!(stopped().starts_with("模型 "));
     }
 
     #[test]

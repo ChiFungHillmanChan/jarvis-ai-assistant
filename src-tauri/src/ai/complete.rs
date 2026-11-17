@@ -59,7 +59,7 @@ pub async fn complete(router: &AiRouter, db: &Database, request: Request<'_>) ->
         // A saved model the registry disabled: nothing is sent, and no
         // other entry answers in its place (ai/disabled.rs).
         if let Err(stopped) = super::disabled::check_entry(entry) {
-            return Err(super::disabled::stop(stopped, super::disabled::is_foreground(request.feature)));
+            return Err(super::disabled::stop(stopped, super::disabled::is_foreground(request.feature), super::bedrock::UiLanguage::read(db)));
         }
         let started = Instant::now();
         let answered = complete_one(router, db, entry, &request).await;
@@ -471,7 +471,7 @@ pub(crate) mod tests {
         let row = |position: i32, provider_type: &str, model_id: Option<&str>| ProviderChainEntry { position, provider_type: provider_type.into(), endpoint_id: None, model_id: model_id.map(str::to_string), enabled: true, base_url: None };
         router.set_provider_chain(vec![row(0, "openai", Some("gpt-5.6-luna")), row(1, "claude", None)]);
         let error = complete(&router, &db, sort_request(true)).await.unwrap_err();
-        let expected = crate::ai::disabled::Disabled { provider: "openai".into(), model: "gpt-5.6-luna".into(), replacement: Some("gpt-6-luna".into()) }.message();
+        let expected = crate::ai::disabled::Disabled { provider: "openai".into(), model: "gpt-5.6-luna".into(), replacement: Some("gpt-6-luna".into()) }.message(super::super::bedrock::UiLanguage::En);
         assert_eq!(error, expected, "the run records why it did not run");
         assert!(crate::ai::cost::tests::usage_rows(&db).is_empty(), "nothing was sent");
     }

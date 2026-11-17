@@ -799,7 +799,7 @@ impl AiRouter {
             // A saved model the registry disabled stops the turn here: no
             // request is sent, and the next entry is not tried in its place.
             if let Err(stopped) = disabled::check_entry(entry) {
-                return Err(disabled::stop(stopped, disabled::is_foreground(cost::current_feature())));
+                return Err(disabled::stop(stopped, disabled::is_foreground(cost::current_feature()), bedrock::UiLanguage::read(db)));
             }
 
             let provider_name = match entry.provider_type.as_str() {
