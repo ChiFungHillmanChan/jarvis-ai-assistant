@@ -249,7 +249,7 @@ pub async fn send_local(
             messages: local_messages.clone(),
             tools: request_tools.clone(),
             tool_choice: (final_round && request_tools.is_some()).then_some("none"),
-            max_tokens: Some(4096.min(context_length / 2)),
+            max_tokens: Some(crate::ai::models::local_chat_max_output_tokens(context_length)),
             stream: true,
             response_format: if use_response_format {
                 Some(json!({"type": "json_object"}))

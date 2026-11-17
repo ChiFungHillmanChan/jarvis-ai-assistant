@@ -1,6 +1,6 @@
 {
-  "version": 1,
-  "issued_at": "2026-11-13T00:00:00Z",
+  "version": 3,
+  "issued_at": "2026-11-17T17:03:55Z",
   "min_app_version": "0.5.11",
   "providers": [
     {
@@ -172,6 +172,7 @@
       "model_id_pattern": null,
       "default_for": [],
       "limits": {
+        "chat_max_output_tokens": 4096,
         "completion_context_tokens": 8192,
         "default_context_tokens": 4096,
         "max_tool_rounds": 5
@@ -451,7 +452,7 @@
       "replacement": null,
       "managed": false,
       "prices": {
-        "input": 0.1,
+        "input": 0.11,
         "output": 0.5,
         "cache_read": 0.01,
         "cache_write": 0.125,
@@ -700,8 +701,8 @@
       "provider": "claude",
       "kind": "model",
       "display_name": {
-        "en": "Claude Sonnet 4.6",
-        "zh-HK": "Claude Sonnet 4.6"
+        "en": "Claude Sonnet 4.6 QA",
+        "zh-HK": "Claude Sonnet 4.6 QA"
       },
       "status": "active",
       "replacement": null,
@@ -1935,6 +1936,14 @@
     },
     "cloud_triage": {
       "jarvis_ai": "jarvis-ai"
+    }
+  },
+  "feature_limits": {
+    "mail_analysis": {
+      "max_output_tokens": 4096
+    },
+    "mail_sort": {
+      "max_output_tokens": 4096
     }
   },
   "chat_model_filter": {
