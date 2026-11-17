@@ -673,6 +673,8 @@ async fn a_limit_outside_its_bound_rejects_the_whole_copy() {
         ("openai", "chat_reasoning_effort", json!("maximal"), json!("xhigh"), "is not one of none, minimal, low, medium, high, xhigh".into()),
         ("claude", "api_version", json!("2023-6-01"), json!("2023-06-01"), "is not a date (YYYY-MM-DD)".into()),
         ("claude", "api_version", json!("v2023-06-01"), json!("2099-12-31"), "is not a date (YYYY-MM-DD)".into()),
+        ("claude", "api_version", json!("2023-06-011"), json!("2023-06-01"), "is not a date (YYYY-MM-DD)".into()),
+        ("claude", "api_version", json!("2023-0a-01"), json!("2023-06-01"), "is not a date (YYYY-MM-DD)".into()),
     ];
     for (id, field, outside, inside, why) in cases {
         let case = format!("{id}.{field} = {outside}");

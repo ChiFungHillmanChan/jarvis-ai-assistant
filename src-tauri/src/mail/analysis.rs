@@ -2147,6 +2147,26 @@ mod tests {
         assert!(error.starts_with("The model gpt-5.6-luna has been turned off") && error.contains("gpt-6-luna"), "in the app's language: {error}");
     }
 
+    /// Through the whole analysis call: the disabled message is in the
+    /// language Settings saved, and nothing reaches the (loopback) OpenAI.
+    #[tokio::test]
+    async fn analysis_reports_a_disabled_model_in_the_apps_language() {
+        let db = crate::db::test_database();
+        let _registry = crate::ai::registry::test_override::with(|r| {
+            let entry = r.models.iter_mut().find(|m| m.id == "gpt-5.6-luna").unwrap();
+            entry.status = crate::ai::registry::Status::Disabled;
+            entry.replacement = Some("gpt-6-luna".into());
+        });
+        let server = HttpFixture::start(vec![]).await;
+        let analyze = || analyze_with_endpoints(context("openai", "gpt-5.6-luna", vec![message(1, "正文")]), None, Some(OPENAI_FIXTURE_KEY.into()), None, server.port, OpenAiEndpoint::Loopback(server.port), Some(&db));
+        let english = analyze().await.err().unwrap();
+        assert!(english.starts_with("The model gpt-5.6-luna has been turned off"), "{english}");
+        db.conn.lock().unwrap().execute("INSERT OR REPLACE INTO user_preferences (key, value) VALUES ('ui_locale', 'zh-HK')", []).unwrap();
+        let chinese = analyze().await.err().unwrap();
+        assert!(chinese.starts_with("模型 gpt-5.6-luna 已停用"), "{chinese}");
+        assert!(server.finish().await.is_empty(), "nothing was sent");
+    }
+
     #[test]
     fn rejects_unknown_modes_and_unsafe_or_empty_model_ids_in_written_chinese() {
         let now = Utc.with_ymd_and_hms(2026, 9, 10, 12, 0, 0).unwrap();
