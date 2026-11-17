@@ -128,8 +128,9 @@ pub fn run() {
 
             let ai_provider = {
                 let conn = db.conn.lock().unwrap();
+                // None saved: the registry's default preset (ai::preset_chain).
                 conn.query_row("SELECT value FROM user_preferences WHERE key = 'ai_provider'", [], |row| row.get::<_, String>(0))
-                    .unwrap_or_else(|_| "gemini_primary".to_string())
+                    .unwrap_or_default()
             };
             log::info!("AI provider: {}", ai_provider);
             let mut router = AiRouter::new(&ai_provider);

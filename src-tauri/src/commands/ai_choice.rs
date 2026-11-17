@@ -131,7 +131,8 @@ pub(crate) fn rebuilt_router(db: &Database) -> AiRouter {
         .lock()
         .ok()
         .and_then(|conn| conn.query_row("SELECT value FROM user_preferences WHERE key='ai_provider'", [], |r| r.get::<_, String>(0)).ok())
-        .unwrap_or_else(|| "gemini_primary".into());
+        // None saved: the registry's default preset (ai::preset_chain).
+        .unwrap_or_default();
     let mut router = AiRouter::new(&provider);
     router.load_from_db(db);
     router.reload_keys();
