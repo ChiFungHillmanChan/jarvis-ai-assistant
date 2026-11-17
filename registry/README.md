@@ -28,9 +28,9 @@
 | `tests/registry-publish.test.ts`：以替身 `aws` 指令測試 `publish.sh`，不連接 AWS | PR 檢查；Registry workflow 簽署前；`npm run test:frontend` |
 | `tests/registry.test.ts`：與 `src-tauri/src/ai/models.rs` 等現有程式碼逐項對照、驗證器的拒絕情況、簽署格式 | PR 檢查；`npm run test:frontend`（本機，以及推送至 `main` 後的 CI）。**不會**在簽署前執行，因此不會阻止發佈 |
 
-PR 檢查只讀取，沒有 environment、secret 或 AWS 權限。除了 `registry/`、registry 的測試及 workflow，PR 檢查亦會在測試所對照的程式碼（例如 `src-tauri/src/ai/models.rs`、`src/pages/Settings.tsx`）或 `package.json`、`package-lock.json` 有改動時執行；如測試讀取了 workflow 的 `paths` 沒有列出的檔案，`tests/registry.test.ts` 的最後一項測試會失敗。PR 改動了 `registry.json` 而 base 分支已有該檔案時，版本必須高於 base 分支的版本；`registry.json` 沒有改動的 PR（例如只改說明或測試）毋須提高版本。
+PR 檢查只讀取，沒有 environment、secret 或 AWS 權限。除了 `registry/`、registry 的測試及 workflow，PR 檢查亦會在測試讀取的其他檔案（App 測試所用的凍結副本 `src-tauri/src/ai/registry/fixture.json` 及 `src-tauri/tauri.conf.json`）或 `package.json`、`package-lock.json` 有改動時執行；如測試讀取了 workflow 的 `paths` 沒有列出的檔案，`tests/registry.test.ts` 的最後一項測試會失敗。PR 改動了 `registry.json` 而 base 分支已有該檔案時，版本必須高於 base 分支的版本；`registry.json` 沒有改動的 PR（例如只改說明或測試）毋須提高版本。
 
-P05 令 App 改讀註冊表之前，`tests/registry.test.ts` 會把註冊表與現時程式碼逐項比對：修改 App 目前寫死的數值（例如 `models.rs` 的價格）會令 PR 檢查及 `npm run test:frontend` 失敗，但不會阻止發佈。這是刻意的：在 P05 之前，改動註冊表不會改變 App 的行為。P05 令 App 改讀註冊表時，這些對照 `models.rs` 等程式碼的鎖定會從測試移除。JARVIS AI 的設定（`managed`）及各模型的 `status` 沒有被測試鎖定，可直接修改；它們的數值以擁有人的決定及審查為準，驗證器只檢查必須一直成立的規則。驗證器對 `managed.hkd_per_usd` 的檢查是港元聯繫匯率的兌換範圍 7.75 至 7.85；匯率如須設於這個範圍之外，必須在同一個 PR 一併修改驗證器。
+自 P05 起，App 直接讀取註冊表，測試不再把註冊表與程式碼比對：修改價格、預設模型或上限毋須改動任何測試。App 的 Rust 測試及 `registry/lookup.ts` 的查詢測試使用凍結的副本 `src-tauri/src/ai/registry/fixture.json`（即首次發佈的第 1 版），因此改動 `registry.json` 不會令這些測試失敗；隨 App 發佈的副本則由 `the_bundled_registry_is_usable` 等 Rust 測試檢查是否可用，包括 App 讀取的每個上限。JARVIS AI 的設定（`managed`）及各模型的 `status` 沒有被測試鎖定，可直接修改；它們的數值以擁有人的決定及審查為準，驗證器只檢查必須一直成立的規則。驗證器對 `managed.hkd_per_usd` 的檢查是港元聯繫匯率的兌換範圍 7.75 至 7.85；匯率如須設於這個範圍之外，必須在同一個 PR 一併修改驗證器。
 
 ## 修改流程
 
@@ -88,6 +88,8 @@ P05 令 App 改讀註冊表之前，`tests/registry.test.ts` 會把註冊表與�
 - `min_app_version` 高於 App 版本時，繼續使用 App 內置的資料。
 - 註冊表的 `base_url` 不可改變使用者金鑰的發送目的地；App 須把各服務商的主機名稱固定或列入允許清單。
 - 給 P05：目前沒有任何欄位或機制令註冊表過期。所有已簽署的版本都保留在 bucket 內，而且永遠能通過驗證；能寫入 `registry/*` 的人可以把 `latest.json` 指回較舊的已簽署版本，只有上述下限會拒絕它。
+
+App 的做法（P05，`src-tauri/src/ai/registry/`）：啟動時先用簽章有效、版本高於內置副本而且 `min_app_version` 符合的快取副本，否則用內置副本，啟動時不連網。之後在啟動時、每 6 小時及 Mac 喚醒後以 `If-None-Match` 取得遠端副本；只有簽章有效、版本高於目前使用及曾見過的最高版本、而且 `min_app_version` 符合的副本才會取代快取。被拒的副本只記錄原因，不記錄內容。資料條款以內置副本為下限，只可收緊；遠端副本新增的服務商一律視為 `unknown`，其 `base_url`、地區及主機名稱都不會被使用。被停用的模型不會自動改用替代模型：App 會提示使用者確認，確認前使用該模型的請求會停止，背景工作亦不會執行。正式版本的端點於編譯時以 `JARVIS_REGISTRY_URL` 指定；未指定時 App 只使用內置副本。
 
 ## 回滾
 

@@ -8,8 +8,9 @@ name: Registry check
 # published again, so it needs no new version.
 #
 # The paths are the registry, its tests and workflows, the files those tests
-# read elsewhere in the repository (the code they compare the registry with),
-# and the package files the type check and the validator install from. The
+# read elsewhere in the repository, and the package files the type check and
+# the validator install from. Since P05 the app reads the registry itself, so
+# no test compares it with the app's code. The
 # last test in tests/registry.test.ts fails when a test reads a file these
 # paths miss.
 #
@@ -27,28 +28,10 @@ on:
       # Installed by npm ci; the type check and the validator depend on them.
       - "package.json"
       - "package-lock.json"
-      # Read by tests/registry.test.ts (the code the registry must match).
-      - "src-tauri/migrations/V30__choose_one_ai.sql"
-      - "src-tauri/src/ai/bedrock.rs"
-      - "src-tauri/src/ai/claude.rs"
-      - "src-tauri/src/ai/compat.rs"
-      - "src-tauri/src/ai/complete.rs"
-      - "src-tauri/src/ai/gemini.rs"
-      - "src-tauri/src/ai/local/mod.rs"
-      - "src-tauri/src/ai/mail_policy.rs"
-      - "src-tauri/src/ai/mod.rs"
-      - "src-tauri/src/ai/models.rs"
-      - "src-tauri/src/ai/openai.rs"
-      - "src-tauri/src/aws/model_list.rs"
-      - "src-tauri/src/commands/ai_choice.rs"
-      - "src-tauri/src/mail/models.rs"
-      - "src-tauri/src/voice/minimax.rs"
-      - "src-tauri/src/voice/model_manager.rs"
-      - "src-tauri/src/voice/transcribe.rs"
+      # Read by tests/registry.test.ts: the frozen copy the app's tests and
+      # the lookup cases run on, and the updater key signing must not reuse.
+      - "src-tauri/src/ai/registry/fixture.json"
       - "src-tauri/tauri.conf.json"
-      - "src/components/ChooseAi.tsx"
-      - "src/lib/ai-choice.ts"
-      - "src/pages/Settings.tsx"
       # Read by tests/registry-publish.test.ts (the read Lambda's key and metadata name).
       - "infra/lambda/registry/index.ts"
 
