@@ -886,14 +886,23 @@ mod tests {
     /// under what OpenAI saw), then the user picks OpenAI in the card for a
     /// mail question. The answer and its note.
     async fn picked_after_moving_to(chosen: impl FnOnce(&Database)) -> (Arc<Database>, ChatMessage) {
+        let db = moved_and_answered(chosen);
+        let answer = on_pick(&db, Some(openai_pick(None)), a_mail_turn(db.clone())).await.unwrap();
+        (db, answer)
+    }
+
+    fn moved_and_answered(chosen: impl FnOnce(&Database)) -> Arc<Database> {
         let db = Arc::new(crate::db::test_database());
         crate::ai::mail_policy::test_support::use_ai(&db, "openai", None);
         crate::ai::mail_policy::withheld(&db);
         chosen(&db);
         save_turn(&db, "s1", "hello").unwrap();
         persist_scoped_reply(&db.conn.lock().unwrap(), "Hi", "s1").unwrap();
-        let answer = on_pick(&db, Some(openai_pick(None)), a_mail_turn(db.clone())).await.unwrap();
-        (db, answer)
+        db
+    }
+
+    fn kimi(db: &Database) {
+        crate::ai::mail_policy::test_support::use_ai(db, "openai", crate::ai::mail_policy::test_support::KIMI);
     }
 
     fn newest(db: &Database, table: &str) -> i64 {
@@ -916,12 +925,29 @@ mod tests {
     #[tokio::test]
     async fn a_picked_answer_to_a_mail_question_is_not_replayed_to_an_ai_that_may_not_receive_it() {
         let (db, answer) = picked_after_moving_to(|db| {
-            crate::ai::mail_policy::test_support::use_ai(db, "openai", crate::ai::mail_policy::test_support::KIMI);
+            kimi(db);
             crate::ai::mail_policy::test_support::agree_to_kimi(db);
         })
         .await;
         assert_next_turn_sees_none_of_it(&db);
         assert_eq!(answer.note.as_deref(), Some("Kimi will not see this answer or the chat before it: Gmail and Calendar content is not sent to Kimi."));
+    }
+
+    /// While a picked turn runs, a job on the saved choice (a background
+    /// read on Kimi) is shown none of what the turn has saved so far.
+    #[tokio::test]
+    async fn while_a_picked_turn_runs_the_chosen_ai_is_shown_none_of_it() {
+        let db = moved_and_answered(kimi);
+        let turn = db.clone();
+        on_pick(&db, Some(openai_pick(None)), async move {
+            let answer = a_mail_turn(turn.clone()).await?;
+            let line = crate::ai::capability::unpicked(|| crate::ai::mail_policy::withheld(&turn));
+            assert!(line.conversations >= newest(&turn, "conversations"), "{line:?}");
+            assert!(line.memories >= newest(&turn, "user_memory") && line.tasks >= newest(&turn, "tasks"), "{line:?}");
+            Ok(answer)
+        })
+        .await
+        .unwrap();
     }
 
     /// (3) Gemini as the chosen AI, its billing not confirmed.
@@ -938,7 +964,7 @@ mod tests {
     /// (4) Choosing an AI that may receive it lifts the line, as a move does.
     #[tokio::test]
     async fn moving_to_an_ai_that_may_receive_google_content_lifts_it() {
-        let (db, _) = picked_after_moving_to(|db| crate::ai::mail_policy::test_support::use_ai(db, "openai", crate::ai::mail_policy::test_support::KIMI)).await;
+        let (db, _) = picked_after_moving_to(kimi).await;
         assert_next_turn_sees_none_of_it(&db);
         crate::ai::mail_policy::test_support::use_ai(&db, "openai", None);
         let (_, history) = save_turn(&db, "s1", "Thanks").unwrap();
