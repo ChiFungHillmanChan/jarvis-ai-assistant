@@ -54,6 +54,9 @@ test('a base URL is named by the registry service whose host it is on, else by i
   assert.equal(serviceLabel(catalog, 'https://API.DeepSeek.com/v1'), 'api.deepseek.com');
   assert.equal(serviceLabel(catalog, 'not a url'), 'not a url');
   assert.equal(serviceFor(null, 'https://api.moonshot.ai/v1'), null);
+  // Only at a label boundary, as ai/compat.rs matches.
+  assert.equal(serviceFor(catalog, 'https://moonshot.ai/v1')?.id, 'kimi');
+  for (const fake of ['https://evilmoonshot.ai/v1', 'https://moonshot.ai.evil.example/v1', 'https://x-aliyuncs.com/v1']) assert.equal(serviceFor(catalog, fake), null, fake);
 });
 
 test('setup offers the registry services in its order, only those this build has a form for', () => {

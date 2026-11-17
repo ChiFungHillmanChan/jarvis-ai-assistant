@@ -25,11 +25,16 @@ function hostOf(baseUrl: string): string | null {
   try { return new URL(baseUrl).hostname.toLowerCase(); } catch { return null; }
 }
 
+/** Whether `host` is `suffix` or a name under it, as ai/compat.rs `on_host`: "evilmoonshot.ai" is not on "moonshot.ai". */
+export function onHost(host: string, suffix: string): boolean {
+  return host === suffix || host.endsWith(`.${suffix}`);
+}
+
 /** The compatible service a base URL is on, matched on its hosts as ai/compat.rs does. */
 export function serviceFor(catalog: AiModelCatalog | null, baseUrl: string): CompatibleService | null {
   const host = hostOf(baseUrl);
   if (!catalog || !host) return null;
-  return catalog.compatible.find(service => service.host_suffixes.some(suffix => host.endsWith(suffix))) ?? null;
+  return catalog.compatible.find(service => service.host_suffixes.some(suffix => onHost(host, suffix))) ?? null;
 }
 
 /** The name shown for a base URL: the service's, else its host (compat::label). */

@@ -38,10 +38,16 @@ pub fn key_account(base_url: &str) -> String {
 pub fn provider_for(base_url: &str) -> Option<&'static str> {
     let host = host(base_url);
     let registry = super::registry::current();
-    let found = registry.providers.iter().find(|p| p.host_suffixes.iter().any(|suffix| host.ends_with(suffix.as_str())))?;
+    let found = registry.providers.iter().find(|p| p.host_suffixes.iter().any(|suffix| on_host(&host, suffix)))?;
     // A &'static name for the few ids this build has code for; any other
     // provider is "another service".
     ["kimi", "qwen", "gemini_compat"].into_iter().find(|id| *id == found.id)
+}
+
+/// Whether `host` is `suffix` or a name under it: "api.moonshot.ai" is on
+/// "moonshot.ai", "evilmoonshot.ai" is not.
+pub(crate) fn on_host(host: &str, suffix: &str) -> bool {
+    host == suffix || host.strip_suffix(suffix).is_some_and(|rest| rest.ends_with('.'))
 }
 
 /// Whether the base URL is OpenAI's own API (the registry's `openai` address).
@@ -165,5 +171,30 @@ mod tests {
         assert_eq!(label(KIMI_GLOBAL), host(KIMI_GLOBAL), "a host the registry no longer lists is not the service");
         assert_eq!(provider_for("https://api.kimi.example/v1"), Some("kimi"), "the hosts are the registry's");
         assert_eq!(label("https://api.kimi.example/v1"), "Moonshot");
+    }
+
+    /// A host matches a service's suffix only at a label boundary: every
+    /// real host the registry lists still matches, a look-alike does not.
+    /// (Main matched any host that ended with the suffix.)
+    #[test]
+    fn a_look_alike_host_is_not_the_service() {
+        let registry = crate::ai::registry::current();
+        let services: Vec<_> = registry.providers.iter().filter(|p| !p.host_suffixes.is_empty()).collect();
+        assert!(!services.is_empty());
+        for provider in services {
+            let id = provider.id.as_str();
+            for region in &provider.regions {
+                assert_eq!(provider_for(&region.base_url).unwrap_or("none"), id, "{}", region.base_url);
+            }
+            for suffix in &provider.host_suffixes {
+                assert_eq!(provider_for(&format!("https://{suffix}/v1")).unwrap_or("none"), id, "the suffix itself");
+                assert_eq!(provider_for(&format!("https://api.{suffix}/v1")).unwrap_or("none"), id, "a name under it");
+                for fake in [format!("evil{suffix}"), format!("{suffix}.evil.example"), format!("x-{suffix}")] {
+                    assert_eq!(provider_for(&format!("https://{fake}/v1")), None, "{fake}");
+                }
+            }
+        }
+        assert_eq!(provider_for("https://generativelanguage.googleapis.com/v1beta/openai"), Some("gemini_compat"));
+        assert!(on_host("a.b.c", "b.c") && on_host("b.c", "b.c") && !on_host("ab.c", "b.c") && !on_host("c", "b.c"));
     }
 }
