@@ -284,17 +284,24 @@ impl SideEffectLedger {
 
 /// The model a request runs on (P06): the first enabled row of the chain the
 /// user saved. The other rows are never tried in its place; they are offered
-/// in the error card. For the built-in chain nobody saved (an install from
-/// before setup asked), the first row with credentials counts as the choice,
-/// since nobody chose and there is nothing to switch away from. None: no AI
-/// chosen.
+/// in the error card. For the built-in chain nobody saved, see
+/// [`unsaved_chain_choice`]. None: no AI chosen.
 pub(crate) fn chosen_entry(chain: &[ProviderChainEntry], saved: bool, configured: &[ProviderChainEntry]) -> Option<ProviderChainEntry> {
-    let mut enabled = chain.iter().filter(|entry| entry.enabled);
     if saved {
-        return enabled.next().cloned();
+        return chain.iter().find(|entry| entry.enabled).cloned();
     }
+    unsaved_chain_choice(chain, configured)
+}
+
+/// The choice for a chain nobody saved (DECISIONS, P06 "Failure handling",
+/// point 2): the first enabled row that has credentials counts as the
+/// user's choice, since nobody chose and there is nothing to switch away
+/// from. These are installs with no provider_chain rows: betas from before
+/// setup asked for an AI, where Settings → Provider priority was never
+/// saved, and new installs with a key but setup's AI step not finished.
+fn unsaved_chain_choice(chain: &[ProviderChainEntry], configured: &[ProviderChainEntry]) -> Option<ProviderChainEntry> {
     let has_credentials = |entry: &&ProviderChainEntry| configured.iter().any(|c| c.provider_type == entry.provider_type && c.base_url == entry.base_url && c.endpoint_id == entry.endpoint_id);
-    enabled.find(has_credentials).cloned()
+    chain.iter().filter(|entry| entry.enabled).find(has_credentials).cloned()
 }
 
 /// The wait before the one resend to the same model after a transient
@@ -1248,6 +1255,29 @@ mod tests {
         let (result, sent, _) = run_fake(None, None, &[], cost::Feature::Chat, &SideEffectLedger::new(), vec![]).await;
         assert!(sent.is_empty());
         assert_eq!(result.unwrap_err(), NO_AI_CHOSEN);
+    }
+
+    /// A chain nobody saved: the first enabled row with credentials, matched
+    /// on provider, address and endpoint, in the chain's order; none
+    /// without credentials.
+    #[test]
+    fn a_chain_nobody_saved_uses_its_first_enabled_row_with_credentials() {
+        let row = |provider: &str, base: Option<&str>, endpoint: Option<&str>| ProviderChainEntry { base_url: base.map(str::to_string), endpoint_id: endpoint.map(str::to_string), ..chosen_row(provider, None) };
+        let chain = [
+            ProviderChainEntry { enabled: false, ..row("claude", None, None) },
+            row("gemini", None, None),
+            row("openai", Some("https://api.moonshot.ai/v1"), None),
+            row("local", None, Some("lan")),
+            row("openai", None, None),
+        ];
+        let choice = |configured: &[ProviderChainEntry]| unsaved_chain_choice(&chain, configured).map(|r| (r.provider_type, r.base_url, r.endpoint_id));
+        assert_eq!(choice(&[row("claude", None, None)]), None, "a disabled row is never the choice");
+        assert_eq!(choice(&[row("openai", None, None), row("gemini", None, None)]), Some(("gemini".into(), None, None)), "the chain's order, not the keys'");
+        assert_eq!(choice(&[row("openai", None, None)]), Some(("openai".into(), None, None)), "an OpenAI key is not a Kimi key");
+        assert_eq!(choice(&[row("openai", Some("https://api.moonshot.ai/v1"), None)]), Some(("openai".into(), Some("https://api.moonshot.ai/v1".into()), None)));
+        assert_eq!(choice(&[row("local", None, Some("other"))]), None, "another endpoint is not this one");
+        assert_eq!(choice(&[row("local", None, Some("lan"))]), Some(("local".into(), None, Some("lan".into()))));
+        assert_eq!(choice(&[]), None);
     }
 
     /// The table stays as history (P05 replaces it with the registry), but
