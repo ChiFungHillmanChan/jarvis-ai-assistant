@@ -16,7 +16,7 @@ const ANALYSIS_CAP: u32 = 1_234;
 const SORT_CAP: u32 = 4_321;
 
 fn registry_with_caps() -> test_override::Guard {
-    assert!(ANALYSIS_CAP != crate::ai::models::OUTPUT_TOKENS_WHEN_UNSET && SORT_CAP != crate::ai::models::OUTPUT_TOKENS_WHEN_UNSET);
+    const { assert!(ANALYSIS_CAP != crate::ai::models::OUTPUT_TOKENS_WHEN_UNSET && SORT_CAP != crate::ai::models::OUTPUT_TOKENS_WHEN_UNSET) };
     test_override::with(|r| {
         r.feature_limits.insert("mail_analysis".into(), FeatureLimits { max_output_tokens: Some(ANALYSIS_CAP) });
         r.feature_limits.insert("mail_sort".into(), FeatureLimits { max_output_tokens: Some(SORT_CAP) });
