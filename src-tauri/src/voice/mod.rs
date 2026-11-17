@@ -445,10 +445,15 @@ mod tests {
     /// of the provider's reply, the audio or a transcript.
     #[test]
     fn a_failed_cloud_transcription_is_logged_without_its_content() {
-        let error = "Gemini API error 400 Bad Request: {\"error\":{\"message\":\"PRIVATE-TRANSCRIPT-CANARY\"}}";
+        // voice/transcribe.rs's own error shapes.
+        let error = "Gemini STT error 400 Bad Request: {\"error\":{\"message\":\"PRIVATE-TRANSCRIPT-CANARY\"}}";
         let line = super::cloud_failure_line("Gemini STT", error, true);
         assert_eq!(line, "[voice] cloud transcription on Gemini STT failed (BadRequest); transcribing on this Mac");
         assert!(!line.contains("CANARY"));
+        let busy = super::cloud_failure_line("GPT STT", "OpenAI STT error 503 Service Unavailable: PRIVATE-TRANSCRIPT-CANARY", false);
+        assert_eq!(busy, "[voice] cloud transcription on GPT STT failed (ServerError); no speech model on this Mac, the error is shown");
+        let offline = super::cloud_failure_line("GPT STT", "OpenAI STT error: error sending request for url", true);
+        assert!(offline.contains("(Unreachable)"), "{offline}");
     }
 
     use super::pick_key;

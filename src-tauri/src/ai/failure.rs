@@ -53,7 +53,9 @@ impl Code {
 /// strings, or in the "（<status>）" of complete.rs's own messages.
 fn status_in(err: &str) -> Option<u16> {
     let digits = |rest: &str| rest.split(|c: char| !c.is_ascii_digit()).next().and_then(|d| d.parse().ok());
-    if let Some(rest) = err.split(" API error ").nth(1) {
+    // "<provider> API error <status>: ..." from the chat wires, and
+    // "<provider> STT error <status>: ..." from voice/transcribe.rs.
+    if let Some(rest) = err.split(" API error ").nth(1).or_else(|| err.split(" STT error ").nth(1)) {
         return digits(rest);
     }
     err.split('（').skip(1).find_map(|rest| digits(rest).filter(|s: &u16| (100..600).contains(s)))
