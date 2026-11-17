@@ -93,7 +93,7 @@ pub fn get_curated_models(total_ram_gb: f64, pulled_ids: &[String]) -> Vec<Recom
             min_ram_gb: m.min_ram_gb,
             tool_capable: m.tool_capable,
             description: m.description.to_string(),
-            already_pulled: pulled_ids.iter().any(|p| *p == m.id),
+            already_pulled: pulled_ids.contains(&m.id),
         })
         .collect()
 }

@@ -212,7 +212,8 @@ fn chat_models(provider: &str, ids: Vec<String>) -> Vec<String> {
         .into_iter()
         .map(|id| id.trim_start_matches(filter.strip_prefix.as_str()).to_string())
         .filter(|id| pattern.as_ref().is_none_or(|re| re.is_match(id)))
-        .filter(|id| !filter.exclude_words.iter().any(|word| id.contains(word.as_str())) && !(filter.exclude_dated_snapshots && is_snapshot(id)))
+        .filter(|id| !filter.exclude_words.iter().any(|word| id.contains(word.as_str())))
+        .filter(|id| !filter.exclude_dated_snapshots || !is_snapshot(id))
         .collect();
     models.sort_by(|a, b| b.cmp(a));
     models.dedup();
