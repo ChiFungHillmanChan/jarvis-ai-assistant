@@ -4,7 +4,7 @@ import { markOnboardingComplete, setPreference } from '../lib/commands';
 import WindowControls from '../components/WindowControls';
 import '../styles/setup.css';
 
-export default function WelcomeGuide({ onComplete }: { onComplete: (next: 'setup' | 'workspace') => void }) {
+export default function WelcomeGuide({ onComplete }: { onComplete: (next: 'quick' | 'workspace') => void }) {
   const { locale, hasSavedChoice, setLocale, text } = useUiLocale();
   const [stage, setStage] = useState<'language' | 'guide'>(hasSavedChoice ? 'guide' : 'language');
   const [selected, setSelected] = useState<UiLocale>(locale);
@@ -19,7 +19,7 @@ export default function WelcomeGuide({ onComplete }: { onComplete: (next: 'setup
     else setError(true);
     operation.current = false; setBusy(false);
   }
-  async function finish(next: 'setup' | 'workspace') {
+  async function finish(next: 'quick' | 'workspace') {
     if (operation.current) return;
     operation.current = true; setBusy(true); setError(false);
     try {
@@ -62,7 +62,7 @@ export default function WelcomeGuide({ onComplete }: { onComplete: (next: 'setup
       </ol>
       <div className="setup-current"><h2>{text('Understand what leaves your Mac', '了解哪些資料會傳送至雲端')}</h2><p>{text('Your workspace is stored on this Mac. Cloud AI sends the content needed for a request to your selected provider; local mail AI requires a compatible installed model. The assistant and mail use the one AI you choose; voice has its own setting. Gmail sync downloads up to 50 messages per batch and is not a full mailbox backup.', '工作區資料儲存在此 Mac。使用雲端 AI 時，處理請求所需的內容會傳送至所選供應商；本機電郵 AI 則需要已安裝的相容模型。AI 助理及電郵使用你選擇的同一個 AI；語音另行設定。Gmail 每批最多同步 50 封郵件，並非完整信箱備份。')}</p></div>
       {error && <p className="setup-error" role="alert">{text('Could not save your progress. Please try again.', '未能儲存導引進度，請重試。')}</p>}
-      <footer className="setup-footer"><button className="setup-primary" disabled={busy} onClick={() => void finish('setup')}>{text('Choose your AI', '選擇你的 AI')}</button><button disabled={busy} onClick={() => void finish('workspace')}>{text('Explore the workspace', '先瀏覽工作區')}</button><button disabled={busy} onClick={() => { setSelected(locale); setError(false); setStage('language'); }}>{text('Change language', '變更語言')}</button></footer>
+      <footer className="setup-footer"><button className="setup-primary" disabled={busy} onClick={() => void finish('quick')}>{text('Quick setup', '快速設定')}</button><button disabled={busy} onClick={() => void finish('workspace')}>{text('Explore the workspace', '先瀏覽工作區')}</button><button disabled={busy} onClick={() => { setSelected(locale); setError(false); setStage('language'); }}>{text('Change language', '變更語言')}</button></footer>
       {busy && <p role="status">{text('Saving your progress…', '正在儲存導引進度…')}</p>}
     </main>}
   </div>;

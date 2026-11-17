@@ -1038,6 +1038,7 @@ async fn execute_calendar_tool(
             if !event_id.is_empty() && event_id != "unknown" {
                 crate::chat_session::tool_result(name, json!({"view":"calendar","accountId":"legacy-google","eventId":event_id}), json!({"title":title,"start":start,"end":end,"state":"created"}));
             }
+            mirror_event_days(db, token, &start, &end).await;
             Ok(format!("Event created: {}", result))
         }
         "update_event" => {
@@ -1055,6 +1056,7 @@ async fn execute_calendar_tool(
             if edits_shared_content(args) && !event_content_is_editable(db, event_id) {
                 return Ok(SHARED_EVENT_REFUSAL.to_string());
             }
+            let previous = local_event_times(db, event_id);
             let result = calendar::update_event(
                 token,
                 event_id,
@@ -1066,12 +1068,20 @@ async fn execute_calendar_tool(
             )
             .await?;
             crate::chat_session::tool_result(name, json!({"view":"calendar","accountId":"legacy-google","eventId":event_id}), json!({"state":"updated"}));
+            let new_start = start.or_else(|| previous.as_ref().map(|p| p.0.clone()));
+            let new_end = end.or_else(|| previous.as_ref().map(|p| p.1.clone()));
+            if let (Some(new_start), Some(new_end)) = (new_start, new_end) {
+                // The old row may sit on another day the refresh below does not cover.
+                forget_local_event(db, event_id);
+                mirror_event_days(db, token, &new_start, &new_end).await;
+            }
             Ok(format!("Event updated: {}", result))
         }
         "delete_event" => {
             let event_id = args["event_id"].as_str().unwrap_or("");
             let result = calendar::delete_event(token, event_id).await?;
             forget_local_event(db, event_id);
+            crate::chat_session::notify("calendar-changed");
             Ok(result)
         }
         _ => Err(format!("Unknown Calendar tool: {}", name)),
@@ -1105,6 +1115,60 @@ fn with_other_accounts(main: String, others: Vec<String>) -> String {
         return main;
     }
     format!("{}\n\nOther Google accounts (read-only):\n{}", main, others.join("\n"))
+}
+
+/// The Calendar page reads the local copy, so an event the assistant writes on
+/// Google is copied in straight away and the page is told to reload. Before
+/// this, a new or moved meeting only appeared after the next sync. A failure
+/// here leaves the write on Google intact and the next sync repairs the copy.
+async fn mirror_event_days(db: &crate::db::Database, token: &str, start: &str, end: &str) {
+    use crate::integrations::calendar;
+    if let Some((time_min, time_max)) = local_day_window(start, end, &chrono::Local) {
+        match calendar::fetch_events_detailed(token, &time_min, &time_max).await {
+            Ok(fetched) => {
+                if let Err(e) = calendar::save_to_db(db, &fetched, &time_min, &time_max, calendar::MAIN_ACCOUNT) {
+                    log::warn!("[calendar] local copy not refreshed after assistant change: {}", e);
+                }
+            }
+            Err(e) => log::warn!("[calendar] could not re-read changed days: {}", e),
+        }
+    }
+    crate::chat_session::notify("calendar-changed");
+}
+
+/// Local midnight of the first day the event touches to local midnight after
+/// its last day: the window `save_to_db` may reconcile. Accepts RFC3339 times
+/// and all-day `YYYY-MM-DD` dates.
+fn local_day_window<Tz>(start: &str, end: &str, tz: &Tz) -> Option<(String, String)>
+where
+    Tz: chrono::TimeZone,
+    Tz::Offset: std::fmt::Display,
+{
+    let day = |value: &str| {
+        chrono::DateTime::parse_from_rfc3339(value)
+            .map(|t| t.with_timezone(tz).date_naive())
+            .ok()
+            .or_else(|| chrono::NaiveDate::parse_from_str(value, "%Y-%m-%d").ok())
+    };
+    let first = day(start)?;
+    let last = day(end).unwrap_or(first).max(first);
+    let midnight = |d: chrono::NaiveDate| {
+        tz.from_local_datetime(&d.and_hms_opt(0, 0, 0)?)
+            .earliest()
+            .map(|t| t.to_rfc3339())
+    };
+    Some((midnight(first)?, midnight(last.succ_opt()?)?))
+}
+
+/// Start and end of the main calendar's local copy of an event, if it has one.
+fn local_event_times(db: &crate::db::Database, event_id: &str) -> Option<(String, String)> {
+    let conn = db.conn.lock().ok()?;
+    conn.query_row(
+        "SELECT start_time, end_time FROM calendar_events WHERE account_id = '' AND google_id = ?1",
+        rusqlite::params![event_id],
+        |row| Ok((row.get(0)?, row.get(1)?)),
+    )
+    .ok()
 }
 
 /// Drop the local mirror row for an event Google has confirmed deleted.
@@ -1403,9 +1467,19 @@ fn approval_detail(name: &str, args: &serde_json::Value, db: &crate::db::Databas
     let found = match name {
         "remember" => args["content"].as_str().map(str::to_string),
         "archive_email" => lookup("SELECT '\u{201c}' || coalesce(subject, '') || '\u{201d} ' || sender FROM emails WHERE gmail_id = ?1", &id("email_id")),
-        "delete_event" => lookup("SELECT '\u{201c}' || summary || '\u{201d} ' || start_time FROM calendar_events WHERE account_id = '' AND google_id = ?1", &id("event_id")),
+        "delete_event" | "update_event" => {
+            let conn = db.conn.lock().ok();
+            conn.and_then(|conn| {
+                conn.query_row(
+                    "SELECT summary, start_time FROM calendar_events WHERE account_id = '' AND google_id = ?1",
+                    [id("event_id")],
+                    |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?)),
+                )
+                .ok()
+            })
+            .map(|(summary, start)| event_label(&summary, &start, &chrono::Local))
+        }
         "update_follow_up" => lookup("SELECT '\u{201c}' || title || '\u{201d}' FROM mail_items WHERE id = ?1", &id("item_id")),
-        "update_event" => lookup("SELECT '\u{201c}' || summary || '\u{201d} ' || start_time FROM calendar_events WHERE account_id = '' AND google_id = ?1", &id("event_id")),
         "forget" => match args["keyword"].as_str() {
             Some(keyword) => Some(format!("\u{201c}{keyword}\u{201d}")),
             None => lookup("SELECT '\u{201c}' || content || '\u{201d}' FROM user_memory WHERE id = ?1", &id("id")),
@@ -1426,6 +1500,20 @@ fn approval_detail(name: &str, args: &serde_json::Value, db: &crate::db::Databas
         "forget" => "id",
         _ => "item_id",
     })))
+}
+
+/// How the approval card names an event: its title and start in the Mac's
+/// time zone. Google stores the start in the calendar's own zone (or UTC), so
+/// the raw string showed a time the user would not recognise.
+fn event_label<Tz>(summary: &str, start: &str, tz: &Tz) -> String
+where
+    Tz: chrono::TimeZone,
+    Tz::Offset: std::fmt::Display,
+{
+    let when = chrono::DateTime::parse_from_rfc3339(start)
+        .map(|t| t.with_timezone(tz).format("%Y-%m-%d %H:%M").to_string())
+        .unwrap_or_else(|_| start.to_string());
+    format!("\u{201c}{summary}\u{201d} {when}")
 }
 
 async fn execute_tool_inner(
@@ -2334,9 +2422,11 @@ mod outbound_approval_tests {
         let detail = |name: &str, args: serde_json::Value| approval_detail(name, &args, &db);
         assert_eq!(detail("forget", serde_json::json!({"id": 7})), "\u{201c}Accountant is Kenny\u{201d}");
         assert_eq!(detail("forget", serde_json::json!({"keyword": "Kenny"})), "\u{201c}Kenny\u{201d}");
+        // The start is shown in the Mac's time zone; event_label's own test
+        // pins the formatting with a fixed zone.
         assert_eq!(
             detail("update_event", serde_json::json!({"event_id": "evt1"})),
-            "\u{201c}Board meeting\u{201d} 2026-11-02T10:00:00+08:00"
+            event_label("Board meeting", "2026-11-02T10:00:00+08:00", &chrono::Local)
         );
         assert_eq!(
             detail("create_github_issue", serde_json::json!({"repo": "acme/app", "title": "Inbox"})),
@@ -2703,6 +2793,27 @@ mod local_time_tests {
             "the model must not be told to stamp today's offset on a future date, got: {line}"
         );
         assert!(!line.contains('\n'), "must stay a single line, got: {line}");
+    }
+
+    #[test]
+    fn event_label_shows_the_start_in_local_time() {
+        let hk = hong_kong();
+        assert_eq!(event_label("Meeting with Alex", "2026-11-17T07:00:00Z", &hk), "\u{201c}Meeting with Alex\u{201d} 2026-11-17 15:00");
+        assert_eq!(event_label("Offsite", "2026-11-20", &hk), "\u{201c}Offsite\u{201d} 2026-11-20");
+    }
+
+    #[test]
+    fn local_day_window_covers_whole_local_days() {
+        let hk = hong_kong();
+        // 23:30 UTC on the 16th is already the 17th in Hong Kong.
+        let (from, to) = local_day_window("2026-11-16T23:30:00+00:00", "2026-11-17T00:30:00+00:00", &hk).unwrap();
+        assert_eq!(from, "2026-11-17T00:00:00+08:00");
+        assert_eq!(to, "2026-11-18T00:00:00+08:00");
+        // All-day dates, and an end before the start never inverts the window.
+        let (from, to) = local_day_window("2026-11-20", "2026-11-19", &hk).unwrap();
+        assert_eq!(from, "2026-11-20T00:00:00+08:00");
+        assert_eq!(to, "2026-11-21T00:00:00+08:00");
+        assert!(local_day_window("not a time", "2026-11-19", &hk).is_none());
     }
 
     #[test]

@@ -1,4 +1,4 @@
-export type StartupScreen = 'workspace' | 'welcome' | 'setup';
+export type StartupScreen = 'workspace' | 'welcome' | 'setup' | 'quick';
 
 /**
  * Whether the language in use should be saved for someone who never saved
@@ -7,7 +7,7 @@ export type StartupScreen = 'workspace' | 'welcome' | 'setup';
  * step, for one). The welcome screen asks first.
  */
 export function keepsLocaleInUse(screen: StartupScreen | null): boolean {
-  return screen === 'workspace' || screen === 'setup';
+  return screen === 'workspace' || screen === 'setup' || screen === 'quick';
 }
 
 export async function readStartupScreen(
@@ -15,5 +15,7 @@ export async function readStartupScreen(
   readIntro: () => Promise<string>,
 ): Promise<StartupScreen> {
   if (await readComplete()) return 'workspace';
-  return await readIntro() === 'true' ? 'setup' : 'welcome';
+  // Past the welcome but not finished: resume the quick setup. Mail setup is
+  // one click from there and from Set up in the workspace.
+  return await readIntro() === 'true' ? 'quick' : 'welcome';
 }

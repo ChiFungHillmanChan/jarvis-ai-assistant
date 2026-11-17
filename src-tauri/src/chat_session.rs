@@ -11,6 +11,13 @@ pub struct Context {
 tokio::task_local! { pub static CONTEXT: Context; }
 pub static FOREGROUND: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
 
+/// Tells open views that a tool changed data they show (for example
+/// `calendar-changed`), so they reload instead of waiting for the next sync.
+pub fn notify(event: &str) {
+    use tauri::Emitter;
+    let _ = CONTEXT.try_with(|c| Emitter::emit(&c.app, event, ()));
+}
+
 pub fn identity(value: Option<String>, default: &str) -> Result<String, String> {
     match value {
         None => Ok(default.to_owned()),

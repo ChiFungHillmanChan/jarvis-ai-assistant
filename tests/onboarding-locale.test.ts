@@ -22,8 +22,8 @@ test('first launch requires language choice; saved choice resumes the guide', as
   assert.equal(reopened.getSnapshot().hasSavedChoice, true);
 });
 
-test('completing the intro avoids repeating it while mail setup remains incomplete', async () => {
-  assert.equal(await readStartupScreen(async () => false, async () => 'true'), 'setup');
+test('completing the intro avoids repeating it while quick setup remains incomplete', async () => {
+  assert.equal(await readStartupScreen(async () => false, async () => 'true'), 'quick');
   assert.equal(await readStartupScreen(async () => true, async () => { throw Error('must not read intro for existing users'); }), 'workspace');
 });
 
@@ -105,6 +105,7 @@ test('a user past the language step with nothing saved gets the language in use 
 test('only someone past the welcome screen has the language in use saved', () => {
   assert.equal(keepsLocaleInUse('workspace'), true);
   assert.equal(keepsLocaleInUse('setup'), true);
+  assert.equal(keepsLocaleInUse('quick'), true);
   assert.equal(keepsLocaleInUse('welcome'), false, 'first launch asks for the language');
   assert.equal(keepsLocaleInUse(null), false, 'not known yet');
 });

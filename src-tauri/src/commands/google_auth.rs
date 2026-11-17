@@ -10,6 +10,8 @@ use tauri::State;
 /// ask to replace it. Stable so the UI can offer SWITCH ACCOUNT on this exact
 /// result instead of treating it as success.
 pub const ALREADY_CONNECTED: &str = "Already connected to Google";
+/// Signed in, but Calendar was left unticked on Google's consent screen.
+pub const CALENDAR_NOT_ALLOWED: &str = "Connected without Calendar";
 
 /// Returned by `google_connect_gmail` when the account chosen in the browser
 /// is not the main account. Stable so the UI can explain it in the user's
@@ -94,9 +96,12 @@ pub async fn google_connect(
     app: tauri::AppHandle,
 ) -> Result<String, String> {
     let mut plan = connect_plan(auth.is_linked(), force.unwrap_or(false));
-    if plan == ConnectPlan::Reuse && auth.ensure_access_token().await.is_err() {
+    if plan == ConnectPlan::Reuse
+        && (!auth.calendar_granted() || auth.ensure_access_token().await.is_err())
+    {
         // Linked, but the stored grant no longer yields a token (revoked at
-        // Google, refresh token expired). Re-running the flow is the repair.
+        // Google, refresh token expired), or Calendar was left unticked on
+        // Google's consent screen. Re-running the flow is the repair.
         plan = ConnectPlan::Fresh;
     }
     match plan {
@@ -108,6 +113,8 @@ pub async fn google_connect(
     // After Relink the old grant's scopes are gone; after Fresh from a dead
     // grant they are still what the user had.
     auth.start_auth_flow(connect_scopes(auth.gmail_granted())).await?;
+    // Google's last page says JARVIS is back in front; make it so.
+    crate::payments::return_link::bring_forward(&app);
     // A Keychain write that fails silently leaves the user looking connected
     // now and signed out on the next launch. Say so instead.
     auth.save_to_db(&db).map_err(|e| {
@@ -149,6 +156,9 @@ pub async fn google_connect(
             log::warn!("First calendar sync after Google connect failed: {}", e);
         }
     });
+    if !auth.calendar_granted() {
+        return Ok(CALENDAR_NOT_ALLOWED.to_string());
+    }
     Ok("Connected to Google".to_string())
 }
 
@@ -393,6 +403,8 @@ pub struct MainGoogleAccount {
     /// Whether the Assistant's mail tools are on; Settings offers Connect
     /// Gmail while they are off.
     gmail: bool,
+    /// Whether Google granted Calendar; Settings asks to allow it when not.
+    calendar: bool,
 }
 
 /// The main account and the additional ones, for Settings > Google.
@@ -432,6 +444,7 @@ pub async fn google_accounts(
             name: name.filter(|_| state != "not_connected"),
             email,
             gmail: state != "not_connected" && auth.gmail_granted(),
+            calendar: state != "not_connected" && auth.calendar_granted(),
         },
         others,
     })

@@ -47,12 +47,14 @@ import type { GoogleAccounts } from "../lib/commands";
 import { listen } from "@tauri-apps/api/event";
 import { invoke } from "@tauri-apps/api/core";
 import type { AccountStatus, VoiceSettings, WakeWordStatus, VoiceState, LocalEndpoint, LocalModel, ProviderChainEntry, EndpointHealth, StorageUsage, StorageScope } from "../lib/types";
-import { GOOGLE_ALREADY_CONNECTED } from "../lib/types";
+import { GOOGLE_ALREADY_CONNECTED, GOOGLE_CALENDAR_NOT_ALLOWED } from "../lib/types";
 import { gmailConnectErrorKey, offersConnectGmail } from "../lib/google-gmail";
 import { useVoiceState } from "../hooks/useVoiceState";
 import { useUiLocale } from "../i18n";
 import IntegrationConnection from "../components/IntegrationConnection";
 import OtherGoogleAccounts from "../components/OtherGoogleAccounts";
+import { confirmAction } from "../components/ConfirmDialog";
+import GoogleConnectSteps from "../components/GoogleConnectSteps";
 import { connectionStatuses, connectionsChanged } from "../lib/connections";
 import { DISPLAY_NAME_KEY, accountSectionVisible, displayNameChanged } from "../lib/account";
 import LocalAiSetup from "../components/LocalAiSetup";
@@ -178,7 +180,7 @@ export default function Settings() {
 
   async function handleClearApiKey(provider: string, label: string) {
     setApiKeyError(null);
-    if (!window.confirm(`${text("Remove the saved", "是否移除已儲存的")} ${label} ${text("key from your Keychain? This cannot be undone.", "密鑰？此操作無法復原。")}`)) {
+    if (!(await confirmAction(`${text("Remove the saved", "是否移除已儲存的")} ${label} ${text("key from your Keychain? This cannot be undone.", "密鑰？此操作無法復原。")}`, text("Remove", "移除")))) {
       return;
     }
     try {
@@ -558,9 +560,10 @@ export default function Settings() {
   async function handleGoogleConnect(force: boolean) {
     // Switching revokes the current grant and wipes the cached mail before the
     // new flow starts, so it gets the same confirm-then-act treatment as CLEAR.
-    if (force && !window.confirm(
-      text("Switch the main Google account? This revokes this Google access (unless Mail still uses the same account) and deletes its Assistant mail cache, Calendar events and briefings on this Mac. Mail workspace copies and other accounts are kept.", "是否切換主 Google 帳戶？此操作會撤銷目前的 Google 連接（郵件工作區仍使用同一帳戶時除外），並刪除此 Mac 上該帳戶的助手郵件快取、日曆活動及簡報；郵件工作區副本及其他帳戶會保留。")
-    )) {
+    if (force && !(await confirmAction(
+      text("Switch the main Google account? This revokes this Google access (unless Mail still uses the same account) and deletes its Assistant mail cache, Calendar events and briefings on this Mac. Mail workspace copies and other accounts are kept.", "是否切換主 Google 帳戶？此操作會撤銷目前的 Google 連接（郵件工作區仍使用同一帳戶時除外），並刪除此 Mac 上該帳戶的助手郵件快取、日曆活動及簡報；郵件工作區副本及其他帳戶會保留。"),
+      text("Switch account", "切換帳戶"),
+    ))) {
       return;
     }
     setConnecting(true);
@@ -572,7 +575,9 @@ export default function Settings() {
       setGoogleNotice(
         result === GOOGLE_ALREADY_CONNECTED
           ? text("That account is already linked. Use Switch account to change it.", "此帳戶已連接。請使用「切換帳戶」更換。")
-          : result
+          : result === GOOGLE_CALENDAR_NOT_ALLOWED
+            ? null
+            : result
       );
     } catch (e) {
       // Cancelling a sign-in the user abandoned is not a failure.
@@ -612,9 +617,10 @@ export default function Settings() {
   }
 
   async function handleGoogleDisconnect() {
-    if (!window.confirm(
-      text("Disconnect the main Google account? This revokes this Google access (unless Mail still uses the same account) and deletes its Assistant mail cache, Calendar events and briefings on this Mac. Mail workspace copies and other accounts are kept. You can reconnect later.", "是否中斷主 Google 帳戶連接？此操作會撤銷 Google 連接（郵件工作區仍使用同一帳戶時除外），並刪除此 Mac 上該帳戶的助手郵件快取、日曆活動及簡報；郵件工作區副本及其他帳戶會保留。之後可以重新連接。")
-    )) {
+    if (!(await confirmAction(
+      text("Disconnect the main Google account? This revokes this Google access (unless Mail still uses the same account) and deletes its Assistant mail cache, Calendar events and briefings on this Mac. Mail workspace copies and other accounts are kept. You can reconnect later.", "是否中斷主 Google 帳戶連接？此操作會撤銷 Google 連接（郵件工作區仍使用同一帳戶時除外），並刪除此 Mac 上該帳戶的助手郵件快取、日曆活動及簡報；郵件工作區副本及其他帳戶會保留。之後可以重新連接。"),
+      text("Disconnect", "中斷連接"),
+    ))) {
       return;
     }
     setDisconnecting(true);
@@ -1002,7 +1008,19 @@ export default function Settings() {
                     ? text("Google no longer accepts this connection. Reconnect to keep using mail tools, Calendar and briefings.", "Google 已不接受此連接。請重新連接，以繼續使用郵件工具、日曆及簡報。")
                     : mainLabel ? `${text("Connected as", "已連接帳戶：")} ${mainLabel}` : text('Connected', '已連接')}
                 </div>
+                {google.main.state === "connected" && !google.main.calendar && (
+                  <div role="alert" style={{ color: "var(--accent-urgent)", fontSize: 12, lineHeight: 1.5, marginBottom: 10 }}>
+                    {text('Calendar access was not allowed, so JARVIS cannot see your calendar. Choose Allow Calendar, then tick "View and edit events on all your calendars" on Google\'s page.', '未授權日曆，JARVIS 無法讀取你的日曆。請按「允許日曆」，並在 Google 頁面剔選日曆權限（View and edit events on all your calendars）。')}
+                  </div>
+                )}
                 <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
+                  {google.main.state === "connected" && !google.main.calendar && <button
+                    onClick={() => { void handleGoogleConnect(false); }}
+                    disabled={connecting || connectingGmail || disconnecting}
+                    style={{ ...styles.actionBtn, borderColor: "var(--cyan)" }}
+                  >
+                    {connecting ? text('Opening…', '正在開啟…') : text('Allow Calendar', '允許日曆')}
+                  </button>}
                   {google.main.state === "reconnect" && <button
                     onClick={() => { void handleGoogleConnect(false); }}
                     disabled={connecting || connectingGmail || disconnecting}
@@ -1052,12 +1070,15 @@ export default function Settings() {
                 )}
               </>
             ) : (
+              <>
+              <GoogleConnectSteps style={styles.hint} />
               <div style={{ display: "flex", gap: 8 }}>
                 <button onClick={() => { void handleGoogleConnect(false); }} disabled={connecting} style={styles.actionBtn}>
                   {connecting ? text('Connecting…', '正在連接…') : text('Connect Google', '連接 Google')}
                 </button>
                 {connecting && <button onClick={cancelGoogleConnect} style={styles.actionBtn}>{text('Cancel', '取消')}</button>}
               </div>
+              </>
             )}
             {(connecting || connectingGmail) && <div style={{ ...styles.hint, marginTop: 8, marginBottom: 0 }}>{text('Finish signing in in your browser. If you closed the Google tab, choose Cancel.', '請在瀏覽器完成登入。如已關閉 Google 登入分頁，請按「取消」。')}</div>}
             {googleNotice && <div style={{ ...styles.hint, marginTop: 10, marginBottom: 0 }}>{googleNotice}</div>}
