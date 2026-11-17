@@ -2994,17 +2994,34 @@ mod local_data_tests {
         db
     }
 
+    /// Google's Limited Use rules (DECISIONS, P06 "Google Limited Use",
+    /// 2026-11-17): the mail and calendar tools give a service JARVIS cannot
+    /// confirm (Kimi) no content even after the user agreed to its terms;
+    /// Gemini with billing confirmed and a safe provider (OpenAI) get it.
     #[tokio::test]
     async fn email_and_calendar_tools_refuse_an_ai_that_may_train_on_them() {
+        use crate::ai::mail_policy::test_support::{agree_to_gemini, agree_to_kimi, use_ai, KIMI};
+        const MAIL: [&str; 4] = ["list_follow_ups", "list_inbox_triage", "read_email", "search_emails"];
+        let refused = |out: &str| out.starts_with("Gmail and Calendar content is not sent to");
         let db = mail_db();
-        db.conn.lock().unwrap().execute_batch(
-            "DELETE FROM provider_chain;
-             INSERT INTO provider_chain(position,provider_type,enabled,base_url) VALUES (0,'openai',1,'https://api.moonshot.ai/v1');",
-        ).unwrap();
-        for tool in ["list_follow_ups", "list_inbox_triage", "read_email", "search_emails", "list_events"] {
+        use_ai(&db, "openai", KIMI);
+        agree_to_kimi(&db);
+        for tool in MAIL.into_iter().chain(["list_events"]) {
             let out = run(tool, serde_json::json!({}), &db).await;
-            assert!(out.starts_with("Email and calendar content is not shared with Kimi"), "{tool}: {out}");
+            assert!(out.starts_with("Gmail and Calendar content is not sent to Kimi"), "{tool}: {out}");
             assert!(!out.contains("Gold Badge"), "{tool} leaked mail content");
+        }
+        for (provider, agree) in [("gemini", Some(agree_to_gemini as fn(&crate::db::Database))), ("openai", None)] {
+            let db = mail_db();
+            use_ai(&db, provider, None);
+            if let Some(agree) = agree {
+                agree(&db);
+            }
+            for tool in MAIL.into_iter().chain(["list_events"]) {
+                let out = run(tool, serde_json::json!({}), &db).await;
+                assert!(!refused(&out), "{provider} {tool}: {out}");
+            }
+            assert!(run("list_inbox_triage", serde_json::json!({}), &db).await.contains("Gold Badge"), "{provider}");
         }
     }
 

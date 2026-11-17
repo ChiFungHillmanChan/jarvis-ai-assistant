@@ -88,11 +88,7 @@ pub async fn run_briefing(
         }
     }
 
-    // The briefing sends senders, subjects and snippets to the AI.
-    // Not skipped silently (P06): the consent card is raised once per launch.
-    if let Err(blocked) = crate::ai::mail_policy::check(&db) {
-        log::info!("[daily_briefing] email is not shared with the chosen AI ({}), skipping", blocked.code());
-        blocked.raise("briefing");
+    if !may_read_google_content(&db) {
         return Ok(());
     }
 
@@ -450,8 +446,42 @@ async fn speak_briefing_via_router(
     Ok(())
 }
 
+/// The briefing sends senders, subjects, snippets and event titles to the
+/// chosen AI, so it runs only when that AI may receive them
+/// (ai::mail_policy). Not skipped silently (P06): what stands in the way is
+/// raised once per launch.
+fn may_read_google_content(db: &crate::db::Database) -> bool {
+    match crate::ai::mail_policy::check(db) {
+        Ok(()) => true,
+        Err(blocked) => {
+            log::info!("[daily_briefing] email is not shared with the chosen AI ({}), skipping", blocked.code());
+            blocked.raise("briefing");
+            false
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
+    /// Google's Limited Use rules (DECISIONS, P06 "Google Limited Use",
+    /// 2026-11-17): no briefing goes to a service JARVIS cannot confirm
+    /// (Kimi), even after the user agreed to its terms; Gemini with billing
+    /// confirmed and a safe provider (OpenAI) get it.
+    #[test]
+    fn the_briefing_runs_only_on_an_ai_that_may_receive_google_content() {
+        use crate::ai::mail_policy::test_support::{agree_to_gemini, agree_to_kimi, use_ai, KIMI};
+        let db = crate::db::test_database();
+        use_ai(&db, "openai", KIMI);
+        agree_to_kimi(&db);
+        assert!(!super::may_read_google_content(&db));
+        use_ai(&db, "gemini", None);
+        assert!(!super::may_read_google_content(&db), "billing not confirmed yet");
+        agree_to_gemini(&db);
+        assert!(super::may_read_google_content(&db));
+        use_ai(&db, "openai", None);
+        assert!(super::may_read_google_content(&db));
+    }
+
     use super::today_local;
 
     /// The shipped repair for rows written under the old UTC+8 key. Run here

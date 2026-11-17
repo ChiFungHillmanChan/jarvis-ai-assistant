@@ -341,7 +341,6 @@ pub async fn mail_analyze_group(
         None
     };
     let assistant = if context.settings.processing_mode == "assistant" {
-        crate::ai::mail_policy::check(&db).map_err(|blocked| blocked.user_message())?;
         Some(analysis::AssistantRoute {
             router: router.lock().map_err(|e| e.to_string())?.clone(),
             db: db.inner().clone(),
@@ -349,8 +348,34 @@ pub async fn mail_analyze_group(
     } else {
         None
     };
-    // A model picked in the error card runs this analysis once (P06).
-    crate::ai::capability::with_pick(pick, analysis::analyze(context, creds, openai_key, assistant, Some(&db))).await
+    analyze_on(pick, &db, context, creds, openai_key, assistant).await
+}
+
+/// An analysis, in the scope of the model picked in the error card (P06),
+/// if any. On the chosen AI ("assistant" mode) the gate asks about the model
+/// the request runs on, so it is asked inside that scope: a pick is gated
+/// like the saved choice.
+async fn analyze_on(
+    pick: Option<crate::ai::capability::Pick>,
+    db: &Arc<Database>,
+    context: MailContext,
+    creds: Option<crate::aws::credentials::AwsCredentials>,
+    openai_key: Option<String>,
+    assistant: Option<analysis::AssistantRoute>,
+) -> Result<MailAnalysis, String> {
+    crate::ai::capability::with_pick(pick, async {
+        if assistant.is_some() {
+            assistant_may_analyze(db)?;
+        }
+        analysis::analyze(context, creds, openai_key, assistant, Some(db)).await
+    })
+    .await
+}
+
+/// Whether an analysis may send the group's mail to the AI the request
+/// runs on (ai::mail_policy): the reason when not.
+fn assistant_may_analyze(db: &Database) -> Result<(), String> {
+    crate::ai::mail_policy::check(db).map_err(|blocked| blocked.user_message())
 }
 
 fn select_openai_key(
@@ -370,6 +395,71 @@ fn select_openai_key(
 #[cfg(test)]
 mod tests {
     use super::select_openai_key;
+
+    /// Google's Limited Use rules (DECISIONS, P06 "Google Limited Use",
+    /// 2026-11-17) for the two mail paths on the chosen AI. Analysis and AI
+    /// sorting send no mail to a service JARVIS cannot confirm (Kimi), even
+    /// after the user agreed to its terms; Gemini with billing confirmed and
+    /// a safe provider (OpenAI) receive it.
+    mod google_content {
+        use super::super::{analyze_on, assistant_may_analyze, chosen_ai_for_mail};
+        use crate::ai::mail_policy::test_support::{agree_to_gemini, agree_to_kimi, use_ai, KIMI};
+        use crate::ai::mail_policy::Blocked;
+        use std::sync::Arc;
+
+        fn on_kimi_after_agreeing() -> crate::db::Database {
+            let db = crate::db::test_database();
+            use_ai(&db, "openai", KIMI);
+            agree_to_kimi(&db);
+            db
+        }
+
+        #[test]
+        fn ai_sorting_sends_no_mail_to_an_unknown_terms_service() {
+            let db = on_kimi_after_agreeing();
+            assert!(matches!(chosen_ai_for_mail(&db), Err(Blocked::NotForGoogleContent { ref label, .. }) if label == "Kimi"));
+            let gemini = crate::db::test_database();
+            use_ai(&gemini, "gemini", None);
+            agree_to_gemini(&gemini);
+            assert!(matches!(chosen_ai_for_mail(&gemini), Ok(Some(_))));
+            let openai = crate::db::test_database();
+            use_ai(&openai, "openai", None);
+            assert!(matches!(chosen_ai_for_mail(&openai), Ok(Some(_))));
+        }
+
+        #[test]
+        fn mail_analysis_sends_no_mail_to_an_unknown_terms_service() {
+            let error = assistant_may_analyze(&on_kimi_after_agreeing()).unwrap_err();
+            assert!(error.starts_with("Gmail and Calendar content is not sent to Kimi"), "{error}");
+            let gemini = crate::db::test_database();
+            use_ai(&gemini, "gemini", None);
+            agree_to_gemini(&gemini);
+            assert_eq!(assistant_may_analyze(&gemini), Ok(()));
+            let openai = crate::db::test_database();
+            use_ai(&openai, "openai", None);
+            assert_eq!(assistant_may_analyze(&openai), Ok(()));
+        }
+
+        /// A model picked in the error card is gated like the saved choice:
+        /// with OpenAI saved, picking Kimi for one analysis sends it nothing
+        /// (the gate is asked inside the pick's scope).
+        #[tokio::test]
+        async fn a_picked_unknown_terms_service_gets_no_mail_either() {
+            let db = Arc::new(crate::db::test_database());
+            use_ai(&db, "openai", None);
+            agree_to_kimi(&db);
+            let kimi = crate::ai::capability::Pick { provider_type: "openai".into(), base_url: KIMI.map(str::to_string), endpoint_id: None, model_id: Some("kimi-k2".into()) };
+            let route = crate::mail::analysis::AssistantRoute { router: crate::ai::AiRouter::new("gemini_primary"), db: db.clone() };
+            let context = crate::mail::models::MailContext {
+                group: crate::mail::models::MailGroup { id: 1, name: "Board".into(), instructions: String::new(), message_count: 0 },
+                messages: Vec::new(),
+                memories: Vec::new(),
+                settings: crate::mail::models::MailSettings { processing_mode: "assistant".into(), local_model: String::new(), bedrock_model: String::new(), openai_model: String::new() },
+            };
+            let error = analyze_on(Some(kimi), &db, context, None, None, Some(route)).await.unwrap_err();
+            assert!(error.starts_with("Gmail and Calendar content is not sent to Kimi"), "{error}");
+        }
+    }
 
     #[test]
     fn explicit_environment_key_does_not_access_keychain() {

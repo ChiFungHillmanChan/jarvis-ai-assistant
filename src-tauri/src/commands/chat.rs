@@ -80,8 +80,8 @@ pub async fn send_message(
     if let Some(retry_of) = retry_of.as_deref() {
         if !crate::ai::failure::may_retry(retry_of) {
             return Err(crate::ai::bedrock::UiLanguage::read(&db).pick(
-                "This request already carried out an action, so JARVIS does not send it again.",
-                "這個請求已完成了操作，為免重複執行，不會再次傳送。",
+                "This request already carried out an action, such as creating an event or a draft. JARVIS does not send it again, so the action is not done twice.",
+                "這個請求已執行了操作，例如建立日曆事件或草稿。為免重複執行，JARVIS 不會再次傳送。",
             ));
         }
     }

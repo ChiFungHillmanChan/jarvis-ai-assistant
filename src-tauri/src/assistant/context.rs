@@ -503,6 +503,9 @@ mod tests {
             )
             .unwrap();
         }
+        // Kimi: not even after the user agreed to its terms (DECISIONS, P06
+        // "Google Limited Use", 2026-11-17).
+        crate::ai::mail_policy::test_support::agree_to_kimi(&db);
         let blocked = DayContext::gather(&db).unwrap();
         assert_eq!(blocked.calendar_summary, "1 meeting today.");
         let sent = format!("{}{}", blocked.inline_context(), blocked.to_prompt());
@@ -511,6 +514,12 @@ mod tests {
         db.conn.lock().unwrap().execute("UPDATE provider_chain SET base_url = NULL", []).unwrap();
         let allowed = DayContext::gather(&db).unwrap();
         assert!(allowed.calendar_summary.contains("Term sheet call") && allowed.calendar_summary.contains("Cyberport"), "{}", allowed.calendar_summary);
+
+        // Gemini once its billing is confirmed.
+        crate::ai::mail_policy::test_support::use_ai(&db, "gemini", None);
+        assert_eq!(DayContext::gather(&db).unwrap().calendar_summary, "1 meeting today.", "billing not confirmed yet");
+        crate::ai::mail_policy::test_support::agree_to_gemini(&db);
+        assert!(DayContext::gather(&db).unwrap().calendar_summary.contains("Term sheet call"));
     }
 
     /// Google stores a timed event in the calendar's own zone. The model reads

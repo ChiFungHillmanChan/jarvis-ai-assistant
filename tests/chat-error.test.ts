@@ -22,7 +22,7 @@ test('held-back email names the service whose terms wait for agreement', () => {
 });
 
 test('any other error is shown as the backend wrote it', () => {
-  const error = 'This request already carried out an action, so JARVIS does not send it again.';
+  const error = 'This request already carried out an action, such as creating an event or a draft. JARVIS does not send it again, so the action is not done twice.';
   assert.deepEqual(chatErrorText(error, en), { message: error, detail: null });
   assert.deepEqual(chatErrorText('{not json', en), { message: '{not json', detail: null });
 });
