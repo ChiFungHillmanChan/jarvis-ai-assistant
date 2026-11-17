@@ -8,7 +8,8 @@ import { listen } from '@tauri-apps/api/event';
  * and the services setup offers are kept. Never hardcode a model id in the
  * frontend.
  */
-export interface AiModelDefaults { openai: string; claude: string; gemini_flash: string; gemini_pro: string; bedrock: string }
+/** `whisper` is the on-device speech model; its file is `<id>.bin`. */
+export interface AiModelDefaults { openai: string; claude: string; gemini_flash: string; gemini_pro: string; bedrock: string; whisper: string }
 /** US$ per 1M tokens. */
 export interface ModelPrice { input_per_million: number; output_per_million: number; cache_read_per_million: number; cache_write_per_million: number }
 export interface CloudModel { provider: string; id: string; label: string; family: boolean; price: ModelPrice; max_output_tokens: number | null }

@@ -763,6 +763,8 @@ export default function Settings() {
     );
   }
 
+  // The speech model's file, named by the registry (voice/model_manager.rs).
+  const whisperFile = models ? `${models.defaults.whisper}.bin` : "";
   const options = (models?.presets ?? []).map((preset) => ({ value: preset.id, label: localized(preset.label, text) }));
   // A saved preset the registry no longer lists runs as the default one (ai::preset_chain).
   const activePreset = options.some((opt) => opt.value === aiProvider) ? aiProvider : models?.default_preset ?? "";
@@ -1285,7 +1287,7 @@ export default function Settings() {
             )}
             {wakeStatus?.model_downloaded && modelDownloading === null && (
               <div style={{ ...styles.hint, marginTop: 8 }}>
-                {text("Model file: ~/Library/Application Support/jarvis/models/ggml-base.bin. If transcription keeps failing to load the model, that file is damaged: Download again replaces it in place.", "模型檔案：~/Library/Application Support/jarvis/models/ggml-base.bin。如果語音辨識持續無法載入模型，檔案可能已損壞；「重新下載」會取代原檔。")}
+                {text(`Model file: ~/Library/Application Support/jarvis/models/${whisperFile}. If transcription keeps failing to load the model, that file is damaged: Download again replaces it in place.`, `模型檔案：~/Library/Application Support/jarvis/models/${whisperFile}。如果語音辨識持續無法載入模型，檔案可能已損壞；「重新下載」會取代原檔。`)}
               </div>
             )}
             <div style={styles.privacyText}>

@@ -10,7 +10,7 @@ const local = (id: string, setup: boolean): LocalModel => ({
   setup: setup ? { disk_reserve_gb: 10, context_cap: 4096, think_off: true } : null,
 });
 const catalog: AiModelCatalog = {
-  defaults: { openai: 'gpt-6-luna', claude: '', gemini_flash: '', gemini_pro: '', bedrock: '' },
+  defaults: { openai: 'gpt-6-luna', claude: '', gemini_flash: '', gemini_pro: '', bedrock: '', whisper: '' },
   cloud: [cloud('gpt-5', 1.25), cloud('gpt-6-luna', 0.1), cloud('qwen3-32b', 0.042)],
   local: [local('qwen3.5:4b', true), local('llama3.1:8b', false), local('qwen3.5:9b', true)],
   registry: { version: 7, issued_at: '2026-11-13T00:00:00Z', source: 'cached' },

@@ -278,6 +278,8 @@ pub struct Defaults {
     pub gemini_flash: String,
     pub gemini_pro: String,
     pub bedrock: String,
+    /// The on-device speech model; its file is `<id>.bin` (voice/model_manager.rs).
+    pub whisper: String,
 }
 
 /// A provider chain preset (Settings > Models), in registry order.
@@ -361,6 +363,7 @@ pub fn ai_models() -> Catalog {
             gemini_flash: registry.default_model("chat", "gemini"),
             gemini_pro: registry.default_model("premium", "gemini"),
             bedrock: registry.default_model("chat", "bedrock"),
+            whisper: registry.default_model("stt", "whisper"),
         },
         cloud: cloud_models(&registry),
         local: registry.local_models().filter_map(local_from).collect(),
