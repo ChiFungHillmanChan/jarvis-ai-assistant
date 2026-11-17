@@ -93,17 +93,12 @@ pub(crate) fn fixture() -> Arc<Registry> {
     Arc::clone(&FIXTURE)
 }
 
-/// What Settings > About shows.
+/// What Settings > About shows (`ai_models`).
 #[derive(Debug, Clone, serde::Serialize)]
 pub struct Info {
     pub version: u64,
     pub issued_at: String,
     pub source: Source,
-}
-
-pub fn info() -> Info {
-    let active = holder().get();
-    Info { version: active.registry.version, issued_at: active.registry.issued_at.clone(), source: active.source }
 }
 
 /// At launch, before anything asks for a model: use the cached copy when it

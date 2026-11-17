@@ -280,11 +280,48 @@ pub struct Defaults {
     pub bedrock: String,
 }
 
+/// A provider chain preset (Settings > Models), in registry order.
+#[derive(Serialize)]
+pub struct PresetChoice {
+    pub id: String,
+    pub label: registry::doc::Text,
+}
+
+/// A service setup offers (ChooseAi), in the registry's `setup.order`.
+#[derive(Serialize)]
+pub struct SetupChoice {
+    /// The registry provider id; `openai_compat` is "another service".
+    pub id: String,
+    pub name: registry::doc::Text,
+    pub hint: registry::doc::Text,
+    pub key_page: Option<String>,
+    pub model: registry::doc::SetupModel,
+}
+
+/// An OpenAI-compatible service known by name: its regions and the hosts
+/// that are it. Always as this build shipped them (`load::apply_floor`).
+#[derive(Serialize)]
+pub struct CompatibleService {
+    pub id: String,
+    pub name: String,
+    pub regions: Vec<registry::doc::Region>,
+    pub host_suffixes: Vec<String>,
+}
+
 #[derive(Serialize)]
 pub struct Catalog {
     pub defaults: Defaults,
     pub cloud: Vec<CloudModel>,
     pub local: Vec<LocalModel>,
+    /// The registry these lists come from (Settings > About).
+    pub registry: registry::Info,
+    /// Whether this build fetches newer registries (it has an endpoint).
+    pub registry_updates: bool,
+    pub app_version: String,
+    pub presets: Vec<PresetChoice>,
+    pub default_preset: String,
+    pub setup: Vec<SetupChoice>,
+    pub compatible: Vec<CompatibleService>,
 }
 
 fn cloud_models(registry: &registry::Registry) -> Vec<CloudModel> {
@@ -327,6 +364,29 @@ pub fn ai_models() -> Catalog {
         },
         cloud: cloud_models(&registry),
         local: registry.local_models().filter_map(local_from).collect(),
+        registry: registry::Info { version: registry.version, issued_at: registry.issued_at.clone(), source: registry::holder().get().source },
+        registry_updates: registry::fetch::endpoint().is_some(),
+        app_version: registry::load::app_version().to_string(),
+        presets: registry.presets.chains.iter().map(|(id, preset)| PresetChoice { id: id.clone(), label: preset.label.clone() }).collect(),
+        default_preset: registry.presets.default.clone(),
+        setup: {
+            let mut offered: Vec<(u32, SetupChoice)> = registry
+                .providers
+                .iter()
+                .filter_map(|p| {
+                    let setup = p.setup.as_ref()?;
+                    Some((setup.order, SetupChoice { id: p.id.clone(), name: p.display_name.clone(), hint: setup.hint.clone(), key_page: setup.key_page.clone(), model: setup.model.clone() }))
+                })
+                .collect();
+            offered.sort_by_key(|(order, _)| *order);
+            offered.into_iter().map(|(_, choice)| choice).collect()
+        },
+        compatible: registry
+            .providers
+            .iter()
+            .filter(|p| p.wire == "openai_compat" && !p.host_suffixes.is_empty())
+            .map(|p| CompatibleService { id: p.id.clone(), name: p.display_name.en.clone(), regions: p.regions.clone(), host_suffixes: p.host_suffixes.clone() })
+            .collect(),
     }
 }
 
@@ -365,6 +425,31 @@ mod tests {
         let catalog = ai_models();
         assert_eq!(catalog.defaults.openai, "gpt-5.6-luna");
         assert!(catalog.cloud.iter().any(|m| m.id == "gpt-5.6-luna" && m.label == "Renamed"));
+    }
+
+    /// What the frontend lists (presets, setup, compatible services and the
+    /// registry version) comes from the registry, in its order.
+    #[test]
+    fn the_frontend_catalog_lists_what_the_registry_holds() {
+        let _registry = registry::test_override::with(|r| {
+            r.version = 42;
+            r.presets.chains.reverse();
+            r.providers.iter_mut().find(|p| p.id == "claude").unwrap().setup.as_mut().unwrap().order = 0;
+        });
+        let catalog = ai_models();
+        assert_eq!(catalog.registry.version, 42);
+        let wire = serde_json::to_value(&catalog).unwrap();
+        assert_eq!(wire["registry"]["source"], "bundled");
+        let presets: Vec<&str> = catalog.presets.iter().map(|p| p.id.as_str()).collect();
+        let mut expected: Vec<String> = registry::fixture().presets.chains.iter().map(|(id, _)| id.clone()).collect();
+        expected.reverse();
+        assert_eq!(presets, expected);
+        assert_eq!(catalog.setup[0].id, "claude", "setup follows setup.order");
+        assert!(catalog.setup.iter().any(|s| s.id == "openai_compat"));
+        let services: Vec<&str> = catalog.compatible.iter().map(|s| s.id.as_str()).collect();
+        assert_eq!(services, ["kimi", "qwen", "gemini_compat"]);
+        assert_eq!(wire["setup"][0]["name"]["zh-HK"], "Anthropic Claude");
+        assert_eq!(wire["compatible"][0]["regions"][0]["key_page"], "https://platform.moonshot.ai/console/api-keys");
     }
 
     #[test]
