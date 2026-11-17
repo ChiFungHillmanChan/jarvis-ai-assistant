@@ -1,29 +1,23 @@
 // P05: the app takes every model id from the model registry at runtime, so
-// no model id is written in the app's code. This scans the app's sources
-// (src/ and src-tauri/src/) for model ids: every id in the registry, and
-// anything shaped like one. Comments are skipped, and so is code that never
-// reaches a user's build: Rust items and modules compiled only for tests or
-// the native QA build (#[cfg(test)], #[cfg(feature = "native-qa")] and
+// no model id is written in the app's code. This scans what goes into the
+// app (src/, src-tauri/ and the HTML pages Vite builds from) for model ids:
+// every id in the registry, anything shaped like one (SHAPE, any case), and
+// a family prefix an id is built from (FRAGMENT: format!("gpt-{}", ..)).
+// Comments are skipped, and so is code that never reaches a user's build:
+// Rust items and modules compiled only for tests or the native QA build
+// (#[cfg(test)], #[cfg(feature = "native-qa")] and
 // #[cfg(any(test, feature = "native-qa"))]).
 //
-// JSON data files in those folders are scanned too, since the app can
-// compile one in (include_str!).
+// Every file the shipped Rust code compiles in (include_str!, include_bytes!)
+// is scanned too, whatever its type: the system prompt's .md, the JSON data.
 //
-// Not scanned, by design:
-// - registry/: the registry itself, the one place ids are kept.
-// - src-tauri/migrations/: history. A migration that set a model id once
-//   (V30's column defaults, the chain rows of earlier ones) must keep the
-//   text it ran with; saved choices it wrote stay valid.
-// - tests/: test fixtures.
-// - infra/: the server side (the registry Lambda and, from P08, the proxy),
-//   which is not the app.
-//
-// Every remaining hit is listed in ALLOWED, or its whole file in
-// ALLOWED_FILES, with the reason.
+// The places not scanned are NOT_SCANNED below, each with its reason. Every
+// remaining hit is listed in ALLOWED, or its whole file in ALLOWED_FILES,
+// with the reason.
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { readdirSync, readFileSync, statSync } from 'node:fs';
-import { join } from 'node:path';
+import { dirname, join, posix } from 'node:path';
 
 const root = new URL('..', import.meta.url).pathname;
 const read = (path: string) => readFileSync(join(root, path), 'utf8');
@@ -40,6 +34,39 @@ const ALLOWED: Record<string, string> = {
   'src/lib/mail.ts|jev': 'the decided_by value of a sorting row, not a model id',
 };
 
+/**
+ * Directories the scan does not read, and why. Paths are from the repo root.
+ * src-tauri/migrations/ is compiled into the app (refinery's
+ * embed_migrations!), so it is an exception and not "outside the app": the
+ * migrations that write a model id are named in MIGRATIONS_WITH_IDS.
+ */
+export const NOT_SCANNED: Record<string, string> = {
+  'registry/': 'the registry itself, the one place model ids are kept',
+  'src-tauri/migrations/':
+    'history: a migration must keep the SQL it ran with (refinery checks each applied migration against its file), so a model id one wrote stays; the ones that write one are listed in MIGRATIONS_WITH_IDS, and no migration may be changed or added for P05',
+  'src-tauri/target/': 'build output, not source',
+  'src-tauri/gen/': 'files Tauri generates at build time, not source',
+  'src-tauri/icons/': 'images',
+  'tests/': 'test fixtures',
+  'infra/': 'the server side (the registry Lambda and, from P08, the proxy), which is not the app',
+};
+
+/**
+ * The migrations whose SQL (comments aside) writes a model id, and what a
+ * fresh install gets from each. A new migration that writes one fails the
+ * scan test until it is listed here with the reason.
+ */
+export const MIGRATIONS_WITH_IDS: Record<string, string> = {
+  'src-tauri/migrations/V13__aws_credentials_and_routing.sql':
+    'seeds workload_routing (volume, tools, premium) with three Bedrock ids; no request path reads that table (ai/mod.rs no_request_path_reads_workload_routing)',
+  'src-tauri/migrations/V20__default_chain_fallback.sql':
+    "moves the old default chain's Gemini row from gemini-3-flash-preview to gemini-3.1-pro-preview; a fresh install has no chain rows, so it writes nothing",
+  'src-tauri/migrations/V21__beta_cleanup.sql': 'moves Gemini chain rows pinned to gemini-3-flash-preview to gemini-3.7-flash; nothing on a fresh install',
+  'src-tauri/migrations/V23__mail_openai.sql': "mail_settings.openai_model DEFAULT 'gpt-5.6-luna'; the one mail_settings row (V22) gets it",
+  'src-tauri/migrations/V27__mail_triage.sql': "moves mail_settings.openai_model from 'gpt-5.6-luna' (or '') to 'gpt-6-luna'; mail_triage.decided_by DEFAULT 'jev' is a sorting value, not a model",
+  'src-tauri/migrations/V30__choose_one_ai.sql': "rebuilds mail_settings with openai_model DEFAULT 'gpt-6-luna' and copies the row, so a fresh install holds 'gpt-6-luna'",
+};
+
 /** Files that may hold any model id, and why. */
 const ALLOWED_FILES: Record<string, string> = {
   'src-tauri/src/ai/registry/fixture.json': 'the frozen copy of registry version 1 the tests run on; compiled only into the tests',
@@ -47,8 +74,20 @@ const ALLOWED_FILES: Record<string, string> = {
     'the frozen price list of the one-time correction of old usage rows (ai/cost.rs correct_old_rows), kept as registry version 1 priced them so every release corrects them the same way (the lead\'s ruling of 2026-11-17 on DECISIONS.md, "P04 and P05:"); never edited',
 };
 
-/** Anything shaped like a model id, whether the registry lists it or not. */
-export const SHAPE = /(?<![\w.:-])(?:(?:global|us|eu|apac|jp)\.)?(?:gpt-\d[\w.:-]*|o\d-(?:mini|pro)[\w.:-]*|claude-(?:opus|sonnet|haiku|\d)[\w.:-]*|gemini-(?:\d|flash|pro)[\w.:-]*|(?:anthropic|amazon|meta|mistral|cohere)\.[a-z][\w.:-]*|qwen\d[\w.:-]*|llama\d[\w.:-]*|gemma\d[\w.:-]*|mistral:[\w.-]+|deepseek-[\w.:-]+|kimi-k\d[\w.:-]*|moonshot-v\d[\w.:-]*|jev-[\w.:-]+|ggml-[\w-]+|whisper-[\w.:-]+|speech-\d[\w.:-]*)(?![\w:-])/g;
+/**
+ * Anything shaped like a model id, whether the registry lists it or not, in
+ * any case. A Bedrock id may carry any geography prefix (us., us-gov., au.,
+ * ca., global.); its vendor part must look like a model (a "-" or ":" after
+ * the first word), so "aws.amazon.com" is not one.
+ */
+export const SHAPE = /(?<![\w.:-])(?:[a-z][a-z-]*\.)?(?:gpt-\d[\w.:-]*|chatgpt-[\w.:-]+|o\d(?:-[\w.:-]+)?|text-embedding-[\w.:-]+|tts-\d[\w.:-]*|claude-(?:opus|sonnet|haiku|instant|\d)[\w.:-]*|gemini-(?:\d|flash|pro|exp)[\w.:-]*|(?:anthropic|amazon|meta|mistral|cohere|ai21|deepseek)\.[a-z][\w]*[-:][\w.:-]*|qwen\d[\w.:-]*|qwen-[\w.:-]+|qwq[\w.:-]*|llama-?\d[\w.:-]*|gemma\d[\w.:-]*|mistral[:-][\w.-]+|mixtral[\w.:-]*|phi\d[\w.:-]*|deepseek-[\w.:-]+|kimi-[\w.:-]+|moonshot-v\d[\w.:-]*|(?:amazon-)?nova-[\w.:-]+|grok-\d[\w.:-]*|command-r(?:\d\w*|-[\w.:-]+)?|jev-[\w.:-]+|ggml-[\w-]+|whisper-[\w.:-]+|speech-\d[\w.:-]*)(?![\w:-])/gi;
+
+/**
+ * A family prefix an id is built from at runtime: "gpt-" just before a
+ * placeholder or the end of a string (format!("gpt-{}-luna", 6),
+ * concat!("gemini-", "3.7-flash"), `qwen-${size}`).
+ */
+export const FRAGMENT = /(?<![\w.:-])(?:gpt|chatgpt|claude|gemini|qwen|llama|gemma|kimi|moonshot|nova|grok|deepseek|mistral|mixtral|jev|ggml|whisper|speech|tts|text-embedding)-(?=["'`{]|\$\{)/gi;
 
 const registryIds = () => {
   const ids = new Set<string>();
@@ -71,12 +110,13 @@ export function idPattern(ids: Iterable<string>): RegExp {
   const parts = [];
   if (marked.length) parts.push(`(?<![\\w.:-])(?:${marked.join('|')})(?![\\w:-])`);
   if (words.length) parts.push(`(?<=["'\`])(?:${words.join('|')})(?=["'\`])`);
-  return new RegExp(parts.join('|'), 'g');
+  return parts.length ? new RegExp(parts.join('|'), 'g') : /(?!)/g;
 }
 
 function files(dir: string, keep: (path: string) => boolean): string[] {
   return readdirSync(join(root, dir)).flatMap(name => {
     const path = `${dir}/${name}`;
+    if (notScanned(path)) return [];
     return statSync(join(root, path)).isDirectory() ? files(path, keep) : keep(path) ? [path] : [];
   });
 }
@@ -161,11 +201,18 @@ export function withoutTestItems(code: string, bare: string): string {
   return lines.join('\n');
 }
 
-/** What the scan reads of one file. */
+/** What the scan reads of one file. A "-" written as an escape counts as one. */
 export function scanned(source: string, rust: boolean): string {
   const { code, bare } = lex(source, rust);
-  return rust ? withoutTestItems(code, bare) : code;
+  return (rust ? withoutTestItems(code, bare) : code).replace(/\\x2d|\\u\{0*2d\}|\\u002d/gi, '-');
 }
+
+/** The files a shipped Rust file compiles in, from the repo root. */
+export function compiledIn(file: string, code: string): string[] {
+  return [...code.matchAll(/include_(?:str|bytes)!\(\s*"([^"]+)"\s*\)/g)].map(m => posix.normalize(posix.join(dirname(file), m[1])));
+}
+
+const notScanned = (path: string) => Object.keys(NOT_SCANNED).some(dir => `${path}/`.startsWith(dir));
 
 /** Files that are test-only modules: `#[cfg(test)] mod name;` next to them. */
 function testModuleFiles(rustFiles: string[]): Set<string> {
@@ -182,21 +229,41 @@ function testModuleFiles(rustFiles: string[]): Set<string> {
   return found;
 }
 
+/** What the scan reads of `file`: code without comments and test-only items, other files as they stand. */
+function readScanned(file: string): string {
+  if (file.endsWith('.rs')) return scanned(read(file), true);
+  if (/\.(?:ts|tsx|js|mjs)$/.test(file)) return scanned(read(file), false);
+  return read(file);
+}
+
+function hitsIn(code: string, listed: RegExp): string[] {
+  return [listed, SHAPE, FRAGMENT].flatMap(pattern => [...code.matchAll(pattern)].map(match => match[0]));
+}
+
+/** The files scanned: the app's sources, and every file shipped Rust compiles in. */
+export function scannedFiles(): string[] {
+  const rust = files('src-tauri', path => path.endsWith('.rs'));
+  const testOnly = testModuleFiles(rust.filter(path => path.startsWith('src-tauri/src/')));
+  const shipped = rust.filter(path => !testOnly.has(path));
+  const sources = new Set([
+    ...files('src', path => /\.(?:ts|tsx|js|mjs|json|html)$/.test(path)),
+    ...shipped,
+    ...files('src-tauri', path => path.endsWith('.json')),
+    ...readdirSync(root).filter(name => name.endsWith('.html')),
+  ]);
+  for (const file of shipped) {
+    for (const target of compiledIn(file, scanned(read(file), true))) if (!notScanned(target)) sources.add(target);
+  }
+  return [...sources].sort();
+}
+
 function scan(): Map<string, Set<string>> {
   const listed = idPattern(registryIds());
-  const rust = files('src-tauri/src', path => path.endsWith('.rs'));
-  const testOnly = testModuleFiles(rust);
-  const json = [...files('src', path => path.endsWith('.json')), ...files('src-tauri/src', path => path.endsWith('.json'))];
-  const sources = [...files('src', path => /\.(?:ts|tsx)$/.test(path)), ...rust.filter(path => !testOnly.has(path)), ...json];
   const hits = new Map<string, Set<string>>();
-  for (const file of sources) {
-    // JSON has no comments, so it is read as it stands.
-    const code = file.endsWith('.json') ? read(file) : scanned(read(file), file.endsWith('.rs'));
-    for (const pattern of [listed, SHAPE]) {
-      for (const match of code.matchAll(pattern)) {
-        if (!hits.has(file)) hits.set(file, new Set());
-        hits.get(file)!.add(match[0]);
-      }
+  for (const file of scannedFiles()) {
+    for (const id of hitsIn(readScanned(file), listed)) {
+      if (!hits.has(file)) hits.set(file, new Set());
+      hits.get(file)!.add(id);
     }
   }
   return hits;
@@ -244,4 +311,37 @@ test('the scan finds an id in code and skips comments and test-only code', () =>
   // Every registry id is found as a string.
   const all = idPattern(registryIds());
   for (const id of registryIds()) assert.ok(`x = "${id}";`.match(all)?.[0] === id, id);
+});
+
+test('the shape covers the families the review found missing, in any case, and ids built from a prefix', () => {
+  const found = (line: string) => hitsIn(scanned(line, true), idPattern([])).length > 0;
+  for (const id of ['chatgpt-4o-latest', 'o3', 'o1-preview', 'o4-mini', 'text-embedding-3-small', 'tts-1-hd', 'Claude-Sonnet-5-5', 'GPT-6-Luna', 'qwen-max', 'qwen-plus', 'kimi-latest', 'nova-premier', 'amazon-nova-pro', 'grok-4', 'mixtral:8x7b', 'phi4:14b', 'command-r', 'au.anthropic.claude-haiku-4-5-20251001-v1:0', 'us-gov.anthropic.claude-sonnet-4-6', 'ca.amazon.nova-lite-v1:0', 'apac.amazon.nova-pro-v1:0', 'global.anthropic.claude-opus-4-6-v1']) {
+    assert.ok(found(`const A: &str = "${id}";`), id);
+  }
+  for (const line of ['let m = format!("gpt-{}-luna", 6);', 'let m = concat!("gemini-", "3.7-flash");', 'let m = "gpt\\x2d6-luna";', 'let m = "gpt\\u{2d}6-luna";']) assert.ok(found(line), line);
+  assert.ok(hitsIn(scanned('const m = `qwen-${size}`;', false), idPattern([])).length > 0, 'a template literal');
+  // Not ids: a host, a word that only starts like a family, a Rust path.
+  for (const line of ['let u = "https://aws.amazon.com/bedrock";', 'let u = "https://api.openai.com/v1";', 'let k = "gemini_compat";', 'use crate::ai::models::jev;', 'let s = "photo";']) {
+    assert.deepEqual(hitsIn(scanned(line, true), idPattern([])), [], line);
+  }
+});
+
+test('the scan reads every file the app compiles in, and no directory it names as not scanned', () => {
+  const scannedNow = scannedFiles();
+  assert.ok(scannedNow.includes('src-tauri/src/ai/system_prompt_static.md'), 'the system prompt compiled in by include_str!');
+  for (const file of ['src-tauri/build.rs', 'src-tauri/tauri.conf.json', 'index.html']) assert.ok(scannedNow.includes(file), file);
+  assert.deepEqual(scannedNow.filter(notScanned), []);
+  for (const dir of Object.keys(NOT_SCANNED).filter(dir => !['src-tauri/target/', 'src-tauri/gen/'].includes(dir))) {
+    assert.ok(statSync(join(root, dir)).isDirectory(), `${dir} exists`);
+  }
+  // The include_str! targets are found from the shipped code only.
+  assert.deepEqual(compiledIn('src-tauri/src/ai/tools.rs', 'include_str!("system_prompt_static.md")'), ['src-tauri/src/ai/system_prompt_static.md']);
+  assert.deepEqual(compiledIn('src-tauri/src/ai/registry/load.rs', 'include_str!("../../../../registry/registry.json")'), ['registry/registry.json']);
+});
+
+test('the migrations that write a model id are exactly the ones named', () => {
+  const listed = idPattern(registryIds());
+  const sql = (file: string) => read(file).replace(/--[^\n]*/g, '');
+  const withIds = readdirSync(join(root, 'src-tauri/migrations')).map(name => `src-tauri/migrations/${name}`).filter(file => hitsIn(sql(file), listed).length > 0).sort();
+  assert.deepEqual(withIds, Object.keys(MIGRATIONS_WITH_IDS).sort(), 'a migration that writes a model id is listed in MIGRATIONS_WITH_IDS with what it writes');
 });
