@@ -85,7 +85,8 @@ pub fn provider_id(provider_type: &str, base_url: Option<&str>) -> String {
 
 /// Store one request. A local model is stored at 0 with its tokens; a cloud
 /// model missing from the price list is stored with its tokens, the cost
-/// NULL and `price_unknown` set (ai/models.rs).
+/// NULL and `price_unknown` set (ai/models.rs). Priced with the registry in
+/// use now, whose version the row records (V35).
 #[allow(clippy::too_many_arguments)]
 pub fn record_inference(
     db: &crate::db::Database,
@@ -99,9 +100,10 @@ pub fn record_inference(
     cache_write_tokens: i64,
     latency_ms: i64,
 ) {
-    let usd_micro = crate::ai::models::usd_cost_micro(provider, model_id, input_tokens, output_tokens, cache_read_tokens, cache_write_tokens);
+    let registry = crate::ai::registry::current();
+    let usd_micro = registry.usd_cost_micro(provider, model_id, input_tokens, output_tokens, cache_read_tokens, cache_write_tokens);
     let cost = stored_cost(provider, usd_micro);
-    insert_row(db, provider, feature, workload, model_id, input_tokens, output_tokens, cache_read_tokens, cache_write_tokens, cost, latency_ms);
+    insert_row(db, provider, feature, workload, model_id, input_tokens, output_tokens, cache_read_tokens, cache_write_tokens, cost, latency_ms, registry.version);
 }
 
 /// Speech usage, which the price list cannot turn into money: MiniMax bills
@@ -109,7 +111,8 @@ pub fn record_inference(
 /// Volume row with the cost unknown; `input_units` is tokens for Gemini and
 /// characters for MiniMax.
 pub fn record_unpriced(db: &crate::db::Database, provider: &str, feature: Feature, model_id: &str, input_units: i64, output_tokens: i64, latency_ms: i64) {
-    insert_row(db, provider, feature, Workload::Volume, model_id, input_units, output_tokens, 0, 0, StoredCost::Unknown, latency_ms);
+    let version = crate::ai::registry::current().version;
+    insert_row(db, provider, feature, Workload::Volume, model_id, input_units, output_tokens, 0, 0, StoredCost::Unknown, latency_ms, version);
 }
 
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -135,7 +138,12 @@ fn stored_cost(provider: &str, usd_micro: Option<i64>) -> StoredCost {
 ///
 /// `input_tokens` always includes cached tokens, as `usd_cost_micro` expects;
 /// a provider that reports them separately (Anthropic, Bedrock) adds them in.
+///
+/// The registry in use when the turn starts prices every request of it, and
+/// the row records that registry's version: a registry fetched mid-turn
+/// never splits one turn across two price lists.
 pub struct TurnUsage {
+    registry: std::sync::Arc<crate::ai::registry::Registry>,
     provider: String,
     model_id: String,
     input_tokens: i64,
@@ -148,7 +156,7 @@ pub struct TurnUsage {
 
 impl TurnUsage {
     pub fn new(provider: &str, model_id: &str) -> Self {
-        TurnUsage { provider: provider.into(), model_id: model_id.into(), input_tokens: 0, output_tokens: 0, cache_read_tokens: 0, cache_write_tokens: 0, usd_micro: 0, price_unknown: false }
+        TurnUsage { registry: crate::ai::registry::current(), provider: provider.into(), model_id: model_id.into(), input_tokens: 0, output_tokens: 0, cache_read_tokens: 0, cache_write_tokens: 0, usd_micro: 0, price_unknown: false }
     }
 
     /// Add one request's usage.
@@ -157,7 +165,7 @@ impl TurnUsage {
         self.output_tokens += output_tokens;
         self.cache_read_tokens += cache_read_tokens;
         self.cache_write_tokens += cache_write_tokens;
-        let usd_micro = crate::ai::models::usd_cost_micro(&self.provider, &self.model_id, input_tokens, output_tokens, cache_read_tokens, cache_write_tokens);
+        let usd_micro = self.registry.usd_cost_micro(&self.provider, &self.model_id, input_tokens, output_tokens, cache_read_tokens, cache_write_tokens);
         match stored_cost(&self.provider, usd_micro) {
             StoredCost::Micro(micro) => self.usd_micro += micro,
             StoredCost::Unknown => self.price_unknown = true,
@@ -172,7 +180,7 @@ impl TurnUsage {
     /// `self` means a turn is stored at most once.
     pub fn record(self, db: &crate::db::Database, workload: Workload, latency_ms: i64) {
         let cost = if self.price_unknown { StoredCost::Unknown } else { StoredCost::Micro(self.usd_micro) };
-        insert_row(db, &self.provider, current_feature(), workload, &self.model_id, self.input_tokens, self.output_tokens, self.cache_read_tokens, self.cache_write_tokens, cost, latency_ms);
+        insert_row(db, &self.provider, current_feature(), workload, &self.model_id, self.input_tokens, self.output_tokens, self.cache_read_tokens, self.cache_write_tokens, cost, latency_ms, self.registry.version);
     }
 
     /// For a turn that failed part-way: store what earlier requests were
@@ -197,6 +205,7 @@ fn insert_row(
     cache_write_tokens: i64,
     cost: StoredCost,
     latency_ms: i64,
+    registry_version: u64,
 ) {
     let (usd_micro, price_unknown) = match cost {
         StoredCost::Micro(micro) => (Some(micro), false),
@@ -214,8 +223,8 @@ fn insert_row(
         "INSERT INTO inference_metrics
             (ts, workload, model_id, input_tokens, output_tokens,
              cache_read_tokens, cache_write_tokens, latency_ms,
-             provider, usd_cost_micro, feature, price_unknown)
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12)",
+             provider, usd_cost_micro, feature, price_unknown, registry_version)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13)",
         rusqlite::params![
             now,
             workload_str(workload),
@@ -229,6 +238,7 @@ fn insert_row(
             usd_micro,
             feature.as_str(),
             price_unknown,
+            registry_version as i64,
         ],
     ) {
         log::warn!("cost: insert failed: {e}");
@@ -462,7 +472,7 @@ pub(crate) mod tests {
     /// and a file-backed fixture leaks its .db/-wal/-shm into $TMPDIR whenever an
     /// assertion fails before the cleanup line -- which is exactly the state the
     /// fixture is in while someone is iterating on it.
-    /// Mirrors the V34 inference_metrics DDL (minus id/NOT NULL/CHECK) --
+    /// Mirrors the V35 inference_metrics DDL (minus id/NOT NULL/CHECK) --
     /// update if that schema changes.
     pub(crate) fn temp_metrics_db(rows_sql: &str) -> crate::db::Database {
         use rusqlite::Connection;
@@ -474,7 +484,7 @@ pub(crate) mod tests {
                 input_tokens INTEGER, output_tokens INTEGER,
                 cache_read_tokens INTEGER, cache_write_tokens INTEGER,
                 latency_ms INTEGER, provider TEXT, usd_cost_micro INTEGER,
-                feature TEXT, price_unknown INTEGER);
+                feature TEXT, price_unknown INTEGER, registry_version INTEGER);
              {rows_sql}"
         ))
         .unwrap();
@@ -593,6 +603,41 @@ pub(crate) mod tests {
 
     fn marked(conn: &rusqlite::Connection) -> bool {
         conn.query_row("SELECT EXISTS(SELECT 1 FROM user_preferences WHERE key = ?1)", [OLD_ROWS_CORRECTED_KEY], |r| r.get(0)).unwrap()
+    }
+
+    /// A row is priced with the registry in use when it is written and
+    /// records that registry's version; a chat turn keeps the registry it
+    /// started with, even when a newer one arrives mid-turn.
+    #[test]
+    fn each_row_records_the_registry_version_it_was_priced_at() {
+        let db = crate::db::test_database();
+        let sonnet = |input: f64| move |r: &mut crate::ai::registry::Registry| {
+            r.models.iter_mut().find(|m| m.id == "claude-sonnet-4-6").unwrap().prices.as_mut().unwrap().input = input;
+        };
+        let turn = {
+            let change = sonnet(10.0);
+            let _v7 = crate::ai::registry::test_override::with(|r| {
+                r.version = 7;
+                change(r);
+            });
+            TurnUsage::new("claude", "claude-sonnet-4-6")
+        };
+        let mut turn = turn;
+        {
+            let change = sonnet(20.0);
+            let _v8 = crate::ai::registry::test_override::with(|r| {
+                r.version = 8;
+                change(r);
+            });
+            turn.add_request(1_000_000, 0, 0, 0);
+            record_inference(&db, "claude", Feature::MailSort, Workload::Volume, "claude-sonnet-4-6", 1_000_000, 0, 0, 0, 5);
+            record_unpriced(&db, "minimax", Feature::Tts, "speech-02-hd", 12, 0, 5);
+        }
+        turn.record(&db, Workload::Volume, 5);
+        let conn = db.conn.lock().unwrap();
+        let mut stmt = conn.prepare("SELECT feature, registry_version, usd_cost_micro FROM inference_metrics ORDER BY id").unwrap();
+        let rows: Vec<(String, i64, Option<i64>)> = stmt.query_map([], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?))).unwrap().map(Result::unwrap).collect();
+        assert_eq!(rows, vec![("mail_sort".into(), 8, Some(20_000_000)), ("tts".into(), 8, None), ("other".into(), 7, Some(10_000_000))]);
     }
 
     /// The correction prices with the registry this release ships, never
@@ -1099,6 +1144,50 @@ pub(crate) mod tests {
             .query_row("SELECT COUNT(*) FROM sqlite_master WHERE type = 'index' AND name IN ('idx_inference_metrics_ts', 'idx_inference_metrics_provider_ts')", [], |r| r.get(0))
             .unwrap();
         assert_eq!(indexes, 2);
+        drop(conn);
+        drop(db);
+        std::fs::remove_dir_all(&directory).unwrap();
+    }
+
+    /// V35 on a database with usage from V34: every request and every daily
+    /// total is kept as it was, at registry version 0, and the totals keep
+    /// their key and checks with the version added.
+    #[test]
+    fn v35_keeps_every_request_and_total_at_version_zero() {
+        let directory = std::env::temp_dir().join(format!("jarvis-usage-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir(&directory).unwrap();
+        let path = directory.join("usage.db");
+        let totals = "SELECT day, provider, model_id, feature, price_unknown, requests, input_tokens, output_tokens, cache_read_tokens, cache_write_tokens, usd_cost_micro FROM usage_daily ORDER BY 1, 2, 3, 4, 5";
+        type Total = (i64, String, String, String, i64, i64, i64, i64, i64, i64, Option<i64>);
+        let read = |conn: &rusqlite::Connection| -> Vec<Total> {
+            let mut stmt = conn.prepare(totals).unwrap();
+            stmt.query_map([], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?, r.get(5)?, r.get(6)?, r.get(7)?, r.get(8)?, r.get(9)?, r.get(10)?))).unwrap().map(Result::unwrap).collect()
+        };
+        let before = {
+            let db = crate::db::test_database_at_version(&path, 34);
+            let conn = db.conn.lock().unwrap();
+            conn.execute_batch(
+                "INSERT INTO inference_metrics (ts, workload, model_id, input_tokens, output_tokens, latency_ms, provider, usd_cost_micro, feature, price_unknown) VALUES
+                    (1, 'tools', 'gpt-6-luna', 10, 1, 5, 'openai', 7, 'chat', 0),
+                    (2, 'volume', 'kimi-k2', 20, 2, 5, 'kimi', NULL, 'chat', 1);
+                 INSERT INTO usage_daily (day, provider, model_id, feature, price_unknown, requests, input_tokens, output_tokens, cache_read_tokens, cache_write_tokens, usd_cost_micro) VALUES
+                    (5, 'openai', 'gpt-6-luna', 'chat', 0, 3, 30, 3, 0, 0, 21),
+                    (5, 'kimi', 'kimi-k2', 'chat', 1, 2, 40, 4, 0, 0, NULL);",
+            )
+            .unwrap();
+            read(&conn)
+        };
+        let db = crate::db::test_database_at(&path);
+        let conn = db.conn.lock().unwrap();
+        assert_eq!(read(&conn), before);
+        let versions: Vec<i64> = conn.prepare("SELECT registry_version FROM inference_metrics UNION ALL SELECT registry_version FROM usage_daily").unwrap().query_map([], |r| r.get(0)).unwrap().map(Result::unwrap).collect();
+        assert_eq!(versions, vec![0, 0, 0, 0]);
+        // Same day, same model, another version: a second total, not a conflict.
+        conn.execute("INSERT INTO usage_daily (day, provider, model_id, feature, price_unknown, requests, input_tokens, output_tokens, cache_read_tokens, cache_write_tokens, usd_cost_micro, registry_version) VALUES (5, 'openai', 'gpt-6-luna', 'chat', 0, 1, 1, 1, 0, 0, 1, 2)", []).unwrap();
+        assert!(
+            conn.execute("INSERT INTO usage_daily (day, provider, model_id, feature, price_unknown, requests, input_tokens, output_tokens, cache_read_tokens, cache_write_tokens, usd_cost_micro, registry_version) VALUES (6, 'openai', 'x', 'chat', 1, 1, 1, 1, 0, 0, 5, 2)", []).is_err(),
+            "the totals keep the cost rule"
+        );
         drop(conn);
         drop(db);
         std::fs::remove_dir_all(&directory).unwrap();
