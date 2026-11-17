@@ -122,11 +122,14 @@ impl VoiceEngine {
     pub async fn transcribe_command(&self, audio_data: &[f32]) -> Result<String, String> {
         let whisper = model_manager::is_downloaded();
         let cloud = cloud_speech_for(&self.db);
-        if let CloudSpeech::WaitsForConsent(_, request) = &cloud {
-            request.raise("stt");
-        }
         match first_step(&cloud, whisper, crate::ai::bedrock::UiLanguage::read(&self.db)) {
-            Step::Fail(reason) => return Err(reason),
+            Step::Fail(reason) => {
+                // Nothing on this Mac can transcribe it: the card, with the reason.
+                if let CloudSpeech::WaitsForConsent(_, request) = &cloud {
+                    request.raise("stt");
+                }
+                return Err(reason);
+            }
             Step::Local => {}
             Step::Cloud => {
                 if let CloudSpeech::Ready(route, key) = cloud {
