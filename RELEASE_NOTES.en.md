@@ -1,8 +1,12 @@
 JARVIS v0.5.12
 
-This update makes automations dependable across restarts, sleep and quitting JARVIS. Nothing runs while your Mac is asleep; JARVIS catches up after it wakes. It also adds a Usage page and fixes several problems with Bedrock, Claude and Gemini.
+This update makes automations dependable across restarts, sleep and quitting JARVIS. Nothing runs while your Mac is asleep; JARVIS catches up after it wakes. It also adds a Usage page, makes first-run setup and connecting Google Calendar simpler, and fixes confirmation dialogs, Calendar page updates and several problems with Bedrock, Claude and Gemini.
 
 New
+- Quick setup: the first time you open JARVIS, three steps set it up: choose your AI, connect Google Calendar, and ask about your day. To set up mail first, choose Set up Mail instead.
+- Before you connect Google, JARVIS lists what to do on Google's pages, including Advanced > Go to JARVIS and ticking the calendar permission. If the calendar box was not ticked, JARVIS says so, and Allow Calendar opens Google's page again.
+- When you finish signing in to Google in the browser, the page says so in English and Chinese, and JARVIS comes back to the front.
+- Report a problem: the status bar at the bottom of the window has Report a problem. It opens an email to the team in your mail app with the JARVIS version filled in; you check it and send it yourself.
 - Open at login: JARVIS now opens when you log in to your Mac, so automations keep running after a restart. It turns on by itself once JARVIS is in your Applications folder. Turn it off in Settings > Background; once you turn it off, it stays off. "Delete all JARVIS data on this Mac" turns it off as well.
 - Daily briefing: turn it on in Settings > Background and choose a time (08:30 unless you change it). JARVIS shows a notification and a briefing on the Automation page with today's meetings, tasks and unread mail, and adds an AI summary when the network is available. It is read aloud only when it runs on time, with the Mac awake and the screen unlocked. If the Mac was asleep or JARVIS was closed at that time, the briefing is shown once later the same day and is not read aloud. Once that day is over it is not shown.
 - Keep awake on mains power (off unless you turn it on): while it is plugged in, the Mac does not go to sleep on its own. It does not help with the lid closed.
@@ -12,6 +16,13 @@ New
 - Mail analysis with the AI you chose, and AI sorting, can now use Bedrock instead of saying the feature is not supported. In these two features Bedrock's error messages follow the interface language, English or Chinese, and when the saved AWS credentials cannot be read JARVIS asks you to save them again in Settings. With Claude, AI sorting now asks Claude for a fixed-format answer.
 
 Fixed
+- Disconnect, Switch account, Remove key and disconnecting another Google account did nothing, because the confirmation never appeared. They now ask in JARVIS's own dialog.
+- In replies where the AI used a tool, sentences ran together (for example "calendar.Tomorrow"). Each part now starts a new paragraph.
+- After the AI adds, moves or cancels an event, the Calendar page updates straight away instead of at the next sync.
+- The status bar no longer keeps saying "Composing response..." after a reply is finished. While a reply is read aloud it says so, and Esc stops it.
+- Google sign-in now waits up to 10 minutes instead of 3, long enough for Google to ask you to confirm on your phone; Cancel still ends it early. If the time runs out, the message says the sign-in did not finish instead of "OAuth cancelled".
+- Manage in Settings on the Connections page opens Assistant Google (Models for AI providers) instead of whichever settings section was shown last.
+- The approval card names an event by its title and its start time in your Mac's time zone, instead of Google's raw time.
 - Automations missed while the Mac was asleep or JARVIS was closed: after waking or reopening, only the latest missed run is caught up. Earlier ones are not run one by one, and the same scheduled run never runs twice.
 - When the network is not back yet after waking, automations that need it (mail, calendar, Notion and GitHub sync) wait for it instead of failing, so "Scheduled jobs failed" no longer appears for that reason.
 - If JARVIS is force-quit in the middle of a run, that run is done once more when JARVIS reopens.

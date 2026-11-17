@@ -84,8 +84,10 @@ const DEFAULT_TOKEN_LIFETIME: std::time::Duration = std::time::Duration::from_se
 /// connects and then says nothing must not consume the whole consent window.
 const CALLBACK_READ_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(5);
 
-/// Total time the user has to finish consent in the browser.
-const CALLBACK_DEADLINE: std::time::Duration = std::time::Duration::from_secs(180);
+/// Total time the user has to finish consent in the browser. Three minutes
+/// was too short in testing: Google can stop a first sign-in to confirm it on
+/// the user's phone. Cancel ends a wait early.
+const CALLBACK_DEADLINE: std::time::Duration = std::time::Duration::from_secs(600);
 
 /// Returned when the user cancels a sign-in that is waiting for the browser.
 pub const SIGN_IN_CANCELLED: &str = "Google sign-in cancelled";
@@ -133,8 +135,10 @@ async fn wait_for_code(
 ) -> Result<String, String> {
     tokio::select! {
         result = tokio::time::timeout(CALLBACK_DEADLINE, redirect) => result
-            .map_err(|_| "OAuth timeout: no response within 3 minutes. Please try again.".to_string())?
-            .map_err(|_| "OAuth cancelled".to_string())?
+            .map_err(|_| "OAuth timeout: no response within 10 minutes. Please try again.".to_string())?
+            // The listener gave up first (its own deadline, or a broken
+            // socket). Users read "OAuth cancelled" as something they did.
+            .map_err(|_| "Google sign-in did not finish. Please try again.".to_string())?
             .map_err(|e| format!("Google OAuth denied: {}", e)),
         Ok(()) = cancel => Err(SIGN_IN_CANCELLED.to_string()),
     }
@@ -151,6 +155,9 @@ const REFRESH_KEYCHAIN_MARKER: &str = "__keychain__";
 /// only when the user turns those tools on (`google_connect_gmail`), never at
 /// the first connect, so the app can be verified for Calendar without it.
 pub const GMAIL_SCOPE: &str = "https://www.googleapis.com/auth/gmail.modify";
+
+/// The Calendar scope the first connect asks for.
+pub const CALENDAR_EVENTS_SCOPE: &str = "https://www.googleapis.com/auth/calendar.events";
 
 /// user_preferences key for the scopes Google granted the main account,
 /// space-separated as Google lists them. Not a secret.
@@ -194,6 +201,23 @@ fn sign_in_params(kind: SignIn, add_to: Option<&str>) -> Vec<(&'static str, Stri
         }
         SignIn::Mailbox => vec![("prompt", "consent select_account".to_string())],
     }
+}
+
+/// The page the browser shows after Google sends the user back. All text is
+/// fixed here, never taken from the request.
+fn callback_page(status: &str, title: &str, title_zh: &str, message: &str, message_zh: &str) -> String {
+    format!(
+        "HTTP/1.1 {status}\r\nContent-Type: text/html; charset=utf-8\r\nConnection: close\r\n\r\n\
+         <!doctype html><html lang=\"en\"><head><meta charset=\"utf-8\"><title>JARVIS</title>\
+         <meta name=\"viewport\" content=\"width=device-width, initial-scale=1\"><style>\
+         body{{margin:0;min-height:100vh;display:flex;align-items:center;justify-content:center;background:#060a14;color:#e6eefb;font-family:-apple-system,BlinkMacSystemFont,'Helvetica Neue',sans-serif}}\
+         main{{max-width:440px;margin:24px;padding:32px 36px;border:1px solid rgba(0,180,255,0.35);border-radius:14px;background:rgba(10,20,36,0.9);box-shadow:0 0 40px rgba(0,180,255,0.12)}}\
+         .mark{{font:600 13px/1 'SF Mono',Menlo,monospace;letter-spacing:4px;color:rgba(0,180,255,0.95)}}\
+         h1{{margin:18px 0 10px;font-size:22px;font-weight:600}}p{{margin:0 0 8px;font-size:15px;line-height:1.55;color:#aab8cc}}\
+         .zh{{margin-top:18px;padding-top:16px;border-top:1px solid rgba(255,255,255,0.08)}}</style></head>\
+         <body><main><div class=\"mark\">JARVIS</div><h1>{title}</h1><p>{message}</p>\
+         <div class=\"zh\" lang=\"zh-HK\"><h1>{title_zh}</h1><p>{message_zh}</p></div></main></body></html>"
+    )
 }
 
 pub struct GoogleAuth {
@@ -396,17 +420,17 @@ impl GoogleAuth {
                     .unwrap_or(false);
                 if !state_matches {
                     log::warn!("Discarding OAuth callback with a mismatched state parameter");
-                    let response = "HTTP/1.1 400 Bad Request\r\nContent-Type: text/html\r\n\r\n<html><body><h1>JARVIS</h1><p>This sign-in response did not come from the request JARVIS started. Please try again.</p></body></html>";
+                    let response = callback_page("400 Bad Request", "Sign-in did not finish", "登入未完成", "This response did not come from the sign-in JARVIS started. Return to JARVIS and try again.", "此回應並非來自 JARVIS 發出的登入要求。請返回 JARVIS 再試一次。");
                     let _ = tokio::io::AsyncWriteExt::write_all(&mut stream, response.as_bytes()).await;
                     continue;
                 }
 
                 if let Some(err) = error {
-                    let response = "HTTP/1.1 200 OK\r\nContent-Type: text/html\r\n\r\n<html><body><h1>JARVIS</h1><p>Authentication failed. You can close this tab.</p></body></html>";
+                    let response = callback_page("200 OK", "Sign-in did not finish", "登入未完成", "You can close this tab, return to JARVIS and try again.", "你可以關閉此分頁，返回 JARVIS 再試一次。");
                     let _ = tokio::io::AsyncWriteExt::write_all(&mut stream, response.as_bytes()).await;
                     let _ = tx.send(Err(err));
                 } else if let Some(code) = code {
-                    let response = "HTTP/1.1 200 OK\r\nContent-Type: text/html\r\n\r\n<html><body><h1>JARVIS</h1><p>Authentication successful. You can close this tab.</p></body></html>";
+                    let response = callback_page("200 OK", "Connected to JARVIS", "已連接 JARVIS", "You can close this tab. JARVIS is back in front to finish setting up.", "你可以關閉此分頁。JARVIS 已回到前景，可繼續設定。");
                     let _ = tokio::io::AsyncWriteExt::write_all(&mut stream, response.as_bytes()).await;
                     let _ = tx.send(Ok(code));
                 }
@@ -532,6 +556,17 @@ impl GoogleAuth {
     /// off; nothing here ever asks Google for Gmail in the background.
     pub fn gmail_granted(&self) -> bool {
         self.granted_scopes.lock().unwrap().iter().any(|scope| scope == GMAIL_SCOPE)
+    }
+
+    /// Whether Google granted Calendar. Its consent screen lists Calendar as a
+    /// checkbox that starts unticked, so a user who only presses Continue is
+    /// linked with nothing but their name and address.
+    pub fn calendar_granted(&self) -> bool {
+        self.granted_scopes
+            .lock()
+            .unwrap()
+            .iter()
+            .any(|scope| scope == CALENDAR_EVENTS_SCOPE || scope == "https://www.googleapis.com/auth/calendar")
     }
 
     /// An empty session on the same OAuth client. The Gmail sign-in runs on
@@ -790,6 +825,16 @@ mod tests {
     use super::*;
 
     const CALLBACK: &str = "GET /?state=abc-123&code=4/auth-code HTTP/1.1\r\nHost: 127.0.0.1\r\n\r\n";
+
+    #[test]
+    fn calendar_counts_only_when_google_granted_it() {
+        let profile_only = GoogleAuth::signed_in_for_tests(&["https://www.googleapis.com/auth/userinfo.profile", "https://www.googleapis.com/auth/userinfo.email"]);
+        assert!(!profile_only.calendar_granted(), "Calendar left unticked on the consent screen");
+        assert!(GoogleAuth::signed_in_for_tests(&[CALENDAR_EVENTS_SCOPE]).calendar_granted());
+        assert!(GoogleAuth::signed_in_for_tests(&["https://www.googleapis.com/auth/calendar"]).calendar_granted());
+        // Grants stored before scopes were recorded asked for Calendar.
+        assert!(stored_scopes(None, true).iter().any(|s| s == CALENDAR_EVENTS_SCOPE));
+    }
 
     #[test]
     fn callback_params_are_parsed() {

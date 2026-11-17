@@ -2,11 +2,14 @@ import { useState, useEffect, useCallback, useRef } from 'react';
 import { listen } from '@tauri-apps/api/event';
 import type { ChatMessage, ChatStep, ChatTokenPayload, ChatStatusPayload, ChatStatePayload } from '../lib/types';
 import { sendMessage, getConversations } from '../lib/commands';
-import { addStep, matchesRun, mergeHistory, spokenMessage } from '../workspace/chatState';
+import { addStep, matchesRun, mergeHistory, roundBreak, spokenMessage } from '../workspace/chatState';
 interface SessionState { historyLoading: boolean; messages: ChatMessage[]; loading: boolean; error: string | null; currentStatus: string | null; currentDetail: string | null; streamingText: string }
 interface Scoped { session_id?: string; run_id?: string }
 const empty = (): SessionState => ({ historyLoading: true, messages: [], loading: false, error: null, currentStatus: null, currentDetail: null, streamingText: '' });
-interface Stream { sessionId: string; runId: string; text: string; held: string; buffer: string; steps: ChatStep[] }
+// roundEnded: a status arrived after some text, so the model is on a new round
+// (tool call, then more text). Rounds are separate replies and need a break
+// between them, or "calendar." and "Tomorrow" run together.
+interface Stream { sessionId: string; runId: string; text: string; held: string; buffer: string; steps: ChatStep[]; roundEnded: boolean }
 
 // The selected conversation is a view; an in-flight run always belongs to its origin.
 export function useChat() {
@@ -54,13 +57,21 @@ export function useChat() {
         update(run.sessionId, s => ({ ...s, streamingText: '' }));
         return;
       }
-      if (payload.done) { flush(); return; }
+      // The reply text is complete. The run can stay open while the voice reply
+      // reads it aloud, and "Composing response..." must not stay up meanwhile.
+      if (payload.done) { flush(); update(run.sessionId, s => ({ ...s, currentStatus: null, currentDetail: null })); return; }
+      if (run.roundEnded && payload.token.trim()) {
+        run.roundEnded = false;
+        run.buffer += roundBreak(run.text + run.buffer, payload.token);
+      }
       run.held = ''; run.buffer += payload.token;
       if (frame.current === null) frame.current = requestAnimationFrame(flush);
     });
     const statusListener = listen<ChatStatusPayload & Scoped>('chat-status', ({ payload }) => {
       if (!matches(payload)) return;
-      stream.current!.steps = addStep(stream.current!.steps, payload);
+      const run = stream.current!;
+      run.steps = addStep(run.steps, payload);
+      if ((run.text + run.buffer).trim()) run.roundEnded = true;
       update(payload.session_id!, s => ({ ...s, currentStatus: payload.status, currentDetail: payload.detail ?? null }));
     });
     const stateListener = listen<ChatStatePayload & Scoped>('chat-state', ({ payload }) => {
@@ -76,7 +87,7 @@ export function useChat() {
     const id = selected.current;
     if (!text.trim()) return;
     if (stream.current) { update(id, s => ({ ...s, error: 'Another assistant task is running. You can keep working here and send this request when it finishes.' })); return; }
-    const run: Stream = { sessionId: id, runId: crypto.randomUUID(), text: '', held: '', buffer: '', steps: [] };
+    const run: Stream = { sessionId: id, runId: crypto.randomUUID(), text: '', held: '', buffer: '', steps: [], roundEnded: false };
     stream.current = run; setRunningSessionId(id);
     update(id, s => ({ ...s, loading: true }));
     try {

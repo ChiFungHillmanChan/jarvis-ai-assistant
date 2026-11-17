@@ -5,6 +5,7 @@ import { MailItemRow } from "../components/mail/MailItems";
 import "./email-workspace.css";
 import { useTauriCommand } from "../hooks/useTauriCommand";
 import type { CalendarEventView, Task } from "../lib/types";
+import { listen } from "@tauri-apps/api/event";
 import { createEvent, getTasks, syncCalendar } from "../lib/commands";
 import { useWorkspaceValue } from "../workspace/WorkspaceContext";
 import "./tool-pages.css";
@@ -67,6 +68,12 @@ export default function CalendarPage() {
   const loadError = visible.error || todays.error;
 
   const refetch = () => { visible.refetch(); todays.refetch(); };
+  // The assistant changed an event on Google; the backend has refreshed the local copy.
+  const refetchRef = useRef(refetch); refetchRef.current = refetch;
+  useEffect(() => {
+    const off = listen('calendar-changed', () => refetchRef.current());
+    return () => { void off.then(stop => stop()).catch(() => undefined); };
+  }, []);
   const select = (entry: CalendarEntry) => setSelection(entry.id);
   const openDay = (day: string) => { setAnchor(day); setView("day"); };
   const move = (direction: 1 | -1) => setAnchor(stepAnchor(view, anchor, direction));

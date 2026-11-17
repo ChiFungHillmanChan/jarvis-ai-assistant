@@ -21,6 +21,11 @@ pub fn open_urls(app: &AppHandle, urls: &[Url]) {
         return;
     }
     log::info!("Back from the Stripe page; bringing JARVIS forward");
+    bring_forward(app);
+}
+
+/// Brings the JARVIS window in front of the browser the user just finished in.
+pub fn bring_forward(app: &AppHandle) {
     if crate::wallpaper::is_active() {
         let _ = crate::wallpaper::raise_for_interaction(app);
     } else if let Some(window) = app.get_webview_window("main") {
