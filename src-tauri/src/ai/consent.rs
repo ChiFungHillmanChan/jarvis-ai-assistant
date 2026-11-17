@@ -137,8 +137,15 @@ pub fn give(db: &Database, subject: &Subject, terms_now: DataTerms) -> Result<()
 }
 
 /// Withdraw a consent. True when there was one.
+///
+/// Withdrawing Gemini also clears the billing box that builds from before
+/// V36 read (`gemini_billing_confirmed`, which V36 copied and left in
+/// place), so going back to such a build does not agree again for the user.
 pub fn revoke(db: &Database, subject: &Subject) -> Result<bool, String> {
     let conn = db.conn.lock().map_err(|e| e.to_string())?;
+    if subject.provider == "gemini" {
+        conn.execute("DELETE FROM user_preferences WHERE key = 'gemini_billing_confirmed'", []).map_err(|e| e.to_string())?;
+    }
     conn.execute("DELETE FROM ai_consent WHERE provider = ?1 AND base_url = ?2", [&subject.provider, &subject.base_url]).map(|n| n > 0).map_err(|e| e.to_string())
 }
 
@@ -333,6 +340,23 @@ mod tests {
 
     /// The shipped V36: a Gemini billing confirmation given before it is
     /// carried over as that consent; an unchecked one is not.
+    #[test]
+    fn withdrawing_gemini_also_clears_the_old_billing_box() {
+        let db = crate::db::test_database();
+        let legacy = |db: &Database| db.conn.lock().unwrap().query_row("SELECT value FROM user_preferences WHERE key = 'gemini_billing_confirmed'", [], |r| r.get::<_, String>(0)).ok();
+        db.conn.lock().unwrap().execute("INSERT INTO user_preferences (key, value) VALUES ('gemini_billing_confirmed', 'true')", []).unwrap();
+        let gemini = Subject { provider: "gemini".into(), base_url: String::new() };
+        give(&db, &gemini, DataTerms::NeedsBillingConfirmation).unwrap();
+        // Withdrawing another service's consent leaves it.
+        revoke(&db, &Subject { provider: "kimi".into(), base_url: "https://api.moonshot.ai/v1".into() }).unwrap();
+        assert_eq!(legacy(&db).as_deref(), Some("true"));
+        // A build from before V36 reads only this box: withdrawing Gemini in
+        // this build must not leave it ticked for that build (review B, m6).
+        assert!(revoke(&db, &gemini).unwrap());
+        assert_eq!(legacy(&db), None);
+        assert!(!holds(&db, &gemini, DataTerms::NeedsBillingConfirmation));
+    }
+
     #[test]
     fn v36_carries_over_a_gemini_billing_confirmation() {
         const V36: &str = include_str!("../../migrations/V36__ai_consent.sql");
