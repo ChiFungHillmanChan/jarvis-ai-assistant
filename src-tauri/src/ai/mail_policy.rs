@@ -605,6 +605,37 @@ mod tests {
         db
     }
 
+    /// Every set of the three keys, with no saved chain: the gate judges the
+    /// row the router's run sends to (`AiRouter::chosen` over what
+    /// `configured` finds, as `run_chosen` asks), and nothing when the router
+    /// has nothing to send to. Both are called; the rule is not restated.
+    #[tokio::test]
+    async fn for_every_set_of_keys_the_gate_judges_the_row_the_router_sends_to() {
+        use crate::ai::{keys_found, KeysFound};
+        let db = db_with(&[], &[]);
+        let row = |e: &ProviderChainEntry| (e.provider_type.clone(), e.model_id.clone(), e.base_url.clone(), e.endpoint_id.clone());
+        for bits in 0..8u8 {
+            let keys = KeysFound { gemini: bits & 1 != 0, claude: bits & 2 != 0, openai: bits & 4 != 0 };
+            let mut router = crate::ai::AiRouter::new("");
+            // Set on the router itself, so no key in the environment counts.
+            router.gemini_key = keys.gemini.then(|| "test-gemini".to_string());
+            router.claude_key = keys.claude.then(|| "test-claude".to_string());
+            router.openai_key = keys.openai.then(|| "test-openai".to_string());
+            router.append_default_fallbacks();
+            assert_eq!(router.keys_found(), keys);
+            let sends_to = router.chosen(&router.configured(&db).await);
+            let _gate_sees = keys_found::with(keys);
+            match (&sends_to, receiver(&db)) {
+                (Some(sent), Ok(judged)) => {
+                    assert_eq!(row(&judged), row(sent), "{keys:?}");
+                    assert_eq!(check(&db), allowed(&db, sent), "{keys:?}");
+                }
+                (None, Err(Blocked::Undecided(_))) => assert!(matches!(check(&db), Err(Blocked::Undecided(_))), "{keys:?}"),
+                (sent, judged) => panic!("{keys:?}: the router sends to {sent:?}, the gate judges {judged:?}"),
+            }
+        }
+    }
+
     /// With no saved chain the gate judges the row the request runs on, by
     /// the router's own rule (`ai::unsaved_choice`), not Gemini (review B,
     /// I-1, with review A, M-2).

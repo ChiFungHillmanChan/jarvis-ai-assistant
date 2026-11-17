@@ -160,7 +160,14 @@ pub fn set_api_key(
     db: State<'_, Arc<Database>>,
     router: State<'_, std::sync::Mutex<crate::ai::AiRouter>>,
 ) -> Result<(), String> {
-    let change = plan_key_change(&value, remove)?;
+    save_api_key(&provider, &value, remove, &db, &router)
+}
+
+/// What [`set_api_key`] does. The router's keys are reloaded before this
+/// returns, which also publishes which keys exist for the mail gate
+/// (`ai::keys_found`), so the next request is judged with the change.
+fn save_api_key(provider: &str, value: &str, remove: Option<bool>, db: &Database, router: &std::sync::Mutex<crate::ai::AiRouter>) -> Result<(), String> {
+    let change = plan_key_change(value, remove)?;
     // MiniMax is an integration credential, not one of the chain providers: it
     // is read back through `integration_keys::resolve`, which expects the
     // Keychain item plus the marker row that `store` writes. Routing it through
@@ -172,9 +179,9 @@ pub fn set_api_key(
             KeyChange::Remove => "",
         };
         let key = if provider == "minimax" { "minimax_api_key" } else { "typesafe_api_key" };
-        return crate::integration_keys::store(&db, key, secret);
+        return crate::integration_keys::store(db, key, secret);
     }
-    let account = match provider.as_str() {
+    let account = match provider {
         "gemini" => "gemini_api_key",
         "claude" => "claude_api_key",
         "openai" => "openai_api_key",
@@ -229,6 +236,30 @@ pub fn get_api_key_status() -> Result<HashMap<String, bool>, String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A key saved or removed in Settings is what the next request is judged
+    /// by: the command reloads the router's keys before it returns, and that
+    /// publishes which keys exist for the mail gate (`ai::keys_found`). The
+    /// Keychain here is the in-memory one test builds use; only Claude's
+    /// account is touched, which no other test reads.
+    #[test]
+    fn a_key_saved_or_removed_in_settings_is_what_the_next_request_is_judged_by() {
+        let db = crate::db::test_database();
+        let router = std::sync::Mutex::new(crate::ai::AiRouter::new(""));
+        // What the environment alone gives, without the Keychain.
+        let from_env = crate::ai::AiRouter::new("").keys_found();
+        save_api_key("claude", "test-claude-not-real", None, &db, &router).unwrap();
+        let published = crate::ai::keys_found().expect("published when the key was saved");
+        assert!(published.claude);
+        assert_eq!(published, router.lock().unwrap().keys_found());
+        if !from_env.gemini {
+            assert_eq!(crate::ai::mail_policy::receiver(&db).unwrap().provider_type, "claude");
+        }
+        save_api_key("claude", "", Some(true), &db, &router).unwrap();
+        let published = crate::ai::keys_found().expect("published when the key was removed");
+        assert_eq!(published.claude, from_env.claude);
+        assert_eq!(published, router.lock().unwrap().keys_found());
+    }
 
     /// Every credential the app keeps in `user_preferences` must be on the
     /// deny-list. If a new integration adds one, add it here too.

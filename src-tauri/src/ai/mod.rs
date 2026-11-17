@@ -336,19 +336,36 @@ pub(crate) fn keys_found() -> Option<KeysFound> {
     KEYS_FOUND.read().ok().and_then(|keys| *keys)
 }
 
-/// Tests set the keys the gate sees for this thread.
+/// Written by `reload_keys` and nothing else.
+fn publish_keys_found(keys: KeysFound) {
+    if let Ok(mut found) = KEYS_FOUND.write() {
+        *found = Some(keys);
+    }
+    #[cfg(test)]
+    keys_found::publish(keys);
+}
+
+/// Tests see the keys their own thread's `reload_keys` published, so tests
+/// running side by side do not see each other's; or the keys a test sets.
 #[cfg(test)]
 pub(crate) mod keys_found {
     use super::KeysFound;
     use std::cell::Cell;
 
-    thread_local! { static OVERRIDE: Cell<Option<KeysFound>> = const { Cell::new(None) }; }
-
-    pub(crate) fn get() -> Option<KeysFound> {
-        OVERRIDE.with(Cell::get)
+    thread_local! {
+        static PUBLISHED: Cell<Option<KeysFound>> = const { Cell::new(None) };
+        static OVERRIDE: Cell<Option<Option<KeysFound>>> = const { Cell::new(None) };
     }
 
-    pub(crate) struct Guard(Option<KeysFound>);
+    pub(crate) fn get() -> Option<KeysFound> {
+        OVERRIDE.with(Cell::get).unwrap_or_else(|| PUBLISHED.with(Cell::get))
+    }
+
+    pub(super) fn publish(keys: KeysFound) {
+        PUBLISHED.with(|p| p.set(Some(keys)));
+    }
+
+    pub(crate) struct Guard(Option<Option<KeysFound>>);
 
     impl Drop for Guard {
         fn drop(&mut self) {
@@ -357,12 +374,12 @@ pub(crate) mod keys_found {
     }
 
     pub(crate) fn with(keys: KeysFound) -> Guard {
-        Guard(OVERRIDE.with(|o| o.replace(Some(keys))))
+        Guard(OVERRIDE.with(|o| o.replace(Some(Some(keys)))))
     }
 
     /// As before the first Keychain read.
     pub(crate) fn without() -> Guard {
-        Guard(OVERRIDE.with(|o| o.replace(None)))
+        Guard(OVERRIDE.with(|o| o.replace(Some(None))))
     }
 }
 
@@ -753,9 +770,7 @@ impl AiRouter {
         self.gemini_key = resolve_key_with("GEMINI_API_KEY", || from_keychain("gemini_api_key"));
         self.claude_key = resolve_key_with("ANTHROPIC_API_KEY", || from_keychain("claude_api_key"));
         self.openai_key = resolve_key_with("OPENAI_API_KEY", || from_keychain("openai_api_key"));
-        if let Ok(mut found) = KEYS_FOUND.write() {
-            *found = Some(self.keys_found());
-        }
+        publish_keys_found(self.keys_found());
     }
 
     /// Add Claude and/or OpenAI to the built-in default chain when the user
