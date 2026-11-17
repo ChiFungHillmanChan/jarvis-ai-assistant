@@ -35,6 +35,34 @@ use serde_json::{json, Value};
 use std::time::{Duration, Instant};
 
 const JEV_URL: &str = "https://api.typesafe.ai/v1/systemone";
+
+/// Where sorting sends Jev and OpenAI requests. Production callers cannot
+/// change either host; only unit tests point both at one loopback fixture,
+/// as mail/analysis.rs does.
+#[derive(Clone, Copy)]
+enum Endpoints {
+    Production,
+    #[cfg(test)]
+    Loopback(u16),
+}
+
+impl Endpoints {
+    fn jev(self) -> String {
+        match self {
+            Endpoints::Production => JEV_URL.to_string(),
+            #[cfg(test)]
+            Endpoints::Loopback(port) => format!("http://127.0.0.1:{port}/v1/systemone"),
+        }
+    }
+
+    fn openai(self) -> OpenAiEndpoint {
+        match self {
+            Endpoints::Production => OpenAiEndpoint::Production,
+            #[cfg(test)]
+            Endpoints::Loopback(port) => OpenAiEndpoint::Loopback(port),
+        }
+    }
+}
 /// Jev accuracy drops as state fills with irrelevant detail; the opening of a
 /// message carries what these questions need.
 const JEV_TEXT_CHARS: usize = 1_500;
@@ -324,11 +352,11 @@ pub fn parse_jev(response: &Value) -> Result<JevAnswers, String> {
     })
 }
 
-async fn ask_jev(client: &reqwest::Client, key: &str, state: Value) -> Result<JevAnswers, String> {
+async fn ask_jev(client: &reqwest::Client, url: &str, key: &str, state: Value) -> Result<JevAnswers, String> {
     let body = json!({"state": state, "model": crate::ai::models::jev(), "questions": jev_questions()});
     let mut delay = Duration::from_millis(800);
     for attempt in 0..3 {
-        let response = client.post(JEV_URL).bearer_auth(key).json(&body).send().await;
+        let response = client.post(url).bearer_auth(key).json(&body).send().await;
         match response {
             Ok(response) if response.status().is_success() => {
                 let value: Value = response.json().await.map_err(|_| "TypeSafe 回覆格式無效。".to_string())?;
@@ -618,9 +646,11 @@ async fn ask_chosen_ai(router: &crate::ai::AiRouter, db: &Database, instructions
     Ok((value, done))
 }
 
+#[allow(clippy::too_many_arguments)]
 async fn triage_one(
     db: &Database,
     client: &reqwest::Client,
+    endpoints: Endpoints,
     keys: &TriageKeys,
     owners: &[String],
     language: &str,
@@ -669,7 +699,7 @@ async fn triage_one(
     let jev = match (keys.typesafe.as_deref(), keys.assistant.as_ref()) {
         (Some(key), _) => {
             let started = Instant::now();
-            match ask_jev(client, key, jev_state(&message, owners)).await {
+            match ask_jev(client, &endpoints.jev(), key, jev_state(&message, owners)).await {
                 Ok(answers) => {
                     outcome.jev_input = answers.input_tokens;
                     add_cost(&mut outcome.cost_micro, record_jev(db, &answers, started.elapsed().as_millis() as i64));
@@ -734,10 +764,10 @@ async fn triage_one(
         let answer: Option<Result<(Value, String), String>> = if let (Some(_), Err(stopped)) = (keys.openai.as_deref(), crate::ai::disabled::check("openai", &keys.openai_model)) {
             // The saved OpenAI model is disabled: not sent, no other model
             // in its place (ai/disabled.rs). The message stays untriaged.
-            Some(Err(crate::ai::disabled::stop(stopped, false)))
+            Some(Err(crate::ai::disabled::stop(stopped, false, crate::ai::bedrock::UiLanguage::read(db))))
         } else if let Some(openai_key) = keys.openai.as_deref() {
             let started = Instant::now();
-            Some(openai::send_json(openai_key, &keys.openai_model, &instructions, &input, "mail_triage", luna_schema(), OpenAiEndpoint::Production).await.map(|(value, usage)| {
+            Some(openai::send_json(openai_key, &keys.openai_model, &instructions, &input, "mail_triage", luna_schema(), endpoints.openai()).await.map(|(value, usage)| {
                 outcome.luna_input = usage.input_tokens;
                 outcome.luna_output = usage.output_tokens;
                 add_cost(&mut outcome.cost_micro, record_openai_sort(db, &keys.openai_model, &usage, started.elapsed().as_millis() as i64));
@@ -827,7 +857,7 @@ pub async fn run(db: &Database, keys: TriageKeys, language: &str) -> Result<Mail
     let outcomes = stream::iter(sender_chains(messages).into_iter().map(|chain| async move {
         let mut outcomes = Vec::with_capacity(chain.len());
         for message in chain {
-            outcomes.push(triage_one(db, client, keys, owners, language, message).await);
+            outcomes.push(triage_one(db, client, Endpoints::Production, keys, owners, language, message).await);
         }
         outcomes
     }))
@@ -1208,9 +1238,85 @@ mod tests {
             received_at: "2026-09-20T10:00:00Z".into(),
         };
         let client = reqwest::Client::new();
-        let answers = ask_jev(&client, &key, jev_state(&message, &["me@example.com".into()])).await.unwrap();
+        let answers = ask_jev(&client, &Endpoints::Production.jev(), &key, jev_state(&message, &["me@example.com".into()])).await.unwrap();
         println!("{answers:?}");
         assert_eq!(answers.category, "jobs");
         assert!(answers.needs_reply > 0.5);
+    }
+
+    /// One loopback server for both sorting hosts: Jev's path gets an
+    /// unsure classification (so the summary step runs), anything else a
+    /// 400. Returns the port and the paths it was asked for.
+    async fn sorting_fixture() -> (u16, std::sync::Arc<std::sync::Mutex<Vec<String>>>) {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        let listener = tokio::net::TcpListener::bind((std::net::Ipv4Addr::LOCALHOST, 0)).await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let paths = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+        let seen = paths.clone();
+        tokio::spawn(async move {
+            while let Ok((mut stream, _)) = listener.accept().await {
+                let mut request = Vec::new();
+                let mut buf = [0u8; 4096];
+                // Headers, then the body its Content-Length names.
+                let body_start = loop {
+                    let n = stream.read(&mut buf).await.unwrap_or(0);
+                    if n == 0 { break None; }
+                    request.extend_from_slice(&buf[..n]);
+                    if let Some(at) = request.windows(4).position(|w| w == b"\r\n\r\n") { break Some(at + 4); }
+                };
+                let Some(body_start) = body_start else { continue };
+                let head = String::from_utf8_lossy(&request[..body_start]).to_string();
+                let length = head.lines().find_map(|l| l.to_ascii_lowercase().strip_prefix("content-length:").map(|v| v.trim().parse::<usize>().unwrap_or(0))).unwrap_or(0);
+                while request.len() < body_start + length {
+                    let n = stream.read(&mut buf).await.unwrap_or(0);
+                    if n == 0 { break; }
+                    request.extend_from_slice(&buf[..n]);
+                }
+                let path = head.split_whitespace().nth(1).unwrap_or("").to_string();
+                seen.lock().unwrap().push(path.clone());
+                let (status, body) = if path == "/v1/systemone" {
+                    (200, json!({"model": "jev-test", "answers": {
+                        "category": {"choice": "work", "confidence": 0.3},
+                        "needs_reply": {"noul": 0.2}, "action_required": {"noul": 0.2}, "has_date": {"noul": 0.1},
+                        "importance": {"score": 0.4}}}).to_string())
+                } else {
+                    (400, "{}".to_string())
+                };
+                let reply = format!("HTTP/1.1 {status} Fixture\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}", body.len());
+                let _ = stream.write_all(reply.as_bytes()).await;
+                let _ = stream.shutdown().await;
+            }
+        });
+        (port, paths)
+    }
+
+    /// Sorting with an OpenAI key whose saved model the registry disabled:
+    /// Jev classifies, the summary step sends nothing to OpenAI, no other
+    /// AI answers in its place, the run records the disabled message and
+    /// the message stays untriaged.
+    #[tokio::test]
+    async fn sorting_on_a_disabled_openai_model_sends_nothing_and_records_why() {
+        let db = crate::db::test_database();
+        let (port, paths) = sorting_fixture().await;
+        let client = reqwest::Client::builder().timeout(Duration::from_secs(10)).build().unwrap();
+        let message = TriageInput { id: 7, thread_id: None, sender: "Ann <ann@example.com>".into(), subject: "Quarterly figures".into(), snippet: String::new(), body: Some("Please see the figures.".into()), received_at: "2026-09-20T10:00:00Z".into() };
+        let keys = |model: &str| TriageKeys { typesafe: Some("ts-test-not-real".into()), openai: Some("sk-test-not-sent".into()), openai_model: model.into(), assistant: None };
+
+        // The fixture is reached as it should be: with the model active, the
+        // summary request goes to the loopback "OpenAI" (which refuses it).
+        let active = triage_one(&db, &client, Endpoints::Loopback(port), &keys("gpt-5.6-luna"), &["me@example.com".into()], "en", message.clone()).await;
+        let asked = std::mem::take(&mut *paths.lock().unwrap());
+        assert!(asked.len() >= 2 && asked[0] == "/v1/systemone" && asked[1..].iter().all(|p| p == "/v1/responses"), "{asked:?} {:?}", active.error);
+
+        let _registry = crate::ai::registry::test_override::with(|r| {
+            let entry = r.models.iter_mut().find(|m| m.id == "gpt-5.6-luna").unwrap();
+            entry.status = crate::ai::registry::Status::Disabled;
+            entry.replacement = Some("gpt-6-luna".into());
+        });
+        let outcome = triage_one(&db, &client, Endpoints::Loopback(port), &keys("gpt-5.6-luna"), &["me@example.com".into()], "en", message).await;
+        let expected = crate::ai::disabled::Disabled { provider: "openai".into(), model: "gpt-5.6-luna".into(), replacement: Some("gpt-6-luna".into()) }.message(crate::ai::bedrock::UiLanguage::En);
+        assert_eq!(outcome.error.as_deref(), Some(expected.as_str()));
+        assert_eq!(paths.lock().unwrap().as_slice(), ["/v1/systemone"], "Jev classified; nothing went to OpenAI");
+        assert!(!outcome.triaged && !outcome.summarized, "the message stays untriaged for the next run");
     }
 }
