@@ -49,6 +49,18 @@
         "cloud_triage": { "$ref": "#/$defs/featureDefaults" }
       }
     },
+    "feature_limits": {
+      "description": "Limits of the requests a feature sends itself, whichever provider answers them (mail analysis, mail sorting), by feature name. Added in version 3. The app fills a feature or a field a copy leaves out, or sends as an empty object, with the value of the copy built into it (ai/registry/load.rs apply_floor), and never reads a feature it does not use.",
+      "type": "object",
+      "propertyNames": { "$ref": "#/$defs/featureName" },
+      "additionalProperties": {
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {
+          "max_output_tokens": { "description": "The output cap of one request of this feature.", "$ref": "#/$defs/outputTokens" }
+        }
+      }
+    },
     "chat_model_filter": {
       "description": "Which ids from a provider's live model list are offered as chat models (commands/ai_choice.rs chat_models).",
       "type": "object",

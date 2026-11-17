@@ -85,7 +85,7 @@ pub(super) async fn send(
             "input": prompt,
             "store": false,
             "stream": false,
-            "max_output_tokens": 4096,
+            "max_output_tokens": crate::ai::models::feature_max_output_tokens(crate::ai::cost::Feature::MailAnalysis),
             "reasoning": {"effort": "low"},
             "truncation": "disabled"
         }),

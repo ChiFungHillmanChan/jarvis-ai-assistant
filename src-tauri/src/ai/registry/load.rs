@@ -161,6 +161,11 @@ pub(crate) fn apply_floor(bundled: &Registry, registry: &mut Registry) {
             registry.providers.push(own.clone());
         }
     }
+    // A feature limit the copy leaves out, or sends as an empty object,
+    // keeps the bundled value, as a provider limit does.
+    for (feature, own) in &bundled.feature_limits {
+        registry.feature_limits.entry(feature.clone()).or_default().fill_from(own);
+    }
     // Downloads are addresses too: a file is fetched only from where this
     // build said, and checked against the hash it shipped. The Whisper model
     // is the bundled one, so its download always exists.
