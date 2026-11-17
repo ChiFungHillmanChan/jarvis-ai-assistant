@@ -1,0 +1,139 @@
+//! The model registry the app runs on (P05): every model, price, limit,
+//! capability, feature default and provider data term comes from here and
+//! nowhere else. `ai::models` keeps the functions callers already used, as a
+//! thin layer over [`current`].
+//!
+//! - `load`: the bundled copy, the cached copy, the checks a copy must pass
+//!   and the data-terms floor.
+//! - `fetch`: the signed remote copy (`GET /v1/registry`), on launch, every
+//!   six hours and after a wake; never on the startup path.
+//!
+//! BYOK calls still go from the Mac to the provider directly; the registry
+//! carries no keys and never decides where a key is sent.
+
+pub mod doc;
+pub mod fetch;
+pub mod load;
+mod lookup;
+
+pub use doc::{DataTerms, Model, Provider, Registry, Status};
+pub use load::Source;
+pub use lookup::ModelState;
+
+use std::sync::{Arc, LazyLock, RwLock};
+
+/// The registry compiled into this build. Always valid: the Rust test
+/// `the_bundled_registry_is_usable` parses it, and so does every launch.
+pub fn bundled() -> Arc<Registry> {
+    static BUNDLED: LazyLock<Arc<Registry>> =
+        LazyLock::new(|| Arc::new(Registry::parse(load::BUNDLED_JSON.as_bytes()).expect("registry/registry.json is a usable registry")));
+    Arc::clone(&BUNDLED)
+}
+
+/// The copy in use and where it came from.
+#[derive(Debug, Clone)]
+pub struct Active {
+    pub registry: Arc<Registry>,
+    pub source: Source,
+}
+
+/// Holds the copy in use. The app has one ([`holder`]); tests make their own.
+pub struct Holder {
+    active: RwLock<Active>,
+}
+
+impl Holder {
+    pub fn new(active: Active) -> Self {
+        Holder { active: RwLock::new(active) }
+    }
+
+    pub fn get(&self) -> Active {
+        self.active.read().unwrap_or_else(|poisoned| poisoned.into_inner()).clone()
+    }
+
+    pub fn set(&self, active: Active) {
+        *self.active.write().unwrap_or_else(|poisoned| poisoned.into_inner()) = active;
+    }
+}
+
+/// The app's copy in use: the bundled copy until [`start`] has read the
+/// cache.
+pub fn holder() -> &'static Holder {
+    static HOLDER: LazyLock<Holder> = LazyLock::new(|| Holder::new(Active { registry: bundled(), source: Source::Bundled }));
+    &HOLDER
+}
+
+/// The registry every lookup reads. Cheap: one read lock and an `Arc` clone.
+pub fn current() -> Arc<Registry> {
+    #[cfg(test)]
+    if let Some(registry) = test_override::get() {
+        return registry;
+    }
+    holder().get().registry
+}
+
+/// What Settings > About shows.
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct Info {
+    pub version: u64,
+    pub issued_at: String,
+    pub source: Source,
+}
+
+pub fn info() -> Info {
+    let active = holder().get();
+    Info { version: active.registry.version, issued_at: active.registry.issued_at.clone(), source: active.source }
+}
+
+/// At launch, before anything asks for a model: use the cached copy when it
+/// passes every check, else the bundled copy. Reads one small file and
+/// verifies one signature; never touches the network.
+pub fn start() {
+    let bundled = bundled();
+    let cache = load::cache_dir().and_then(|dir| load::read_cache(&dir));
+    let (registry, source) = load::at_launch(&bundled, cache.as_ref(), &load::compiled_key(), load::app_version());
+    log::info!("registry: version {} ({:?})", registry.version, source);
+    holder().set(Active { registry: Arc::new(registry), source });
+}
+
+/// For tests that need a registry other than the bundled one: every lookup
+/// on this thread reads it until the guard is dropped. `#[tokio::test]` runs
+/// on one thread, so this covers async tests too.
+#[cfg(test)]
+pub(crate) mod test_override {
+    use super::Registry;
+    use std::cell::RefCell;
+    use std::sync::Arc;
+
+    thread_local! {
+        static OVERRIDE: RefCell<Option<Arc<Registry>>> = const { RefCell::new(None) };
+    }
+
+    pub(crate) fn get() -> Option<Arc<Registry>> {
+        OVERRIDE.with(|o| o.borrow().clone())
+    }
+
+    pub(crate) struct Guard(Option<Arc<Registry>>);
+
+    impl Drop for Guard {
+        fn drop(&mut self) {
+            let previous = self.0.take();
+            OVERRIDE.with(|o| *o.borrow_mut() = previous);
+        }
+    }
+
+    pub(crate) fn set(registry: Registry) -> Guard {
+        let previous = OVERRIDE.with(|o| o.borrow_mut().replace(Arc::new(registry)));
+        Guard(previous)
+    }
+
+    /// The bundled registry with `change` applied, in place for this thread.
+    pub(crate) fn with(change: impl FnOnce(&mut Registry)) -> Guard {
+        let mut registry = (*super::bundled()).clone();
+        change(&mut registry);
+        set(registry)
+    }
+}
+
+#[cfg(test)]
+mod tests;

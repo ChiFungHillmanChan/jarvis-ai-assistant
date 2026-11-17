@@ -70,6 +70,18 @@ pub fn run() {
         // app back after Stripe; see payments::return_link.
         .plugin(tauri_plugin_deep_link::init())
         .setup(|app| {
+            // The model registry first: every model, price and default below
+            // comes from it. Reads the cached copy (one small file, one
+            // signature check) or uses the bundled copy; the network fetch
+            // runs in the background and never holds startup.
+            ai::registry::start();
+            {
+                use tauri::Emitter;
+                let handle = app.handle().clone();
+                ai::registry::fetch::spawn(move |version| {
+                    let _ = handle.emit("registry-updated", version);
+                });
+            }
             tool_approval::init(app.handle().clone());
             {
                 use tauri_plugin_deep_link::DeepLinkExt;

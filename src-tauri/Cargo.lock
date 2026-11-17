@@ -2797,6 +2797,7 @@ dependencies = [
  "open",
  "refinery",
  "reqwest 0.12.28",
+ "ring",
  "rusqlite",
  "security-framework 2.11.1",
  "serde",
