@@ -89,13 +89,13 @@ PR 檢查只讀取，沒有 environment、secret 或 AWS 權限。除了 `regist
 - 註冊表的 `base_url` 不可改變使用者金鑰的發送目的地；App 須把各服務商的主機名稱固定或列入允許清單。
 - 給 P05：目前沒有任何欄位或機制令註冊表過期。所有已簽署的版本都保留在 bucket 內，而且永遠能通過驗證；能寫入 `registry/*` 的人可以把 `latest.json` 指回較舊的已簽署版本，只有上述下限會拒絕它。
 
-App 的做法（P05，`src-tauri/src/ai/registry/`）：啟動時先用簽章有效、版本高於內置副本、`min_app_version` 符合而且通過「App 接受的範圍」各項檢查的快取副本，否則用內置副本，啟動時不連網。之後在啟動時、每 6 小時及 Mac 喚醒後取得遠端副本；快取副本就是使用中的副本時，會附上它的 `If-None-Match`。只有簽章有效、版本高於使用中的副本、內置副本及快取中簽章可驗證的副本、`min_app_version` 符合而且通過範圍檢查的副本，才會取代快取及使用中的副本；版本與使用中相同的回覆視為未改動。快取檔未能驗證簽章時，它記錄的版本一概不計。被拒的副本只記錄原因（欄位名稱及版本號），不記錄內容。資料條款以內置副本為下限，只可收緊；遠端副本新增的服務商一律視為 `unknown`，其 `base_url`、地區及主機名稱都不會被使用。被停用的模型不會自動改用替代模型：App 會提示使用者確認，確認前使用該模型的請求會停止，背景工作亦不會執行。正式版本的端點於編譯時以 `JARVIS_REGISTRY_URL` 指定；未指定時 App 只使用內置副本，不會查詢任何端點。prod 開始提供註冊表之後，發佈環境必須在執行 `scripts/release.sh` 之前把 `JARVIS_REGISTRY_URL` 設為 prod 的 `RegistryUrl`，絕不可帶有 dev 的網址。
+App 的做法（P05，`src-tauri/src/ai/registry/`）：啟動時先用簽章有效、版本高於內置副本、`min_app_version` 符合而且通過「App 接受的範圍」各項檢查的快取副本，否則用內置副本，啟動時不連網。之後在啟動時、每 6 小時及 Mac 喚醒後取得遠端副本；快取副本就是使用中的副本時，會附上它的 `If-None-Match`。只有簽章有效、版本高於使用中的副本、內置副本及快取中簽章可驗證的副本、`min_app_version` 符合而且通過範圍檢查的副本，才會取代快取及使用中的副本；版本與使用中相同的回覆視為未改動。快取檔未能驗證簽章時，它記錄的版本一概不計。被拒的副本只記錄原因（欄位名稱及版本號），不記錄內容。資料條款以內置副本為下限，只可收緊；遠端副本新增的服務商一律視為 `unknown`，其 `base_url`、地區及主機名稱都不會被使用。被停用的模型不會自動改用替代模型：App 會提示使用者確認，確認前使用該模型的請求會停止，背景工作亦不會執行。正式版本的端點於編譯時以 `JARVIS_REGISTRY_URL` 指定；未指定時 App 只使用內置副本，不會查詢任何端點。debug 版本（包括 native-qa）亦可在啟動時以 `JARVIS_REGISTRY_URL` 指定端點，例如在 QA 時指向 dev；這個變數只可在指令行設定，絕不可寫入 `.env`，因為 `scripts/release.sh` 會把 `.env` 的每個變數匯出至正式版本的建置，dev 的網址便會編入正式版本。prod 開始提供註冊表之後，發佈環境必須在執行 `scripts/release.sh` 之前把 `JARVIS_REGISTRY_URL` 設為 prod 的 `RegistryUrl`，絕不可帶有 dev 的網址；QA 或 debug 時只在指令行設定，絕不可寫入 `.env`。
 
 ## App 接受的範圍
 
 App 的 `Registry::check`（`src-tauri/src/ai/registry/doc.rs`）拒絕任何一項超出以下範圍的副本，整份不用，使用中的副本不變；`schema.json` 設有相同的範圍，因此 CI 在簽署前已會拒絕。上限以第 1 版的最大值為基準，至少保留約十倍的空間：
 
-| 欄位（`providers[].limits`） | 範圍 |
+| 欄位（除另有註明外，均在 `providers[].limits`） | 範圍 |
 | --- | --- |
 | `chat_max_output_tokens`、`default_max_output_tokens`、`stt_max_output_tokens` | 1 至 131,072（第 1 版最大 4,096） |
 | `completion_context_tokens`、`default_context_tokens` | 1 至 1,048,576（第 1 版最大 8,192） |
@@ -103,6 +103,7 @@ App 的 `Registry::check`（`src-tauri/src/ai/registry/doc.rs`）拒絕任何一
 | `chat_temperature` | 0 至 2 |
 | `chat_reasoning_effort` | `none`、`minimal`、`low`、`medium`、`high`、`xhigh`、`max` 之一（OpenAI 的 reasoning 指南所列，2026-11-17 閱讀；各模型只接受其中部分） |
 | `api_version` | `YYYY-MM-DD` 格式的日期 |
+| `models[].max_output`（每個模型的輸出上限，Gemini 以 `maxOutputTokens` 送出） | 1 至 1,048,576（第 1 版最大 65,536） |
 
 模型 id（`models[].id`、`replacement`、`built_in_models`、`features` 的預設及 `presets` 的模型）只可包含英文字母、數字及 `.`、`_`、`:`、`/`、`-`，而且不可包含 `..`；`schema.json` 另要求 `models[].id` 為小寫（App 以不分大小寫的方式比對）。各功能的預設模型及 preset 所用的模型必須為 `active`；App 建議的替代模型亦只會是 `active` 的模型。
 
@@ -320,4 +321,4 @@ node --experimental-strip-types registry/validate.ts registry/registry.json
     ```bash
     REGISTRY_URL=<prod 的 RegistryUrl>
     ```
-    prod 開始提供註冊表之後，正式版本的發佈環境必須在執行 `scripts/release.sh` 之前把 `JARVIS_REGISTRY_URL` 設為 prod 的 `RegistryUrl`，絕不可帶有 dev 的網址；未設定時，建置出來的 App 只使用內置副本，不會查詢任何端點。
+    prod 開始提供註冊表之後，正式版本的發佈環境必須在執行 `scripts/release.sh` 之前把 `JARVIS_REGISTRY_URL` 設為 prod 的 `RegistryUrl`，絕不可帶有 dev 的網址；QA 或 debug 時只在指令行設定 `JARVIS_REGISTRY_URL`，絕不可寫入 `.env`，因為 `scripts/release.sh` 會把 `.env` 的每個變數匯出至正式版本的建置。未設定時，建置出來的 App 只使用內置副本，不會查詢任何端點。
