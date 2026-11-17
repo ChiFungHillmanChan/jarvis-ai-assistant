@@ -121,6 +121,31 @@ impl Limits {
     }
 }
 
+/// The limits of one feature's own requests, whichever provider answers them
+/// (registry `feature_limits.<feature>`): mail analysis and mail sorting.
+#[derive(Debug, Clone, Default, Deserialize, Serialize, PartialEq)]
+pub struct FeatureLimits {
+    pub max_output_tokens: Option<u32>,
+}
+
+impl FeatureLimits {
+    /// Fill each limit this copy leaves out with `other`'s.
+    pub(crate) fn fill_from(&mut self, other: &FeatureLimits) {
+        if self.max_output_tokens.is_none() {
+            self.max_output_tokens = other.max_output_tokens;
+        }
+    }
+
+    /// Every limit this copy sets is inside its bound. The error names the
+    /// field, never its value.
+    pub(crate) fn check(&self, feature: &str) -> Result<(), String> {
+        if self.max_output_tokens.is_some_and(|v| !(1..=MAX_OUTPUT_TOKENS).contains(&v)) {
+            return Err(format!("feature_limits.{feature}.max_output_tokens is outside 1 to {MAX_OUTPUT_TOKENS}"));
+        }
+        Ok(())
+    }
+}
+
 /// The bounds of the limits, inclusive, mirrored in registry/schema.json.
 /// Version 1 holds at most 4,096 output tokens, 8,192 context tokens and 5
 /// tool rounds; each maximum is at least ten times that. Output: 131,072
@@ -180,7 +205,14 @@ pub(crate) const REQUIRED_LIMITS: &[(&str, &str)] = &[
     ("ollama", "completion_context_tokens"),
     ("ollama", "default_context_tokens"),
     ("ollama", "max_tool_rounds"),
+    ("ollama", "chat_max_output_tokens"),
 ];
+
+/// The feature limits this build reads (`feature_limits.<feature>.max_output_tokens`).
+/// The bundled copy carries each, and a fetched copy that leaves one out
+/// keeps the bundled value, as for [`REQUIRED_LIMITS`].
+#[cfg(test)]
+pub(crate) const REQUIRED_FEATURE_LIMITS: &[&str] = &["mail_analysis", "mail_sort"];
 
 #[derive(Debug, Clone, Deserialize, Serialize, PartialEq)]
 pub struct Provider {
@@ -350,6 +382,11 @@ pub struct Registry {
     pub providers: Vec<Provider>,
     pub models: Vec<Model>,
     pub features: BTreeMap<String, BTreeMap<String, String>>,
+    /// Added in version 3; a copy without it keeps the bundled values
+    /// (`load::apply_floor`). A feature this build does not read is never
+    /// read, though its limits are still checked against their bounds.
+    #[serde(default)]
+    pub feature_limits: BTreeMap<String, FeatureLimits>,
     pub chat_model_filter: ChatModelFilter,
     pub presets: Presets,
 }
@@ -408,6 +445,9 @@ impl Registry {
         }
         if parse_version(&self.min_app_version).is_none() {
             return Err("min_app_version is not x.y.z".into());
+        }
+        for (feature, limits) in &self.feature_limits {
+            limits.check(feature)?;
         }
         for provider in &self.providers {
             provider.limits.check(&provider.id)?;

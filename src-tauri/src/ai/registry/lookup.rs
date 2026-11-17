@@ -2,7 +2,7 @@
 //! local catalog and whether a saved model may still be used. The rules are
 //! those of registry/lookup.ts and of models.rs before P05.
 
-use super::doc::{Limits, Model, Registry, Status};
+use super::doc::{FeatureLimits, Limits, Model, Registry, Status};
 use crate::ai::models::{cost_micro_at, is_local, Price};
 
 /// Whether a saved model may be used, and what replaces it.
@@ -68,6 +68,10 @@ impl Registry {
 
     pub fn limits(&self, provider: &str) -> Limits {
         self.provider(provider).map(|p| p.limits.clone()).unwrap_or_default()
+    }
+
+    pub fn feature_limits(&self, feature: &str) -> FeatureLimits {
+        self.feature_limits.get(feature).cloned().unwrap_or_default()
     }
 
     /// The Ollama catalog, in file order.

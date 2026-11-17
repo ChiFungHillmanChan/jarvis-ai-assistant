@@ -73,14 +73,28 @@ fn the_bundled_registry_is_usable() {
     assert!(load::app_satisfies(&registry.min_app_version, load::app_version()), "this build can use the copy it ships");
 }
 
+/// The limits added in version 3. The frozen fixture is version 1 and never
+/// gains them: the app's tests on it use `OUTPUT_TOKENS_WHEN_UNSET`.
+const ADDED_IN_VERSION_3: &[(&str, &str)] = &[("ollama", "chat_max_output_tokens")];
+
 #[test]
 fn the_bundled_registry_carries_every_limit_the_app_reads() {
     for registry in [bundled(), fixture()] {
+        let frozen = Arc::ptr_eq(&registry, &fixture());
         for (provider, field) in super::doc::REQUIRED_LIMITS {
             let limits = serde_json::to_value(&registry.provider(provider).unwrap_or_else(|| panic!("{provider}")).limits).unwrap();
+            if frozen && ADDED_IN_VERSION_3.contains(&(*provider, *field)) {
+                assert!(limits[field].is_null(), "the fixture is version 1, without providers.{provider}.limits.{field}");
+                continue;
+            }
             assert!(!limits[field].is_null(), "providers.{provider}.limits.{field} is missing in version {}", registry.version);
         }
     }
+    let registry = bundled();
+    for feature in super::doc::REQUIRED_FEATURE_LIMITS {
+        assert!(registry.feature_limits(feature).max_output_tokens.is_some(), "feature_limits.{feature}.max_output_tokens is missing in version {}", registry.version);
+    }
+    assert!(fixture().feature_limits.is_empty(), "the fixture is version 1, without feature_limits");
 }
 
 #[test]
@@ -681,6 +695,8 @@ async fn a_limit_outside_its_bound_rejects_the_whole_copy() {
     let cases: Vec<(&str, &str, Value, Value, String)> = vec![
         ("openai", "chat_max_output_tokens", json!(0), json!(1), range(MAX_OUTPUT_TOKENS)),
         ("openai", "chat_max_output_tokens", json!(MAX_OUTPUT_TOKENS + 1), json!(MAX_OUTPUT_TOKENS), range(MAX_OUTPUT_TOKENS)),
+        ("ollama", "chat_max_output_tokens", json!(0), json!(1), range(MAX_OUTPUT_TOKENS)),
+        ("ollama", "chat_max_output_tokens", json!(MAX_OUTPUT_TOKENS + 1), json!(MAX_OUTPUT_TOKENS), range(MAX_OUTPUT_TOKENS)),
         ("gemini", "default_max_output_tokens", json!(0), json!(1), range(MAX_OUTPUT_TOKENS)),
         ("gemini", "default_max_output_tokens", json!(MAX_OUTPUT_TOKENS + 1), json!(MAX_OUTPUT_TOKENS), range(MAX_OUTPUT_TOKENS)),
         ("gemini", "stt_max_output_tokens", json!(0), json!(1), range(MAX_OUTPUT_TOKENS)),
@@ -713,6 +729,198 @@ async fn a_limit_outside_its_bound_rejects_the_whole_copy() {
         assert_eq!(load::read_cache(&setup.dir), None, "{case}: nothing is cached");
         assert_eq!(setup.refresh(&fake).await, Outcome::Updated { version: bundled().version + 1 }, "{id}.{field} = {inside} is inside its bound");
     }
+}
+
+/// The same for each feature's output cap: either side of its bound, the
+/// reason names the field path and never the value.
+#[tokio::test]
+async fn a_feature_limit_outside_its_bound_rejects_the_whole_copy() {
+    use super::doc::{MAX_OUTPUT_TOKENS, REQUIRED_FEATURE_LIMITS};
+    for feature in REQUIRED_FEATURE_LIMITS {
+        for (outside, inside) in [(0, 1), (MAX_OUTPUT_TOKENS + 1, MAX_OUTPUT_TOKENS)] {
+            let set = |value: u32| newer(1, |doc| doc["feature_limits"][*feature]["max_output_tokens"] = json!(value));
+            let setup = Setup::new();
+            let fake = Fake::with(vec![signed_reply(&setup.key, set(outside), "\"a\""), signed_reply(&setup.key, set(inside), "\"b\"")]);
+            let reason = format!("feature_limits.{feature}.max_output_tokens is outside 1 to {MAX_OUTPUT_TOKENS}");
+            assert_eq!(setup.refresh(&fake).await, Outcome::Rejected(Rejected::Unreadable(reason)), "{feature} = {outside}: rejected, the field named and the value not quoted");
+            let active = setup.holder.get();
+            assert_eq!((active.registry.version, active.source), (bundled().version, Source::Bundled), "{feature} = {outside}: the copy in use stays");
+            assert_eq!(load::read_cache(&setup.dir), None, "{feature} = {outside}: nothing is cached");
+            assert_eq!(setup.refresh(&fake).await, Outcome::Updated { version: bundled().version + 1 }, "{feature} = {inside} is inside its bound");
+            assert_eq!(setup.holder.get().registry.feature_limits(feature).max_output_tokens, Some(inside));
+        }
+    }
+}
+
+/// A cached or fetched copy written before version 3 (as dev's version 2
+/// is), or one that sends only part of the output caps, is used, and each cap
+/// it lacks keeps the bundled value: no feature_limits at all, one feature
+/// left out, a feature sent as an empty object, ollama's chat cap left out.
+/// A feature this build does not read is accepted and never read; a cap the
+/// copy does send is used.
+#[test]
+fn a_copy_without_the_output_caps_of_version_3_keeps_the_bundled_values() {
+    let b = bundled();
+    let own = |feature: &str| b.feature_limits(feature).max_output_tokens;
+    let own_local = b.limits("ollama").chat_max_output_tokens;
+    let without_all = accepted(|doc| {
+        doc.as_object_mut().unwrap().remove("feature_limits");
+        provider(doc, "ollama")["limits"].as_object_mut().unwrap().remove("chat_max_output_tokens");
+    });
+    let partial = accepted(|doc| {
+        doc["feature_limits"] = json!({ "mail_analysis": { "max_output_tokens": 1234 }, "mail_sort": {}, "not_a_feature": { "max_output_tokens": 99 } });
+    });
+    let one_left_out = accepted(|doc| {
+        doc["feature_limits"] = json!({ "mail_sort": { "max_output_tokens": 4321 } });
+    });
+    for feature in super::doc::REQUIRED_FEATURE_LIMITS {
+        assert!(own(feature).is_some(), "{feature}: the bundled copy carries it");
+        assert_eq!(without_all.feature_limits(feature).max_output_tokens, own(feature), "{feature}: no feature_limits at all");
+    }
+    assert_eq!(without_all.limits("ollama").chat_max_output_tokens, own_local, "ollama's chat cap left out");
+    assert_eq!(partial.feature_limits("mail_sort").max_output_tokens, own("mail_sort"), "an empty object removes nothing");
+    assert_eq!(partial.feature_limits("mail_analysis").max_output_tokens, Some(1234), "a cap the copy sends is used");
+    assert_eq!(one_left_out.feature_limits("mail_analysis").max_output_tokens, own("mail_analysis"), "a feature left out");
+    assert_eq!(one_left_out.feature_limits("mail_sort").max_output_tokens, Some(4321));
+}
+
+/// What the call sites send when the copy in use lacks the caps: the bundled
+/// copy's values. The bundled copy here holds three values that are not
+/// `OUTPUT_TOKENS_WHEN_UNSET`, so a copy left unfilled (the constant) cannot
+/// pass for a filled one.
+#[test]
+fn the_accessors_give_the_bundled_caps_when_the_copy_in_use_lacks_them() {
+    use crate::ai::cost::Feature;
+    use crate::ai::models::{feature_max_output_tokens, local_chat_max_output_tokens, OUTPUT_TOKENS_WHEN_UNSET};
+    let (analysis, sort, local) = (1_111, 2_222, 3_333);
+    for value in [analysis, sort, local] {
+        assert_ne!(value, OUTPUT_TOKENS_WHEN_UNSET);
+    }
+    let _bundled = test_override::bundled_with(|r| {
+        r.feature_limits.insert("mail_analysis".into(), super::doc::FeatureLimits { max_output_tokens: Some(analysis) });
+        r.feature_limits.insert("mail_sort".into(), super::doc::FeatureLimits { max_output_tokens: Some(sort) });
+        r.providers.iter_mut().find(|p| p.id == "ollama").unwrap().limits.chat_max_output_tokens = Some(local);
+    });
+    let without_all = accepted(|doc| {
+        doc.as_object_mut().unwrap().remove("feature_limits");
+        provider(doc, "ollama")["limits"].as_object_mut().unwrap().remove("chat_max_output_tokens");
+    });
+    let _in_use = test_override::set(without_all);
+    assert_eq!(feature_max_output_tokens(Feature::MailAnalysis), analysis);
+    assert_eq!(feature_max_output_tokens(Feature::MailSort), sort);
+    assert_eq!(local_chat_max_output_tokens(u32::MAX), local);
+}
+
+/// When neither the copy in use nor the bundled copy carries a cap (the app's
+/// tests on the version 1 fixture; never a release, see the test above and
+/// `the_bundled_registry_carries_every_limit_the_app_reads`), the accessors
+/// use the one named constant: the value the code held before version 3,
+/// never 0 and never unlimited.
+#[test]
+fn a_cap_neither_copy_carries_is_the_named_constant() {
+    use crate::ai::cost::Feature;
+    use crate::ai::models::{feature_max_output_tokens, local_chat_max_output_tokens, OUTPUT_TOKENS_WHEN_UNSET};
+    assert_eq!(OUTPUT_TOKENS_WHEN_UNSET, 4_096);
+    assert!((1..=super::doc::MAX_OUTPUT_TOKENS).contains(&OUTPUT_TOKENS_WHEN_UNSET));
+    let _bundled = test_override::bundled_with(|r| {
+        r.feature_limits.clear();
+        r.providers.iter_mut().find(|p| p.id == "ollama").unwrap().limits.chat_max_output_tokens = None;
+    });
+    let copy = accepted(|doc| {
+        doc.as_object_mut().unwrap().remove("feature_limits");
+        provider(doc, "ollama")["limits"].as_object_mut().unwrap().remove("chat_max_output_tokens");
+    });
+    assert!(copy.feature_limits.values().all(|l| l.max_output_tokens.is_none()) && copy.limits("ollama").chat_max_output_tokens.is_none(), "neither copy carries them");
+    let _in_use = test_override::set(copy);
+    assert_eq!(feature_max_output_tokens(Feature::MailAnalysis), OUTPUT_TOKENS_WHEN_UNSET);
+    assert_eq!(feature_max_output_tokens(Feature::MailSort), OUTPUT_TOKENS_WHEN_UNSET);
+    assert_eq!(local_chat_max_output_tokens(u32::MAX), OUTPUT_TOKENS_WHEN_UNSET);
+    assert_eq!(local_chat_max_output_tokens(2_000), 1_000, "still at most half the context");
+}
+
+/// Whenever the registry carries a cap, the accessors return it, not the
+/// constant; each feature reads its own.
+#[test]
+fn the_output_cap_accessors_read_the_registry() {
+    use crate::ai::cost::Feature;
+    use crate::ai::models::{feature_max_output_tokens, local_chat_max_output_tokens, OUTPUT_TOKENS_WHEN_UNSET};
+    let _registry = test_override::with(|r| {
+        r.feature_limits.insert("mail_analysis".into(), super::doc::FeatureLimits { max_output_tokens: Some(1234) });
+        r.feature_limits.insert("mail_sort".into(), super::doc::FeatureLimits { max_output_tokens: Some(4321) });
+        r.providers.iter_mut().find(|p| p.id == "ollama").unwrap().limits.chat_max_output_tokens = Some(777);
+    });
+    for value in [1234, 4321, 777] {
+        assert_ne!(value, OUTPUT_TOKENS_WHEN_UNSET);
+    }
+    assert_eq!(feature_max_output_tokens(Feature::MailAnalysis), 1234);
+    assert_eq!(feature_max_output_tokens(Feature::MailSort), 4321);
+    assert_eq!(local_chat_max_output_tokens(u32::MAX), 777);
+    assert_eq!(local_chat_max_output_tokens(1_000), 500, "at most half the context");
+}
+
+/// The local chat request cannot be built in a test (`send_local` needs a
+/// running app's handle), so this checks its source instead: the request's
+/// cap is the accessor above, and the old literal is gone.
+#[test]
+fn the_local_chat_request_takes_its_cap_from_the_accessor() {
+    let source = include_str!("../local/mod.rs");
+    assert_eq!(source.matches("max_tokens: Some(crate::ai::models::local_chat_max_output_tokens(context_length)),").count(), 1);
+    assert!(!source.contains("4096.min(") && !source.contains("4_096.min("), "no fixed cap is left beside it");
+}
+
+/// Every call of the feature cap accessor in the app's Rust sources names a
+/// feature the bundled copy must carry (`REQUIRED_FEATURE_LIMITS`), so no
+/// caller can reach `OUTPUT_TOKENS_WHEN_UNSET` in a release. The argument
+/// must be a `Feature::<Name>` literal (with or without a path before it); a
+/// variable or anything else this cannot read fails the test.
+#[test]
+fn every_feature_whose_cap_the_app_reads_is_carried_by_the_bundled_copy() {
+    use crate::ai::cost::Feature;
+    // Every feature, by the name the code writes. A name not listed here
+    // fails below, so a new feature is added here before it can be passed.
+    let features = [Feature::Chat, Feature::Tools, Feature::MailAnalysis, Feature::MailSort, Feature::Briefing, Feature::Stt, Feature::Tts, Feature::Memory, Feature::Other];
+    // Built in two parts, so this test's own source holds no call to find.
+    let call = concat!("feature_max_output_tokens", "(");
+    fn rust_files(dir: &std::path::Path, out: &mut Vec<PathBuf>) {
+        for entry in std::fs::read_dir(dir).unwrap() {
+            let path = entry.unwrap().path();
+            if path.is_dir() {
+                rust_files(&path, out);
+            } else if path.extension().is_some_and(|e| e == "rs") {
+                out.push(path);
+            }
+        }
+    }
+    let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src");
+    let mut files = Vec::new();
+    rust_files(&root, &mut files);
+    let mut calls: Vec<(String, &'static str)> = Vec::new();
+    for path in &files {
+        let source = std::fs::read_to_string(path).unwrap();
+        let file = path.strip_prefix(&root).unwrap().to_string_lossy().replace('\\', "/");
+        for (at, _) in source.match_indices(call) {
+            if source[..at].ends_with("fn ") {
+                continue; // the definition in ai/models.rs
+            }
+            let rest = &source[at + call.len()..];
+            let argument = rest[..rest.find(')').unwrap_or(rest.len())].trim().trim_end_matches(',').trim();
+            let parts: Vec<&str> = argument.split("::").collect();
+            let readable = parts.len() >= 2
+                && parts[parts.len() - 2] == "Feature"
+                && parts[..parts.len() - 2].iter().all(|p| !p.is_empty() && p.bytes().all(|c| c.is_ascii_lowercase() || c == b'_'));
+            assert!(readable, "{file}: a call of the feature cap accessor whose argument is not a Feature::<Name> literal: {argument:?}");
+            let name = parts[parts.len() - 1];
+            let feature = features.iter().find(|f| format!("{f:?}") == name).unwrap_or_else(|| panic!("{file}: Feature::{name} is not a feature this test knows"));
+            calls.push((file.clone(), feature.as_str()));
+        }
+    }
+    for (file, feature) in &calls {
+        assert!(super::doc::REQUIRED_FEATURE_LIMITS.contains(feature), "{file} reads the cap of {feature}, which the bundled copy is not required to carry (REQUIRED_FEATURE_LIMITS)");
+    }
+    for file in ["mail/openai.rs", "mail/analysis.rs", "mail/triage.rs"] {
+        assert!(calls.iter().any(|(f, _)| f == file), "the call in {file} was found");
+    }
+    assert!(calls.len() >= 3, "{calls:?}");
 }
 
 #[test]

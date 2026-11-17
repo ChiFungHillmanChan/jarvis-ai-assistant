@@ -137,7 +137,7 @@ async fn analyze_with_endpoints(
             let done = crate::ai::complete::complete(
                 &route.router,
                 &route.db,
-                crate::ai::complete::Request { system: "", user: &prepared.prompt, json: false, max_tokens: 4_096, feature: crate::ai::cost::Feature::MailAnalysis },
+                crate::ai::complete::Request { system: "", user: &prepared.prompt, json: false, max_tokens: crate::ai::models::feature_max_output_tokens(crate::ai::cost::Feature::MailAnalysis), feature: crate::ai::cost::Feature::MailAnalysis },
             )
             .await?;
             prepared.model = format!("{} · {}", done.provider, done.model);

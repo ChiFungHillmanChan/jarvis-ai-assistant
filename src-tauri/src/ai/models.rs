@@ -89,6 +89,29 @@ pub fn chat_max_output_tokens(provider: &str) -> u32 {
     limits(provider).chat_max_output_tokens.unwrap_or_default()
 }
 
+/// The output cap the two accessors below use only when neither the copy in
+/// use nor the bundled copy carries their field (both were added in registry
+/// version 3). The bundled copy carries both (`REQUIRED_LIMITS`,
+/// `REQUIRED_FEATURE_LIMITS`) and a cached or fetched copy that leaves one
+/// out takes the bundled value (`load::apply_floor`), so a release never
+/// uses it; the app's tests do, on the frozen version 1 fixture. It is the
+/// value the code held before version 3: never 0, never unlimited.
+pub(crate) const OUTPUT_TOKENS_WHEN_UNSET: u32 = 4_096;
+
+/// The output cap of one local chat request (registry
+/// `providers.ollama.limits.chat_max_output_tokens`), never more than half
+/// the model's context window.
+pub fn local_chat_max_output_tokens(context_length: u32) -> u32 {
+    limits("ollama").chat_max_output_tokens.unwrap_or(OUTPUT_TOKENS_WHEN_UNSET).min(context_length / 2)
+}
+
+/// The output cap of one request a feature sends itself, whichever AI
+/// answers it (registry `feature_limits.<feature>.max_output_tokens`): mail
+/// analysis and mail sorting.
+pub fn feature_max_output_tokens(feature: super::cost::Feature) -> u32 {
+    registry::current().feature_limits(feature.as_str()).max_output_tokens.unwrap_or(OUTPUT_TOKENS_WHEN_UNSET)
+}
+
 /// Tool rounds in one chat turn before the final answer is forced.
 pub fn max_tool_rounds(provider: &str) -> usize {
     limits(provider).max_tool_rounds.unwrap_or_default() as usize

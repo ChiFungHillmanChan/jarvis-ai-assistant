@@ -142,6 +142,8 @@ test('the validator refuses a limit outside its bound, as the app does, and acce
   const cases: [string, string, unknown, unknown][] = [
     ['openai', 'chat_max_output_tokens', 0, 1],
     ['openai', 'chat_max_output_tokens', 131073, 131072],
+    ['ollama', 'chat_max_output_tokens', 0, 1],
+    ['ollama', 'chat_max_output_tokens', 131073, 131072],
     ['gemini', 'default_max_output_tokens', 131073, 131072],
     ['gemini', 'stt_max_output_tokens', 0, 131072],
     ['ollama', 'completion_context_tokens', 1048577, 1048576],
@@ -159,6 +161,22 @@ test('the validator refuses a limit outside its bound, as the app does, and acce
     assert.ok(errors.some(e => e.startsWith(`schema: /providers/${index}/limits/${field} `)), `${id}.${field} = ${outside}: ${errors.join('\n')}`);
     assert.deepEqual(errorsFor(doc => { provider(doc, id).limits[field] = inside; }), [], `${id}.${field} = ${inside}`);
   }
+});
+
+test("the validator refuses a feature's output cap outside its bound or a feature it does not know, as the schema says, and accepts a copy without them", () => {
+  // FeatureLimits::check in src-tauri/src/ai/registry/doc.rs (MAX_OUTPUT_TOKENS).
+  for (const feature of ['mail_analysis', 'mail_sort']) {
+    for (const [outside, inside] of [[0, 1], [131073, 131072]]) {
+      const errors = errorsFor(doc => { doc.feature_limits[feature].max_output_tokens = outside; });
+      assert.ok(errors.some(e => e.startsWith(`schema: /feature_limits/${feature}/max_output_tokens `)), `${feature} = ${outside}: ${errors.join('\n')}`);
+      assert.deepEqual(errorsFor(doc => { doc.feature_limits[feature].max_output_tokens = inside; }), [], `${feature} = ${inside}`);
+    }
+  }
+  assert.ok(errorsFor(doc => { doc.feature_limits.not_a_feature = { max_output_tokens: 4096 }; }).some(e => e.startsWith('schema: /feature_limits ')), 'a feature name outside the list');
+  assert.ok(errorsFor(doc => { doc.feature_limits.mail_sort.temperature = 1; }).some(e => e.includes('(temperature)')), 'a field the app does not know');
+  // A copy written before version 3 (as dev's version 2), or with part of them, is still valid.
+  assert.deepEqual(errorsFor(doc => { delete doc.feature_limits; }), []);
+  assert.deepEqual(errorsFor(doc => { doc.feature_limits = { mail_analysis: {} }; }), []);
 });
 
 test("the validator refuses a model's max_output outside its bound, as the app does, and accepts one at it", () => {

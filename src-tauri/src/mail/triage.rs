@@ -641,7 +641,7 @@ fn json_object(text: &str) -> Option<Value> {
 /// `parse_luna` validates what comes back.
 async fn ask_chosen_ai(router: &crate::ai::AiRouter, db: &Database, instructions: &str, input: &str, schema: Value) -> Result<(Value, crate::ai::complete::Completion), String> {
     let system = format!("{instructions}\n\nReply with only one JSON object that matches this JSON Schema, with every field present:\n{schema}");
-    let done = crate::ai::complete::complete(router, db, crate::ai::complete::Request { system: &system, user: input, json: true, max_tokens: 4_096, feature: Feature::MailSort }).await?;
+    let done = crate::ai::complete::complete(router, db, crate::ai::complete::Request { system: &system, user: input, json: true, max_tokens: crate::ai::models::feature_max_output_tokens(Feature::MailSort), feature: Feature::MailSort }).await?;
     let value = json_object(&done.text).ok_or_else(|| format!("{} 回覆的格式無效，請稍後重試。", done.provider))?;
     Ok((value, done))
 }
