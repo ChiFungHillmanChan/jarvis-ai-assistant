@@ -100,17 +100,62 @@ struct CandidateContent {
     parts: Option<Vec<GeminiPart>>,
 }
 
-/// The request's generationConfig. A "Think harder" turn on a model the
-/// registry marks as thinking asks for the high thinking level (P06):
-/// `thinkingLevel` is Google's setting for Gemini 3 and later, whose default
-/// level differs per model. Google refuses it on earlier models, which ends
-/// on the error card; nothing is switched.
+/// The request's generationConfig.
 fn generation_config(max_output_tokens: u32, deeper: Option<crate::ai::capability::Deeper>) -> serde_json::Value {
     let mut config = json!({"maxOutputTokens": max_output_tokens});
-    if deeper.is_some_and(|d| d.thinking) {
-        config["thinkingConfig"] = json!({"thinkingLevel": "HIGH"});
+    if let Some(thinking) = thinking_config(deeper) {
+        config["thinkingConfig"] = thinking;
     }
     config
+}
+
+/// The thinking parameter a request carries (P06), the one place that
+/// decides it. A "Think harder" turn on a model the registry marks as
+/// thinking asks for the high thinking level, and only that: never minimal
+/// or xhigh, and no model id or version is read here. Any other turn keeps
+/// Google's default for the model. Whether gemini-2.5 models accept
+/// `thinkingLevel` is not settled (DECISIONS.md, P06 rows of 2026-11-17); if
+/// Google refuses it, the request ends on the error card with Google's
+/// reason, and nothing is switched.
+fn thinking_config(deeper: Option<crate::ai::capability::Deeper>) -> Option<serde_json::Value> {
+    deeper.is_some_and(|d| d.thinking).then(|| json!({"thinkingLevel": "HIGH"}))
+}
+
+/// What the model sent in one round, kept so the next request can send it
+/// back as Google requires ("resend all thought blocks exactly as they were
+/// received"): every function-call part unchanged, with the thoughtSignature
+/// it carries, and the streamed text as one part with the signature a text
+/// part arrived with. Gemini 3 models think on every turn, so this holds for
+/// any turn with tools, not only "Think harder".
+#[derive(Default)]
+struct ModelRound {
+    texts: Vec<String>,
+    text_signature: Option<String>,
+    calls: Vec<GeminiPart>,
+}
+
+impl ModelRound {
+    fn take(&mut self, part: &GeminiPart) {
+        if let Some(text) = &part.text {
+            self.texts.push(text.clone());
+        }
+        if part.function_call.is_some() {
+            self.calls.push(part.clone());
+        } else if let Some(signature) = &part.thought_signature {
+            self.text_signature = Some(signature.clone());
+        }
+    }
+
+    /// The model turn sent back before the function responses.
+    fn parts(&self) -> Vec<GeminiPart> {
+        let mut parts = Vec::new();
+        let text = self.texts.join("");
+        if !text.is_empty() || self.text_signature.is_some() {
+            parts.push(GeminiPart { text: Some(text), thought_signature: self.text_signature.clone(), ..Default::default() });
+        }
+        parts.extend(self.calls.iter().cloned());
+        parts
+    }
 }
 
 pub async fn send(
@@ -186,8 +231,7 @@ pub async fn send(
 
         let mut stream = response.bytes_stream();
         let mut buffer = super::SseByteBuffer::new();
-        let mut text_parts: Vec<String> = Vec::new();
-        let mut function_call_parts: Vec<GeminiPart> = Vec::new();
+        let mut round = ModelRound::default();
         let mut announced_tools: HashSet<String> = HashSet::new();
         let mut response_started = false;
         let mut finish_reason: Option<String> = None;
@@ -265,7 +309,6 @@ pub async fn send(
                                                 }),
                                             );
                                         }
-                                        text_parts.push(text.clone());
                                         let _ = app_handle.emit(
                                             "chat-token",
                                             json!({"token": text, "done": false}),
@@ -291,8 +334,8 @@ pub async fn send(
                                                 json!({"tool_name": &fc.name}),
                                             );
                                         }
-                                        function_call_parts.push(part.clone());
                                     }
+                                    round.take(part);
                                 }
                             }
                         }
@@ -303,27 +346,16 @@ pub async fn send(
 
         usage.add_to(&mut turn);
 
-        if !function_call_parts.is_empty() && !final_round {
-            let mut assistant_parts: Vec<GeminiPart> = Vec::new();
-            let full_text = text_parts.join("");
-            if !full_text.is_empty() {
-                assistant_parts.push(GeminiPart {
-                    text: Some(full_text),
-                    ..Default::default()
-                });
-            }
-            for fc_part in &function_call_parts {
-                assistant_parts.push(fc_part.clone());
-            }
+        if !round.calls.is_empty() && !final_round {
             contents.push(GeminiContent {
                 role: "model".into(),
-                parts: assistant_parts,
+                parts: round.parts(),
             });
 
             let mut response_parts: Vec<GeminiPart> = Vec::new();
             let mut executed_tools: HashSet<String> = HashSet::new();
             let mut narrated = false;
-            for fc_part in &function_call_parts {
+            for fc_part in &round.calls {
                 let fc = match fc_part.function_call.as_ref() {
                     Some(fc) => fc,
                     None => continue,
@@ -391,7 +423,7 @@ pub async fn send(
         }
 
         let _ = app_handle.emit("chat-token", json!({"token": "", "done": true}));
-        if !text_parts.is_empty() {
+        if !round.texts.is_empty() {
             if turn.is_empty() {
                 log::warn!(
                     "[gemini] no usageMetadata received for non-empty response; recording zero tokens (model={})",
@@ -399,9 +431,9 @@ pub async fn send(
                 );
             }
             turn.record(db, workload, started_at.elapsed().as_millis() as i64);
-            return Ok(text_parts.join(""));
+            return Ok(round.texts.join(""));
         }
-        if final_round && !function_call_parts.is_empty() {
+        if final_round && !round.calls.is_empty() {
             turn.record(db, workload, started_at.elapsed().as_millis() as i64);
             return Ok(tools::tool_limit_fallback(&tools::read_language_pref(db)).into());
         }
@@ -409,7 +441,7 @@ pub async fn send(
             "[gemini] empty response: model={} finish_reason={:?} function_calls={} events={} bytes={} first_chunk={:?}",
             model,
             finish_reason,
-            function_call_parts.len(),
+            round.calls.len(),
             event_count,
             total_bytes,
             first_chunk_sample
@@ -559,6 +591,45 @@ mod tests {
         assert_eq!(deeper, json!({"maxOutputTokens": 100, "thinkingConfig": {"thinkingLevel": "HIGH"}}));
         assert_eq!(generation_config(100, None), json!({"maxOutputTokens": 100}));
         assert_eq!(generation_config(100, Some(Deeper { thinking: false, effort: true })), json!({"maxOutputTokens": 100}));
+    }
+
+    /// The one place that decides the thinking parameter: HIGH on a marked
+    /// turn for a thinking model, nothing otherwise, and never another level.
+    #[test]
+    fn the_thinking_parameter_is_high_on_a_marked_turn_and_absent_otherwise() {
+        use crate::ai::capability::Deeper;
+        assert_eq!(thinking_config(Some(Deeper { thinking: true, effort: false })), Some(json!({"thinkingLevel": "HIGH"})));
+        assert_eq!(thinking_config(Some(Deeper { thinking: true, effort: true })), Some(json!({"thinkingLevel": "HIGH"})));
+        assert_eq!(thinking_config(Some(Deeper { thinking: false, effort: true })), None);
+        assert_eq!(thinking_config(None), None);
+    }
+
+    /// A round streamed with thought signatures (canned SSE chunks): the
+    /// model turn sent back carries every signature unchanged, the
+    /// function-call parts as received and the text with its signature.
+    #[test]
+    fn thought_signatures_go_back_unchanged_before_the_function_responses() {
+        let chunks = [
+            r#"{"candidates":[{"content":{"parts":[{"text":"Let me check "}]}}]}"#,
+            r#"{"candidates":[{"content":{"parts":[{"text":"your calendar.","thoughtSignature":"dGV4dC1zaWc="}]}}]}"#,
+            r#"{"candidates":[{"content":{"parts":[{"functionCall":{"name":"list_events","args":{"days":7}},"thoughtSignature":"Y2FsbC1zaWc="}]}}]}"#,
+            r#"{"candidates":[{"content":{"parts":[{"functionCall":{"name":"list_tasks","args":{}}}]}}]}"#,
+        ];
+        let mut round = ModelRound::default();
+        for chunk in chunks {
+            let sse: StreamChunk = serde_json::from_str(chunk).unwrap();
+            for candidate in sse.candidates.unwrap() {
+                for part in candidate.content.unwrap().parts.unwrap() {
+                    round.take(&part);
+                }
+            }
+        }
+        assert_eq!(serde_json::to_value(round.parts()).unwrap(), json!([
+            {"text": "Let me check your calendar.", "thoughtSignature": "dGV4dC1zaWc="},
+            {"functionCall": {"name": "list_events", "args": {"days": 7}}, "thoughtSignature": "Y2FsbC1zaWc="},
+            {"functionCall": {"name": "list_tasks", "args": {}}},
+        ]));
+        assert_eq!(round.texts.join(""), "Let me check your calendar.");
     }
 
     #[test]
