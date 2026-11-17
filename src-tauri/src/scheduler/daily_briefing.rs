@@ -88,6 +88,7 @@ pub async fn run_briefing(
         }
     }
 
+    // Asked again before each request below (`each_gated`).
     if !may_read_google_content(&db) {
         return Ok(());
     }
@@ -138,17 +139,22 @@ pub async fn run_briefing(
         messages.len()
     );
 
-    // Step 1: Nova Micro — classify importance.
-    let classified =
-        classify_with_nova(&messages, &router_val, &db, &auth, &app_handle).await?;
-
     // Read language preference before summarising so the prompt and persisted
     // record both reflect the user's actual setting.
     let language = crate::ai::tools::read_language_pref(&db);
 
-    // Step 2: Haiku 4.5 — 5-bullet summary + 3 suggested actions.
-    let (summary_md, actions_json) =
-        summarize_with_haiku(&classified, &router_val, &db, &auth, &app_handle, &language).await?;
+    // Step 1: Nova Micro — classify importance. Step 2: Haiku 4.5 — 5-bullet
+    // summary + 3 suggested actions. The gate is asked before each.
+    let (router_ref, db_ref, auth_ref, app_ref, language_ref) = (&router_val, &db, &auth, &app_handle, &language);
+    let Some((summary_md, actions_json)) = each_gated(
+        &db,
+        || classify_with_nova(&messages, router_ref, db_ref, auth_ref, app_ref),
+        |classified| async move { summarize_with_haiku(&classified, router_ref, db_ref, auth_ref, app_ref, language_ref).await },
+    )
+    .await?
+    else {
+        return Ok(());
+    };
 
     // Persist.
     let now_ts = chrono::Utc::now().timestamp();
@@ -450,6 +456,28 @@ async fn speak_briefing_via_router(
 /// chosen AI, so it runs only when that AI may receive them
 /// (ai::mail_policy). Not skipped silently (P06): what stands in the way is
 /// raised once per launch.
+///
+/// The briefing's two requests, each with the gate asked again just before it
+/// is sent (review B, I-3): a consent withdrawn, or terms tightened, while
+/// the first runs stops the second. None: stopped, nothing more sent.
+async fn each_gated<A, B, FA, FB>(db: &crate::db::Database, classify: impl FnOnce() -> FA, summarize: impl FnOnce(A) -> FB) -> Result<Option<B>, String>
+where
+    FA: std::future::Future<Output = Result<A, String>>,
+    FB: std::future::Future<Output = Result<B, String>>,
+{
+    if !may_read_google_content(db) {
+        return Ok(None);
+    }
+    let classified = classify().await?;
+    if !may_read_google_content(db) {
+        return Ok(None);
+    }
+    summarize(classified).await.map(Some)
+}
+
+/// Whether the briefing may read Gmail and Calendar content for the chosen AI
+/// (ai::mail_policy). Not skipped silently (P06): what stands in the way is
+/// raised once per launch.
 fn may_read_google_content(db: &crate::db::Database) -> bool {
     match crate::ai::mail_policy::check(db) {
         Ok(()) => true,
@@ -480,6 +508,40 @@ mod tests {
         assert!(super::may_read_google_content(&db));
         use_ai(&db, "openai", None);
         assert!(super::may_read_google_content(&db));
+    }
+
+    /// The gate is asked again before each of the briefing's two requests
+    /// (review B, I-3): a consent withdrawn while the first runs stops the
+    /// second, and one withdrawn before the first stops both.
+    #[tokio::test]
+    async fn a_consent_withdrawn_during_the_briefing_stops_the_next_request() {
+        use crate::ai::mail_policy::test_support::{agree_to_gemini, use_ai};
+        let gemini = crate::ai::consent::Subject { provider: "gemini".into(), base_url: String::new() };
+        let db = crate::db::test_database();
+        use_ai(&db, "gemini", None);
+        agree_to_gemini(&db);
+        let summarized = std::cell::Cell::new(false);
+        let done = super::each_gated(
+            &db,
+            || async {
+                crate::ai::consent::revoke(&db, &gemini).unwrap();
+                Ok("classified")
+            },
+            |_classified| async {
+                summarized.set(true);
+                Ok("summary")
+            },
+        )
+        .await;
+        assert_eq!(done, Ok(None));
+        assert!(!summarized.get(), "the summary was not asked for");
+
+        let classified = std::cell::Cell::new(false);
+        let done = super::each_gated(&db, || async { classified.set(true); Ok(1) }, |n| async move { Ok(n + 1) }).await;
+        assert_eq!(done, Ok(None));
+        assert!(!classified.get(), "nothing was sent");
+        agree_to_gemini(&db);
+        assert_eq!(super::each_gated(&db, || async { Ok(1) }, |n| async move { Ok(n + 1) }).await, Ok(Some(2)));
     }
 
     use super::today_local;

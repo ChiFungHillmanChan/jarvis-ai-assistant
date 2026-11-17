@@ -167,6 +167,17 @@ async fn ai_sorting_with_the_chosen_ai_asks_for_the_registry_cap() {
             [],
         )
         .unwrap();
+    // Sorting on the chosen AI needs a saved choice (commands::mail), and
+    // the gate asks about it before each message: the router's chain, saved.
+    db.conn
+        .lock()
+        .unwrap()
+        .execute_batch(&format!(
+            "INSERT INTO local_endpoints(id, name, url, backend_type) VALUES ('loopback', 'Loopback', 'http://127.0.0.1:{port}', 'ollama');
+             DELETE FROM provider_chain;
+             INSERT INTO provider_chain(position, provider_type, endpoint_id, model_id, enabled, base_url) VALUES (0, 'local', 'loopback', 'fixture-model', 1, NULL);"
+        ))
+        .unwrap();
     let keys = super::triage::TriageKeys { typesafe: None, openai: None, openai_model: String::new(), assistant: Some(chosen_local_ai(port)) };
     let run = tokio::time::timeout(Duration::from_secs(10), super::triage::run(&db, keys, "en")).await.expect("the loopback reply arrives");
     assert!(run.is_ok(), "{:?}", run.err());

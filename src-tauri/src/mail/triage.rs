@@ -646,6 +646,22 @@ async fn ask_chosen_ai(router: &crate::ai::AiRouter, db: &Database, instructions
     Ok((value, done))
 }
 
+/// Asked again just before each message is sent (review B, I-3 and I-4): a
+/// consent withdrawn, or terms tightened by a fetched registry copy, during a
+/// run stops every message not sent yet. `to`: a service used on its own key
+/// (TypeSafe, the OpenAI summary); None for the chosen AI. Refused: the
+/// message stays untriaged with the reason, raised once per launch.
+fn still_allowed(db: &Database, to: Option<&str>) -> Result<(), String> {
+    let judged = match to {
+        Some(provider) => crate::ai::mail_policy::may_send_to(db, provider),
+        None => crate::ai::mail_policy::check(db),
+    };
+    judged.map_err(|blocked| {
+        blocked.raise("mail_sort");
+        blocked.user_message()
+    })
+}
+
 #[allow(clippy::too_many_arguments)]
 async fn triage_one(
     db: &Database,
@@ -698,6 +714,10 @@ async fn triage_one(
     let mut combined: Option<(LunaExtraction, String)> = None;
     let jev = match (keys.typesafe.as_deref(), keys.assistant.as_ref()) {
         (Some(key), _) => {
+            if let Err(error) = still_allowed(db, Some("typesafe")) {
+                outcome.error = Some(error);
+                return outcome;
+            }
             let started = Instant::now();
             match ask_jev(client, &endpoints.jev(), key, jev_state(&message, owners)).await {
                 Ok(answers) => {
@@ -713,6 +733,10 @@ async fn triage_one(
             }
         }
         (None, Some(router)) => {
+            if let Err(error) = still_allowed(db, None) {
+                outcome.error = Some(error);
+                return outcome;
+            }
             let instructions = format!("{}\n{}", luna_instructions(language, &today_text, &received_local), combined_rules());
             let parsed = ask_chosen_ai(router, db, &instructions, &input, combined_schema()).await.and_then(|(value, done)| {
                 outcome.luna_input = done.input_tokens;
@@ -765,6 +789,8 @@ async fn triage_one(
             // The saved OpenAI model is disabled: not sent, no other model
             // in its place (ai/disabled.rs). The message stays untriaged.
             Some(Err(crate::ai::disabled::stop(stopped, false, crate::ai::bedrock::UiLanguage::read(db))))
+        } else if let (Some(_), Err(error)) = (keys.openai.as_deref(), still_allowed(db, Some("openai"))) {
+            Some(Err(error))
         } else if let Some(openai_key) = keys.openai.as_deref() {
             let started = Instant::now();
             Some(openai::send_json(openai_key, &keys.openai_model, &instructions, &input, "mail_triage", luna_schema(), endpoints.openai()).await.map(|(value, usage)| {
@@ -774,6 +800,8 @@ async fn triage_one(
                 outcome.price_unknown |= !crate::ai::models::price_known("openai", &keys.openai_model);
                 (value, keys.openai_model.clone())
             }))
+        } else if let (Some(_), Err(error)) = (keys.assistant.as_ref(), still_allowed(db, None)) {
+            Some(Err(error))
         } else if let Some(router) = keys.assistant.as_ref() {
             Some(ask_chosen_ai(router, db, &instructions, &input, luna_schema()).await.map(|(value, done)| {
                 outcome.luna_input = done.input_tokens;
@@ -846,6 +874,10 @@ fn sender_chains(messages: Vec<TriageInput>) -> Vec<Vec<TriageInput>> {
 
 /// Triage up to RUN_LIMIT untriaged messages, newest first.
 pub async fn run(db: &Database, keys: TriageKeys, language: &str) -> Result<MailTriageRun, String> {
+    run_on(db, keys, language, Endpoints::Production).await
+}
+
+async fn run_on(db: &Database, keys: TriageKeys, language: &str, endpoints: Endpoints) -> Result<MailTriageRun, String> {
     let messages = store::untriaged_messages(db, RUN_LIMIT)?;
     let owners = store::owner_addresses(db)?;
     let client = reqwest::Client::builder()
@@ -857,7 +889,7 @@ pub async fn run(db: &Database, keys: TriageKeys, language: &str) -> Result<Mail
     let outcomes = stream::iter(sender_chains(messages).into_iter().map(|chain| async move {
         let mut outcomes = Vec::with_capacity(chain.len());
         for message in chain {
-            outcomes.push(triage_one(db, client, Endpoints::Production, keys, owners, language, message).await);
+            outcomes.push(triage_one(db, client, endpoints, keys, owners, language, message).await);
         }
         outcomes
     }))
@@ -1248,6 +1280,11 @@ mod tests {
     /// unsure classification (so the summary step runs), anything else a
     /// 400. Returns the port and the paths it was asked for.
     async fn sorting_fixture() -> (u16, std::sync::Arc<std::sync::Mutex<Vec<String>>>) {
+        sorting_fixture_with(|_| {}).await
+    }
+
+    /// The fixture, calling `on_request` with each path before it answers.
+    async fn sorting_fixture_with(on_request: impl Fn(&str) + Send + 'static) -> (u16, std::sync::Arc<std::sync::Mutex<Vec<String>>>) {
         use tokio::io::{AsyncReadExt, AsyncWriteExt};
         let listener = tokio::net::TcpListener::bind((std::net::Ipv4Addr::LOCALHOST, 0)).await.unwrap();
         let port = listener.local_addr().unwrap().port();
@@ -1274,6 +1311,7 @@ mod tests {
                 }
                 let path = head.split_whitespace().nth(1).unwrap_or("").to_string();
                 seen.lock().unwrap().push(path.clone());
+                on_request(&path);
                 let (status, body) = if path == "/v1/systemone" {
                     (200, json!({"model": "jev-test", "answers": {
                         "category": {"choice": "work", "confidence": 0.3},
@@ -1294,6 +1332,68 @@ mod tests {
     /// Jev classifies, the summary step sends nothing to OpenAI, no other
     /// AI answers in its place, the run records the disabled message and
     /// the message stays untriaged.
+    fn ann(id: i64) -> TriageInput {
+        TriageInput { id, thread_id: None, sender: "Ann <ann@example.com>".into(), subject: "Quarterly figures".into(), snippet: String::new(), body: Some("Please see the figures.".into()), received_at: "2026-09-20T10:00:00Z".into() }
+    }
+
+    fn typesafe_and_openai() -> TriageKeys {
+        TriageKeys { typesafe: Some("ts-test-not-real".into()), openai: Some("sk-test-not-sent".into()), openai_model: "gpt-5.6-luna".into(), assistant: None }
+    }
+
+    /// TypeSafe and the OpenAI summary follow the registry's terms for each
+    /// message (review B, I-4): a copy that tightens one stops what goes to it.
+    #[tokio::test]
+    async fn typesafe_and_the_openai_summary_follow_a_tightened_registry() {
+        use crate::ai::registry::DataTerms;
+        let db = crate::db::test_database();
+        let (port, paths) = sorting_fixture().await;
+        let client = reqwest::Client::builder().timeout(Duration::from_secs(10)).build().unwrap();
+        let owners = ["me@example.com".to_string()];
+        {
+            let _registry = crate::ai::registry::test_override::with(|r| r.providers.iter_mut().find(|p| p.id == "typesafe").unwrap().data_terms = DataTerms::Unknown);
+            let outcome = triage_one(&db, &client, Endpoints::Loopback(port), &typesafe_and_openai(), &owners, "en", ann(7)).await;
+            assert!(paths.lock().unwrap().is_empty(), "nothing sent: {:?}", paths.lock().unwrap());
+            assert!(outcome.error.as_deref().is_some_and(|e| e.starts_with("Gmail and Calendar content is not sent to ")), "{:?}", outcome.error);
+            assert!(!outcome.triaged);
+        }
+        let _registry = crate::ai::registry::test_override::with(|r| r.providers.iter_mut().find(|p| p.id == "openai").unwrap().data_terms = DataTerms::NeedsBillingConfirmation);
+        let outcome = triage_one(&db, &client, Endpoints::Loopback(port), &typesafe_and_openai(), &owners, "en", ann(8)).await;
+        assert_eq!(paths.lock().unwrap().as_slice(), ["/v1/systemone"], "Jev classified; nothing went to OpenAI");
+        let Err(crate::ai::mail_policy::Blocked::NeedsConsent(request)) = crate::ai::mail_policy::may_send_to(&db, "openai") else { panic!("OpenAI needs consent now") };
+        assert_eq!(outcome.error, Some(request.to_error()));
+        assert!(!outcome.summarized);
+    }
+
+    /// A consent withdrawn while a sort run is going stops the messages not
+    /// sent yet (review B, I-3): the gate is asked again before each one.
+    /// Ann's two emails are sorted one after the other (one sender's mail
+    /// goes in order); the consent is withdrawn when the first reaches OpenAI.
+    #[tokio::test]
+    async fn withdrawing_consent_during_a_sort_run_stops_the_next_message() {
+        use crate::ai::registry::DataTerms;
+        let db = std::sync::Arc::new(crate::db::test_database());
+        crate::mail::store::upsert_account(&db, "a", "me@example.com", true).unwrap();
+        db.conn.lock().unwrap().execute_batch("INSERT INTO mail_messages(id,account_id,provider_id,sender,subject,body,received_at) VALUES
+            (1,'a','p1','Ann <ann@example.com>','Quarterly figures','Please see the figures.','2026-09-20T10:00:00Z'),
+            (2,'a','p2','Ann <ann@example.com>','Quarterly figures again','Please see the new figures.','2026-09-20T11:00:00Z');").unwrap();
+        let _registry = crate::ai::registry::test_override::with(|r| r.providers.iter_mut().find(|p| p.id == "openai").unwrap().data_terms = DataTerms::NeedsBillingConfirmation);
+        let openai = crate::ai::consent::Subject { provider: "openai".into(), base_url: String::new() };
+        crate::ai::consent::give(&db, &openai, DataTerms::NeedsBillingConfirmation).unwrap();
+        let withdraw = (db.clone(), openai.clone());
+        let (port, paths) = sorting_fixture_with(move |path| {
+            if path == "/v1/responses" {
+                crate::ai::consent::revoke(&withdraw.0, &withdraw.1).unwrap();
+            }
+        })
+        .await;
+        run_on(&db, typesafe_and_openai(), "en", Endpoints::Loopback(port)).await.unwrap();
+        let asked = paths.lock().unwrap().clone();
+        let second = asked.iter().rposition(|p| p == "/v1/systemone").unwrap();
+        assert_eq!(asked.iter().filter(|p| *p == "/v1/systemone").count(), 2, "{asked:?}");
+        assert!(asked[..second].iter().any(|p| p == "/v1/responses"), "the first email reached OpenAI: {asked:?}");
+        assert!(!asked[second..].iter().any(|p| p == "/v1/responses"), "the second did not: {asked:?}");
+    }
+
     #[tokio::test]
     async fn sorting_on_a_disabled_openai_model_sends_nothing_and_records_why() {
         let db = crate::db::test_database();

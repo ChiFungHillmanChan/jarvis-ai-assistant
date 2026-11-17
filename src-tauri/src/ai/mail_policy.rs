@@ -163,6 +163,15 @@ pub(crate) fn receiver(db: &Database) -> Result<ProviderChainEntry, Blocked> {
     super::unsaved_choice(&preset, keys, super::bedrock_saved(db)).ok_or_else(none_set_up)
 }
 
+/// Whether Gmail content may go to `provider` used on the user's own key
+/// rather than as the chosen AI: the Email page's OpenAI-key and Bedrock
+/// modes, TypeSafe sorting and the OpenAI summary in sorting. The registry's
+/// terms decide as they do for the chosen AI, so a fetched copy that tightens
+/// one of these takes effect there too (review B, I-4).
+pub fn may_send_to(db: &Database, provider: &str) -> Result<(), Blocked> {
+    judge(db, Subject { provider: provider.to_string(), base_url: String::new() })
+}
+
 /// Whether Gmail and Calendar content may go to `entry` now: the models
 /// the error card offers when a request needed it.
 pub fn may_receive(db: &Database, entry: &ProviderChainEntry) -> bool {
@@ -195,7 +204,12 @@ fn allowed(db: &Database, entry: &ProviderChainEntry) -> Result<(), Blocked> {
         ("openai", _) | (_, None) => String::new(),
         (_, Some(base)) => base.to_string(),
     };
-    let subject = Subject { provider: provider.to_string(), base_url };
+    judge(db, Subject { provider: provider.to_string(), base_url })
+}
+
+/// The terms in force for `subject` decide: `unknown` never receives Gmail
+/// or Calendar content; otherwise [`gate`].
+fn judge(db: &Database, subject: Subject) -> Result<(), Blocked> {
     let (label, terms) = describe(&subject);
     if terms == DataTerms::Unknown {
         let message = not_for_google_content(&label, UiLanguage::read(db));
