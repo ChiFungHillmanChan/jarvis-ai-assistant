@@ -247,14 +247,19 @@ enum CloudSpeech {
 /// Resolved on every use rather than once at startup: users paste the key into
 /// Settings after first launch, which writes it to the Keychain only.
 fn cloud_speech_for(db: &crate::db::Database) -> CloudSpeech {
-    let Some(route) = crate::commands::ai_choice::saved_chain(db).ok().and_then(|chain| speech_route(crate::commands::ai_choice::describe(&chain).as_ref())) else {
-        return CloudSpeech::None;
-    };
-    let key = match route.wire {
+    let Ok(chain) = crate::commands::ai_choice::saved_chain(db) else { return CloudSpeech::None };
+    cloud_speech_from(db, &chain, |wire| match wire {
         transcribe::SpeechWire::Gemini => resolve_key("GEMINI_API_KEY", "gemini_api_key"),
         transcribe::SpeechWire::OpenAi => resolve_key("OPENAI_API_KEY", "openai_api_key"),
+    })
+}
+
+/// [`cloud_speech_for`] with the saved chain and the key lookup given.
+fn cloud_speech_from(db: &crate::db::Database, chain: &[crate::ai::ProviderChainEntry], key_for: impl FnOnce(transcribe::SpeechWire) -> Option<String>) -> CloudSpeech {
+    let Some(route) = speech_route(crate::commands::ai_choice::describe(chain).as_ref()) else {
+        return CloudSpeech::None;
     };
-    let Some(key) = key else { return CloudSpeech::None };
+    let Some(key) = key_for(route.wire) else { return CloudSpeech::None };
     match speech_gate(db, route.wire) {
         Ok(()) => CloudSpeech::Ready(route, key),
         Err(request) => CloudSpeech::WaitsForConsent(route, request),
@@ -400,6 +405,27 @@ mod tests {
         let route = speech_route(Some(&ai("openai", None))).expect("a registry that names an OpenAI model turns it on");
         assert_eq!((route.wire, route.model.as_str()), (SpeechWire::OpenAi, "transcribe-model"));
         assert_eq!(speech_route(Some(&ai("openai", Some("https://api.moonshot.ai/v1")))), None, "a compatible service is not OpenAI");
+    }
+
+    /// The recording waits for the consent its terms need: Gemini's card
+    /// until the user agrees, sent once they do, held back again after they
+    /// withdraw it (review B, m1). The key is given here, not read from the
+    /// Keychain; nothing is sent.
+    #[test]
+    fn a_recording_waits_for_the_consent_its_terms_need() {
+        use super::{cloud_speech_from, CloudSpeech};
+        use crate::ai::mail_policy::test_support::{agree_to_gemini, use_ai};
+        let db = crate::db::test_database();
+        use_ai(&db, "gemini", None);
+        let chain = crate::commands::ai_choice::saved_chain(&db).unwrap();
+        let speech = |db: &crate::db::Database| cloud_speech_from(db, &chain, |_| Some("test-gemini".to_string()));
+        assert!(matches!(speech(&db), CloudSpeech::WaitsForConsent(_, request) if request.subject().provider == "gemini"));
+        agree_to_gemini(&db);
+        assert!(matches!(speech(&db), CloudSpeech::Ready(_, key) if key == "test-gemini"));
+        crate::ai::consent::revoke(&db, &crate::ai::consent::Subject { provider: "gemini".into(), base_url: String::new() }).unwrap();
+        assert!(matches!(speech(&db), CloudSpeech::WaitsForConsent(..)));
+        // No key: no cloud speech at all.
+        assert!(matches!(cloud_speech_from(&db, &chain, |_| None), CloudSpeech::None));
     }
 
     /// The recording goes to at most one cloud service, the chosen AI's,

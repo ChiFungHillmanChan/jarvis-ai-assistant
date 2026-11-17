@@ -123,6 +123,30 @@ pub async fn list_models(base_url: &str, api_key: &str) -> Result<Vec<String>, S
 mod tests {
     use super::*;
 
+    /// Only OpenAI's own host is OpenAI (`safe` terms). A name that merely
+    /// contains it, or carries it in the path or the user part, is another
+    /// service, whose terms are `unknown` (review B, m2).
+    #[test]
+    fn only_openais_own_host_counts_as_openai() {
+        for url in ["https://api.openai.com/v1", "https://API.OpenAI.com/v1/", "https://api.openai.com:443/v1", "https://someone@api.openai.com/v1"] {
+            assert!(is_openai(url), "{url}");
+        }
+        for url in [
+            "https://api.openai.com.evil.example/v1",
+            "https://evil.example/api.openai.com/v1",
+            "https://api.openai.com@evil.example/v1",
+            "https://api.openai.com./v1",
+            "https://xapi.openai.com/v1",
+            "https://api-openai.com/v1",
+            "https://openai.com/v1",
+            "https://\u{0430}pi.openai.com/v1",
+            "https://162.159.140.245/v1",
+            "api.openai.com",
+            "",
+        ] {
+            assert!(!is_openai(url), "{url}");
+        }
+    }
     const KIMI_GLOBAL: &str = "https://api.moonshot.ai/v1";
     const KIMI_CHINA: &str = "https://api.moonshot.cn/v1";
     const QWEN_INTERNATIONAL: &str = "https://dashscope-intl.aliyuncs.com/compatible-mode/v1";
