@@ -6,9 +6,11 @@
 // the native QA build (#[cfg(test)], #[cfg(feature = "native-qa")] and
 // #[cfg(any(test, feature = "native-qa"))]).
 //
+// JSON data files in those folders are scanned too, since the app can
+// compile one in (include_str!).
+//
 // Not scanned, by design:
 // - registry/: the registry itself, the one place ids are kept.
-// - src-tauri/src/ai/registry/fixture.json: the frozen copy the tests run on.
 // - src-tauri/migrations/: history. A migration that set a model id once
 //   (V30's column defaults, the chain rows of earlier ones) must keep the
 //   text it ran with; saved choices it wrote stay valid.
@@ -16,7 +18,8 @@
 // - infra/: the server side (the registry Lambda and, from P08, the proxy),
 //   which is not the app.
 //
-// Every remaining hit is listed in ALLOWED with its reason.
+// Every remaining hit is listed in ALLOWED, or its whole file in
+// ALLOWED_FILES, with the reason.
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { readdirSync, readFileSync, statSync } from 'node:fs';
@@ -35,6 +38,13 @@ const ALLOWED: Record<string, string> = {
   // value of the mail_triage.decided_by column, not a model choice.
   'src-tauri/src/mail/triage.rs|jev': 'the decided_by value of a sorting row, not a model id',
   'src/lib/mail.ts|jev': 'the decided_by value of a sorting row, not a model id',
+};
+
+/** Files that may hold any model id, and why. */
+const ALLOWED_FILES: Record<string, string> = {
+  'src-tauri/src/ai/registry/fixture.json': 'the frozen copy of registry version 1 the tests run on; compiled only into the tests',
+  'src-tauri/src/ai/old_rows_prices.frozen.json':
+    'the frozen price list of the one-time correction of old usage rows (ai/cost.rs correct_old_rows), kept as registry version 1 priced them so every release corrects them the same way (the lead\'s ruling of 2026-11-17 on DECISIONS.md, "P04 and P05:"); never edited',
 };
 
 /** Anything shaped like a model id, whether the registry lists it or not. */
@@ -176,10 +186,12 @@ function scan(): Map<string, Set<string>> {
   const listed = idPattern(registryIds());
   const rust = files('src-tauri/src', path => path.endsWith('.rs'));
   const testOnly = testModuleFiles(rust);
-  const sources = [...files('src', path => /\.(?:ts|tsx)$/.test(path)), ...rust.filter(path => !testOnly.has(path))];
+  const json = [...files('src', path => path.endsWith('.json')), ...files('src-tauri/src', path => path.endsWith('.json'))];
+  const sources = [...files('src', path => /\.(?:ts|tsx)$/.test(path)), ...rust.filter(path => !testOnly.has(path)), ...json];
   const hits = new Map<string, Set<string>>();
   for (const file of sources) {
-    const code = scanned(read(file), file.endsWith('.rs'));
+    // JSON has no comments, so it is read as it stands.
+    const code = file.endsWith('.json') ? read(file) : scanned(read(file), file.endsWith('.rs'));
     for (const pattern of [listed, SHAPE]) {
       for (const match of code.matchAll(pattern)) {
         if (!hits.has(file)) hits.set(file, new Set());
@@ -193,7 +205,12 @@ function scan(): Map<string, Set<string>> {
 test('no model id is written in the app code outside the registry and test fixtures', () => {
   const unexpected: string[] = [];
   const used = new Set<string>();
+  const usedFiles = new Set<string>();
   for (const [file, ids] of scan()) {
+    if (ALLOWED_FILES[file]) {
+      usedFiles.add(file);
+      continue;
+    }
     for (const id of ids) {
       const key = `${file}|${id}`;
       if (ALLOWED[key]) used.add(key); else unexpected.push(key);
@@ -202,6 +219,7 @@ test('no model id is written in the app code outside the registry and test fixtu
   assert.deepEqual(unexpected.sort(), [], 'read these ids from the registry (ai_models or ai::models), or list them in ALLOWED with the reason');
   // An exception that no longer matches anything is dropped from the list.
   assert.deepEqual(Object.keys(ALLOWED).filter(key => !used.has(key)), [], 'remove the exceptions that no longer match');
+  assert.deepEqual(Object.keys(ALLOWED_FILES).filter(file => !usedFiles.has(file)), [], 'remove the file exceptions that hold no id or no longer exist');
 });
 
 test('the scan finds an id in code and skips comments and test-only code', () => {
