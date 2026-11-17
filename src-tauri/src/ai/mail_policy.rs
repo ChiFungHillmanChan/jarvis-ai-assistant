@@ -626,35 +626,62 @@ mod tests {
         db
     }
 
-    /// Every set of the three keys, with no saved chain: the gate judges the
-    /// row the router's run sends to (`AiRouter::chosen` over what
-    /// `configured` finds, as `run_chosen` asks), and nothing when the router
-    /// has nothing to send to. Both are called; the rule is not restated.
+    /// The gate and the router agree with no saved chain, for every set of
+    /// the three keys, with and without saved AWS credentials, under each
+    /// preset (and one the registry does not have): `receiver` is the row the
+    /// router's run sends to (`chosen` over what `configured` finds, as
+    /// `run_chosen` takes it), or both have none; `check` judges that row;
+    /// and a consent card names only that row (review B, r4-m2, from its
+    /// matrix). Both are called; the rule is not restated.
     #[tokio::test]
-    async fn for_every_set_of_keys_the_gate_judges_the_row_the_router_sends_to() {
-        use crate::ai::{keys_found, KeysFound};
-        let db = db_with(&[], &[]);
+    async fn the_gate_and_the_router_agree_for_every_key_combination() {
+        use crate::ai::{keys_found, AiRouter, KeysFound};
         let row = |e: &ProviderChainEntry| (e.provider_type.clone(), e.model_id.clone(), e.base_url.clone(), e.endpoint_id.clone());
-        for bits in 0..8u8 {
-            let keys = KeysFound { gemini: bits & 1 != 0, claude: bits & 2 != 0, openai: bits & 4 != 0 };
-            let mut router = crate::ai::AiRouter::new("");
-            // Set on the router itself, so no key in the environment counts.
-            router.gemini_key = keys.gemini.then(|| "test-gemini".to_string());
-            router.claude_key = keys.claude.then(|| "test-claude".to_string());
-            router.openai_key = keys.openai.then(|| "test-openai".to_string());
-            router.append_default_fallbacks();
-            assert_eq!(router.keys_found(), keys);
-            let sends_to = router.chosen(&router.configured(&db).await);
-            let _gate_sees = keys_found::with(keys);
-            match (&sends_to, receiver(&db)) {
-                (Some(sent), Ok(judged)) => {
-                    assert_eq!(row(&judged), row(sent), "{keys:?}");
-                    assert_eq!(check(&db), allowed(&db, sent), "{keys:?}");
+        let mut cases = 0;
+        for preset in ["", "gemini_primary", "gemini_pro_only", "no_such_preset"] {
+            for bits in 0..16u8 {
+                let keys = KeysFound { gemini: bits & 1 != 0, claude: bits & 2 != 0, openai: bits & 4 != 0 };
+                let bedrock = bits & 8 != 0;
+                let db = crate::db::test_database();
+                {
+                    let conn = db.conn.lock().unwrap();
+                    conn.execute("DELETE FROM provider_chain", []).unwrap();
+                    conn.execute("DELETE FROM user_preferences WHERE key = 'ai_provider'", []).unwrap();
+                    if !preset.is_empty() {
+                        conn.execute("INSERT INTO user_preferences(key, value) VALUES ('ai_provider', ?1)", [preset]).unwrap();
+                    }
+                    if bedrock {
+                        conn.execute("INSERT INTO aws_credentials(id, access_key_id, secret_access_key) VALUES (1, 'AKIA-TEST', 'not-real')", []).unwrap();
+                    }
                 }
-                (None, Err(Blocked::Undecided(_))) => assert!(matches!(check(&db), Err(Blocked::Undecided(_))), "{keys:?}"),
-                (sent, judged) => panic!("{keys:?}: the router sends to {sent:?}, the gate judges {judged:?}"),
+                let _gate_sees = keys_found::with(keys);
+                // Keys set on the router itself, so none in the environment counts.
+                let mut router = AiRouter::new(preset).without_keys();
+                if keys.gemini { router.set_gemini_key("test-g"); }
+                if keys.claude { router.set_claude_key("test-c"); }
+                if keys.openai { router.set_openai_key("test-o"); }
+                router.append_default_fallbacks();
+                assert_eq!(router.keys_found(), keys);
+                let case = format!("{preset:?} {keys:?} bedrock={bedrock}");
+                let sent = router.chosen(&router.configured(&db).await);
+                match (&sent, receiver(&db)) {
+                    (Some(s), Ok(j)) => assert_eq!(row(s), row(&j), "{case}"),
+                    (None, Err(Blocked::Undecided(_))) => {}
+                    (s, j) => panic!("{case}: the router sends to {s:?}, the gate judges {j:?}"),
+                }
+                match &sent {
+                    Some(s) => {
+                        assert_eq!(check(&db), allowed(&db, s), "{case}");
+                        if let Err(Blocked::NeedsConsent(request)) = check(&db) {
+                            assert_eq!(request.subject().provider, s.provider_type, "{case}");
+                        }
+                    }
+                    None => assert!(matches!(check(&db), Err(Blocked::Undecided(_))), "{case}"),
+                }
+                cases += 1;
             }
         }
+        assert_eq!(cases, 64);
     }
 
     /// With no saved chain the gate judges the row the request runs on, by
