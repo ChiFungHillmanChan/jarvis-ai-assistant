@@ -117,11 +117,11 @@ This bucket only serves the binaries (and an optional mirror of the manifest).
 
 ```bash
 cd infra && npm ci && (cd lambda/registry && npm ci) && npm run build
-npx cdk diff --profile jarvis --context env=dev --exclusively Jarvis-dev-Registry
-npm run deploy:dev -- --exclusively Jarvis-dev-Registry
+npx cdk diff --profile jarvis-deploy --method template --context env=dev --exclusively Jarvis-dev-Registry
+caffeinate -i npm run deploy:dev -- --exclusively Jarvis-dev-Registry
 ```
 
-**不可省略 `--exclusively`**：省略時，CDK 會先以本機的 checkout 部署 Registry 所依賴的 Auth、Data 及 Payment stack；prod 的 Payment stack 如部署時缺少三個 Stripe id，checkout 會回傳 503。`deploy:dev` 是現有部署腳本（`jarvis` profile）。`cdk diff` 會連接 AWS，因此必須明確指定 profile，以免使用預設憑證。GitHub 的設定及次序（environment 須在部署此 stack 之前建立，然後才是簽署用的 secret 及變數）見 `registry/README.md` 的「首次設定」。
+**不可省略 `--exclusively`**：省略時，CDK 會先以本機的 checkout 部署 Registry 所依賴的 Auth、Data 及 Payment stack；prod 的 Payment stack 如部署時缺少三個 Stripe id，checkout 會回傳 503。`deploy:dev` 是現有部署腳本（`jarvis-deploy` profile；`jarvis` profile 無權使用 CloudFormation）。`cdk diff` 會連接 AWS，因此必須明確指定 profile，以免使用預設憑證；`--method template` 只比較範本，stack 未存在時不會留下 `REVIEW_IN_PROGRESS` 的空 stack。`caffeinate -i` 令 Mac 在部署期間不會因閒置而進入睡眠。GitHub 的設定及次序（environment 須在部署此 stack 之前建立，然後才是簽署用的 secret 及變數）見 `registry/README.md` 的「首次設定」。
 
 只在本機合成範本、不應連接 AWS 時（例如驗證此 stack），使用以下形式。它清除所有 AWS 憑證來源，並關閉 CDK CLI 的遙測及通告下載；否則 CLI 會以預設 profile 向 STS 查詢帳戶（`sts:GetCallerIdentity`），並向 AWS 營運的端點傳送遙測及下載通告：
 

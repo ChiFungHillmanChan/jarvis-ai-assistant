@@ -132,7 +132,7 @@ node --experimental-strip-types registry/validate.ts registry/registry.json
 
 須依次完成。第 8 步（提交公鑰的 PR 之前的最後一步）把 repository 變數 `REGISTRY_PUBLISHING` 設為 `on` 之前，推送至 `main` 只會執行 validate：sign 及兩個 publish job 都會略過，workflow 顯示成功，亦不會建立任何 environment。設為 `on` 之後，欠缺 `REGISTRY_SIGNING_KEY` 或 `registry/signing-public-key.pem` 時，sign job 會失敗並指出欠缺哪一項；欠缺 `REGISTRY_ROLE_ARN` 時，publish job 會在取得 AWS 憑證的步驟失敗，訊息由該 action 提供；欠缺 `REGISTRY_BUCKET` 時，`publish.sh` 會失敗。以上情況都不會發佈任何內容。
 
-以下 AWS 指令使用部署腳本所用的 `jarvis` profile；每個指令都明確指定 profile，避免使用預設憑證。請在 repository 的主要 checkout 內開始，並在同一個終端機視窗內逐行完成全部步驟：`REPO`、`MAIN_CHECKOUT`、`KEYGEN`、`KEY_WORKTREE` 及 `REGISTRY_URL` 這些變數只存在於這個視窗。以 `&&` 連接的各行，任何一行失敗都會停止其後各行；停止時先處理該行的錯誤，再從該段的開頭重新執行。
+以下 AWS 指令使用部署腳本所用的 `jarvis-deploy` profile（IAM 使用者 `jarvis-cdk-deployer`，設定方法見 `infra/README.md`）；`jarvis` profile 無權使用 CloudFormation，亦不能擔任 CDK 的角色，不能用於這些步驟。每個指令都明確指定 profile，避免使用預設憑證。請在 repository 的主要 checkout 內開始，並在同一個終端機視窗內逐行完成全部步驟：`REPO`、`MAIN_CHECKOUT`、`KEYGEN`、`KEY_WORKTREE` 及 `REGISTRY_URL` 這些變數只存在於這個視窗。以 `&&` 連接的各行，任何一行失敗都會停止其後各行；停止時先處理該行的錯誤，再從該段的開頭重新執行。
 
 0. **設定 `REPO` 及主要 checkout 的位置**（只需一次；在主要 checkout 內任何一個資料夾執行）：
    ```bash
@@ -161,21 +161,22 @@ node --experimental-strip-types registry/validate.ts registry/registry.json
    亦可在 GitHub 網頁操作：Settings → Environments → New environment，輸入名稱後於 Deployment branches and tags 選 Selected branches and tags，加入 `main`。
 3. **AWS 的 GitHub OIDC provider**（每個 AWS 帳戶只需一次）。先查看是否已有：
    ```bash
-   aws iam list-open-id-connect-providers --profile jarvis \
+   aws iam list-open-id-connect-providers --profile jarvis-deploy \
      --query "OpenIDConnectProviderList[?ends_with(Arn, ':oidc-provider/token.actions.githubusercontent.com')].Arn" --output text
    ```
    沒有任何輸出時才建立：
    ```bash
-   aws iam create-open-id-connect-provider --profile jarvis \
+   aws iam create-open-id-connect-provider --profile jarvis-deploy \
      --url https://token.actions.githubusercontent.com --client-id-list sts.amazonaws.com
    ```
    檢查：再執行第一個指令，應顯示一個以 `:oidc-provider/token.actions.githubusercontent.com` 結尾的 ARN。
 4. **確認 dev 的 Payment stack 已部署**（路由加在它的 HTTP API 上）：
    ```bash
-   aws cloudformation list-exports --profile jarvis --region ap-southeast-1 \
+   aws cloudformation list-exports --profile jarvis-deploy --region ap-southeast-1 \
      --query "Exports[?Name=='Jarvis-dev-ApiBaseUrl'].Value" --output text
    ```
    檢查：應顯示一個以 `https://` 開頭的網址。沒有輸出即 dev 的 Payment stack 未部署，須先部署它才可繼續。
+   如該 env 從未部署（dev 在 2026-11-16 才首次建立），部署 Registry 之前須先部署 `Jarvis-<env>-Auth`、`Jarvis-<env>-Data` 及 `Jarvis-<env>-Payment`，而 Auth stack 需要 Secrets Manager 內已有 `jarvis/<env>/google-login`。這會建立新的資源並產生費用，須由擁有人另行決定，不屬於本節的步驟。
 5. **部署 dev 的 Registry stack**。部署使用主要 checkout 的程式碼，因此第一段先確認它就是最新的 `main`（已合併 P04），而且 `infra/` 沒有未提交的改動，否則在建置之前停止；停止時先 `git switch main && git pull --ff-only`（或先處理 `infra/` 未提交的改動），再重新執行。部署的一行會再檢查一次這兩項：即使把整段一次貼上，檢查不通過時亦不會部署。
    ```bash
    cd "${MAIN_CHECKOUT:?先執行第 0 步}" &&
@@ -183,16 +184,18 @@ node --experimental-strip-types registry/validate.ts registry/registry.json
      test "$(git rev-parse HEAD)" = "$(git rev-parse origin/main)" &&
      test -z "$(git status --porcelain -- infra)" &&
      cd infra && npm ci && (cd lambda/registry && npm ci) && npm run build
-   cd "${MAIN_CHECKOUT:?先執行第 0 步}/infra" && npx cdk diff --profile jarvis --context env=dev --exclusively Jarvis-dev-Registry
+   cd "${MAIN_CHECKOUT:?先執行第 0 步}/infra" && npx cdk diff --profile jarvis-deploy --method template --context env=dev --exclusively Jarvis-dev-Registry
    cd "${MAIN_CHECKOUT:?先執行第 0 步}/infra" &&
      test "$(git rev-parse HEAD)" = "$(git rev-parse origin/main)" &&
      test -z "$(git status --porcelain -- .)" &&
-     npm run deploy:dev -- --exclusively Jarvis-dev-Registry
+     caffeinate -i npm run deploy:dev -- --exclusively Jarvis-dev-Registry
    ```
    **不可省略 `--exclusively`**：省略時，CDK 會先以本機的 checkout 部署 Registry 所依賴的 Auth、Data 及 Payment stack；prod 的 Payment stack 如部署時缺少三個 Stripe id，checkout 會回傳 503。
+   `cdk diff` 加上 `--method template`，只比較範本，不建立 change set。stack 未存在時，不加這個選項的 `cdk diff` 會建立 change set，並留下一個狀態為 `REVIEW_IN_PROGRESS` 的空 stack（2026-11-16 在 dev 發生過；其後的部署會沿用它，無須刪除）。
+   部署以 `caffeinate -i` 執行，Mac 在部署期間不會因閒置而進入睡眠；2026-11-16 的一次部署曾因 Mac 睡眠而停頓約 40 分鐘。部署腳本遇到 IAM 改動時會在終端機要求確認，因此須在可輸入的終端機視窗執行。
    檢查：應列出 `RegistryBucketName`、`RegistryPublisherRoleArn` 及 `RegistryUrl` 三項輸出（第 7 步用前兩項，第 9 步用 `RegistryUrl`）；以 `RegistryUrl` 執行的 `curl` 應顯示 `503`，即端點已存在、但未有發佈內容（第 9 步之後才會是 `200`）。
    ```bash
-   aws cloudformation describe-stacks --profile jarvis --region ap-southeast-1 --stack-name Jarvis-dev-Registry \
+   aws cloudformation describe-stacks --profile jarvis-deploy --region ap-southeast-1 --stack-name Jarvis-dev-Registry \
      --query "Stacks[0].Outputs[].[OutputKey,OutputValue]" --output text
    curl -s -o /dev/null -w '%{http_code}\n' <RegistryUrl>
    ```
@@ -276,25 +279,25 @@ node --experimental-strip-types registry/validate.ts registry/registry.json
    ```
 10. **prod**。先確認 prod 的 Payment stack 已部署（檢查方法同第 4 步）：
     ```bash
-    aws cloudformation list-exports --profile jarvis --region ap-southeast-1 \
+    aws cloudformation list-exports --profile jarvis-deploy --region ap-southeast-1 \
       --query "Exports[?Name=='Jarvis-prod-ApiBaseUrl'].Value" --output text
     ```
-    再部署 prod 的 Registry stack。與第 5 步一樣，第一段會確認主要 checkout 是最新的 `main`；第 9 步的合併之後須先 `git pull --ff-only`。同樣不可省略 `--exclusively`（原因見第 5 步）：
+    再部署 prod 的 Registry stack。與第 5 步一樣，第一段會確認主要 checkout 是最新的 `main`；第 9 步的合併之後須先 `git pull --ff-only`。同樣不可省略 `--exclusively`，`--method template` 及 `caffeinate -i` 的用途亦相同（見第 5 步）：
     ```bash
     cd "${MAIN_CHECKOUT:?先執行第 0 步}" &&
       git fetch origin main &&
       test "$(git rev-parse HEAD)" = "$(git rev-parse origin/main)" &&
       test -z "$(git status --porcelain -- infra)" &&
       cd infra && npm ci && (cd lambda/registry && npm ci) && npm run build
-    cd "${MAIN_CHECKOUT:?先執行第 0 步}/infra" && npx cdk diff --profile jarvis --context env=prod --exclusively Jarvis-prod-Registry
+    cd "${MAIN_CHECKOUT:?先執行第 0 步}/infra" && npx cdk diff --profile jarvis-deploy --method template --context env=prod --exclusively Jarvis-prod-Registry
     cd "${MAIN_CHECKOUT:?先執行第 0 步}/infra" &&
       test "$(git rev-parse HEAD)" = "$(git rev-parse origin/main)" &&
       test -z "$(git status --porcelain -- .)" &&
-      npm run deploy:prod -- --exclusively Jarvis-prod-Registry
+      caffeinate -i npm run deploy:prod -- --exclusively Jarvis-prod-Registry
     ```
     檢查：應列出三項輸出，以 prod 的 `RegistryUrl` 執行的 `curl` 應顯示 `503`。
     ```bash
-    aws cloudformation describe-stacks --profile jarvis --region ap-southeast-1 --stack-name Jarvis-prod-Registry \
+    aws cloudformation describe-stacks --profile jarvis-deploy --region ap-southeast-1 --stack-name Jarvis-prod-Registry \
       --query "Stacks[0].Outputs[].[OutputKey,OutputValue]" --output text
     curl -s -o /dev/null -w '%{http_code}\n' <prod 的 RegistryUrl>
     ```
