@@ -81,7 +81,7 @@ pub fn update_setting(
         rebuilt.load_from_db(&db);
         rebuilt.reload_keys();
         rebuilt.append_default_fallbacks();
-        *router.lock().map_err(|e| e.to_string())? = rebuilt;
+        crate::ai::install_live(&router, rebuilt)?;
         log::info!("AI provider changed to {}, router rebuilt", value);
     }
     Ok(())
@@ -202,6 +202,7 @@ fn save_api_key(provider: &str, value: &str, remove: Option<bool>, db: &Database
     let mut router = router.lock().map_err(|e| e.to_string())?;
     router.reload_keys();
     router.append_default_fallbacks();
+    router.publish_keys();
     Ok(())
 }
 
@@ -248,6 +249,7 @@ mod tests {
         let router = std::sync::Mutex::new(crate::ai::AiRouter::new(""));
         // What the environment alone gives, without the Keychain.
         let from_env = crate::ai::AiRouter::new("").keys_found();
+        let _one_at_a_time = crate::ai::keys_found::PUBLISHING.lock().unwrap_or_else(|e| e.into_inner());
         save_api_key("claude", "test-claude-not-real", None, &db, &router).unwrap();
         let published = crate::ai::keys_found().expect("published when the key was saved");
         assert!(published.claude);

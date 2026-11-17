@@ -241,7 +241,7 @@ pub fn confirm_model_replacement(
 ) -> Result<String, String> {
     let replacement = confirm(&db, &place, &model)?;
     if matches!(place, Place::Chain { .. }) {
-        *router.lock().map_err(|e| e.to_string())? = crate::commands::ai_choice::rebuilt_router(&db);
+        super::install_live(&router, crate::commands::ai_choice::rebuilt_router(&db))?;
     }
     Ok(replacement)
 }

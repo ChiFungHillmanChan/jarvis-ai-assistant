@@ -316,7 +316,7 @@ pub(crate) fn chosen_entry(chain: &[ProviderChainEntry], saved: bool, configured
 }
 
 /// Which of the router's own keys exist (never the keys themselves), as
-/// `AiRouter::reload_keys` last found them.
+/// the live router last published them.
 #[derive(Clone, Copy, Debug, Default, PartialEq)]
 pub(crate) struct KeysFound {
     pub gemini: bool,
@@ -326,17 +326,26 @@ pub(crate) struct KeysFound {
 
 static KEYS_FOUND: std::sync::RwLock<Option<KeysFound>> = std::sync::RwLock::new(None);
 
-/// The keys the last `reload_keys` found. The mail gate uses them to work
-/// out which model a chain nobody saved runs on ([`unsaved_choice`])
-/// without a Keychain read of its own. None until the first read.
+/// The keys the live router has, as last published. The mail gate uses
+/// them to work out which model a chain nobody saved runs on
+/// ([`unsaved_choice`]) without a Keychain read of its own. None until the
+/// launch publishes them.
 pub(crate) fn keys_found() -> Option<KeysFound> {
     #[cfg(test)]
     return keys_found::get();
     #[cfg(not(test))]
+    process_wide_keys_found()
+}
+
+/// What release builds read.
+fn process_wide_keys_found() -> Option<KeysFound> {
     KEYS_FOUND.read().ok().and_then(|keys| *keys)
 }
 
-/// Written by `reload_keys` and nothing else.
+/// Written only for the live router ([`AiRouter::publish_keys`],
+/// [`install_live`]): a router built for one job reads the Keychain for
+/// itself, and a read that failed for it alone must not change what the
+/// gate judges (review B, r4-m3).
 fn publish_keys_found(keys: KeysFound) {
     if let Ok(mut found) = KEYS_FOUND.write() {
         *found = Some(keys);
@@ -345,12 +354,25 @@ fn publish_keys_found(keys: KeysFound) {
     keys_found::publish(keys);
 }
 
-/// Tests see the keys their own thread's `reload_keys` published, so tests
-/// running side by side do not see each other's; or the keys a test sets.
+/// Make `next` the live router, the one the chat and the jobs started from
+/// now on clone, and publish its keys, both under the router's lock.
+pub(crate) fn install_live(live: &std::sync::Mutex<AiRouter>, next: AiRouter) -> Result<(), String> {
+    let mut router = live.lock().map_err(|e| e.to_string())?;
+    next.publish_keys();
+    *router = next;
+    Ok(())
+}
+
+/// Tests see the keys their own thread published, so tests running side by
+/// side do not see each other's; or the keys a test sets.
 #[cfg(test)]
 pub(crate) mod keys_found {
     use super::KeysFound;
     use std::cell::Cell;
+
+    /// Held by a test that publishes, so the process-wide copy one of them
+    /// checks is not written by another meanwhile.
+    pub(crate) static PUBLISHING: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
     thread_local! {
         static PUBLISHED: Cell<Option<KeysFound>> = const { Cell::new(None) };
@@ -790,6 +812,13 @@ impl AiRouter {
         self.gemini_key = resolve_key_with("GEMINI_API_KEY", || from_keychain("gemini_api_key"));
         self.claude_key = resolve_key_with("ANTHROPIC_API_KEY", || from_keychain("claude_api_key"));
         self.openai_key = resolve_key_with("OPENAI_API_KEY", || from_keychain("openai_api_key"));
+    }
+
+    /// Publish which of this router's keys exist, for the mail gate
+    /// ([`keys_found`]). For the live router only: at launch, and when a
+    /// key is saved or removed in Settings; a new live router publishes
+    /// through [`install_live`].
+    pub(crate) fn publish_keys(&self) {
         publish_keys_found(self.keys_found());
     }
 
@@ -1190,15 +1219,28 @@ mod tests {
         assert_eq!(router.chosen(&configured).unwrap().provider_type, "openai");
     }
 
-    /// Outside test builds the mail gate reads the process-wide snapshot,
-    /// so `reload_keys` must write it, as well as this thread's copy. Only
-    /// presence is checked: tests running side by side also write it.
+    /// Only the live router publishes which keys exist (review B, r4-m3):
+    /// a router built for one job (a sort run, a choice being tested) reads
+    /// the Keychain for itself and publishes nothing, so a read that failed
+    /// for it alone cannot change what the gate judges. The live router's
+    /// keys are published as they are, to this thread's copy (test builds)
+    /// and to the process-wide copy release builds read.
     #[test]
-    fn reloading_keys_writes_the_process_wide_snapshot() {
-        let mut router = AiRouter::new("");
-        router.reload_keys();
-        assert!(KEYS_FOUND.read().unwrap().is_some());
-        assert_eq!(keys_found::get(), Some(router.keys_found()));
+    fn only_the_live_router_publishes_its_keys() {
+        let db = crate::db::test_database();
+        let _job = crate::commands::ai_choice::rebuilt_router(&db);
+        assert_eq!(keys_found::get(), None, "a router built for one job publishes nothing");
+
+        let live = std::sync::Mutex::new(AiRouter::new("").without_keys());
+        let mut next = AiRouter::new("").without_keys();
+        next.set_gemini_key("test-g");
+        next.set_claude_key("test-c");
+        let expected = KeysFound { gemini: true, claude: true, openai: false };
+        let _one_at_a_time = keys_found::PUBLISHING.lock().unwrap_or_else(|e| e.into_inner());
+        install_live(&live, next).unwrap();
+        assert_eq!(live.lock().unwrap().keys_found(), expected);
+        assert_eq!(keys_found::get(), Some(expected));
+        assert_eq!(process_wide_keys_found(), Some(expected));
     }
 
     /// Every tool the app defines is either an action (a resend or a

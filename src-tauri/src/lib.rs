@@ -138,6 +138,8 @@ pub fn run() {
             router.load_from_db(&db);
             router.reload_keys();
             router.append_default_fallbacks();
+            // Before any job starts: the mail gate reads these.
+            router.publish_keys();
             log::info!("Provider chain: {} entries, {} local endpoints",
                 router.provider_chain().len(), router.local_endpoints().len());
 
