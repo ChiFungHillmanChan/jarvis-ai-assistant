@@ -388,7 +388,9 @@ fn addresses_always_come_from_the_bundled_copy() {
             assert_eq!(theirs.setup.as_ref().map(|s| &s.key_page), ours.setup.as_ref().map(|s| &s.key_page), "{id}");
             let mut expected: Vec<&str> = ours.model_id_suffixes.iter().map(String::as_str).chain([":remote"]).collect();
             let mut got: Vec<&str> = theirs.model_id_suffixes.iter().map(String::as_str).collect();
-            (expected.sort(), expected.dedup(), got.sort());
+            expected.sort();
+            expected.dedup();
+            got.sort();
             assert_eq!(got, expected, "{id}: a copy may add a suffix but never remove one");
             assert_eq!(theirs.display_name.en, "Renamed", "{id}: names and copy may change");
         }
@@ -711,7 +713,8 @@ fn every_model_id_a_copy_sends_is_a_safe_model_id() {
         let (name, c) = &bundled().presets.chains[chain];
         (name.clone(), c.entries.iter().position(|e| e.model.is_some()).unwrap())
     };
-    let cases: Vec<(String, Box<dyn Fn(&mut Value)>)> = vec![
+    type Tamper<'a> = Box<dyn Fn(&mut Value) + 'a>;
+    let cases: Vec<(String, Tamper<'_>)> = vec![
         ("features.chat.gemini is not a safe model id".into(), Box::new(|doc| doc["features"]["chat"]["gemini"] = json!(bad))),
         (format!("presets.chains.{name}[{entry}] is not a safe model id"), Box::new(|doc| doc["presets"]["chains"][&name]["entries"][entry]["model"] = json!(bad))),
         ("a openai model's id or replacement is not a safe model id".into(), Box::new(|doc| push_openai_like(doc, json!({ "id": "gpt?x" })))),
