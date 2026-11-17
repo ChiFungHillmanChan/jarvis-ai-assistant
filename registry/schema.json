@@ -298,7 +298,7 @@
         },
         "price_source": { "description": "Where and when the prices were read.", "type": "string", "minLength": 1 },
         "context": { "description": "Context window in tokens; null where the app does not record it.", "type": ["integer", "null"], "minimum": 1 },
-        "max_output": { "description": "The most output tokens (thinking included) one request may ask for; null where not recorded.", "type": ["integer", "null"], "minimum": 1 },
+        "max_output": { "description": "The most output tokens (thinking included) one request may ask for; null where not recorded.", "type": ["integer", "null"], "minimum": 1, "maximum": 1048576 },
         "capabilities": {
           "description": "What JARVIS uses with this model today, not everything the model can do: false can mean the app does not use the ability yet.",
           "type": "object",

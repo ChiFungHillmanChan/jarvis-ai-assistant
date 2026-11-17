@@ -653,6 +653,27 @@ fn the_endpoint_is_the_launch_value_else_the_compiled_one_and_https_only() {
 /// Each bound of each limit (registry/README.md, "Limits"): a copy just
 /// outside is rejected whole, the reason names the field and never the
 /// value, and the copy in use stays; a copy just inside is used.
+/// A model's own output cap, which Gemini sends as maxOutputTokens: the
+/// same path as the limits below. The model is the first the bundled copy
+/// gives a cap to.
+#[tokio::test]
+async fn a_models_max_output_outside_its_bound_rejects_the_whole_copy() {
+    use super::doc::MAX_MODEL_OUTPUT_TOKENS;
+    let id = bundled().models.iter().find(|m| m.max_output.is_some()).expect("a model with a cap").id.clone();
+    let set = |value: u32| newer(1, |doc| doc["models"].as_array_mut().unwrap().iter_mut().find(|m| m["id"] == id.as_str()).unwrap()["max_output"] = json!(value));
+    for (outside, inside) in [(0, 1), (MAX_MODEL_OUTPUT_TOKENS + 1, MAX_MODEL_OUTPUT_TOKENS)] {
+        let setup = Setup::new();
+        let fake = Fake::with(vec![signed_reply(&setup.key, set(outside), "\"a\""), signed_reply(&setup.key, set(inside), "\"b\"")]);
+        let reason = format!("models.{id}.max_output is outside 1 to {MAX_MODEL_OUTPUT_TOKENS}");
+        assert_eq!(setup.refresh(&fake).await, Outcome::Rejected(Rejected::Unreadable(reason)), "{outside}: rejected, the field named and the value not quoted");
+        let active = setup.holder.get();
+        assert_eq!((active.registry.version, active.source), (bundled().version, Source::Bundled), "{outside}: the copy in use stays");
+        assert_eq!(load::read_cache(&setup.dir), None, "{outside}: nothing is cached");
+        assert_eq!(setup.refresh(&fake).await, Outcome::Updated { version: bundled().version + 1 }, "{inside} is inside its bound");
+        assert_eq!(setup.holder.get().registry.models.iter().find(|m| m.id == id).unwrap().max_output, Some(inside));
+    }
+}
+
 #[tokio::test]
 async fn a_limit_outside_its_bound_rejects_the_whole_copy() {
     use super::doc::{MAX_CONTEXT_TOKENS, MAX_OUTPUT_TOKENS, MAX_TOOL_ROUNDS};

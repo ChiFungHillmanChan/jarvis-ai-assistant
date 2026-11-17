@@ -129,6 +129,10 @@ impl Limits {
 pub(crate) const MAX_OUTPUT_TOKENS: u32 = 131_072;
 pub(crate) const MAX_CONTEXT_TOKENS: u32 = 1_048_576;
 pub(crate) const MAX_TOOL_ROUNDS: u32 = 50;
+/// A model's own output cap (`models[].max_output`): version 1's largest is
+/// 65,536, so 16 times that. `models[].context` has no bound: the app does
+/// not read it (the Model type has no such field).
+pub(crate) const MAX_MODEL_OUTPUT_TOKENS: u32 = 1_048_576;
 pub(crate) const MAX_TEMPERATURE: f32 = 2.0;
 /// The values OpenAI lists for reasoning effort ("Supported values are
 /// model-dependent and can include none, minimal, low, medium, high, xhigh,
@@ -414,6 +418,10 @@ impl Registry {
         for model in &self.models {
             if !is_safe_model_id(&model.id) || !model.replacement.as_deref().is_none_or(is_safe_model_id) {
                 return Err(format!("a {} model's id or replacement is not a safe model id", model.provider));
+            }
+            // Gemini sends it as maxOutputTokens (gemini.rs output_cap).
+            if model.max_output.is_some_and(|v| !(1..=MAX_MODEL_OUTPUT_TOKENS).contains(&v)) {
+                return Err(format!("models.{}.max_output is outside 1 to {MAX_MODEL_OUTPUT_TOKENS}", model.id));
             }
         }
         // A default and a preset entry are sent when the user saved no

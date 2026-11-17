@@ -161,6 +161,17 @@ test('the validator refuses a limit outside its bound, as the app does, and acce
   }
 });
 
+test("the validator refuses a model's max_output outside its bound, as the app does, and accepts one at it", () => {
+  // MAX_MODEL_OUTPUT_TOKENS in src-tauri/src/ai/registry/doc.rs.
+  const index = seeded().models.findIndex((m: any) => m.max_output !== null);
+  const set = (value: number) => (doc: any) => { doc.models[index].max_output = value; };
+  for (const [outside, inside] of [[0, 1], [1048577, 1048576]]) {
+    const errors = errorsFor(set(outside));
+    assert.ok(errors.some(e => e.startsWith(`schema: /models/${index}/max_output `)), `${outside}: ${errors.join('\n')}`);
+    assert.deepEqual(errorsFor(set(inside)), [], `${inside}`);
+  }
+});
+
 test('the validator refuses a model id the app could not send safely, such as one with path characters', () => {
   const bad = 'gemini-3.7-flash/../x';
   const refused = (change: (doc: any) => void, path: string) => {
