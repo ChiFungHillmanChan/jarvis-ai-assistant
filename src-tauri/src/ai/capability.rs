@@ -127,6 +127,20 @@ pub fn picked() -> Option<Pick> {
     PICKED.try_with(Clone::clone).ok().flatten()
 }
 
+/// `tokio::task::spawn_blocking`, keeping the request's pick. A task-local
+/// does not reach the blocking thread: without this, the mail gate and the
+/// withheld line there would answer for the saved choice, not for the model
+/// the request is sent to.
+pub async fn spawn_blocking<R: Send + 'static>(f: impl FnOnce() -> R + Send + 'static) -> Result<R, String> {
+    let pick = picked();
+    tokio::task::spawn_blocking(move || PICKED.sync_scope(pick, f)).await.map_err(|e| e.to_string())
+}
+
+/// `f` as if nothing had been picked: what holds for the saved choice.
+pub fn unpicked<R>(f: impl FnOnce() -> R) -> R {
+    PICKED.sync_scope(None, f)
+}
+
 /// A model a request would run on: the row, the registry provider and the
 /// model id that is sent.
 #[derive(Debug, Clone, Serialize, PartialEq)]

@@ -57,6 +57,10 @@ pub struct ChatMessage {
     /// A voice request whose recording was kept and can be played back.
     #[serde(default)]
     pub has_recording: bool,
+    /// Shown under the answer: for one answered by a model picked in the
+    /// error card, that the chosen AI will not see it (mail_policy::PickedTurn).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub note: Option<String>,
 }
 
 #[tauri::command]
@@ -88,11 +92,30 @@ pub async fn send_message(
     let _guard = chat_session::FOREGROUND.try_lock().map_err(|_| "另一個助理任務進行中，請等完成後再試。".to_string())?;
     let context = chat_session::Context { session_id: session_id.clone(), run_id, app: app_handle.clone() };
     let retrying = retry_of.is_some();
-    chat_session::CONTEXT.scope(context, crate::ai::capability::with_pick(pick, async {
+    chat_session::CONTEXT.scope(context, on_pick(&db, pick, async {
     let result = send_scoped(&app_handle, &db, &router, &google_auth, &engine, message, workload, session_id, retrying).await;
     let _ = app_handle.emit("chat-state", json!({"state":"idle"}));
     result
     })).await
+}
+
+/// A chat turn, on the model picked in the error card if the user picked
+/// one (P06). What a picked turn saves is withheld from a chosen AI that
+/// may not receive Gmail and Calendar content, and the answer says so
+/// (mail_policy::PickedTurn).
+async fn on_pick(
+    db: &Database,
+    pick: Option<crate::ai::capability::Pick>,
+    turn: impl std::future::Future<Output = Result<ChatMessage, String>>,
+) -> Result<ChatMessage, String> {
+    let picked = pick.is_some();
+    crate::ai::capability::with_pick(pick, async {
+        let recorded = if picked { crate::ai::mail_policy::PickedTurn::begin(db)? } else { None };
+        let mut answer = turn.await?;
+        answer.note = recorded.as_ref().and_then(|turn| turn.note());
+        Ok(answer)
+    })
+    .await
 }
 
 async fn send_scoped(
@@ -124,39 +147,13 @@ async fn send_scoped(
 
     // Run DB insert + conversation fetch + context gathering on a blocking thread
     // to avoid starving tokio's async worker pool when the mutex is contended.
+    // The thread keeps the request's pick: what it may be shown is decided
+    // for the model it is sent to.
     let db_arc = db.clone();
     let msg_clone = message.clone();
-    let msg_lower = message.to_lowercase();
     let history_session = session_id.clone();
-
-    // (history, context messages, the saved message's id, email held back)
-    type Turn = (Vec<(String, String)>, Vec<(String, String)>, i64, Option<crate::ai::mail_policy::Blocked>);
-    let (history, context_messages, message_id, held_back) = tokio::task::spawn_blocking(
-        move || -> Result<Turn, String> {
-            let (message_id, history) = if retrying { save_retried_turn(&db_arc, &history_session, &msg_clone)? } else { save_turn(&db_arc, &history_session, &msg_clone)? };
-
-            // Only add context for questions about personal data (saves tokens)
-            let needs_context = needs_personal_context(&msg_lower, &msg_clone);
-
-            let mut ctx_msgs = Vec::new();
-            if needs_context {
-                if let Ok(ctx) = crate::assistant::context::DayContext::gather(&db_arc) {
-                    ctx_msgs.push(("user".to_string(), ctx.inline_context()));
-                    ctx_msgs.push(("assistant".to_string(), "Understood.".to_string()));
-                }
-            }
-
-            // Email and calendar content this turn leaves out (the senders
-            // and titles of [CONTEXT], earlier chat that quoted email): not
-            // silently (P06), the consent card goes up below.
-            let leaves_out = needs_context || crate::ai::mail_policy::withheld(&db_arc) != crate::ai::mail_policy::Withheld::default();
-            let held_back = if leaves_out { crate::ai::mail_policy::check(&db_arc).err() } else { None };
-
-            Ok((history, ctx_msgs, message_id, held_back))
-        },
-    )
-    .await
-    .map_err(|e| e.to_string())??;
+    let (history, context_messages, message_id, held_back) =
+        crate::ai::capability::spawn_blocking(move || begin_turn(&db_arc, &history_session, &msg_clone, retrying)).await??;
     if let Some(blocked) = held_back {
         blocked.raise("chat");
     }
@@ -187,12 +184,12 @@ async fn send_scoped(
         if !topic.is_empty() {
             let db_arc2 = db.clone();
             let search_session = session_id.clone();
-            let results: Vec<String> = tokio::task::spawn_blocking(move || -> Result<Vec<String>, String> {
+            let results: Vec<String> = crate::ai::capability::spawn_blocking(move || -> Result<Vec<String>, String> {
                 Ok(search_history(&db_arc2, &search_session, &topic, Some(message_id))?
                     .into_iter()
                     .map(|(role, content, date)| format!("[{} - {}]: {}", date.unwrap_or_default(), role, crate::util::truncate_bytes(&content, 100)))
                     .collect())
-            }).await.map_err(|e| e.to_string())??;
+            }).await??;
 
             if !results.is_empty() {
                 let search_context = results.join("\n");
@@ -242,6 +239,7 @@ async fn send_scoped(
                     content: search_response,
                     created_at: None,
                     has_recording: false,
+                    note: None,
                 });
             }
         }
@@ -375,7 +373,37 @@ async fn send_scoped(
         content: final_response,
         created_at: None,
         has_recording: false,
+        note: None,
     })
+}
+
+/// (history, context messages, the saved message's id, email held back)
+type Turn = (Vec<(String, String)>, Vec<(String, String)>, i64, Option<crate::ai::mail_policy::Blocked>);
+
+/// The start of a chat turn, before anything is sent: save the message and
+/// gather what goes with it. Blocking; run it with
+/// `capability::spawn_blocking`, so a pick reaches the gates here.
+fn begin_turn(db: &Arc<Database>, session_id: &str, message: &str, retrying: bool) -> Result<Turn, String> {
+    let (message_id, history) = if retrying { save_retried_turn(db, session_id, message)? } else { save_turn(db, session_id, message)? };
+
+    // Only add context for questions about personal data (saves tokens)
+    let needs_context = needs_personal_context(&message.to_lowercase(), message);
+
+    let mut ctx_msgs = Vec::new();
+    if needs_context {
+        if let Ok(ctx) = crate::assistant::context::DayContext::gather(db) {
+            ctx_msgs.push(("user".to_string(), ctx.inline_context()));
+            ctx_msgs.push(("assistant".to_string(), "Understood.".to_string()));
+        }
+    }
+
+    // Email and calendar content this turn leaves out (the senders and
+    // titles of [CONTEXT], earlier chat that quoted email): not silently
+    // (P06), the consent card goes up in send_scoped.
+    let leaves_out = needs_context || crate::ai::mail_policy::withheld(db) != crate::ai::mail_policy::Withheld::default();
+    let held_back = if leaves_out { crate::ai::mail_policy::check(db).err() } else { None };
+
+    Ok((history, ctx_msgs, message_id, held_back))
 }
 
 /// Save the user's message and return the session's recent messages to send
@@ -559,6 +587,7 @@ fn history(conn: &rusqlite::Connection, session_id: &str, limit: Option<i64>) ->
                 content: row.get(2)?,
                 created_at: row.get(3)?,
                 has_recording: row.get(4)?,
+                note: None,
             })
         })
         .map_err(|e| e.to_string())?
@@ -824,6 +853,144 @@ mod tests {
 
         let sent = save_turn_and_load_history(&db, "s1", "hello").unwrap();
         assert_eq!(sent, vec![("user".to_string(), "hello".to_string())]);
+    }
+
+    // P06, Google Limited Use (DECISIONS 2026-11-17): a model picked once in
+    // the error card can answer a mail question while the chosen AI may not
+    // receive Gmail and Calendar content.
+
+    const KENNY: &str = "Kenny asks for HK$12,000";
+
+    fn openai_pick(base_url: Option<&str>) -> crate::ai::capability::Pick {
+        crate::ai::capability::Pick { provider_type: "openai".into(), base_url: base_url.map(str::to_string), endpoint_id: None, model_id: None }
+    }
+
+    fn contents(history: Vec<(String, String)>) -> Vec<String> {
+        history.into_iter().map(|(_, content)| content).collect()
+    }
+
+    /// What a chat turn saves, without a model: the message, begun as
+    /// send_scoped begins it (off the async threads), a memory and a task as
+    /// the tools save them, and the reply.
+    async fn a_mail_turn(db: Arc<Database>) -> Result<ChatMessage, String> {
+        let begun = db.clone();
+        crate::ai::capability::spawn_blocking(move || begin_turn(&begun, "s1", "What did Kenny's email say?", false)).await??;
+        let conn = db.conn.lock().unwrap();
+        conn.execute("INSERT INTO user_memory (content) VALUES ('Kenny is owed HK$12,000')", []).unwrap();
+        conn.execute("INSERT INTO tasks (title) VALUES ('Pay Kenny HK$12,000')", []).unwrap();
+        persist_scoped_reply(&conn, KENNY, "s1").unwrap();
+        Ok(ChatMessage { id: None, role: "assistant".into(), content: KENNY.into(), created_at: None, has_recording: false, note: None })
+    }
+
+    /// Kimi chosen after OpenAI, one turn on Kimi since (the line is drawn
+    /// under what OpenAI saw), then the user picks OpenAI in the card for a
+    /// mail question. The answer and its note.
+    async fn picked_after_moving_to(chosen: impl FnOnce(&Database)) -> (Arc<Database>, ChatMessage) {
+        let db = Arc::new(crate::db::test_database());
+        crate::ai::mail_policy::test_support::use_ai(&db, "openai", None);
+        crate::ai::mail_policy::withheld(&db);
+        chosen(&db);
+        save_turn(&db, "s1", "hello").unwrap();
+        persist_scoped_reply(&db.conn.lock().unwrap(), "Hi", "s1").unwrap();
+        let answer = on_pick(&db, Some(openai_pick(None)), a_mail_turn(db.clone())).await.unwrap();
+        (db, answer)
+    }
+
+    fn newest(db: &Database, table: &str) -> i64 {
+        db.conn.lock().unwrap().query_row(&format!("SELECT MAX(id) FROM {table}"), [], |r| r.get(0)).unwrap()
+    }
+
+    /// What the chosen AI is shown on its next turn: none of the picked
+    /// turn (the question, the answer, the memory and the task it saved).
+    fn assert_next_turn_sees_none_of_it(db: &Database) {
+        let (_, history) = save_turn(db, "s1", "And the deadline?").unwrap();
+        assert_eq!(contents(history), ["And the deadline?"]);
+        assert!(search_history(db, "s1", "Kenny", None).unwrap().is_empty());
+        let line = crate::ai::mail_policy::withheld(db);
+        assert!(line.memories >= newest(db, "user_memory"), "{line:?}");
+        assert!(line.tasks >= newest(db, "tasks"), "{line:?}");
+    }
+
+    /// (1) Kimi, whose terms JARVIS cannot confirm, even after the user
+    /// agreed to them.
+    #[tokio::test]
+    async fn a_picked_answer_to_a_mail_question_is_not_replayed_to_an_ai_that_may_not_receive_it() {
+        let (db, answer) = picked_after_moving_to(|db| {
+            crate::ai::mail_policy::test_support::use_ai(db, "openai", crate::ai::mail_policy::test_support::KIMI);
+            crate::ai::mail_policy::test_support::agree_to_kimi(db);
+        })
+        .await;
+        assert_next_turn_sees_none_of_it(&db);
+        assert_eq!(answer.note.as_deref(), Some("Kimi will not see this answer or the chat before it: Gmail and Calendar content is not sent to Kimi."));
+    }
+
+    /// (3) Gemini as the chosen AI, its billing not confirmed.
+    #[tokio::test]
+    async fn a_picked_answer_is_not_replayed_to_gemini_before_consent() {
+        let (db, answer) = picked_after_moving_to(|db| crate::ai::mail_policy::test_support::use_ai(db, "gemini", None)).await;
+        assert_next_turn_sees_none_of_it(&db);
+        assert_eq!(
+            answer.note.as_deref(),
+            Some("Google Gemini will not see this answer or the chat before it until you agree to share Gmail and Calendar content with it.")
+        );
+    }
+
+    /// (4) Choosing an AI that may receive it lifts the line, as a move does.
+    #[tokio::test]
+    async fn moving_to_an_ai_that_may_receive_google_content_lifts_it() {
+        let (db, _) = picked_after_moving_to(|db| crate::ai::mail_policy::test_support::use_ai(db, "openai", crate::ai::mail_policy::test_support::KIMI)).await;
+        assert_next_turn_sees_none_of_it(&db);
+        crate::ai::mail_policy::test_support::use_ai(&db, "openai", None);
+        let (_, history) = save_turn(&db, "s1", "Thanks").unwrap();
+        assert!(contents(history).contains(&KENNY.to_string()));
+        assert_eq!(crate::ai::mail_policy::withheld(&db), crate::ai::mail_policy::Withheld::default());
+    }
+
+    /// An answer from a model picked once changes nothing when the chosen AI
+    /// may receive the content too, and the answer carries no note.
+    #[tokio::test]
+    async fn a_pick_while_the_chosen_ai_may_receive_it_withholds_nothing() {
+        let db = Arc::new(crate::db::test_database());
+        crate::ai::mail_policy::test_support::use_ai(&db, "claude", None);
+        let answer = on_pick(&db, Some(openai_pick(None)), a_mail_turn(db.clone())).await.unwrap();
+        assert_eq!(answer.note, None);
+        let (_, history) = save_turn(&db, "s1", "Thanks").unwrap();
+        assert!(contents(history).contains(&KENNY.to_string()));
+    }
+
+    /// The other way round: OpenAI chosen, Kimi picked once in a card. The
+    /// turn begins in a blocking thread, which must still see the pick, or
+    /// Kimi would be sent the calendar titles and the chat that quoted mail.
+    #[tokio::test]
+    async fn a_picked_ai_that_may_not_receive_google_content_is_sent_none() {
+        let db = Arc::new(crate::db::test_database());
+        crate::ai::mail_policy::test_support::use_ai(&db, "openai", None);
+        db.conn
+            .lock()
+            .unwrap()
+            .execute(
+                "INSERT INTO calendar_events (google_id, summary, start_time, end_time, location) VALUES ('e1', 'Term sheet call', ?1, ?1, 'Cyberport')",
+                [chrono::Local::now().to_rfc3339_opts(chrono::SecondsFormat::Secs, false)],
+            )
+            .unwrap();
+        save_turn(&db, "s1", "What did Kenny's email say?").unwrap();
+        persist_scoped_reply(&db.conn.lock().unwrap(), KENNY, "s1").unwrap();
+
+        let begun = db.clone();
+        let (history, context, _, _) = crate::ai::capability::with_pick(
+            Some(openai_pick(crate::ai::mail_policy::test_support::KIMI)),
+            crate::ai::capability::spawn_blocking(move || begin_turn(&begun, "s1", "What is on my calendar today?", false)),
+        )
+        .await
+        .unwrap()
+        .unwrap();
+        assert_eq!(contents(history), ["What is on my calendar today?"]);
+        let sent = format!("{context:?}");
+        assert!(!sent.contains("Term sheet") && !sent.contains("Cyberport"), "{sent}");
+
+        // OpenAI, still the chosen AI, is shown everything as before.
+        let (_, history) = save_turn(&db, "s1", "Thanks").unwrap();
+        assert!(contents(history).contains(&KENNY.to_string()));
     }
 
     /// When the line cannot be read everything saved is withheld, but the

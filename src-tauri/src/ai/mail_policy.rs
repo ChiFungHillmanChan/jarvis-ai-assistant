@@ -253,6 +253,10 @@ pub fn withheld_as_turn_begins(db: &Database) -> Withheld {
 
 fn line(db: &Database, turn_begins: bool) -> Withheld {
     let allowed = check(db).is_ok();
+    // A model picked once in the error card (P06) answers one request: what
+    // it may be shown is worked out here, but nothing is recorded. What the
+    // saved choice may be shown afterwards is [`PickedTurn`]'s to record.
+    let records = super::capability::picked().is_none();
     // Gemini is what an install chats with until the user chooses otherwise.
     let gemini_only = crate::commands::ai_choice::saved_chain(db)
         .unwrap_or_default()
@@ -275,7 +279,7 @@ fn line(db: &Database, turn_begins: bool) -> Withheld {
     };
     let recorded = pref(MAIL_AI_WAS_ALLOWED);
     if allowed {
-        if recorded.as_deref() != Some("true") {
+        if records && recorded.as_deref() != Some("true") {
             let _ = conn.execute("DELETE FROM user_preferences WHERE key = ?1", [WITHHELD_THROUGH]);
             set(MAIL_AI_WAS_ALLOWED, "true");
         }
@@ -307,12 +311,12 @@ fn line(db: &Database, turn_begins: bool) -> Withheld {
         };
         // The line is saved before the record changes, so a failed write is
         // tried again on the next turn instead of losing the line.
-        if turn_begins && (!set(WITHHELD_THROUGH, &format!("{conversations},{memories},{tasks}")) || !set(MAIL_AI_WAS_ALLOWED, "false")) {
+        if turn_begins && records && (!set(WITHHELD_THROUGH, &format!("{conversations},{memories},{tasks}")) || !set(MAIL_AI_WAS_ALLOWED, "false")) {
             return everything;
         }
         return Withheld { conversations, memories, tasks };
     }
-    if recorded.is_none() {
+    if records && recorded.is_none() {
         set(MAIL_AI_WAS_ALLOWED, "false");
     }
     match pref(WITHHELD_THROUGH) {
@@ -325,6 +329,72 @@ fn line(db: &Database, turn_begins: bool) -> Withheld {
             }
         }
     }
+}
+
+/// A request answered by a model picked once in the error card (P06,
+/// Google Limited Use), while it runs.
+///
+/// When the picked model may receive Gmail and Calendar content, whatever
+/// the request saves (the user's message, the reply, a memory or a task)
+/// can quote it. The request is recorded as answered by an AI that may
+/// receive email, as if the user had moved to it and back: a chosen AI that
+/// may not is then shown nothing saved up to the end of the request
+/// ([`withheld`]), until the user chooses one that may. It is recorded
+/// before the request saves anything, and again when it ends, however it
+/// ends: a line drawn while it ran (by another turn beginning) cannot leave
+/// out what it saved after that line.
+pub struct PickedTurn<'a> {
+    db: &'a Database,
+    /// Why the saved choice may not receive the content, if it may not.
+    chosen: Option<Blocked>,
+}
+
+impl<'a> PickedTurn<'a> {
+    /// In the pick's scope. None when the picked model may not receive the
+    /// content either: nothing it saves can quote it. A record that cannot
+    /// be written refuses the request.
+    pub fn begin(db: &'a Database) -> Result<Option<PickedTurn<'a>>, String> {
+        if check(db).is_err() {
+            return Ok(None);
+        }
+        let chosen = super::capability::unpicked(|| check(db)).err();
+        record_an_allowed_answer(db)?;
+        Ok(Some(PickedTurn { db, chosen }))
+    }
+
+    /// The sentence under the answer when the saved choice will not see it.
+    pub fn note(&self) -> Option<String> {
+        let language = UiLanguage::read(self.db);
+        match self.chosen.as_ref()? {
+            Blocked::NeedsConsent(request) => Some(language.pick(
+                format!("{} will not see this answer or the chat before it until you agree to share Gmail and Calendar content with it.", request.label),
+                format!("在你同意與 {0} 分享 Gmail 及日曆內容前，{0} 不會看到這個回覆及之前的對話。", request.label),
+            )),
+            Blocked::NotForGoogleContent { label, .. } | Blocked::NotAllowed(label) => Some(language.pick(
+                format!("{label} will not see this answer or the chat before it: Gmail and Calendar content is not sent to {label}."),
+                format!("{label} 不會看到這個回覆及之前的對話：Gmail 及日曆內容不會傳送至 {label}。"),
+            )),
+        }
+    }
+}
+
+impl Drop for PickedTurn<'_> {
+    fn drop(&mut self) {
+        if let Err(error) = record_an_allowed_answer(self.db) {
+            log::warn!("[mail_policy] a picked answer could not be recorded at its end: {error}");
+        }
+    }
+}
+
+fn record_an_allowed_answer(db: &Database) -> Result<(), String> {
+    let conn = db.conn.lock().map_err(|e| e.to_string())?;
+    conn.execute(
+        "INSERT INTO user_preferences (key, value) VALUES (?1, 'true') \
+         ON CONFLICT(key) DO UPDATE SET value = 'true', updated_at = datetime('now')",
+        [MAIL_AI_WAS_ALLOWED],
+    )
+    .map(|_| ())
+    .map_err(|e| e.to_string())
 }
 
 /// Ollama names its cloud models "<name>:cloud" or "<name>:<size>-cloud" and
