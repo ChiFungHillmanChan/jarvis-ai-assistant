@@ -355,17 +355,17 @@ pub struct Corrected {
 /// anywhere leaves every row and the marker as they were, and the whole
 /// step runs again at the next open.
 ///
-/// The price list: the step asks the registry built into this release
-/// (`registry::shipped()`, registry/registry.json as this build bundles it),
-/// never a fetched copy, and must keep doing so. It runs once, at the first
-/// open of whichever release a user installs next, before the cached or
-/// fetched registry is read, so its result must not depend on what was
-/// fetched or when.
+/// The price list: the step reads [`FrozenPrices`] only, never the
+/// registry (bundled, cached or fetched), and must keep doing so. It runs
+/// once, at the first open of whichever release a user installs next, so
+/// its result must depend neither on what was fetched or when nor on which
+/// release that is: a user who skips a release gets the same result
+/// (DECISIONS.md, "P04 and P05:"; the lead's ruling of 2026-11-17).
 pub fn correct_old_rows(conn: &rusqlite::Connection) -> rusqlite::Result<Corrected> {
-    use crate::ai::models::is_local;
-    let shipped = crate::ai::registry::shipped();
-    let price_known = |provider: &str, model_id: &str| shipped.price_known(provider, model_id);
-    let usd_cost_micro = |provider: &str, model_id: &str, input: i64, output: i64, cache_read: i64, cache_write: i64| shipped.usd_cost_micro(provider, model_id, input, output, cache_read, cache_write);
+    let frozen = FrozenPrices::get();
+    let is_local = |provider: &str| frozen.is_local(provider);
+    let price_known = |provider: &str, model_id: &str| frozen.price_known(provider, model_id);
+    let usd_cost_micro = |provider: &str, model_id: &str, input: i64, output: i64, cache_read: i64, cache_write: i64| frozen.usd_cost_micro(provider, model_id, input, output, cache_read, cache_write);
     let done: bool = conn.query_row("SELECT EXISTS(SELECT 1 FROM user_preferences WHERE key = ?1)", [OLD_ROWS_CORRECTED_KEY], |r| r.get(0))?;
     if done {
         return Ok(Corrected::default());
@@ -461,6 +461,82 @@ pub fn correct_old_rows_on_open(conn: &rusqlite::Connection) {
             "cost: old usage rows corrected: {guessed} billed at the guessed rate and {billed_at_zero} billed at zero now count as price unknown, {local_made_free} local rows are free, {cache_added} Bedrock rows now count their cache in the input"
         ),
         Err(e) => log::warn!("cost: could not correct the old usage rows; every roll-up tries again first and moves no request until it succeeds: {e}"),
+    }
+}
+
+/// The price list of [`correct_old_rows`] and of nothing else:
+/// old_rows_prices.frozen.json, the priced entries of registry/registry.json
+/// version 1 with the lookup rule they were read with. The file never
+/// changes (`the_frozen_price_list_is_never_edited`), and neither the
+/// registry's format nor its lookup reaches it, so every release corrects
+/// old rows the same way.
+#[derive(serde::Deserialize)]
+struct FrozenPrices {
+    local_providers: Vec<String>,
+    models: Vec<FrozenModel>,
+}
+
+#[derive(serde::Deserialize)]
+struct FrozenModel {
+    id: String,
+    input: f64,
+    output: f64,
+    cache_read: Option<f64>,
+    cache_write: Option<f64>,
+    tiers: Vec<FrozenTier>,
+}
+
+#[derive(serde::Deserialize)]
+struct FrozenTier {
+    above_input_tokens: i64,
+    input: f64,
+    output: f64,
+    cache_read: Option<f64>,
+    cache_write: Option<f64>,
+}
+
+impl FrozenPrices {
+    /// Parsed once. The file is compiled in and its bytes are pinned, and
+    /// `the_frozen_prices_are_version_1_of_the_registry` parses it, so this
+    /// cannot fail in a build whose tests passed.
+    fn get() -> &'static FrozenPrices {
+        static FROZEN: std::sync::LazyLock<FrozenPrices> = std::sync::LazyLock::new(|| serde_json::from_str(include_str!("old_rows_prices.frozen.json")).expect("the frozen price list parses"));
+        &FROZEN
+    }
+
+    fn is_local(&self, provider: &str) -> bool {
+        let provider = provider.to_lowercase();
+        self.local_providers.contains(&provider)
+    }
+
+    /// The entry whose id is the longest one contained in the lowercased id.
+    fn find(&self, model_id: &str) -> Option<&FrozenModel> {
+        let wanted = model_id.to_lowercase();
+        self.models.iter().filter(|m| wanted.contains(m.id.as_str())).max_by_key(|m| m.id.len())
+    }
+
+    fn price_known(&self, provider: &str, model_id: &str) -> bool {
+        self.is_local(provider) || self.find(model_id).is_some()
+    }
+
+    /// None for a local model (free) and for an unpriced one. The highest
+    /// tier the input exceeds bills the whole request.
+    fn usd_cost_micro(&self, provider: &str, model_id: &str, input_tokens: i64, output_tokens: i64, cache_read_tokens: i64, cache_write_tokens: i64) -> Option<i64> {
+        if self.is_local(provider) {
+            return None;
+        }
+        let m = self.find(model_id)?;
+        let price = |input: f64, output: f64, cache_read: Option<f64>, cache_write: Option<f64>| crate::ai::models::Price {
+            input_per_million: input,
+            output_per_million: output,
+            cache_read_per_million: cache_read.unwrap_or(0.0),
+            cache_write_per_million: cache_write.unwrap_or(0.0),
+        };
+        let p = match m.tiers.iter().rev().find(|t| input_tokens > t.above_input_tokens) {
+            Some(t) => price(t.input, t.output, t.cache_read, t.cache_write),
+            None => price(m.input, m.output, m.cache_read, m.cache_write),
+        };
+        Some(crate::ai::models::cost_micro_at(p, input_tokens, output_tokens, cache_read_tokens, cache_write_tokens))
     }
 }
 
@@ -640,11 +716,11 @@ pub(crate) mod tests {
         assert_eq!(rows, vec![("mail_sort".into(), 8, Some(20_000_000)), ("tts".into(), 8, None), ("other".into(), 7, Some(10_000_000))]);
     }
 
-    /// The correction prices with the registry this release ships, never
-    /// the copy in use: here the copy in use prices nothing, and the rows
-    /// priced by the shipped copy still keep their cost.
+    /// The correction prices with the frozen list, never the copy in use:
+    /// here the copy in use prices nothing, and the rows the frozen list
+    /// prices still keep their cost.
     #[test]
-    fn old_rows_are_corrected_with_the_shipped_registry_not_the_one_in_use() {
+    fn old_rows_are_corrected_with_the_frozen_prices_not_the_registry_in_use() {
         let db = crate::db::test_database();
         let conn = db.conn.lock().unwrap();
         let _fetched = crate::ai::registry::test_override::with(|r| {
@@ -662,6 +738,95 @@ pub(crate) mod tests {
         let after = snapshot(&conn);
         assert_eq!(after[0].1 .4, Some(925), "repriced at the shipped Haiku rate");
         assert_eq!(after[1], before[1], "a priced model billed at zero is not marked unknown");
+    }
+
+    /// Never edit or regenerate old_rows_prices.frozen.json, and never
+    /// change this hash to make the test pass. The correction runs once, at
+    /// the first open of whichever release a user installs next. A list
+    /// that changed between releases would correct the same rows one way
+    /// for a user who took every release and another way for one who
+    /// skipped some (a model that gains or loses a price flips rules 1 and
+    /// 2). DECISIONS.md, "P04 and P05:", as the lead ruled on 2026-11-17.
+    /// A new price belongs in registry/registry.json.
+    #[test]
+    fn the_frozen_price_list_is_never_edited() {
+        let digest = ring::digest::digest(&ring::digest::SHA256, include_bytes!("old_rows_prices.frozen.json"));
+        let hex: String = digest.as_ref().iter().map(|b| format!("{b:02x}")).collect();
+        assert_eq!(hex, "af323dadc1f975271f8a64f95d6da949d3a8c71463b1697fc5fa74ecedbdaed2");
+    }
+
+    /// The frozen list prices every id as registry version 1 did, the
+    /// tiers and local providers included (the fixture is that version).
+    #[test]
+    fn the_frozen_prices_are_version_1_of_the_registry() {
+        let frozen = FrozenPrices::get();
+        let v1 = crate::ai::registry::fixture();
+        assert_eq!(v1.version, 1);
+        assert!(!frozen.models.is_empty());
+        let mut ids: Vec<String> = v1.models.iter().map(|m| m.id.clone()).collect();
+        ids.extend([HAIKU, "us.meta.llama3-3-70b-instruct-v1:0", "GPT-6-Luna-2026-01-01", "kimi-k2-0905-preview", ""].map(String::from));
+        let mut tokens = vec![(0, 0, 0, 0), (12_000, 800, 2_000, 300)];
+        for tier in v1.models.iter().filter_map(|m| m.prices.as_ref()).flat_map(|p| &p.tiers) {
+            tokens.extend([(tier.above_input_tokens, 10, 0, 0), (tier.above_input_tokens + 1, 10, 5, 5)]);
+        }
+        for provider in ["bedrock", "openai", "compat:api.moonshot.ai", "unknown", "ollama", "Local", "本機 AI"] {
+            for id in &ids {
+                assert_eq!(frozen.price_known(provider, id), v1.price_known(provider, id), "{provider} {id}");
+                for &(input, output, cache_read, cache_write) in &tokens {
+                    assert_eq!(frozen.usd_cost_micro(provider, id, input, output, cache_read, cache_write), v1.usd_cost_micro(provider, id, input, output, cache_read, cache_write), "{provider} {id} {input}");
+                }
+            }
+        }
+    }
+
+    /// The same rows end the same way whatever registry is in use: here the
+    /// copy in use differs from the frozen list (a model it did not price
+    /// has a price, a model it priced is gone), and the result is the one
+    /// version 1 gives.
+    #[test]
+    fn old_rows_are_corrected_the_same_whatever_registry_is_in_use() {
+        let llama = "us.meta.llama3-3-70b-instruct-v1:0";
+        let rows: &[Row] = &[
+            (OLD, "bedrock", llama, 1_000, 50, 0, 0, Some(0), "chat", 0),
+            (OLD, "bedrock", HAIKU, 120, 45, 800, 400, Some(805), "chat", 0),
+        ];
+        let correct = || {
+            let db = crate::db::test_database();
+            let conn = db.conn.lock().unwrap();
+            insert(&conn, rows);
+            (correct_old_rows(&conn).unwrap(), snapshot(&conn))
+        };
+        let (corrected, at_v1) = correct();
+        assert_eq!(corrected, Corrected { guessed: 0, billed_at_zero: 1, local_made_free: 0, cache_added: 1 });
+        assert_eq!((at_v1[0].1 .4, at_v1[0].1 .6), (None, 1), "an unpriced model billed at zero is marked unknown");
+        assert_eq!(at_v1[1].1 .4, Some(925), "repriced at the Haiku rate of version 1");
+
+        let _live = crate::ai::registry::test_override::with(|r| {
+            let mut priced = r.models.iter().find(|m| m.prices.is_some() && !m.managed).unwrap().clone();
+            priced.id = "llama3-3-70b".into();
+            r.models.push(priced);
+            let haiku = HAIKU.to_lowercase();
+            r.models.retain(|m| !haiku.contains(m.id.as_str()));
+        });
+        assert!(crate::ai::models::price_known("bedrock", llama), "the copy in use prices a model version 1 did not");
+        assert!(!crate::ai::models::price_known("bedrock", HAIKU), "and no longer prices one version 1 did");
+        assert_eq!(correct(), (corrected, at_v1));
+    }
+
+    /// The step reads no registry, so no later release can change it: its
+    /// code, the frozen list's included, names neither the registry nor the
+    /// app's lookups (`models::price_known` and the rest read the copy in
+    /// use).
+    #[test]
+    fn the_old_row_correction_reads_no_registry() {
+        let source = include_str!("cost.rs");
+        let start = source.find("pub fn correct_old_rows(").unwrap();
+        let end = source.find("#[cfg(test)]\npub(crate) mod tests {").unwrap();
+        let code: String = source[start..end].lines().filter(|line| !line.trim_start().starts_with("//")).collect::<Vec<_>>().join("\n");
+        assert!(code.contains("FrozenPrices::get()") && code.contains("fn usd_cost_micro("), "the range holds the step and the frozen list");
+        for read in ["registry", "current()", "models::price_known", "models::usd_cost_micro", "models::price_for", "models::is_local"] {
+            assert!(!code.contains(read), "the old-row correction reads {read}");
+        }
     }
 
     /// The four corrections, each on the rows it names and two of them on

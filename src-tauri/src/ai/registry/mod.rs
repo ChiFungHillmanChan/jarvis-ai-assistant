@@ -72,17 +72,6 @@ pub fn current() -> Arc<Registry> {
     holder().get().registry
 }
 
-/// The copy this release ships, never a fetched one, for work whose result
-/// must not depend on what was fetched or when: the one-time correction of
-/// old usage rows (DECISIONS.md, "P04 and P05"), which runs before the
-/// cache is read. Under test: the frozen fixture.
-pub fn shipped() -> Arc<Registry> {
-    #[cfg(test)]
-    return fixture();
-    #[cfg(not(test))]
-    bundled()
-}
-
 /// registry/registry.json as seeded (version 1), frozen for the tests:
 /// the app's tests run on it, so editing registry/registry.json (a price, a
 /// default) never needs a test change. The bundled copy itself is checked
