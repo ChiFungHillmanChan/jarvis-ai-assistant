@@ -105,11 +105,16 @@ pub struct Info {
 /// passes every check, else the bundled copy. Reads one small file and
 /// verifies one signature; never touches the network.
 pub fn start() {
+    start_in(holder(), load::cache_dir().as_deref());
+}
+
+/// [`start`] with the holder and cache folder given, for the tests.
+pub(crate) fn start_in(holder: &Holder, cache_dir: Option<&std::path::Path>) {
     let bundled = bundled();
-    let cache = load::cache_dir().and_then(|dir| load::read_cache(&dir));
+    let cache = cache_dir.and_then(load::read_cache);
     let (registry, source) = load::at_launch(&bundled, cache.as_ref(), &load::compiled_key(), load::app_version());
     log::info!("registry: version {} ({:?})", registry.version, source);
-    holder().set(Active { registry: Arc::new(registry), source });
+    holder.set(Active { registry: Arc::new(registry), source });
 }
 
 /// For tests that need a registry other than the bundled one: every lookup

@@ -90,6 +90,60 @@ impl Limits {
         fill(&mut self.chat_temperature, &other.chat_temperature);
         fill(&mut self.api_version, &other.api_version);
     }
+
+    /// Every limit this copy sets is inside its bound (registry/README.md,
+    /// "Limits"). The error names the field, never its value.
+    pub(crate) fn check(&self, provider: &str) -> Result<(), String> {
+        let field = |name: &str| format!("providers.{provider}.limits.{name}");
+        let counts = [
+            ("chat_max_output_tokens", self.chat_max_output_tokens, MAX_OUTPUT_TOKENS),
+            ("default_max_output_tokens", self.default_max_output_tokens, MAX_OUTPUT_TOKENS),
+            ("stt_max_output_tokens", self.stt_max_output_tokens, MAX_OUTPUT_TOKENS),
+            ("completion_context_tokens", self.completion_context_tokens, MAX_CONTEXT_TOKENS),
+            ("default_context_tokens", self.default_context_tokens, MAX_CONTEXT_TOKENS),
+            ("max_tool_rounds", self.max_tool_rounds, MAX_TOOL_ROUNDS),
+        ];
+        for (name, value, max) in counts {
+            if value.is_some_and(|v| !(1..=max).contains(&v)) {
+                return Err(format!("{} is outside 1 to {max}", field(name)));
+            }
+        }
+        if self.chat_temperature.is_some_and(|t| !(0.0..=MAX_TEMPERATURE).contains(&t)) {
+            return Err(format!("{} is outside 0 to {MAX_TEMPERATURE}", field("chat_temperature")));
+        }
+        if self.chat_reasoning_effort.as_deref().is_some_and(|effort| !REASONING_EFFORTS.contains(&effort)) {
+            return Err(format!("{} is not one of {}", field("chat_reasoning_effort"), REASONING_EFFORTS.join(", ")));
+        }
+        if self.api_version.as_deref().is_some_and(|v| !is_date(v)) {
+            return Err(format!("{} is not a date (YYYY-MM-DD)", field("api_version")));
+        }
+        Ok(())
+    }
+}
+
+/// The bounds of the limits, inclusive, mirrored in registry/schema.json.
+/// Version 1 holds at most 4,096 output tokens, 8,192 context tokens and 5
+/// tool rounds; each maximum is at least ten times that. Output: 131,072
+/// covers the largest output any listed model documents. Context: 1,048,576
+/// covers a 1M-token context.
+pub(crate) const MAX_OUTPUT_TOKENS: u32 = 131_072;
+pub(crate) const MAX_CONTEXT_TOKENS: u32 = 1_048_576;
+pub(crate) const MAX_TOOL_ROUNDS: u32 = 50;
+pub(crate) const MAX_TEMPERATURE: f32 = 2.0;
+/// The values OpenAI's Chat Completions API takes for `reasoning_effort`,
+/// which ai/openai.rs sends as written.
+pub(crate) const REASONING_EFFORTS: &[&str] = &["none", "minimal", "low", "medium", "high", "xhigh"];
+
+/// YYYY-MM-DD in shape (Anthropic's `anthropic-version` header).
+fn is_date(value: &str) -> bool {
+    let b = value.as_bytes();
+    b.len() == 10 && b.iter().enumerate().all(|(i, c)| if i == 4 || i == 7 { *c == b'-' } else { c.is_ascii_digit() })
+}
+
+/// A model id the app may put in a URL path or a request: letters, digits
+/// and `. _ : / -`, with no `..` (mirrored in registry/schema.json).
+pub(crate) fn is_safe_model_id(id: &str) -> bool {
+    !id.is_empty() && !id.contains("..") && id.bytes().all(|c| c.is_ascii_alphanumeric() || b"._:/-".contains(&c))
 }
 
 /// The limits this build reads, by provider. The bundled copy carries every
@@ -102,6 +156,12 @@ pub(crate) const REQUIRED_LIMITS: &[(&str, &str)] = &[
     ("openai", "chat_reasoning_effort"),
     ("openai_compat", "chat_max_output_tokens"),
     ("openai_compat", "max_tool_rounds"),
+    ("kimi", "chat_max_output_tokens"),
+    ("kimi", "max_tool_rounds"),
+    ("qwen", "chat_max_output_tokens"),
+    ("qwen", "max_tool_rounds"),
+    ("gemini_compat", "chat_max_output_tokens"),
+    ("gemini_compat", "max_tool_rounds"),
     ("claude", "chat_max_output_tokens"),
     ("claude", "max_tool_rounds"),
     ("claude", "api_version"),
@@ -342,6 +402,40 @@ impl Registry {
         }
         if parse_version(&self.min_app_version).is_none() {
             return Err("min_app_version is not x.y.z".into());
+        }
+        for provider in &self.providers {
+            provider.limits.check(&provider.id)?;
+            if !provider.built_in_models.iter().all(|id| is_safe_model_id(id)) {
+                return Err(format!("providers.{}.built_in_models holds an id that is not a safe model id", provider.id));
+            }
+        }
+        for model in &self.models {
+            if !is_safe_model_id(&model.id) || !model.replacement.as_deref().is_none_or(is_safe_model_id) {
+                return Err(format!("a {} model's id or replacement is not a safe model id", model.provider));
+            }
+        }
+        // A default and a preset entry are sent when the user saved no
+        // model, so each must be safe to send and active.
+        for (feature, defaults) in &self.features {
+            for (provider, id) in defaults {
+                if !is_safe_model_id(id) {
+                    return Err(format!("features.{feature}.{provider} is not a safe model id"));
+                }
+                if self.model_state(provider, id) != super::lookup::ModelState::Active {
+                    return Err(format!("features.{feature}.{provider} names a model that is not active"));
+                }
+            }
+        }
+        for (name, chain) in &self.presets.chains {
+            for (i, entry) in chain.entries.iter().enumerate() {
+                let Some(id) = entry.model.as_deref() else { continue };
+                if !is_safe_model_id(id) {
+                    return Err(format!("presets.chains.{name}[{i}] is not a safe model id"));
+                }
+                if self.model_state(&entry.provider, id) != super::lookup::ModelState::Active {
+                    return Err(format!("presets.chains.{name}[{i}] names a model that is not active"));
+                }
+            }
         }
         Ok(())
     }

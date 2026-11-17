@@ -29,8 +29,7 @@ pub trait Transport: Send + Sync {
     async fn get(&self, url: &str, if_none_match: Option<&str>) -> Result<Reply, String>;
 }
 
-/// A published registry is tens of kilobytes; anything far larger is not one.
-const MAX_BODY_BYTES: usize = 4 * 1024 * 1024;
+use load::MAX_BODY_BYTES;
 
 pub struct Http {
     client: reqwest::Client,
@@ -60,21 +59,29 @@ impl Transport for Http {
         let signature = header("x-registry-signature");
         let etag = header("etag");
         let status = response.status().as_u16();
+        let too_large = || "the reply is too large to be a registry".to_string();
         if response.content_length().is_some_and(|n| n as usize > MAX_BODY_BYTES) {
-            return Err("the reply is too large to be a registry".into());
+            return Err(too_large());
         }
-        let body = response.bytes().await.map_err(|e| format!("reading the reply failed: {}", e.without_url()))?;
-        if body.len() > MAX_BODY_BYTES {
-            return Err("the reply is too large to be a registry".into());
+        // Read piece by piece and stop at the cap: a reply without a length
+        // (chunked) is never buffered beyond it.
+        let mut response = response;
+        let mut body = Vec::new();
+        while let Some(chunk) = response.chunk().await.map_err(|e| format!("reading the reply failed: {}", e.without_url()))? {
+            if body.len() + chunk.len() > MAX_BODY_BYTES {
+                return Err(too_large());
+            }
+            body.extend_from_slice(&chunk);
         }
-        Ok(Reply { status, body: body.to_vec(), signature, etag })
+        Ok(Reply { status, body, signature, etag })
     }
 }
 
 /// What one fetch did.
 #[derive(Debug, Clone, PartialEq)]
 pub enum Outcome {
-    /// 304: the copy in use is what the endpoint serves.
+    /// 304, or a signed copy of the version in use: the copy in use is
+    /// what the endpoint serves.
     NotModified,
     /// A newer copy passed every check and is now in use and cached.
     Updated { version: u64 },
@@ -118,19 +125,34 @@ pub async fn refresh(transport: &dyn Transport, url: &str, cx: &Context<'_>) -> 
         Err(why) => Outcome::Failed(why),
         Ok(reply) if reply.status == 304 => Outcome::NotModified,
         Ok(reply) if reply.status == 200 => {
-            let highest = cache.as_ref().map(|c| c.highest_version).unwrap_or(0);
+            // The highest version accepted before is the cached body's,
+            // counted only when its signature verifies.
+            let highest = cache.as_ref().and_then(|c| load::verified_version(c, &cx.key)).unwrap_or(0);
             let floor = active.registry.version.max(highest).max(cx.bundled.version);
+            let store = |reply: &Reply| Cache {
+                body: base64::engine::general_purpose::STANDARD.encode(&reply.body),
+                signature: reply.signature.clone().unwrap_or_default(),
+                etag: reply.etag.clone(),
+            };
             match load::accept(&reply.body, reply.signature.as_deref(), &cx.key, floor, cx.app_version, cx.bundled) {
+                // Signed, readable and the version in use (a fresh install
+                // whose bundled copy is the one published): nothing new.
+                // Keep it with its ETag when no verified cache holds this
+                // version or a later one (a later one is never overwritten:
+                // its version stays the floor), so the next fetch can be
+                // answered with a 304.
+                Err(Rejected::NotNewer { version, .. }) if version == active.registry.version => {
+                    if highest < version {
+                        if let Err(why) = load::write_cache(cx.cache_dir, &store(&reply)) {
+                            log::warn!("registry: version {version} could not be cached: {why}");
+                        }
+                    }
+                    Outcome::NotModified
+                }
                 Err(why) => Outcome::Rejected(why),
                 Ok(registry) => {
                     let version = registry.version;
-                    let stored = Cache {
-                        body: base64::engine::general_purpose::STANDARD.encode(&reply.body),
-                        signature: reply.signature.clone().unwrap_or_default(),
-                        etag: reply.etag.clone(),
-                        highest_version: version,
-                    };
-                    if let Err(why) = load::write_cache(cx.cache_dir, &stored) {
+                    if let Err(why) = load::write_cache(cx.cache_dir, &store(&reply)) {
                         // Still used for this launch; the next launch starts
                         // from the copy it can read.
                         log::warn!("registry: version {version} could not be cached: {why}");

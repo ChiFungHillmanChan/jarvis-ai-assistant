@@ -179,21 +179,34 @@ pub(crate) fn apply_floor(bundled: &Registry, registry: &mut Registry) {
 }
 
 /// The last remote copy that passed every check, as stored on disk: the
-/// bytes exactly as received (base64), the signature header, the ETag, and
-/// the highest version ever accepted. One file, replaced by rename, so a
-/// crash never leaves a body without its signature.
+/// bytes exactly as received (base64), the signature header and the ETag.
+/// One file, replaced by rename, so a crash never leaves a body without its
+/// signature. Nothing in it is trusted unless the signature verifies: the
+/// highest version accepted is the version of the verified body
+/// ([`verified_version`]), never a number written beside it.
 #[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
 pub(crate) struct Cache {
     pub body: String,
     pub signature: String,
     pub etag: Option<String>,
-    pub highest_version: u64,
 }
 
 const CACHE_FILE: &str = "registry-cache.json";
 
+/// A published registry is tens of kilobytes; anything far larger is not one.
+pub(crate) const MAX_BODY_BYTES: usize = 4 * 1024 * 1024;
+/// The cache holds one body in base64 (4 bytes per 3) and a signature.
+const MAX_CACHE_BYTES: u64 = (MAX_BODY_BYTES as u64).div_ceil(3) * 4 + 64 * 1024;
+
 pub(crate) fn read_cache(dir: &Path) -> Option<Cache> {
-    let text = std::fs::read(dir.join(CACHE_FILE)).ok()?;
+    use std::io::Read;
+    let file = std::fs::File::open(dir.join(CACHE_FILE)).ok()?;
+    let mut text = Vec::new();
+    // One byte past the cap tells a file that is too large from one that fits.
+    if file.take(MAX_CACHE_BYTES + 1).read_to_end(&mut text).is_err() || text.len() as u64 > MAX_CACHE_BYTES {
+        log::warn!("registry: the cached copy is unreadable or too large to be one; using the bundled copy until the next fetch");
+        return None;
+    }
     match serde_json::from_slice::<Cache>(&text) {
         Ok(cache) => Some(cache),
         Err(_) => {
@@ -216,6 +229,15 @@ impl Cache {
     pub fn bytes(&self) -> Option<Vec<u8>> {
         base64::engine::general_purpose::STANDARD.decode(&self.body).ok()
     }
+}
+
+/// The version of the cached body when its signature verifies with `key`,
+/// whether or not that copy can be used (it may need a newer app). None for
+/// a cache that does not verify: it then counts for nothing.
+pub(crate) fn verified_version(cache: &Cache, key: &[u8; 32]) -> Option<u64> {
+    let bytes = cache.bytes()?;
+    verify(&bytes, Some(&cache.signature), key).ok()?;
+    serde_json::from_slice::<serde_json::Value>(&bytes).ok()?.get("version")?.as_u64()
 }
 
 /// Where the cache lives: the app's data folder, or the native QA folder.
@@ -249,6 +271,12 @@ pub(crate) fn at_launch(bundled: &Registry, cache: Option<&Cache>, key: &[u8; 32
     };
     match accept(&bytes, Some(&cache.signature), key, bundled.version, app, bundled) {
         Ok(registry) => (registry, Source::Cached),
+        // The bundled copy caught up (an app update, or a copy the endpoint
+        // served at the bundled version): nothing is wrong.
+        Err(Rejected::NotNewer { version, .. }) => {
+            log::info!("registry: the cached copy (version {version}) is not newer than the bundled one; using the bundled copy (version {})", bundled.version);
+            (bundled.clone(), Source::Bundled)
+        }
         Err(why) => {
             log::warn!("registry: cached copy not used: {why}; using the bundled copy (version {})", bundled.version);
             (bundled.clone(), Source::Bundled)

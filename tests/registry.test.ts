@@ -137,6 +137,45 @@ test('the validator rejects a family, a price pattern, as a default, a preset en
   assert.deepEqual(validateRegistry(doc), []);
 });
 
+test('the validator refuses a limit outside its bound, as the app does, and accepts one at it', () => {
+  // The bounds of src-tauri/src/ai/registry/doc.rs (Limits::check), mirrored in the schema.
+  const cases: [string, string, unknown, unknown][] = [
+    ['openai', 'chat_max_output_tokens', 0, 1],
+    ['openai', 'chat_max_output_tokens', 131073, 131072],
+    ['gemini', 'default_max_output_tokens', 131073, 131072],
+    ['gemini', 'stt_max_output_tokens', 0, 131072],
+    ['ollama', 'completion_context_tokens', 1048577, 1048576],
+    ['ollama', 'default_context_tokens', 0, 1],
+    ['claude', 'max_tool_rounds', 0, 1],
+    ['claude', 'max_tool_rounds', 51, 50],
+    ['bedrock', 'chat_temperature', -0.01, 0],
+    ['bedrock', 'chat_temperature', 2.01, 2],
+    ['openai', 'chat_reasoning_effort', 'maximal', 'xhigh'],
+    ['claude', 'api_version', '2023-6-01', '2099-12-31'],
+  ];
+  for (const [id, field, outside, inside] of cases) {
+    const index = seeded().providers.findIndex((p: any) => p.id === id);
+    const errors = errorsFor(doc => { provider(doc, id).limits[field] = outside; });
+    assert.ok(errors.some(e => e.startsWith(`schema: /providers/${index}/limits/${field} `)), `${id}.${field} = ${outside}: ${errors.join('\n')}`);
+    assert.deepEqual(errorsFor(doc => { provider(doc, id).limits[field] = inside; }), [], `${id}.${field} = ${inside}`);
+  }
+});
+
+test('the validator refuses a model id the app could not send safely, such as one with path characters', () => {
+  const bad = 'gemini-3.7-flash/../x';
+  const refused = (change: (doc: any) => void, path: string) => {
+    const errors = errorsFor(change);
+    assert.ok(errors.some(e => e.startsWith(`schema: ${path} must match pattern`)), `${path}: ${errors.join('\n')}`);
+  };
+  refused(doc => { doc.features.chat.gemini = bad; }, '/features/chat/gemini');
+  refused(doc => { doc.presets.chains.gemini_flash_only.entries[0].model = 'gemini-3.7-flash?x=1'; }, '/presets/chains/gemini_flash_only/entries/0/model');
+  refused(doc => { Object.assign(model(doc, 'gpt-5.6-luna'), { status: 'deprecated', replacement: '../gpt-6-luna' }); }, `/models/${seeded().models.findIndex((m: any) => m.id === 'gpt-5.6-luna')}/replacement`);
+  refused(doc => { model(doc, 'gpt-4o').id = 'gpt 4o'; }, `/models/${seeded().models.findIndex((m: any) => m.id === 'gpt-4o')}/id`);
+  refused(doc => { provider(doc, 'bedrock').built_in_models[0] = 'us.anthropic.claude#x'; }, `/providers/${seeded().providers.findIndex((p: any) => p.id === 'bedrock')}/built_in_models/0`);
+  // Every id in the seeded file is safe, Bedrock profiles and Ollama tags included.
+  assert.deepEqual(validateRegistry(seeded()), []);
+});
+
 test('the validator rejects a duplicate id', () => {
   assert.ok(errorsFor(doc => { doc.models.push({ ...model(doc, 'gpt-6-luna') }); }).some(e => e === 'duplicate model id "gpt-6-luna"'));
   assert.ok(errorsFor(doc => { doc.providers.push({ ...provider(doc, 'openai'), setup: null }); }).some(e => e === 'duplicate provider id "openai"'));

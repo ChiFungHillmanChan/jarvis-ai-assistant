@@ -86,7 +86,7 @@
                   "required": ["provider", "model"],
                   "properties": {
                     "provider": { "$ref": "#/$defs/id" },
-                    "model": { "type": ["string", "null"], "minLength": 1 }
+                    "model": { "oneOf": [{ "$ref": "#/$defs/modelId" }, { "type": "null" }] }
                   }
                 }
               }
@@ -141,6 +141,9 @@
   },
   "$defs": {
     "id": { "type": "string", "pattern": "^[a-z][a-z0-9_]*$" },
+    "modelId": { "description": "A model id the app may put in a URL path or a request: letters, digits and . _ : / -, with no '..' (ai/registry/doc.rs is_safe_model_id).", "type": "string", "pattern": "^(?!.*\\.\\.)[A-Za-z0-9._:/-]+$" },
+    "outputTokens": { "description": "An output cap in tokens. The maximum is at least ten times version 1's largest (ai/registry/doc.rs MAX_OUTPUT_TOKENS).", "type": "integer", "minimum": 1, "maximum": 131072 },
+    "contextTokens": { "description": "A context window in tokens (ai/registry/doc.rs MAX_CONTEXT_TOKENS).", "type": "integer", "minimum": 1, "maximum": 1048576 },
     "text": {
       "type": "object",
       "additionalProperties": false,
@@ -159,7 +162,7 @@
       "type": "object",
       "minProperties": 1,
       "propertyNames": { "$ref": "#/$defs/id" },
-      "additionalProperties": { "type": "string", "minLength": 1 }
+      "additionalProperties": { "$ref": "#/$defs/modelId" }
     },
     "provider": {
       "type": "object",
@@ -232,19 +235,19 @@
           "type": "object",
           "additionalProperties": false,
           "properties": {
-            "chat_max_output_tokens": { "type": "integer", "minimum": 1 },
-            "default_max_output_tokens": { "description": "For a model without max_output.", "type": "integer", "minimum": 1 },
-            "stt_max_output_tokens": { "type": "integer", "minimum": 1 },
-            "completion_context_tokens": { "type": "integer", "minimum": 1 },
-            "default_context_tokens": { "type": "integer", "minimum": 1 },
-            "max_tool_rounds": { "type": "integer", "minimum": 1 },
-            "chat_reasoning_effort": { "type": "string", "minLength": 1 },
-            "chat_temperature": { "type": "number", "minimum": 0 },
-            "api_version": { "type": "string", "minLength": 1 }
+            "chat_max_output_tokens": { "$ref": "#/$defs/outputTokens" },
+            "default_max_output_tokens": { "description": "For a model without max_output.", "$ref": "#/$defs/outputTokens" },
+            "stt_max_output_tokens": { "$ref": "#/$defs/outputTokens" },
+            "completion_context_tokens": { "$ref": "#/$defs/contextTokens" },
+            "default_context_tokens": { "$ref": "#/$defs/contextTokens" },
+            "max_tool_rounds": { "type": "integer", "minimum": 1, "maximum": 50 },
+            "chat_reasoning_effort": { "description": "Sent to OpenAI as reasoning_effort.", "enum": ["none", "minimal", "low", "medium", "high", "xhigh"] },
+            "chat_temperature": { "type": "number", "minimum": 0, "maximum": 2 },
+            "api_version": { "description": "Anthropic's anthropic-version header.", "type": "string", "pattern": "^[0-9]{4}-[0-9]{2}-[0-9]{2}$" }
           }
         },
         "inference_geographies": { "description": "Bedrock inference profile prefixes the app points at the saved region; global is never rewritten.", "type": "array", "items": { "type": "string", "minLength": 1 } },
-        "built_in_models": { "description": "The Bedrock picker's built-in list, shown when AWS cannot be asked.", "type": "array", "items": { "type": "string", "minLength": 1 } },
+        "built_in_models": { "description": "The Bedrock picker's built-in list, shown when AWS cannot be asked.", "type": "array", "items": { "$ref": "#/$defs/modelId" } },
         "tool_capable_families": { "description": "Local model families with native tool calling, for models outside the catalog.", "type": "array", "items": { "type": "string", "minLength": 1 } }
       }
     },
@@ -253,12 +256,12 @@
       "additionalProperties": false,
       "required": ["id", "provider", "kind", "display_name", "status", "replacement", "managed", "prices", "context", "max_output", "capabilities"],
       "properties": {
-        "id": { "type": "string", "minLength": 1, "pattern": "^[^\\sA-Z]+$" },
+        "id": { "description": "A safe model id (modelId), in lower case.", "type": "string", "pattern": "^(?!.*\\.\\.)[a-z0-9._:/-]+$" },
         "provider": { "$ref": "#/$defs/id" },
         "kind": { "description": "family: a price pattern for a model family, not a model a user can pick.", "enum": ["model", "family"] },
         "display_name": { "$ref": "#/$defs/text" },
         "status": { "description": "Kill switch per model. disabled: never used; deprecated: still works, the replacement is suggested.", "enum": ["active", "deprecated", "disabled"] },
-        "replacement": { "type": ["string", "null"], "minLength": 1 },
+        "replacement": { "oneOf": [{ "$ref": "#/$defs/modelId" }, { "type": "null" }] },
         "managed": { "description": "True for JARVIS AI's own models: priced for the proxy and never matched by the app's price lookup.", "type": "boolean" },
         "prices": {
           "description": "Null: no price (a local model, which is free, or a service billed in other units).",

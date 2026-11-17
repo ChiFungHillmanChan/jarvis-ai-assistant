@@ -95,32 +95,47 @@ impl Registry {
     }
 
     /// Whether `model_id`, saved for `provider` (a registry provider id),
-    /// may be used. Ollama and OpenAI-compatible ids are the user's own
-    /// picks and match by exact id only; an id the registry does not list is
-    /// active. A disabled entry's replacement is used when it is for the
-    /// same provider and active; otherwise, as for a Bedrock id whose entry
-    /// is another vendor's, the provider's chat default is suggested.
+    /// may be used. Only `provider`'s own entries count ([`Registry::own_entry`]):
+    /// a Bedrock id that contains an Anthropic model's id is not that
+    /// entry, so disabling the Anthropic API model leaves Bedrock running.
+    /// An id no own entry matches is active. A disabled entry's replacement
+    /// is offered when it is an active entry of the same provider; otherwise
+    /// the provider's chat default, when that is active.
     pub fn model_state(&self, provider: &str, model_id: &str) -> ModelState {
         let model_id = model_id.trim();
-        let entry = if matches!(provider, "ollama" | "openai_compat" | "kimi" | "qwen" | "gemini_compat") {
-            self.models.iter().find(|m| m.provider == provider && m.id == model_id)
-        } else {
-            self.resolve(provider, model_id)
-        };
-        let Some(entry) = entry else { return ModelState::Active };
+        let Some(entry) = self.own_entry(provider, model_id) else { return ModelState::Active };
+        let active = |id: &str| self.own_entry(provider, id).map(|m| m.status == Status::Active);
         let replacement = || {
             entry
                 .replacement
                 .as_deref()
-                .filter(|r| entry.provider == provider && self.resolve(provider, r).is_some_and(|m| m.status == Status::Active))
+                .filter(|r| active(r) == Some(true))
+                .or_else(|| self.feature_default("chat", provider).filter(|d| *d != model_id && active(d) != Some(false)))
                 .map(str::to_string)
-                .or_else(|| self.feature_default("chat", provider).filter(|d| *d != model_id).map(str::to_string))
         };
         match entry.status {
             Status::Active => ModelState::Active,
             Status::Deprecated => ModelState::Deprecated { replacement: replacement() },
             Status::Disabled => ModelState::Disabled { replacement: replacement() },
         }
+    }
+
+    /// The entry of `provider` itself that a saved id stands for: the one
+    /// with exactly this id, else, for a provider whose ids the registry
+    /// lists, the longest own entry id contained in it, compared in lower
+    /// case (a family such as "gpt-5", or "nova-pro" in
+    /// "apac.amazon.nova-pro-v1:0"). Ollama and OpenAI-compatible ids are the
+    /// user's own picks and match by exact id only.
+    pub fn own_entry(&self, provider: &str, model_id: &str) -> Option<&Model> {
+        let own = || self.models.iter().filter(move |m| m.provider == provider && !m.managed);
+        if let Some(exact) = own().find(|m| m.id == model_id) {
+            return Some(exact);
+        }
+        if matches!(provider, "ollama" | "openai_compat" | "kimi" | "qwen" | "gemini_compat") {
+            return None;
+        }
+        let wanted = model_id.to_lowercase();
+        own().filter(|m| wanted.contains(m.id.as_str())).max_by_key(|m| m.id.len())
     }
 }
 
