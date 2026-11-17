@@ -358,7 +358,7 @@ pub async fn list_endpoint_models(
         result.push(LocalModel {
             id: m.id,
             endpoint_id: endpoint_id.clone(),
-            context_length: ctx_override.unwrap_or(m.context_length.unwrap_or(4096)),
+            context_length: ctx_override.unwrap_or(m.context_length.unwrap_or_else(|| crate::ai::models::limits("ollama").default_context_tokens.unwrap_or_default())),
             supports_tools: final_cap,
         });
     }

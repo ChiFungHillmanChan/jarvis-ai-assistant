@@ -162,7 +162,7 @@ pub struct MailSettings {
 }
 
 fn default_openai_model() -> String {
-    crate::ai::models::OPENAI_DEFAULT.into()
+    crate::ai::models::default_for("mail_analysis", "openai")
 }
 
 #[derive(Serialize)]

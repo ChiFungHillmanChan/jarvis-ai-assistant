@@ -319,13 +319,13 @@ pub fn parse_jev(response: &Value) -> Result<JevAnswers, String> {
         action_required: noul("action_required")?,
         has_date: noul("has_date")?,
         importance: importance.get("score").and_then(Value::as_f64).ok_or_else(bad)?,
-        model: response.get("model").and_then(Value::as_str).unwrap_or(crate::ai::models::JEV).to_string(),
+        model: response.get("model").and_then(Value::as_str).map(str::to_string).unwrap_or_else(crate::ai::models::jev),
         input_tokens: response.pointer("/usage/input_tokens").and_then(Value::as_i64).unwrap_or(0),
     })
 }
 
 async fn ask_jev(client: &reqwest::Client, key: &str, state: Value) -> Result<JevAnswers, String> {
-    let body = json!({"state": state, "model": crate::ai::models::JEV, "questions": jev_questions()});
+    let body = json!({"state": state, "model": crate::ai::models::jev(), "questions": jev_questions()});
     let mut delay = Duration::from_millis(800);
     for attempt in 0..3 {
         let response = client.post(JEV_URL).bearer_auth(key).json(&body).send().await;

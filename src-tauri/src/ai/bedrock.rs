@@ -13,12 +13,12 @@ use serde_json::json;
 use std::collections::{HashMap, HashSet};
 use crate::chat_session::ScopedEmitter;
 
-/// The Bedrock model: AWS_BEDROCK_MODEL_ID, else models::BEDROCK_DEFAULT.
+/// The Bedrock model: the registry's default. A debug build (development
+/// and the native QA app) may override it with AWS_BEDROCK_MODEL_ID; a
+/// release build reads only the registry.
 pub fn default_model() -> String {
-    std::env::var("AWS_BEDROCK_MODEL_ID")
-        .ok()
-        .filter(|value| !value.trim().is_empty())
-        .unwrap_or_else(|| crate::ai::models::BEDROCK_DEFAULT.to_string())
+    let dev_override = if cfg!(debug_assertions) { std::env::var("AWS_BEDROCK_MODEL_ID").ok() } else { None };
+    dev_override.filter(|value| !value.trim().is_empty()).unwrap_or_else(crate::ai::models::bedrock_default)
 }
 
 /// Build a Bedrock client from explicit credentials.  We intentionally do not
@@ -282,9 +282,10 @@ pub async fn send(
     let language = tools::read_language_pref(db);
     let dynamic = tools::build_dynamic_suffix(&user_name, chrono::Local::now(), &language, db);
     let system_blocks = build_system_blocks(static_prompt, dynamic)?;
+    let limits = crate::ai::models::limits("bedrock");
     let inference_config = InferenceConfiguration::builder()
-        .max_tokens(4096)
-        .temperature(0.2)
+        .max_tokens(limits.chat_max_output_tokens.unwrap_or_default() as i32)
+        .temperature(limits.chat_temperature.unwrap_or_default())
         .build();
 
     let turn = ChatTurn {
@@ -297,7 +298,7 @@ pub async fn send(
         workload,
     };
 
-    let max_iterations = 5;
+    let max_iterations = limits.max_tool_rounds.unwrap_or_default() as usize;
     for round in 0..max_iterations {
         let final_round = round + 1 == max_iterations;
         let (response, output_message, tool_uses) = converse_round(&turn, &bedrock_messages, final_round).await?;

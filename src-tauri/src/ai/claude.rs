@@ -145,12 +145,14 @@ pub async fn send(
     let mut turn = crate::ai::cost::TurnUsage::new("claude", &model);
     let started_at = std::time::Instant::now();
 
-    let max_iterations = 5;
+    let limits = crate::ai::models::limits("claude");
+    let max_iterations = limits.max_tool_rounds.unwrap_or_default() as usize;
+    let api_version = limits.api_version.unwrap_or_default();
     for round in 0..max_iterations {
         let final_round = round + 1 == max_iterations;
         let request = ClaudeRequest {
             model: model.clone(),
-            max_tokens: 4096,
+            max_tokens: limits.chat_max_output_tokens.unwrap_or_default(),
             system: system.clone(),
             tools: claude_tools.clone(),
             tool_choice: final_round.then(|| json!({"type": "none"})),
@@ -161,7 +163,7 @@ pub async fn send(
         let response = client
             .post("https://api.anthropic.com/v1/messages")
             .header("x-api-key", api_key)
-            .header("anthropic-version", "2023-06-01")
+            .header("anthropic-version", &api_version)
             .header("content-type", "application/json")
             .json(&request)
             .send()

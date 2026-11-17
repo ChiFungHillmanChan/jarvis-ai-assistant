@@ -492,7 +492,7 @@ fn native_chat_request<'a>(model: &'a str, prompt: &'a str, num_ctx: usize) -> O
         // These small Qwen models otherwise spend the bounded output budget
         // in message.thinking and can return no answer, including for setup.
         think: crate::ai::models::local_model(model)
-            .and_then(|m| m.setup.as_ref())
+            .and_then(|m| m.setup)
             .is_some_and(|setup| setup.think_off)
             .then_some(false),
         options: OllamaOptions {
@@ -519,7 +519,7 @@ fn context_window(model_info: &serde_json::Value) -> Result<usize, String> {
 }
 
 fn cap_approved_local_context(model: &str, reported: usize) -> usize {
-    match crate::ai::models::local_model(model).and_then(|m| m.setup.as_ref()) {
+    match crate::ai::models::local_model(model).and_then(|m| m.setup) {
         Some(setup) => reported.min(setup.context_cap),
         None => reported,
     }

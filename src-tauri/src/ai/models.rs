@@ -1,15 +1,20 @@
-//! Every AI model JARVIS knows, in one place: the default ("latest") model
-//! per provider, the cloud price list, the local Ollama catalog, and the one
-//! function that turns token usage into cost.
+//! Every AI model JARVIS knows, read from the model registry (ai/registry,
+//! registry/registry.json): the default ("latest") model per provider and
+//! feature, the cloud price list, the local Ollama catalog, and the one
+//! function that turns token usage into cost. This module keeps the
+//! functions callers used before the registry existed, as a thin layer over
+//! `registry::current()`.
 //!
-//! To ship a new model or retire an old one, edit this file only. Every other
-//! module, and the frontend (through `ai_models`), reads from here.
+//! To ship a new model or retire an old one, edit registry/registry.json and
+//! publish it (registry/README.md). No model id is written anywhere else in
+//! the app; the frontend reads the list through `ai_models`.
 //!
 //! Local models run on the user's Mac and have no cost: `usd_cost_micro`
 //! returns None for them and callers report the tokens instead. A cloud model
-//! missing from CLOUD_MODELS has no price either: its usage is stored with the
-//! cost unknown (`price_known`), never with a guessed rate.
+//! the registry does not price has no price either: its usage is stored with
+//! the cost unknown (`price_known`), never with a guessed rate.
 
+use super::registry;
 use serde::Serialize;
 
 // ---------------------------------------------------------------------------
@@ -17,16 +22,92 @@ use serde::Serialize;
 // ---------------------------------------------------------------------------
 
 /// OpenAI chat and mail.
-pub const OPENAI_DEFAULT: &str = "gpt-6-luna";
+pub fn openai_default() -> String {
+    registry::current().default_model("chat", "openai")
+}
+
 /// Anthropic Claude.
-pub const CLAUDE_DEFAULT: &str = "claude-sonnet-5-5";
-/// Gemini for routine work, and for an explicit premium request.
-pub const GEMINI_FLASH: &str = "gemini-3.7-flash";
-pub const GEMINI_PRO: &str = "gemini-3.1-pro-preview";
+pub fn claude_default() -> String {
+    registry::current().default_model("chat", "claude")
+}
+
+/// Gemini for routine work.
+pub fn gemini_flash() -> String {
+    registry::current().default_model("chat", "gemini")
+}
+
+/// Gemini for an explicit premium request.
+pub fn gemini_pro() -> String {
+    registry::current().default_model("premium", "gemini")
+}
+
 /// AWS Bedrock, as a global cross-region inference profile.
-pub const BEDROCK_DEFAULT: &str = "global.anthropic.claude-sonnet-4-6";
+pub fn bedrock_default() -> String {
+    registry::current().default_model("chat", "bedrock")
+}
+
 /// TypeSafe Jev, the optional mail classifier.
+pub fn jev() -> String {
+    registry::current().default_model("mail_sort", "typesafe")
+}
+
+/// The model `provider` uses for `feature` when the user chose none.
+pub fn default_for(feature: &str, provider: &str) -> String {
+    registry::current().default_model(feature, provider)
+}
+
+/// The seeded defaults, for the tests written before the registry. They
+/// equal the frozen test registry (`registry::fixture`), which the app's
+/// tests run on; `fixtures_match_the_test_registry` checks it.
+#[cfg(test)]
+pub const OPENAI_DEFAULT: &str = "gpt-6-luna";
+#[cfg(test)]
+pub const CLAUDE_DEFAULT: &str = "claude-sonnet-5-5";
+#[cfg(test)]
+pub const GEMINI_FLASH: &str = "gemini-3.7-flash";
+#[cfg(test)]
+pub const GEMINI_PRO: &str = "gemini-3.1-pro-preview";
+#[cfg(test)]
+pub const BEDROCK_DEFAULT: &str = "global.anthropic.claude-sonnet-4-6";
+#[cfg(test)]
 pub const JEV: &str = "jev-latest";
+
+// ---------------------------------------------------------------------------
+// Request limits.
+// ---------------------------------------------------------------------------
+
+/// A provider's request limits (registry `providers[].limits`). The bundled
+/// copy carries every limit this build reads (`registry::doc::REQUIRED_LIMITS`),
+/// and a fetched copy that leaves one out keeps the bundled value, so the
+/// zero a missing value would read as is never sent.
+pub fn limits(provider: &str) -> registry::doc::Limits {
+    registry::current().limits(provider)
+}
+
+/// The output cap of one chat request.
+pub fn chat_max_output_tokens(provider: &str) -> u32 {
+    limits(provider).chat_max_output_tokens.unwrap_or_default()
+}
+
+/// Tool rounds in one chat turn before the final answer is forced.
+pub fn max_tool_rounds(provider: &str) -> usize {
+    limits(provider).max_tool_rounds.unwrap_or_default() as usize
+}
+
+/// The `anthropic-version` header.
+pub fn anthropic_version() -> String {
+    limits("claude").api_version.unwrap_or_default()
+}
+
+/// The registry provider whose limits an OpenAI-format row uses: OpenAI's
+/// own API, or the compatible service at `base_url`.
+pub fn openai_format_provider(base_url: Option<&str>) -> &'static str {
+    match base_url {
+        None => "openai",
+        Some(base) if super::compat::is_openai(base) => "openai",
+        Some(base) => super::compat::provider_for(base).unwrap_or("openai_compat"),
+    }
+}
 
 // ---------------------------------------------------------------------------
 // Cloud prices.
@@ -41,10 +122,6 @@ pub struct Price {
     pub cache_write_per_million: f64,
 }
 
-const fn price(input: f64, output: f64, cache_read: f64, cache_write: f64) -> Price {
-    Price { input_per_million: input, output_per_million: output, cache_read_per_million: cache_read, cache_write_per_million: cache_write }
-}
-
 /// The whole request is billed at `price` once its input exceeds `above`.
 #[derive(Debug, Clone, Copy, Serialize)]
 pub struct LongContext {
@@ -52,135 +129,49 @@ pub struct LongContext {
     pub price: Price,
 }
 
-#[derive(Debug, Serialize)]
+/// One priced entry, as the frontend reads it (`src/lib/ai-models.ts`).
+#[derive(Debug, Clone, Serialize)]
 pub struct CloudModel {
-    pub provider: &'static str,
-    /// Matched against the id a provider reports: the longest entry contained
-    /// in that id wins, so "gpt-5.6-luna" beats "gpt-5" and a Bedrock profile
-    /// such as "global.anthropic.claude-sonnet-4-6" finds "claude-sonnet-4-6".
-    pub id: &'static str,
-    pub label: &'static str,
+    pub provider: String,
+    /// Matched against the id a provider reports: the longest entry
+    /// contained in that id wins.
+    pub id: String,
+    pub label: String,
     /// A family pattern ("gemini-flash") rather than a model a user can pick.
     pub family: bool,
     pub price: Price,
     pub long_context: Option<LongContext>,
     /// The most output tokens (thinking included) one request may ask for.
-    /// None where it is not recorded; callers then keep their own cap.
     pub max_output_tokens: Option<u32>,
 }
 
-const fn model(provider: &'static str, id: &'static str, label: &'static str, price: Price) -> CloudModel {
-    CloudModel { provider, id, label, family: false, price, long_context: None, max_output_tokens: None }
-}
-
-const fn family(provider: &'static str, id: &'static str, price: Price) -> CloudModel {
-    CloudModel { provider, id, label: id, family: true, price, long_context: None, max_output_tokens: None }
-}
-
-/// The most output tokens (thinking included) one Gemini request may ask for.
-/// Documented, not verified by a live call: on 2026-11-12 Google's model pages
-/// (aistudio.google.com/docs/models/<id>) each stated "Output token limit
-/// 65,536" for gemini-3.7-flash, gemini-3.1-pro-preview, gemini-3.6-flash,
-/// gemini-3.5-flash, gemini-3.5-flash-lite and gemini-3.1-flash-lite. The
-/// gemini-3-flash, gemini-2.5-pro and gemini-2.5-flash pages were not re-read
-/// that day; 65,536 is their last published limit. The gemini-3.7-flash page
-/// also says that id is deprecated and its requests are routed to
-/// gemini-3.8-flash, whose page states the same 65,536; the ids and defaults
-/// here are unchanged. The ignored test
-/// `gemini_output_limits_match_what_google_serves` makes the live check.
-const GEMINI_MAX_OUTPUT: Option<u32> = Some(65_536);
-
-/// Sources and dates are noted per group; re-check a rate before quoting it.
-pub const CLOUD_MODELS: &[CloudModel] = &[
-    // OpenAI. gpt-6-luna (developers.openai.com, 2026-09-25): $0.10 / $0.01
-    // cached / $0.50; cache writes assumed at 1.25x input. Above 272K input
-    // the whole request is 2x input / 1.5x output.
-    CloudModel {
-        long_context: Some(LongContext { above: 272_000, price: price(0.20, 0.75, 0.02, 0.25) }),
-        ..model("openai", "gpt-6-luna", "GPT-6 Luna", price(0.10, 0.50, 0.01, 0.125))
-    },
-    // gpt-5.6-luna (2026-09-04): $0.20 / $0.02 cached / $1.20, writes $0.25.
-    // Its long-context tier is not modelled.
-    model("openai", "gpt-5.6-luna", "GPT-5.6 Luna", price(0.20, 1.20, 0.02, 0.25)),
-    family("openai", "gpt-5", price(1.25, 10.0, 0.125, 1.25)),
-    model("openai", "gpt-4o-mini", "GPT-4o mini", price(0.15, 0.60, 0.075, 0.15)),
-    model("openai", "gpt-4o", "GPT-4o", price(2.50, 10.0, 1.25, 2.50)),
-    // Anthropic model table (2026-10-06); cache writes at 1.25x input.
-    model("claude", "claude-sonnet-5-5", "Claude Sonnet 5.5", price(2.0, 10.0, 0.20, 2.50)),
-    model("claude", "claude-opus-5-5", "Claude Opus 5.5", price(4.0, 20.0, 0.20, 5.0)),
-    // Haiku 5.5: base rate up to 100K input, $0.50 / $2.50 beyond.
-    CloudModel {
-        long_context: Some(LongContext { above: 100_000, price: price(0.50, 2.50, 0.05, 0.625) }),
-        ..model("claude", "claude-haiku-5-5", "Claude Haiku 5.5", price(0.10, 0.50, 0.01, 0.125))
-    },
-    model("claude", "claude-sonnet-4-6", "Claude Sonnet 4.6", price(3.0, 15.0, 0.30, 3.75)),
-    family("claude", "sonnet-4.6", price(3.0, 15.0, 0.30, 3.75)),
-    model("claude", "claude-haiku-4-5", "Claude Haiku 4.5", price(1.0, 5.0, 0.10, 1.25)),
-    family("claude", "haiku-4.5", price(1.0, 5.0, 0.10, 1.25)),
-    // Gemini (ai.google.dev pricing, 2026-08-07 and 2026-09-04).
-    // WARNING: gemini-3.7-flash is an INTRODUCTORY rate. It doubles to
-    // $1.50 / $7.50 (cache read $0.15) on 2027-01-01; update it that day or
-    // every blended-cost figure for the default chain reads half the truth.
-    CloudModel { max_output_tokens: GEMINI_MAX_OUTPUT, ..model("gemini", "gemini-3.7-flash", "Gemini 3.7 Flash", price(0.75, 3.75, 0.075, 0.75)) },
-    CloudModel {
-        long_context: Some(LongContext { above: 200_000, price: price(4.0, 18.0, 1.0, 4.0) }),
-        max_output_tokens: GEMINI_MAX_OUTPUT,
-        ..model("gemini", "gemini-3.1-pro", "Gemini 3.1 Pro", price(2.0, 12.0, 0.50, 2.0))
-    },
-    CloudModel { max_output_tokens: GEMINI_MAX_OUTPUT, ..model("gemini", "gemini-3.6-flash", "Gemini 3.6 Flash", price(1.50, 7.50, 0.375, 1.50)) },
-    CloudModel { max_output_tokens: GEMINI_MAX_OUTPUT, ..model("gemini", "gemini-3.5-flash", "Gemini 3.5 Flash", price(1.50, 9.0, 0.375, 1.50)) },
-    CloudModel { max_output_tokens: GEMINI_MAX_OUTPUT, ..model("gemini", "gemini-3.5-flash-lite", "Gemini 3.5 Flash-Lite", price(0.30, 2.50, 0.075, 0.30)) },
-    CloudModel { max_output_tokens: GEMINI_MAX_OUTPUT, ..model("gemini", "gemini-3.1-flash-lite", "Gemini 3.1 Flash-Lite", price(0.25, 1.50, 0.0625, 0.25)) },
-    // Last known preview rate; no longer on Google's public page.
-    CloudModel { max_output_tokens: GEMINI_MAX_OUTPUT, ..model("gemini", "gemini-3-flash", "Gemini 3 Flash", price(0.50, 3.0, 0.125, 0.50)) },
-    CloudModel {
-        long_context: Some(LongContext { above: 200_000, price: price(2.50, 15.0, 0.625, 2.50) }),
-        max_output_tokens: GEMINI_MAX_OUTPUT,
-        ..model("gemini", "gemini-2.5-pro", "Gemini 2.5 Pro", price(1.25, 10.0, 0.31, 1.25))
-    },
-    family("gemini", "gemini-pro", price(1.25, 10.0, 0.31, 1.25)),
-    CloudModel { max_output_tokens: GEMINI_MAX_OUTPUT, ..model("gemini", "gemini-2.5-flash", "Gemini 2.5 Flash", price(0.30, 2.50, 0.075, 0.30)) },
-    family("gemini", "gemini-flash", price(0.30, 2.50, 0.075, 0.30)),
-    // Amazon Nova on Bedrock.
-    model("bedrock", "nova-micro", "Amazon Nova Micro", price(0.035, 0.14, 0.00875, 0.04375)),
-    model("bedrock", "nova-lite", "Amazon Nova Lite", price(0.06, 0.24, 0.015, 0.075)),
-    model("bedrock", "nova-pro", "Amazon Nova Pro", price(0.80, 3.20, 0.20, 1.00)),
-    // TypeSafe Jev (docs.typesafe.ai/models, 2026-09-25): $0.042 input, output free.
-    family("typesafe", "jev", price(0.042, 0.0, 0.042, 0.042)),
-];
-
-fn find(model_id: &str) -> Option<&'static CloudModel> {
-    let m = model_id.to_lowercase();
-    CLOUD_MODELS.iter().filter(|entry| m.contains(entry.id)).max_by_key(|entry| entry.id.len())
-}
-
-/// The base price of a cloud model, or None when CLOUD_MODELS has no entry
-/// for it (a model picked from a provider's live list, or a new id). There is
-/// no fallback rate: a guess either hides spend ($0) or invents it.
+/// The base price of a cloud model, or None when the registry has no entry
+/// for it. There is no fallback rate: a guess either hides spend ($0) or
+/// invents it.
 pub fn price_for(model_id: &str) -> Option<Price> {
-    let found = find(model_id).map(|entry| entry.price);
+    let found = registry::current().price_for(model_id);
     if found.is_none() {
-        log::warn!("cost: no price for model '{model_id}'; its usage is stored with the cost unknown. Add it to CLOUD_MODELS in ai/models.rs.");
+        log::warn!("cost: no price for model '{model_id}'; its usage is stored with the cost unknown. Add it to registry/registry.json.");
     }
     found
 }
 
-/// The name this list gives a model id, matched as `price_for` matches it
-/// ("global.anthropic.claude-sonnet-4-6" is "Claude Sonnet 4.6"). None for an
-/// id it does not list and for a family pattern, which names no one model.
-pub fn label_for(model_id: &str) -> Option<&'static str> {
-    find(model_id).filter(|entry| !entry.family).map(|entry| entry.label)
+/// The registry's name for a model id, matched as `price_for` matches it
+/// ("global.anthropic.claude-sonnet-4-6" is "Claude Sonnet 4.6"). None for
+/// an id it does not list and for a family pattern.
+pub fn label_for(model_id: &str) -> Option<String> {
+    registry::current().label_for(model_id).map(str::to_string)
 }
 
 /// Whether usage of this model can be turned into money: always for a local
-/// model (free), and for a cloud model only when CLOUD_MODELS prices it.
+/// model (free), and for a cloud model only when the registry prices it.
 pub fn price_known(provider: &str, model_id: &str) -> bool {
-    is_local(provider) || find(model_id).is_some()
+    registry::current().price_known(provider, model_id)
 }
 
 /// The output cap one request to this model may ask for, when recorded.
 pub fn max_output_tokens(model_id: &str) -> Option<u32> {
-    find(model_id).and_then(|entry| entry.max_output_tokens)
+    registry::current().max_output_tokens(model_id)
 }
 
 // ---------------------------------------------------------------------------
@@ -193,18 +184,12 @@ pub fn is_local(provider: &str) -> bool {
     matches!(provider.to_lowercase().as_str(), "local" | "ollama" | "本機 ai")
 }
 
-/// What one request cost in micro-USD. None when there is no money figure:
-/// a local model, which is free (report its tokens instead), or a cloud model
-/// without a price (`price_known` tells the two apart).
+/// What one request cost in micro-USD at the registry in use. None when
+/// there is no money figure: a local model, which is free (report its tokens
+/// instead), or a cloud model without a price (`price_known` tells the two
+/// apart).
 pub fn usd_cost_micro(provider: &str, model_id: &str, input_tokens: i64, output_tokens: i64, cache_read_tokens: i64, cache_write_tokens: i64) -> Option<i64> {
-    if is_local(provider) {
-        return None;
-    }
-    let p = match find(model_id).and_then(|entry| entry.long_context) {
-        Some(long) if input_tokens > long.above => long.price,
-        _ => price_for(model_id)?,
-    };
-    Some(cost_micro_at(p, input_tokens, output_tokens, cache_read_tokens, cache_write_tokens))
+    registry::current().usd_cost_micro(provider, model_id, input_tokens, output_tokens, cache_read_tokens, cache_write_tokens)
 }
 
 /// One request at one price, in micro-USD. `input_tokens` includes the cache
@@ -224,7 +209,7 @@ pub(crate) fn cost_micro_at(p: Price, input_tokens: i64, output_tokens: i64, cac
 
 /// Settings for the local models JARVIS can install in one click and trusts
 /// with mail.
-#[derive(Debug, Serialize)]
+#[derive(Debug, Clone, Serialize)]
 pub struct LocalSetup {
     /// Free disk needed to download and run it.
     pub disk_reserve_gb: f64,
@@ -235,57 +220,51 @@ pub struct LocalSetup {
     pub think_off: bool,
 }
 
-#[derive(Debug, Serialize)]
+#[derive(Debug, Clone, Serialize)]
 pub struct LocalModel {
-    pub id: &'static str,
-    pub label: &'static str,
-    pub param_size: &'static str,
+    pub id: String,
+    pub label: String,
+    pub param_size: String,
     pub download_gb: f64,
     pub min_ram_gb: u32,
     pub tool_capable: bool,
-    pub description: &'static str,
+    pub description: String,
     /// Some for the models offered in setup and approved for mail.
     pub setup: Option<LocalSetup>,
 }
 
-const fn local(id: &'static str, label: &'static str, param_size: &'static str, download_gb: f64, min_ram_gb: u32, tool_capable: bool, description: &'static str) -> LocalModel {
-    LocalModel { id, label, param_size, download_gb, min_ram_gb, tool_capable, description, setup: None }
+fn local_from(model: &registry::Model) -> Option<LocalModel> {
+    let local = model.local.as_ref()?;
+    Some(LocalModel {
+        id: model.id.clone(),
+        label: model.display_name.en.clone(),
+        param_size: local.param_size.clone(),
+        download_gb: local.download_gb,
+        min_ram_gb: local.min_ram_gb,
+        tool_capable: model.capabilities.tools,
+        description: local.description.clone(),
+        setup: local.setup.as_ref().map(|s| LocalSetup { disk_reserve_gb: s.disk_reserve_gb, context_cap: s.context_cap, think_off: s.think_off }),
+    })
 }
 
-pub const LOCAL_MODELS: &[LocalModel] = &[
-    LocalModel { setup: Some(LocalSetup { disk_reserve_gb: 8.0, context_cap: 4_096, think_off: true }), ..local("qwen3.5:2b", "Qwen 3.5 2B", "2B", 2.7, 8, true, "Lightweight local assistant") },
-    local("llama3.2:3b", "Llama 3.2 3B", "3B", 2.0, 8, true, "Fast, good for chat and basic tasks"),
-    local("qwen2.5:7b", "Qwen 2.5 7B", "7B", 4.7, 8, true, "Strong tool use, multilingual"),
-    LocalModel { setup: Some(LocalSetup { disk_reserve_gb: 10.0, context_cap: 4_096, think_off: true }), ..local("qwen3.5:4b", "Qwen 3.5 4B", "4B", 3.4, 16, true, "Multilingual local assistant") },
-    LocalModel { setup: Some(LocalSetup { disk_reserve_gb: 15.0, context_cap: 8_192, think_off: true }), ..local("qwen3.5:9b", "Qwen 3.5 9B", "9B", 6.6, 24, true, "Multilingual local assistant") },
-    local("mistral:7b", "Mistral 7B", "7B", 4.1, 8, true, "Fast reasoning and tool use"),
-    local("qwen3:8b", "Qwen 3 8B", "8B", 5.2, 8, true, "Qwen multilingual model"),
-    local("deepseek-r1:7b", "DeepSeek R1 7B", "7B", 4.7, 8, false, "Deep reasoning, no tool support"),
-    local("qwen2.5:14b", "Qwen 2.5 14B", "14B", 9.0, 16, true, "Higher quality tool use"),
-    local("deepseek-r1:14b", "DeepSeek R1 14B", "14B", 9.0, 16, false, "Strong reasoning at 14B"),
-    local("qwen2.5:32b", "Qwen 2.5 32B", "32B", 20.0, 32, true, "Near-cloud quality"),
-    local("deepseek-r1:32b", "DeepSeek R1 32B", "32B", 20.0, 32, false, "Best local reasoning"),
-    local("llama3.3:70b", "Llama 3.3 70B", "70B", 43.0, 64, true, "Large general-purpose model"),
-];
+/// The local catalog, in registry order.
+pub fn local_models() -> Vec<LocalModel> {
+    registry::current().local_models().filter_map(local_from).collect()
+}
 
-/// Model families with native tool calling, for local models outside the
-/// catalog.
-pub const TOOL_CAPABLE_FAMILIES: &[&str] = &[
-    "qwen2.5", "qwen2", "qwen3", "llama3.1", "llama3.2", "llama3.3", "llama4", "mistral", "mixtral",
-    "deepseek-v3", "deepseek-r1", "command-r", "command-r-plus", "firefunction", "hermes", "nemotron",
-];
-
-pub fn local_model(id: &str) -> Option<&'static LocalModel> {
-    LOCAL_MODELS.iter().find(|m| m.id == id)
+pub fn local_model(id: &str) -> Option<LocalModel> {
+    registry::current().local_model(id).and_then(local_from)
 }
 
 /// The one-click setup model for this Mac: the largest approved model its RAM runs.
-pub fn suggested_local_model(ram_gb: f64) -> Option<&'static str> {
-    LOCAL_MODELS
-        .iter()
-        .filter(|m| m.setup.is_some() && m.min_ram_gb as f64 <= ram_gb)
-        .max_by_key(|m| m.min_ram_gb)
-        .map(|m| m.id)
+pub fn suggested_local_model(ram_gb: f64) -> Option<String> {
+    registry::current().suggested_local_model(ram_gb).map(str::to_string)
+}
+
+/// Model families with native tool calling, for local models outside the
+/// catalog.
+pub fn tool_capable_families() -> Vec<String> {
+    registry::current().tool_capable_families()
 }
 
 // ---------------------------------------------------------------------------
@@ -294,27 +273,60 @@ pub fn suggested_local_model(ram_gb: f64) -> Option<&'static str> {
 
 #[derive(Serialize)]
 pub struct Defaults {
-    pub openai: &'static str,
-    pub claude: &'static str,
-    pub gemini_flash: &'static str,
-    pub gemini_pro: &'static str,
-    pub bedrock: &'static str,
+    pub openai: String,
+    pub claude: String,
+    pub gemini_flash: String,
+    pub gemini_pro: String,
+    pub bedrock: String,
 }
 
 #[derive(Serialize)]
 pub struct Catalog {
     pub defaults: Defaults,
-    pub cloud: &'static [CloudModel],
-    pub local: &'static [LocalModel],
+    pub cloud: Vec<CloudModel>,
+    pub local: Vec<LocalModel>,
+}
+
+fn cloud_models(registry: &registry::Registry) -> Vec<CloudModel> {
+    registry
+        .models
+        .iter()
+        .filter(|m| !m.managed)
+        .filter_map(|m| {
+            let p = m.prices.as_ref()?;
+            let price = |input: f64, output: f64, cache_read: Option<f64>, cache_write: Option<f64>| Price {
+                input_per_million: input,
+                output_per_million: output,
+                cache_read_per_million: cache_read.unwrap_or(0.0),
+                cache_write_per_million: cache_write.unwrap_or(0.0),
+            };
+            Some(CloudModel {
+                provider: m.provider.clone(),
+                id: m.id.clone(),
+                label: if m.kind == registry::doc::Kind::Family { m.id.clone() } else { m.display_name.en.clone() },
+                family: m.kind == registry::doc::Kind::Family,
+                price: price(p.input, p.output, p.cache_read, p.cache_write),
+                long_context: p.tiers.first().map(|t| LongContext { above: t.above_input_tokens, price: price(t.input, t.output, t.cache_read, t.cache_write) }),
+                max_output_tokens: m.max_output,
+            })
+        })
+        .collect()
 }
 
 /// The full model list, so the frontend never hardcodes a model id.
 #[tauri::command]
 pub fn ai_models() -> Catalog {
+    let registry = registry::current();
     Catalog {
-        defaults: Defaults { openai: OPENAI_DEFAULT, claude: CLAUDE_DEFAULT, gemini_flash: GEMINI_FLASH, gemini_pro: GEMINI_PRO, bedrock: BEDROCK_DEFAULT },
-        cloud: CLOUD_MODELS,
-        local: LOCAL_MODELS,
+        defaults: Defaults {
+            openai: registry.default_model("chat", "openai"),
+            claude: registry.default_model("chat", "claude"),
+            gemini_flash: registry.default_model("chat", "gemini"),
+            gemini_pro: registry.default_model("premium", "gemini"),
+            bedrock: registry.default_model("chat", "bedrock"),
+        },
+        cloud: cloud_models(&registry),
+        local: registry.local_models().filter_map(local_from).collect(),
     }
 }
 
@@ -324,6 +336,35 @@ mod tests {
 
     fn cost(model: &str, input: i64, output: i64, cache_read: i64) -> i64 {
         usd_cost_micro("cloud", model, input, output, cache_read, 0).unwrap()
+    }
+
+    /// The constants the older tests use are the test registry's defaults.
+    #[test]
+    fn fixtures_match_the_test_registry() {
+        assert_eq!(openai_default(), OPENAI_DEFAULT);
+        assert_eq!(claude_default(), CLAUDE_DEFAULT);
+        assert_eq!(gemini_flash(), GEMINI_FLASH);
+        assert_eq!(gemini_pro(), GEMINI_PRO);
+        assert_eq!(bedrock_default(), BEDROCK_DEFAULT);
+        assert_eq!(jev(), JEV);
+    }
+
+    /// The accessors read the registry in use, not a copy made at start-up.
+    #[test]
+    fn a_registry_change_reaches_every_accessor() {
+        let _registry = registry::test_override::with(|r| {
+            r.features.get_mut("chat").unwrap().insert("openai".into(), "gpt-5.6-luna".into());
+            let luna = r.models.iter_mut().find(|m| m.id == "gpt-5.6-luna").unwrap();
+            luna.display_name.en = "Renamed".into();
+            luna.prices.as_mut().unwrap().input = 9.0;
+        });
+        assert_eq!(openai_default(), "gpt-5.6-luna");
+        assert_eq!(label_for("gpt-5.6-luna").as_deref(), Some("Renamed"));
+        assert_eq!(price_for("gpt-5.6-luna").unwrap().input_per_million, 9.0);
+        assert_eq!(cost("gpt-5.6-luna", 1_000_000, 0, 0), 9_000_000);
+        let catalog = ai_models();
+        assert_eq!(catalog.defaults.openai, "gpt-5.6-luna");
+        assert!(catalog.cloud.iter().any(|m| m.id == "gpt-5.6-luna" && m.label == "Renamed"));
     }
 
     #[test]
@@ -366,7 +407,7 @@ mod tests {
     }
 
     /// The longest matching entry wins, so a specific id is never priced as
-    /// the family it contains, whatever the order of CLOUD_MODELS.
+    /// the family it contains, whatever the order of the registry.
     #[test]
     fn specific_ids_beat_the_families_they_contain() {
         assert_eq!(price_for("gpt-5.6-luna").unwrap().input_per_million, 0.20);
@@ -409,56 +450,64 @@ mod tests {
     }
 
     /// Every default must have its own price, or the traffic that matters
-    /// most is stored with the cost unknown.
+    /// most is stored with the cost unknown. Checked on the registry this
+    /// build ships, not only on the test registry.
     #[test]
     fn every_default_model_has_a_real_price() {
-        for id in [OPENAI_DEFAULT, CLAUDE_DEFAULT, GEMINI_FLASH, GEMINI_PRO, BEDROCK_DEFAULT, JEV] {
-            assert!(find(id).is_some(), "{id} has no entry in CLOUD_MODELS");
+        for registry in [registry::fixture(), registry::bundled()] {
+            for (feature, provider) in [("chat", "openai"), ("chat", "claude"), ("chat", "gemini"), ("premium", "gemini"), ("chat", "bedrock"), ("mail_sort", "typesafe")] {
+                let id = registry.default_model(feature, provider);
+                assert!(registry.find_priced(&id).is_some(), "{id} has no price in registry version {}", registry.version);
+            }
         }
         assert_eq!(price_for(GEMINI_FLASH).unwrap().input_per_million, 0.75, "gemini-3.7-flash rate; it doubles on 2027-01-01");
     }
 
-    /// The output limits above are documented, not checked live (see
-    /// GEMINI_MAX_OUTPUT). Asking for more than a model allows is a 400, which
-    /// stops the chain, so check them against what Google reports before
-    /// relying on them. The default Flash and Pro ids must report a limit: a
-    /// bad key or a retired id answers without one, and that proves nothing.
-    /// Run deliberately:
+    /// The output limits above are documented, not checked live (see the
+    /// registry's gemini entries). Asking for more than a model allows is a
+    /// 400, which stops the chain, so check them against what Google reports
+    /// before relying on them. The default Flash and Pro ids must report a
+    /// limit: a bad key or a retired id answers without one, and that proves
+    /// nothing. Run deliberately:
     ///   GEMINI_API_KEY=... cargo test --manifest-path src-tauri/Cargo.toml \
     ///     gemini_output_limits_match_what_google_serves -- --ignored --nocapture
     #[tokio::test]
     #[ignore]
     async fn gemini_output_limits_match_what_google_serves() {
         let key = std::env::var("GEMINI_API_KEY").expect("set GEMINI_API_KEY to run this test");
+        let registry = registry::bundled();
+        let (flash, pro) = (registry.default_model("chat", "gemini"), registry.default_model("premium", "gemini"));
         let mut wrong = Vec::new();
         let mut unserved = Vec::new();
         let mut checked = Vec::new();
-        for entry in CLOUD_MODELS.iter().filter(|m| m.provider == "gemini" && !m.family) {
-            let id = if entry.id == "gemini-3.1-pro" { GEMINI_PRO } else { entry.id };
+        for entry in registry.models.iter().filter(|m| m.provider == "gemini" && m.kind == registry::doc::Kind::Model && m.prices.is_some()) {
+            // The entry that prices the premium default is named for the
+            // family; ask Google for the id that is sent.
+            let id = if registry.find_priced(&pro).is_some_and(|m| m.id == entry.id) { pro.clone() } else { entry.id.clone() };
             let url = format!("{}/models/{id}", crate::ai::gemini::API_BASE);
             let response = reqwest::Client::new().get(url).header("x-goog-api-key", &key).send().await.unwrap();
             let status = response.status();
             let body: serde_json::Value = response.json().await.unwrap_or_default();
             let served = body["outputTokenLimit"].as_u64().map(|n| n as u32);
-            println!("{id}: HTTP {status}, served {served:?}, recorded {:?}", entry.max_output_tokens);
+            println!("{id}: HTTP {status}, served {served:?}, recorded {:?}", entry.max_output);
+            if served.is_none() && (id == flash || id == pro) {
+                unserved.push((id.clone(), status));
+            }
+            if served.is_some() && served != entry.max_output {
+                wrong.push((id.clone(), served, entry.max_output));
+            }
             checked.push(id);
-            if served.is_none() && [GEMINI_FLASH, GEMINI_PRO].contains(&id) {
-                unserved.push((id, status));
-            }
-            if served.is_some() && served != entry.max_output_tokens {
-                wrong.push((id, served, entry.max_output_tokens));
-            }
         }
-        assert!(checked.contains(&GEMINI_FLASH) && checked.contains(&GEMINI_PRO), "the default ids were not checked: {checked:?}");
+        assert!(checked.contains(&flash) && checked.contains(&pro), "the default ids were not checked: {checked:?}");
         assert!(unserved.is_empty(), "no outputTokenLimit for a default model, so nothing was checked (bad key or retired id?): {unserved:?}");
-        assert!(wrong.is_empty(), "outputTokenLimit differs from models.rs: {wrong:?}");
+        assert!(wrong.is_empty(), "outputTokenLimit differs from the registry: {wrong:?}");
     }
 
     #[test]
     fn setup_suggests_the_largest_approved_model_the_ram_runs() {
-        assert_eq!(suggested_local_model(32.0), Some("qwen3.5:9b"));
-        assert_eq!(suggested_local_model(16.0), Some("qwen3.5:4b"));
-        assert_eq!(suggested_local_model(8.0), Some("qwen3.5:2b"));
+        assert_eq!(suggested_local_model(32.0).as_deref(), Some("qwen3.5:9b"));
+        assert_eq!(suggested_local_model(16.0).as_deref(), Some("qwen3.5:4b"));
+        assert_eq!(suggested_local_model(8.0).as_deref(), Some("qwen3.5:2b"));
         assert_eq!(suggested_local_model(4.0), None);
     }
 }

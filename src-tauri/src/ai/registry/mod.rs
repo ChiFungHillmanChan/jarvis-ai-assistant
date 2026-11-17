@@ -64,12 +64,33 @@ pub fn holder() -> &'static Holder {
 }
 
 /// The registry every lookup reads. Cheap: one read lock and an `Arc` clone.
+/// Under test: the frozen fixture, or a test's own copy ([`test_override`]).
 pub fn current() -> Arc<Registry> {
     #[cfg(test)]
-    if let Some(registry) = test_override::get() {
-        return registry;
-    }
+    return test_override::get().unwrap_or_else(fixture);
+    #[cfg(not(test))]
     holder().get().registry
+}
+
+/// The copy this release ships, never a fetched one, for work whose result
+/// must not depend on what was fetched or when: the one-time correction of
+/// old usage rows (DECISIONS.md, "P04 and P05"), which runs before the
+/// cache is read. Under test: the frozen fixture.
+pub fn shipped() -> Arc<Registry> {
+    #[cfg(test)]
+    return fixture();
+    #[cfg(not(test))]
+    bundled()
+}
+
+/// registry/registry.json as seeded (version 1), frozen for the tests:
+/// the app's tests run on it, so editing registry/registry.json (a price, a
+/// default) never needs a test change. The bundled copy itself is checked
+/// by `the_bundled_registry_is_usable` and by registry/validate.ts.
+#[cfg(test)]
+pub(crate) fn fixture() -> Arc<Registry> {
+    static FIXTURE: LazyLock<Arc<Registry>> = LazyLock::new(|| Arc::new(Registry::parse(include_bytes!("fixture.json")).expect("the test fixture is a usable registry")));
+    Arc::clone(&FIXTURE)
 }
 
 /// What Settings > About shows.
@@ -127,9 +148,9 @@ pub(crate) mod test_override {
         Guard(previous)
     }
 
-    /// The bundled registry with `change` applied, in place for this thread.
+    /// The test fixture with `change` applied, in place for this thread.
     pub(crate) fn with(change: impl FnOnce(&mut Registry)) -> Guard {
-        let mut registry = (*super::bundled()).clone();
+        let mut registry = (*super::fixture()).clone();
         change(&mut registry);
         set(registry)
     }

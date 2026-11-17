@@ -50,11 +50,12 @@ const MAX_PAGES: usize = 20;
 pub const LIST_PROFILES_ACTION: &str = "bedrock:ListInferenceProfiles";
 pub const LIST_MODELS_ACTION: &str = "bedrock:ListFoundationModels";
 
-/// The two ids migration V13 seeds into `workload_routing`, and the default.
-/// The built-in list holds these and nothing else: ids the app already ships.
-const SEEDED_HAIKU: &str = "global.anthropic.claude-haiku-4-5-20251001-v1:0";
-const SEEDED_NOVA_MICRO: &str = "apac.amazon.nova-micro-v1:0";
-const BUILT_IN: [&str; 3] = [models::BEDROCK_DEFAULT, SEEDED_HAIKU, SEEDED_NOVA_MICRO];
+/// The list offered when AWS cannot be asked: the registry's
+/// `built_in_models` for Bedrock (seeded with the default and the two ids
+/// migration V13 put in `workload_routing`).
+fn built_in_ids() -> Vec<String> {
+    crate::ai::registry::current().provider("bedrock").map(|p| p.built_in_models.clone()).unwrap_or_default()
+}
 
 #[derive(Serialize, Clone, Copy, Debug, PartialEq)]
 #[serde(rename_all = "snake_case")]
@@ -93,7 +94,7 @@ pub enum Reason {
 #[derive(Serialize, Clone, Debug, PartialEq)]
 pub struct DefaultModel {
     pub id: String,
-    pub name: Option<&'static str>,
+    pub name: Option<String>,
 }
 
 #[derive(Serialize, Clone, Debug, PartialEq)]
@@ -121,14 +122,14 @@ fn default_model() -> DefaultModel {
 /// region's geography as `apply_inference_profile` does when a request is
 /// sent. With no region known the ids stay as shipped.
 pub fn built_in(region: Option<&str>) -> Vec<ModelChoice> {
-    BUILT_IN
+    built_in_ids()
         .iter()
         .map(|shipped| {
             let id = match region {
                 Some(region) => crate::ai::apply_inference_profile(shipped, credentials::inference_profile_for_region(region)),
                 None => shipped.to_string(),
             };
-            let name = models::label_for(shipped).unwrap_or(shipped).to_string();
+            let name = models::label_for(shipped).unwrap_or_else(|| shipped.clone());
             ModelChoice { id, name, kind: Kind::Profile }
         })
         .collect()
@@ -797,17 +798,17 @@ mod tests {
         );
     }
 
-    /// The built-in list holds only ids the app ships (the default and the
-    /// two V13 seeds), named as models.rs names them, pointed at the saved
-    /// region's geography as `apply_inference_profile` would send them.
-    /// Breaks if an id is added that the app does not ship, if a name is
-    /// typed in by hand, or if the geography rewrite is dropped.
+    /// The built-in list is the registry's (in the test registry: the
+    /// default and the two V13 seeds), named as the registry names them,
+    /// pointed at the saved region's geography as `apply_inference_profile`
+    /// would send them. Breaks if a name is typed in by hand, or if the
+    /// geography rewrite is dropped.
     #[test]
     fn the_built_in_list_holds_shipped_ids_for_the_saved_geography() {
         const V13: &str = include_str!("../../migrations/V13__aws_credentials_and_routing.sql");
-        for id in BUILT_IN {
+        for id in built_in_ids() {
             assert!(id == models::BEDROCK_DEFAULT || V13.contains(&format!("'{id}'")), "{id} is not shipped");
-            assert!(models::label_for(id).is_some(), "models.rs names {id}");
+            assert!(models::label_for(&id).is_some(), "the registry names {id}");
         }
         let names = |list: Vec<ModelChoice>| list.into_iter().map(|m| (m.id, m.name)).collect::<Vec<_>>();
         assert_eq!(
@@ -829,7 +830,7 @@ mod tests {
     #[test]
     fn the_default_is_named() {
         if std::env::var("AWS_BEDROCK_MODEL_ID").is_err() {
-            assert_eq!(default_model(), DefaultModel { id: models::BEDROCK_DEFAULT.into(), name: Some("Claude Sonnet 4.6") });
+            assert_eq!(default_model(), DefaultModel { id: models::BEDROCK_DEFAULT.into(), name: Some("Claude Sonnet 4.6".into()) });
         }
     }
 

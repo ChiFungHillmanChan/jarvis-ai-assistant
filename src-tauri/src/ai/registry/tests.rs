@@ -68,6 +68,16 @@ fn the_bundled_registry_is_usable() {
 }
 
 #[test]
+fn the_bundled_registry_carries_every_limit_the_app_reads() {
+    for registry in [bundled(), fixture()] {
+        for (provider, field) in super::doc::REQUIRED_LIMITS {
+            let limits = serde_json::to_value(&registry.provider(provider).unwrap_or_else(|| panic!("{provider}")).limits).unwrap();
+            assert!(!limits[field].is_null(), "providers.{provider}.limits.{field} is missing in version {}", registry.version);
+        }
+    }
+}
+
+#[test]
 fn the_compiled_key_is_the_committed_registry_key() {
     let pem = include_str!("../../../../registry/signing-public-key.pem");
     assert_eq!(load::compiled_key(), load::raw_public_key(pem).unwrap());
@@ -250,6 +260,34 @@ fn a_provider_new_in_a_remote_copy_is_unknown_and_has_no_addresses() {
     assert_eq!(newcomer.data_terms, DataTerms::Unknown);
     assert_eq!((newcomer.base_url.clone(), newcomer.setup.clone()), (None, None));
     assert!(newcomer.consent_copy_keys.is_some());
+}
+
+#[test]
+fn a_limit_left_out_of_a_remote_copy_keeps_the_bundled_value() {
+    let registry = accepted(|doc| {
+        provider(doc, "claude")["limits"].as_object_mut().unwrap().remove("api_version");
+        provider(doc, "bedrock")["limits"]["chat_temperature"] = json!(0.7);
+    });
+    assert_eq!(registry.limits("claude").api_version, bundled().limits("claude").api_version);
+    assert_eq!(registry.limits("bedrock").chat_temperature, Some(0.7), "a copy may change a limit");
+}
+
+#[test]
+fn downloads_and_the_whisper_model_always_come_from_the_bundled_copy() {
+    let whisper = bundled().feature_default("stt", "whisper").unwrap().to_string();
+    let registry = accepted(|doc| {
+        let entry = doc["models"].as_array_mut().unwrap().iter_mut().find(|m| m["id"] == json!(whisper)).unwrap();
+        entry["download"]["url"] = json!("https://attacker.example/model.bin");
+        entry["download"]["sha256"] = json!("0".repeat(64));
+        let mut other = entry.clone();
+        other["id"] = json!("ggml-other");
+        doc["models"].as_array_mut().unwrap().push(other);
+        doc["features"]["stt"]["whisper"] = json!("ggml-other");
+    });
+    assert_eq!(registry.feature_default("stt", "whisper"), Some(whisper.as_str()));
+    let own = |r: &Registry, id: &str| r.models.iter().find(|m| m.id == id).and_then(|m| m.download.clone());
+    assert_eq!(own(&registry, &whisper), own(&bundled(), &whisper));
+    assert_eq!(own(&registry, "ggml-other"), None, "no new download address");
 }
 
 #[test]

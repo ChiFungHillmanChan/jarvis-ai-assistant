@@ -13,7 +13,6 @@ use std::time::Instant;
 
 /// Context window asked of Ollama: a triaged email (6,000 characters), its
 /// instructions and the sender's known follow-ups fit with room to answer.
-const OLLAMA_CONTEXT: u32 = 8_192;
 
 pub struct Request<'a> {
     pub system: &'a str,
@@ -126,7 +125,7 @@ async fn complete_one(router: &AiRouter, db: &Database, entry: &ProviderChainEnt
                 }
                 None => {
                     let key = router.openai_key.clone().ok_or("尚未設定 OpenAI API 密鑰。")?;
-                    ("https://api.openai.com/v1/chat/completions".to_string(), key, entry.model_id.clone().unwrap_or_else(|| crate::ai::models::OPENAI_DEFAULT.to_string()), "OpenAI".to_string())
+                    ("https://api.openai.com/v1/chat/completions".to_string(), key, entry.model_id.clone().unwrap_or_else(crate::ai::models::openai_default), "OpenAI".to_string())
                 }
             };
             let body = chat_completions_body(&model, request, entry.base_url.is_none());
@@ -146,7 +145,7 @@ async fn complete_one(router: &AiRouter, db: &Database, entry: &ProviderChainEnt
                     messages.push(json!({"role": "system", "content": request.system}));
                 }
                 messages.push(json!({"role": "user", "content": request.user}));
-                let mut body = json!({"model": model, "messages": messages, "stream": false, "options": {"num_ctx": OLLAMA_CONTEXT, "num_predict": request.max_tokens}});
+                let mut body = json!({"model": model, "messages": messages, "stream": false, "options": {"num_ctx": crate::ai::models::limits("ollama").completion_context_tokens.unwrap_or_default(), "num_predict": request.max_tokens}});
                 if request.json {
                     body["format"] = json!("json");
                 }
@@ -164,7 +163,7 @@ async fn complete_one(router: &AiRouter, db: &Database, entry: &ProviderChainEnt
         }
         "gemini" => {
             let key = router.gemini_key.clone().ok_or("尚未設定 Gemini API 密鑰。")?;
-            let model = super::gemini_model_for(entry.model_id.as_deref(), Workload::Volume).to_string();
+            let model = super::gemini_model_for(entry.model_id.as_deref(), Workload::Volume);
             let mut body = json!({
                 "contents": [{"role": "user", "parts": [{"text": request.user}]}],
                 "generationConfig": {"maxOutputTokens": request.max_tokens},
@@ -181,9 +180,9 @@ async fn complete_one(router: &AiRouter, db: &Database, entry: &ProviderChainEnt
         }
         "claude" => {
             let key = router.claude_key.clone().ok_or("尚未設定 Claude API 密鑰。")?;
-            let model = entry.model_id.clone().unwrap_or_else(|| crate::ai::models::CLAUDE_DEFAULT.to_string());
+            let model = entry.model_id.clone().unwrap_or_else(crate::ai::models::claude_default);
             let body = claude_body(&model, request);
-            let value = post(&client, "https://api.anthropic.com/v1/messages", "Claude", |r| r.header("x-api-key", &key).header("anthropic-version", "2023-06-01"), &body).await?;
+            let value = post(&client, "https://api.anthropic.com/v1/messages", "Claude", |r| r.header("x-api-key", &key).header("anthropic-version", crate::ai::models::anthropic_version()), &body).await?;
             claude_result(&value, model)
         }
         "bedrock" => {

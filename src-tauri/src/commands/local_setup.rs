@@ -31,14 +31,15 @@ fn ollama_app_installed() -> bool {
     cfg!(target_os = "macos") && std::path::Path::new("/Applications/Ollama.app").is_dir()
 }
 
-// The approved models and their sizes live in ai/models.rs.
-fn suggested_tag(ram_gb: f64) -> Option<&'static str> {
+// The approved models and their sizes live in the registry.
+fn suggested_tag(ram_gb: f64) -> Option<String> {
     crate::ai::models::suggested_local_model(ram_gb)
 }
 
-fn approved(model: &str) -> Option<(&'static crate::ai::models::LocalModel, &'static crate::ai::models::LocalSetup)> {
+fn approved(model: &str) -> Option<(crate::ai::models::LocalModel, crate::ai::models::LocalSetup)> {
     let entry = crate::ai::models::local_model(model)?;
-    entry.setup.as_ref().map(|setup| (entry, setup))
+    let setup = entry.setup.clone()?;
+    Some((entry, setup))
 }
 
 fn disk_reserve_gb(model: &str) -> f64 {
@@ -112,7 +113,7 @@ pub async fn probe_local_setup() -> Result<LocalSetupProbe, String> {
         ollama_installed: ollama_app_installed(),
         ollama_running,
         installed_models,
-        recommended_tag: suggested_tag(total_ram_gb).map(str::to_string),
+        recommended_tag: suggested_tag(total_ram_gb),
         download_url: "https://ollama.com/download/mac",
     })
 }
@@ -219,10 +220,10 @@ mod tests {
     #[test]
     fn recommendation_uses_real_ram_threshold() {
         assert_eq!(suggested_tag(7.9), None);
-        assert_eq!(suggested_tag(8.0), Some("qwen3.5:2b"));
-        assert_eq!(suggested_tag(16.0), Some("qwen3.5:4b"));
-        assert_eq!(suggested_tag(24.0), Some("qwen3.5:9b"));
-        assert_eq!(suggested_tag(32.0), Some("qwen3.5:9b"));
+        assert_eq!(suggested_tag(8.0).as_deref(), Some("qwen3.5:2b"));
+        assert_eq!(suggested_tag(16.0).as_deref(), Some("qwen3.5:4b"));
+        assert_eq!(suggested_tag(24.0).as_deref(), Some("qwen3.5:9b"));
+        assert_eq!(suggested_tag(32.0).as_deref(), Some("qwen3.5:9b"));
         assert!(!supported_macos(Some("13.6")));
         assert!(supported_macos(Some("14.0")));
     }

@@ -136,6 +136,7 @@ pub(crate) fn apply_floor(bundled: &Registry, registry: &mut Registry) {
                 if let Some(setup) = provider.setup.as_mut() {
                     setup.key_page = own.setup.as_ref().and_then(|s| s.key_page.clone());
                 }
+                provider.limits.fill_from(&own.limits);
                 if provider.data_terms != DataTerms::Safe && provider.consent_copy_keys.is_none() {
                     provider.consent_copy_keys = own.consent_copy_keys.clone();
                 }
@@ -158,6 +159,21 @@ pub(crate) fn apply_floor(bundled: &Registry, registry: &mut Registry) {
     for own in &bundled.providers {
         if registry.provider(&own.id).is_none() {
             registry.providers.push(own.clone());
+        }
+    }
+    // Downloads are addresses too: a file is fetched only from where this
+    // build said, and checked against the hash it shipped. The Whisper model
+    // is the bundled one, so its download always exists.
+    for model in &mut registry.models {
+        model.download = bundled.models.iter().find(|own| own.id == model.id).and_then(|own| own.download.clone());
+    }
+    if let Some(whisper) = bundled.feature_default("stt", "whisper") {
+        let whisper = whisper.to_string();
+        registry.features.entry("stt".into()).or_default().insert("whisper".into(), whisper.clone());
+        if !registry.models.iter().any(|m| m.id == whisper) {
+            if let Some(own) = bundled.models.iter().find(|m| m.id == whisper) {
+                registry.models.push(own.clone());
+            }
         }
     }
 }

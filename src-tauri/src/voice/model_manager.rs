@@ -7,25 +7,33 @@ use std::sync::Arc;
 use tauri::Manager;
 use tokio::io::AsyncWriteExt;
 
-const MODEL_URL: &str =
-    "https://huggingface.co/ggerganov/whisper.cpp/resolve/main/ggml-base.bin";
-
-/// Git LFS object id of `ggml-base.bin`, read from the pointer file at
-/// `huggingface.co/ggerganov/whisper.cpp/raw/main/ggml-base.bin` and matching
-/// the `X-Linked-ETag` the CDN serves. A length check alone accepts any body of
-/// the right size, and this file is fed straight into whisper.cpp.
-const MODEL_SHA256: &str = "60ed5bc3dd14eea856493d334349b405782ddcaf0028d4b5df4088345fba2efe";
+/// The Whisper model: the registry's `stt.whisper` default, with the
+/// download address, the Git LFS object id (sha256, matching the
+/// `X-Linked-ETag` the CDN serves) and the size floor it carries. These are
+/// always as this build shipped them: a fetched registry cannot change where
+/// the file comes from or what it must hash to (`registry::load::apply_floor`).
+/// A length check alone accepts any body of the right size, and this file is
+/// fed straight into whisper.cpp.
+fn whisper() -> (String, Option<crate::ai::registry::doc::Download>) {
+    let registry = crate::ai::registry::current();
+    let id = registry.default_model("stt", "whisper");
+    let download = registry.models.iter().find(|m| m.id == id).and_then(|m| m.download.clone());
+    (id, download)
+}
 
 pub fn model_path() -> PathBuf {
     let data_dir = dirs::data_dir().unwrap_or_else(|| PathBuf::from("."));
-    data_dir.join("jarvis").join("models").join("ggml-base.bin")
+    data_dir.join("jarvis").join("models").join(format!("{}.bin", whisper().0))
 }
 
-/// A floor for `ggml-base.bin`, which is roughly 148 MB. This is a floor and
-/// not a checksum -- a file this large can still be the wrong bytes -- but it
-/// stops a zero-byte or grossly truncated leftover from being reported as a
-/// usable model and then failing to load forever.
-const MIN_MODEL_BYTES: u64 = 100_000_000;
+/// A floor for the model file (`ggml-base.bin` is roughly 148 MB). This is a
+/// floor and not a checksum -- a file this large can still be the wrong
+/// bytes -- but it stops a zero-byte or grossly truncated leftover from being
+/// reported as a usable model and then failing to load forever. Without a
+/// recorded floor no file counts as usable.
+fn min_model_bytes() -> u64 {
+    whisper().1.map_or(u64::MAX, |d| d.min_bytes)
+}
 
 pub fn is_downloaded() -> bool {
     model_file_is_usable(std::fs::metadata(model_path()).ok().map(|m| m.len()))
@@ -33,7 +41,7 @@ pub fn is_downloaded() -> bool {
 
 /// `None` means the file is absent.
 fn model_file_is_usable(len: Option<u64>) -> bool {
-    matches!(len, Some(len) if len >= MIN_MODEL_BYTES)
+    matches!(len, Some(len) if len >= min_model_bytes())
 }
 
 /// `force` re-downloads over an existing file. It is the only way out when the
@@ -96,8 +104,9 @@ async fn download_model(app_handle: JarvisAppHandle, force: bool) -> Result<Path
 
     let temp_path = path.with_extension("bin.part");
     let result = async {
+        let url = whisper().1.map(|d| d.url).ok_or("No download is recorded for the speech model.")?;
         let response = reqwest::Client::new()
-            .get(MODEL_URL)
+            .get(url)
             .send()
             .await
             .map_err(|e| format!("Failed to start model download: {}", e))?;
@@ -191,11 +200,12 @@ fn hex_digest(bytes: &[u8]) -> String {
 /// error page padded to the right length, or a tampered CDN object all land
 /// here rather than inside whisper.cpp.
 fn verify_checksum(actual: &str) -> Result<(), String> {
-    if actual.eq_ignore_ascii_case(MODEL_SHA256) {
+    let expected = whisper().1.map(|d| d.sha256).unwrap_or_default();
+    if !expected.is_empty() && actual.eq_ignore_ascii_case(&expected) {
         return Ok(());
     }
     Err(format!(
-        "Model checksum mismatch: expected {MODEL_SHA256}, got {actual}. The download was discarded."
+        "Model checksum mismatch: expected {expected}, got {actual}. The download was discarded."
     ))
 }
 
@@ -216,7 +226,7 @@ mod download_guard_tests {
 mod tests {
     use super::{
         hex_digest, model_file_is_usable, progress_step, should_skip_download, verify_checksum,
-        verify_download_size, MIN_MODEL_BYTES, MODEL_SHA256,
+        verify_download_size, min_model_bytes, whisper,
     };
     use sha2::{Digest, Sha256};
 
@@ -245,8 +255,10 @@ mod tests {
 
     #[test]
     fn the_pinned_digest_is_accepted_in_either_case() {
-        assert!(verify_checksum(MODEL_SHA256).is_ok());
-        assert!(verify_checksum(&MODEL_SHA256.to_uppercase()).is_ok());
+        let pinned = whisper().1.unwrap().sha256;
+        assert_eq!(pinned, "60ed5bc3dd14eea856493d334349b405782ddcaf0028d4b5df4088345fba2efe");
+        assert!(verify_checksum(&pinned).is_ok());
+        assert!(verify_checksum(&pinned.to_uppercase()).is_ok());
     }
 
     #[test]
@@ -275,7 +287,7 @@ mod tests {
         assert!(!model_file_is_usable(None), "absent file");
         assert!(!model_file_is_usable(Some(0)), "zero-byte leftover");
         assert!(!model_file_is_usable(Some(4_096)), "truncated leftover");
-        assert!(!model_file_is_usable(Some(MIN_MODEL_BYTES - 1)));
+        assert!(!model_file_is_usable(Some(min_model_bytes() - 1)));
         assert!(model_file_is_usable(Some(147_951_465)), "full ggml-base.bin");
     }
 

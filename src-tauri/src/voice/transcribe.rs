@@ -90,14 +90,15 @@ impl Transcriber {
                 ]
             }],
             "generationConfig": {
-                "maxOutputTokens": 512
+                "maxOutputTokens": crate::ai::models::limits("gemini").stt_max_output_tokens.unwrap_or_default()
             }
         });
+        let model = crate::ai::models::default_for("stt", "gemini");
 
         let url = format!(
             "{}/models/{}:generateContent",
             gemini::API_BASE,
-            crate::ai::models::GEMINI_FLASH
+            model
         );
 
         // Bounded, because this call sits between the user speaking and any
@@ -126,7 +127,7 @@ impl Transcriber {
         }
 
         let result: serde_json::Value = resp.json().await.map_err(|e| e.to_string())?;
-        record_gemini_stt(db, &result, started.elapsed().as_millis() as i64);
+        record_gemini_stt(db, &model, &result, started.elapsed().as_millis() as i64);
 
         let text = result["candidates"]
             .as_array()
@@ -146,11 +147,11 @@ impl Transcriber {
 /// Store one Gemini transcription. The audio is billed at Gemini's audio
 /// input rate, which ai/models.rs does not carry, so the tokens are kept and
 /// the cost is left unknown rather than priced as text.
-fn record_gemini_stt(db: &crate::db::Database, result: &serde_json::Value, latency_ms: i64) {
+fn record_gemini_stt(db: &crate::db::Database, model: &str, result: &serde_json::Value, latency_ms: i64) {
     let count = |field: &str| result["usageMetadata"][field].as_i64().unwrap_or(0);
     // Thinking is billed as output; candidatesTokenCount leaves it out.
     let output = count("candidatesTokenCount") + count("thoughtsTokenCount");
-    crate::ai::cost::record_unpriced(db, "gemini", crate::ai::cost::Feature::Stt, crate::ai::models::GEMINI_FLASH, count("promptTokenCount"), output, latency_ms);
+    crate::ai::cost::record_unpriced(db, "gemini", crate::ai::cost::Feature::Stt, model, count("promptTokenCount"), output, latency_ms);
 }
 
 /// What the speaker said, without Whisper's notes about sound that is not
@@ -296,7 +297,7 @@ mod tests {
             "candidates": [{"content": {"parts": [{"text": "聽日三點開會"}]}, "finishReason": "STOP"}],
             "usageMetadata": {"promptTokenCount": 480, "candidatesTokenCount": 12, "thoughtsTokenCount": 30}
         });
-        record_gemini_stt(&db, &reply, 900);
+        record_gemini_stt(&db, crate::ai::models::GEMINI_FLASH, &reply, 900);
         assert_eq!(
             crate::ai::cost::tests::usage_rows(&db),
             vec![crate::ai::cost::tests::UsageRow {

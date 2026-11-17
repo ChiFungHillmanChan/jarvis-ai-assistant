@@ -345,13 +345,17 @@ pub struct Corrected {
 /// anywhere leaves every row and the marker as they were, and the whole
 /// step runs again at the next open.
 ///
-/// The price list: the step asks the list built into this release
-/// (`models::price_known` and `models::usd_cost_micro`, on CLOUD_MODELS),
-/// and must keep doing so. It runs once, at the first open of whichever
-/// release a user installs next, so a price list loaded after the database
-/// opens (P04, P05) would see every model as unpriced, or none.
+/// The price list: the step asks the registry built into this release
+/// (`registry::shipped()`, registry/registry.json as this build bundles it),
+/// never a fetched copy, and must keep doing so. It runs once, at the first
+/// open of whichever release a user installs next, before the cached or
+/// fetched registry is read, so its result must not depend on what was
+/// fetched or when.
 pub fn correct_old_rows(conn: &rusqlite::Connection) -> rusqlite::Result<Corrected> {
-    use crate::ai::models::{is_local, price_known, usd_cost_micro};
+    use crate::ai::models::is_local;
+    let shipped = crate::ai::registry::shipped();
+    let price_known = |provider: &str, model_id: &str| shipped.price_known(provider, model_id);
+    let usd_cost_micro = |provider: &str, model_id: &str, input: i64, output: i64, cache_read: i64, cache_write: i64| shipped.usd_cost_micro(provider, model_id, input, output, cache_read, cache_write);
     let done: bool = conn.query_row("SELECT EXISTS(SELECT 1 FROM user_preferences WHERE key = ?1)", [OLD_ROWS_CORRECTED_KEY], |r| r.get(0))?;
     if done {
         return Ok(Corrected::default());
@@ -589,6 +593,30 @@ pub(crate) mod tests {
 
     fn marked(conn: &rusqlite::Connection) -> bool {
         conn.query_row("SELECT EXISTS(SELECT 1 FROM user_preferences WHERE key = ?1)", [OLD_ROWS_CORRECTED_KEY], |r| r.get(0)).unwrap()
+    }
+
+    /// The correction prices with the registry this release ships, never
+    /// the copy in use: here the copy in use prices nothing, and the rows
+    /// priced by the shipped copy still keep their cost.
+    #[test]
+    fn old_rows_are_corrected_with_the_shipped_registry_not_the_one_in_use() {
+        let db = crate::db::test_database();
+        let conn = db.conn.lock().unwrap();
+        let _fetched = crate::ai::registry::test_override::with(|r| {
+            for m in &mut r.models {
+                m.prices = None;
+            }
+        });
+        assert!(!crate::ai::models::price_known("bedrock", HAIKU), "the copy in use prices nothing");
+        insert(&conn, &[
+            (OLD, "bedrock", HAIKU, 120, 45, 800, 400, Some(805), "chat", 0),
+            (OLD, "openai", "gpt-6-luna", 3_000, 40, 0, 0, Some(0), "mail_sort", 0),
+        ]);
+        let before = snapshot(&conn);
+        assert_eq!(correct_old_rows(&conn).unwrap(), Corrected { guessed: 0, billed_at_zero: 0, local_made_free: 0, cache_added: 1 });
+        let after = snapshot(&conn);
+        assert_eq!(after[0].1 .4, Some(925), "repriced at the shipped Haiku rate");
+        assert_eq!(after[1], before[1], "a priced model billed at zero is not marked unknown");
     }
 
     /// The four corrections, each on the rows it names and two of them on

@@ -3,11 +3,9 @@
 //! same wire format, native tool calling, their own key in the Keychain.
 use reqwest::Url;
 
-/// Services offered in setup. The user can also enter any other base URL.
-pub const KIMI_GLOBAL: &str = "https://api.moonshot.ai/v1";
-pub const KIMI_CHINA: &str = "https://api.moonshot.cn/v1";
-pub const QWEN_INTERNATIONAL: &str = "https://dashscope-intl.aliyuncs.com/compatible-mode/v1";
-pub const QWEN_CHINA: &str = "https://dashscope.aliyuncs.com/compatible-mode/v1";
+// The services offered in setup, their regions and their hosts are the
+// registry's (`providers[].regions`, `host_suffixes`), always as this build
+// shipped them. The user can also enter any other base URL.
 
 /// A base URL the app may send the user's key and messages to: https, or
 /// plain http only to this Mac. No credentials, query or fragment, so the
@@ -34,17 +32,29 @@ pub fn key_account(base_url: &str) -> String {
     format!("compat_api_key:{}", host(base_url))
 }
 
+/// The registry provider whose host this base URL is on (Kimi, Qwen,
+/// Gemini's compatible endpoint), matched on `host_suffixes`. None for any
+/// other service.
+pub fn provider_for(base_url: &str) -> Option<&'static str> {
+    let host = host(base_url);
+    let registry = super::registry::current();
+    let found = registry.providers.iter().find(|p| p.host_suffixes.iter().any(|suffix| host.ends_with(suffix.as_str())))?;
+    // A &'static name for the few ids this build has code for; any other
+    // provider is "another service".
+    ["kimi", "qwen", "gemini_compat"].into_iter().find(|id| *id == found.id)
+}
+
+/// Whether the base URL is OpenAI's own API (the registry's `openai` address).
+pub fn is_openai(base_url: &str) -> bool {
+    let registry = super::registry::current();
+    registry.provider("openai").and_then(|p| p.base_url.as_deref()).is_some_and(|own| host(own) == host(base_url))
+}
+
 /// Name shown to the user and written to the cost table.
 pub fn label(base_url: &str) -> String {
-    let host = host(base_url);
-    if host.ends_with("moonshot.ai") || host.ends_with("moonshot.cn") {
-        "Kimi".into()
-    } else if host.ends_with("aliyuncs.com") {
-        "Qwen".into()
-    } else if host.ends_with("generativelanguage.googleapis.com") {
-        "Gemini".into()
-    } else {
-        host
+    match provider_for(base_url) {
+        Some(id) => super::registry::current().provider(id).map(|p| p.display_name.en.clone()).unwrap_or_else(|| id.to_string()),
+        None => host(base_url),
     }
 }
 
@@ -107,6 +117,11 @@ pub async fn list_models(base_url: &str, api_key: &str) -> Result<Vec<String>, S
 mod tests {
     use super::*;
 
+    const KIMI_GLOBAL: &str = "https://api.moonshot.ai/v1";
+    const KIMI_CHINA: &str = "https://api.moonshot.cn/v1";
+    const QWEN_INTERNATIONAL: &str = "https://dashscope-intl.aliyuncs.com/compatible-mode/v1";
+    const QWEN_CHINA: &str = "https://dashscope.aliyuncs.com/compatible-mode/v1";
+
     #[test]
     fn base_urls_are_https_or_this_mac_and_nothing_else() {
         assert_eq!(normalize_base_url(" https://api.moonshot.ai/v1/ ").unwrap(), KIMI_GLOBAL);
@@ -124,5 +139,25 @@ mod tests {
         assert_eq!(label(KIMI_CHINA), "Kimi");
         assert_eq!(label(QWEN_CHINA), "Qwen");
         assert_eq!(label("https://api.deepseek.com/v1"), "api.deepseek.com");
+        assert_eq!(label("https://generativelanguage.googleapis.com/v1beta/openai"), "Gemini");
+        assert_eq!(provider_for(QWEN_INTERNATIONAL), Some("qwen"));
+        assert_eq!(provider_for("https://api.deepseek.com/v1"), None);
+        assert!(is_openai("https://api.openai.com/v1") && !is_openai(KIMI_GLOBAL));
+    }
+
+    /// The services, their regions and their names are the registry's.
+    #[test]
+    fn the_services_follow_the_registry() {
+        let registry = crate::ai::registry::current();
+        for id in ["kimi", "qwen"] {
+            let provider = registry.provider(id).unwrap();
+            assert!(!provider.regions.is_empty(), "{id}");
+            for region in &provider.regions {
+                assert_eq!(provider_for(&region.base_url), Some(id), "{}", region.base_url);
+                assert_eq!(label(&region.base_url), provider.display_name.en);
+            }
+        }
+        let _renamed = crate::ai::registry::test_override::with(|r| r.providers.iter_mut().find(|p| p.id == "kimi").unwrap().display_name.en = "Moonshot".into());
+        assert_eq!(label(KIMI_GLOBAL), "Moonshot");
     }
 }

@@ -72,6 +72,50 @@ pub struct Limits {
     pub api_version: Option<String>,
 }
 
+impl Limits {
+    /// Fill each limit this copy leaves out with `other`'s.
+    pub(crate) fn fill_from(&mut self, other: &Limits) {
+        fn fill<T: Clone>(mine: &mut Option<T>, theirs: &Option<T>) {
+            if mine.is_none() {
+                *mine = theirs.clone();
+            }
+        }
+        fill(&mut self.chat_max_output_tokens, &other.chat_max_output_tokens);
+        fill(&mut self.default_max_output_tokens, &other.default_max_output_tokens);
+        fill(&mut self.stt_max_output_tokens, &other.stt_max_output_tokens);
+        fill(&mut self.completion_context_tokens, &other.completion_context_tokens);
+        fill(&mut self.default_context_tokens, &other.default_context_tokens);
+        fill(&mut self.max_tool_rounds, &other.max_tool_rounds);
+        fill(&mut self.chat_reasoning_effort, &other.chat_reasoning_effort);
+        fill(&mut self.chat_temperature, &other.chat_temperature);
+        fill(&mut self.api_version, &other.api_version);
+    }
+}
+
+/// The limits this build reads, by provider. The bundled copy carries every
+/// one (`the_bundled_registry_carries_every_limit_the_app_reads`); a fetched
+/// copy that leaves one out keeps the bundled value (`load::apply_floor`).
+#[cfg(test)]
+pub(crate) const REQUIRED_LIMITS: &[(&str, &str)] = &[
+    ("openai", "chat_max_output_tokens"),
+    ("openai", "max_tool_rounds"),
+    ("openai", "chat_reasoning_effort"),
+    ("openai_compat", "chat_max_output_tokens"),
+    ("openai_compat", "max_tool_rounds"),
+    ("claude", "chat_max_output_tokens"),
+    ("claude", "max_tool_rounds"),
+    ("claude", "api_version"),
+    ("gemini", "default_max_output_tokens"),
+    ("gemini", "stt_max_output_tokens"),
+    ("gemini", "max_tool_rounds"),
+    ("bedrock", "chat_max_output_tokens"),
+    ("bedrock", "chat_temperature"),
+    ("bedrock", "max_tool_rounds"),
+    ("ollama", "completion_context_tokens"),
+    ("ollama", "default_context_tokens"),
+    ("ollama", "max_tool_rounds"),
+];
+
 #[derive(Debug, Clone, Deserialize, Serialize, PartialEq)]
 pub struct Provider {
     pub id: String,

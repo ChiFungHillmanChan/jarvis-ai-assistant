@@ -2,8 +2,10 @@ use reqwest::Client;
 use tokio::sync::mpsc;
 use futures_util::StreamExt;
 
-/// The MiniMax speech model JARVIS asks for.
-const MODEL: &str = "speech-02-hd";
+/// The MiniMax speech model JARVIS asks for: the registry's `tts.minimax`.
+fn model() -> String {
+    crate::ai::models::default_for("tts", "minimax")
+}
 
 pub struct MinimaxClient {
     api_key: String,
@@ -24,8 +26,9 @@ impl MinimaxClient {
     ) -> Result<mpsc::Receiver<Vec<u8>>, String> {
         let url = "https://api.minimaxi.chat/v1/t2a_v2";
         let started = std::time::Instant::now();
+        let model = model();
         let body = serde_json::json!({
-            "model": MODEL,
+            "model": model,
             "text": text,
             "stream": true,
             "voice_setting": {
@@ -59,7 +62,7 @@ impl MinimaxClient {
             ));
         }
 
-        record_speech(db, text, started.elapsed().as_millis() as i64);
+        record_speech(db, &model, text, started.elapsed().as_millis() as i64);
 
         let (tx, rx) = mpsc::channel(64);
         tokio::spawn(async move {
@@ -82,8 +85,8 @@ impl MinimaxClient {
 
 /// MiniMax prices per character, which the token price list cannot express:
 /// the characters sent go in `input_tokens`, with the cost unknown.
-fn record_speech(db: &crate::db::Database, text: &str, latency_ms: i64) {
-    crate::ai::cost::record_unpriced(db, "minimax", crate::ai::cost::Feature::Tts, MODEL, text.chars().count() as i64, 0, latency_ms);
+fn record_speech(db: &crate::db::Database, model: &str, text: &str, latency_ms: i64) {
+    crate::ai::cost::record_unpriced(db, "minimax", crate::ai::cost::Feature::Tts, model, text.chars().count() as i64, 0, latency_ms);
 }
 
 #[cfg(test)]
@@ -95,7 +98,7 @@ mod tests {
     #[test]
     fn speech_is_recorded_as_tts_by_character() {
         let db = crate::ai::cost::tests::temp_metrics_db("");
-        record_speech(&db, "你好，我係 Jarvis", 300);
+        record_speech(&db, &model(), "你好，我係 Jarvis", 300);
         assert_eq!(
             crate::ai::cost::tests::usage_rows(&db),
             vec![crate::ai::cost::tests::UsageRow {
