@@ -191,7 +191,8 @@ pub async fn stop_listening(
             let _ = app_handle.emit("chat-voice-active", json!({"active": false}));
             let _ = app_handle.emit("chat-state", json!({"state": "idle"}));
             engine.set_state_and_emit(VoiceState::Idle);
-            return Err(e);
+            // The toast shows a sentence, not the error card's data.
+            return Err(crate::ai::failure::plain(&e, crate::ai::bedrock::UiLanguage::read(&db)));
         }
     };
 

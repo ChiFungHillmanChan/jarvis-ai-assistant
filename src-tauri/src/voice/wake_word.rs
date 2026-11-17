@@ -451,7 +451,9 @@ async fn handle_wake_word_detection(
         Err(e) => {
             let _ = app_handle.emit("chat-voice-active", json!({"active": false}));
             let _ = app_handle.emit("chat-state", json!({"state": "idle"}));
-            return Err(e);
+            // The voice indicator and Settings show a sentence, not the
+            // error card's data.
+            return Err(crate::ai::failure::plain(&e, crate::ai::bedrock::UiLanguage::read(&db)));
         }
     };
     // The assistant turn goes through the shared guard, never the raw insert:

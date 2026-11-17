@@ -79,6 +79,34 @@ fn provider_reason(err: &str) -> Option<String> {
     Some(if message.chars().count() > MAX { format!("{}…", message.chars().take(MAX).collect::<String>()) } else { message })
 }
 
+/// A sentence for an error shown where no card can be: a voice turn's toast,
+/// the voice indicator and Settings (review A, I-1). A failure card gives its
+/// message and where to pick another model; a consent card says where to
+/// agree. Any other error is returned as it is.
+pub fn plain(error: &str, language: UiLanguage) -> String {
+    let Ok(value) = serde_json::from_str::<serde_json::Value>(error) else { return error.to_string() };
+    let text = |pointer: &str| value.pointer(pointer).and_then(|v| v.as_str()).unwrap_or_default().to_string();
+    match value.pointer("/jarvis_ai/kind").and_then(|kind| kind.as_str()) {
+        Some("failure") => {
+            let acted = value.pointer("/jarvis_ai/failure/actions_ran").and_then(|n| n.as_u64()).unwrap_or(0) > 0;
+            let next = if acted {
+                language.pick("Part of the request was already carried out, such as an event or a draft: check it before you ask again.", "部分操作已完成，例如日曆事件或草稿：再次提出前請先檢查。")
+            } else {
+                language.pick("You can pick another model in Settings, Models.", "可在「設定」的「模型」中改用其他模型。")
+            };
+            format!("{} {next}", text("/jarvis_ai/failure/message"))
+        }
+        Some("consent") => {
+            let label = text("/jarvis_ai/consent/label");
+            language.pick(
+                format!("{label} receives Gmail and Calendar content only after you agree to its data terms. Agree in Settings, Models, then ask again."),
+                format!("你同意 {label} 的資料條款後，{label} 才會收到 Gmail 及日曆內容。請在「設定」的「模型」中同意，然後再問一次。"),
+            )
+        }
+        _ => error.to_string(),
+    }
+}
+
 /// The log line for a failed request (P06, review A M-6): the service, the
 /// failure class, the HTTP status and the provider's own error code or type.
 /// Never the error text: a provider's error text can include the model id,
@@ -326,6 +354,38 @@ pub fn parse(error: &str) -> Option<serde_json::Value> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Voice turns have no card: the toast, the voice indicator and Settings
+    /// show a sentence, in the UI language, saying where to pick a model or
+    /// agree to terms (review A, I-1). Any other error is shown as it is.
+    #[test]
+    fn a_voice_turn_shows_the_cards_sentence_not_its_data() {
+        use super::super::consent::{Request, Subject};
+        use super::super::registry::DataTerms;
+        for language in [UiLanguage::En, UiLanguage::ZhHk] {
+            let failed = Failure::failed("chat", target("Gemini 3.7 Flash"), "Google Gemini API error 429: {}", 0, Vec::new(), language);
+            let shown = plain(&failed.to_error(), language);
+            assert_eq!(shown, format!("{} {}", failed.message, language.pick("You can pick another model in Settings, Models.", "可在「設定」的「模型」中改用其他模型。")));
+            let acted = Failure::failed("chat", target("Gemini 3.7 Flash"), "Google Gemini API error 500: {}", 1, Vec::new(), language);
+            assert_eq!(
+                plain(&acted.to_error(), language),
+                format!("{} {}", acted.message, language.pick("Part of the request was already carried out, such as an event or a draft: check it before you ask again.", "部分操作已完成，例如日曆事件或草稿：再次提出前請先檢查。"))
+            );
+            let consent = Request::new(Subject { provider: "gemini".into(), base_url: String::new() }, "Google Gemini".into(), DataTerms::NeedsBillingConfirmation);
+            assert_eq!(
+                plain(&consent.to_error(), language),
+                language.pick(
+                    "Google Gemini receives Gmail and Calendar content only after you agree to its data terms. Agree in Settings, Models, then ask again.",
+                    "你同意 Google Gemini 的資料條款後，Google Gemini 才會收到 Gmail 及日曆內容。請在「設定」的「模型」中同意，然後再問一次。",
+                )
+            );
+            for shown in [plain(&failed.to_error(), language), plain(&consent.to_error(), language)] {
+                assert!(!shown.contains("jarvis_ai") && !shown.contains('{'), "{shown}");
+            }
+            assert_eq!(plain("另一個助理任務進行中，請等完成後再試。", language), "另一個助理任務進行中，請等完成後再試。");
+            assert_eq!(plain("{\"not\": \"a card\"}", language), "{\"not\": \"a card\"}");
+        }
+    }
 
     /// The chat failure log line names the service, the failure class, the
     /// HTTP status and the provider's own error code or type, never the body:
