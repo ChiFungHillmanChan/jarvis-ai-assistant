@@ -296,23 +296,61 @@ fn label(registry: &Registry, provider: &str, entry: &ProviderChainEntry, model:
     }
 }
 
-/// Whether "Think harder" can do anything on `entry` for a chat turn: the
-/// registry says the premium model thinks or takes a reasoning effort, and
-/// this build can send that on the provider's chat wire with tools.
+/// What "Think harder" asks of the model a chat turn uses, from the
+/// registry's capability flags. Each wire maps it (P06): Gemini sends a
+/// thinking level, Claude adaptive thinking and an effort, OpenAI a
+/// reasoning effort.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Deeper {
+    /// The model thinks before it answers (`capabilities.thinking`).
+    pub thinking: bool,
+    /// The model takes an effort level (`capabilities.reasoning_effort`).
+    pub effort: bool,
+}
+
+/// Whether "Think harder" can do anything on `entry` for a chat turn, and
+/// what: the registry says the premium model thinks or takes a reasoning
+/// effort, and this build can send that on the provider's chat wire with
+/// tools. None hides the button (P06: a button that changes nothing is not
+/// shown).
 ///
-/// OpenAI's Chat Completions refuses function tools when reasoning is on
-/// for gpt-6-luna (ai/openai.rs `reasoning_effort`, verified live
-/// 2026-09-25), and every chat turn sends tools, so api.openai.com is not
-/// offered it until chat moves to the Responses API. Bedrock is left as it
-/// was before P06 (the premium workload is recorded, nothing else changes),
-/// so it is not offered either.
-pub fn think_harder(entry: &ProviderChainEntry) -> bool {
+/// Shown on Gemini, and on Claude once the registry marks its models
+/// (DECISIONS.md, 2026-11-17). OpenAI's Chat Completions refuses function
+/// tools when reasoning is on for gpt-6-luna (ai/openai.rs
+/// `reasoning_effort`, verified live 2026-09-25), and every chat turn sends
+/// tools, so api.openai.com is not offered it until chat moves to the
+/// Responses API; its mapping is written (openai.rs) and kept off here.
+/// Bedrock's wire has no thinking mapping, and local models already think
+/// by default with no verified parameter, so neither is offered.
+pub fn deeper(entry: &ProviderChainEntry) -> Option<Deeper> {
     let registry = registry::current();
-    let Ok(target) = check(&registry, "premium", entry) else { return false };
-    let Some(model) = target.model.as_deref() else { return false };
-    let Some(described) = describing(&registry, &target.provider, model) else { return false };
-    let thinks = described.capabilities.thinking || described.capabilities.reasoning_effort;
-    thinks && matches!(target.provider.as_str(), "gemini" | "claude")
+    let target = check(&registry, "premium", entry).ok()?;
+    let model = target.model.as_deref()?;
+    let described = describing(&registry, &target.provider, model)?;
+    let wanted = Deeper { thinking: described.capabilities.thinking, effort: described.capabilities.reasoning_effort };
+    let offered = matches!(target.provider.as_str(), "gemini" | "claude");
+    (offered && (wanted.thinking || wanted.effort)).then_some(wanted)
+}
+
+/// Whether the "Think harder" button is shown for `entry`.
+pub fn think_harder(entry: &ProviderChainEntry) -> bool {
+    deeper(entry).is_some()
+}
+
+/// What a chat request on `entry` sends for "Think harder": only on a turn
+/// the user marked, and only what the model can take. A stale mark (the
+/// button was on, then the model changed) sends nothing extra.
+pub fn deeper_for(entry: &ProviderChainEntry, workload: Workload) -> Option<Deeper> {
+    if workload == Workload::Premium { deeper(entry) } else { None }
+}
+
+/// Whether the "Think harder" button is shown: the model the next chat turn
+/// goes to ([`super::chosen_entry`]) can think harder ([`think_harder`]).
+#[tauri::command]
+pub async fn think_harder_offered(db: tauri::State<'_, std::sync::Arc<crate::db::Database>>, router: tauri::State<'_, std::sync::Mutex<super::AiRouter>>) -> Result<bool, String> {
+    let router = router.lock().map_err(|e| e.to_string())?.clone();
+    let configured = router.configured(&db).await;
+    Ok(super::chosen_entry(&router.provider_chain, router.chain_loaded_from_db, &configured).is_some_and(|row| think_harder(&row)))
 }
 
 #[cfg(test)]
@@ -513,5 +551,22 @@ mod tests {
         });
         assert!(think_harder(&row("claude", None, None)));
         assert!(!think_harder(&row("gemini", None, None)));
+    }
+
+    /// What a marked turn asks for follows the registry flags; an unmarked
+    /// turn, or a mark left on for a model that cannot take it, asks for
+    /// nothing.
+    #[test]
+    fn a_think_harder_turn_asks_for_what_the_model_can_take() {
+        let gemini = row("gemini", None, None);
+        assert_eq!(deeper_for(&gemini, Workload::Premium), Some(Deeper { thinking: true, effort: false }));
+        assert_eq!(deeper_for(&gemini, Workload::Tools), None);
+        assert_eq!(deeper_for(&row("openai", None, None), Workload::Premium), None, "registry says it reasons; the chat wire cannot");
+        let _registry = test_override::with(|r| {
+            for m in r.models.iter_mut().filter(|m| m.provider == "claude") {
+                m.capabilities.reasoning_effort = true;
+            }
+        });
+        assert_eq!(deeper_for(&row("claude", None, None), Workload::Premium), Some(Deeper { thinking: false, effort: true }));
     }
 }

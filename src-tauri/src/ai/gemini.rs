@@ -100,6 +100,19 @@ struct CandidateContent {
     parts: Option<Vec<GeminiPart>>,
 }
 
+/// The request's generationConfig. A "Think harder" turn on a model the
+/// registry marks as thinking asks for the high thinking level (P06):
+/// `thinkingLevel` is Google's setting for Gemini 3 and later, whose default
+/// level differs per model. Google refuses it on earlier models, which ends
+/// on the error card; nothing is switched.
+fn generation_config(max_output_tokens: u32, deeper: Option<crate::ai::capability::Deeper>) -> serde_json::Value {
+    let mut config = json!({"maxOutputTokens": max_output_tokens});
+    if deeper.is_some_and(|d| d.thinking) {
+        config["thinkingConfig"] = json!({"thinkingLevel": "HIGH"});
+    }
+    config
+}
+
 pub async fn send(
     api_key: &str,
     model: &str,
@@ -109,6 +122,7 @@ pub async fn send(
     app_handle: &tauri::AppHandle,
     tts_tx: Option<tokio::sync::mpsc::Sender<TtsCommand>>,
     workload: crate::ai::Workload,
+    deeper: Option<crate::ai::capability::Deeper>,
     ledger: &crate::ai::SideEffectLedger,
 ) -> Result<String, Box<dyn std::error::Error + Send + Sync>> {
     let started_at = std::time::Instant::now();
@@ -141,9 +155,7 @@ pub async fn send(
             "contents": contents,
             "tools": gemini_tools,
             "systemInstruction": system_instruction,
-            "generationConfig": {
-                "maxOutputTokens": output_cap(model)
-            }
+            "generationConfig": generation_config(output_cap(model), deeper)
         });
         if final_round {
             // The last allowed round answers from what earlier rounds gathered.
@@ -536,6 +548,18 @@ pub(crate) fn restore_json_text(schema: &serde_json::Value, value: &mut serde_js
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// "Think harder" on a thinking model asks for the high thinking level;
+    /// other turns, and a model the registry does not mark as thinking,
+    /// keep Google's default.
+    #[test]
+    fn think_harder_asks_for_the_high_thinking_level() {
+        use crate::ai::capability::Deeper;
+        let deeper = generation_config(100, Some(Deeper { thinking: true, effort: false }));
+        assert_eq!(deeper, json!({"maxOutputTokens": 100, "thinkingConfig": {"thinkingLevel": "HIGH"}}));
+        assert_eq!(generation_config(100, None), json!({"maxOutputTokens": 100}));
+        assert_eq!(generation_config(100, Some(Deeper { thinking: false, effort: true })), json!({"maxOutputTokens": 100}));
+    }
 
     #[test]
     fn stream_chunk_parses_usage_metadata_field_names() {

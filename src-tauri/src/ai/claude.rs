@@ -4,8 +4,9 @@ use futures_util::StreamExt;
 use reqwest::Client;
 use serde::{Deserialize, Serialize};
 use serde_json::json;
-use std::collections::{HashMap, HashSet};
+use std::collections::{BTreeMap, HashMap, HashSet};
 use crate::chat_session::ScopedEmitter;
+use super::capability::Deeper;
 
 #[derive(Serialize)]
 struct ClaudeRequest {
@@ -19,6 +20,20 @@ struct ClaudeRequest {
     tool_choice: Option<serde_json::Value>,
     messages: Vec<ClaudeMessage>,
     stream: bool,
+    /// "Think harder" (P06): adaptive thinking. Not a `budget_tokens`
+    /// budget: the current Claude models refuse one with a 400.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    thinking: Option<serde_json::Value>,
+    /// "Think harder" (P06): a higher effort.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    output_config: Option<serde_json::Value>,
+}
+
+/// What a "Think harder" turn adds to the request, from what the registry
+/// says the model takes ([`Deeper`]). Nothing for any other turn.
+fn think_fields(deeper: Option<Deeper>) -> (Option<serde_json::Value>, Option<serde_json::Value>) {
+    let Some(deeper) = deeper else { return (None, None) };
+    (deeper.thinking.then(|| json!({"type": "adaptive"})), deeper.effort.then(|| json!({"effort": "high"})))
 }
 
 #[derive(Serialize, Deserialize, Clone, Debug)]
@@ -50,6 +65,60 @@ enum ContentBlock {
         tool_use_id: String,
         content: String,
     },
+    /// Sent back unchanged, signature included, when thinking was asked for.
+    #[serde(rename = "thinking")]
+    Thinking { thinking: String, signature: String },
+    #[serde(rename = "redacted_thinking")]
+    RedactedThinking { data: String },
+}
+
+/// One streamed reply's blocks in the order they came, for the next round
+/// of a turn that asked for thinking: the thinking blocks go back unchanged
+/// (their signatures too), before the tool calls they led to.
+#[derive(Default)]
+struct Replay {
+    blocks: BTreeMap<usize, ContentBlock>,
+    tool_inputs: BTreeMap<usize, String>,
+}
+
+impl Replay {
+    fn start(&mut self, index: usize, block: &SseContentBlock) {
+        let started = match block.block_type.as_str() {
+            "text" => ContentBlock::Text { text: block.text.clone().unwrap_or_default() },
+            "thinking" => ContentBlock::Thinking { thinking: block.thinking.clone().unwrap_or_default(), signature: block.signature.clone().unwrap_or_default() },
+            "redacted_thinking" => ContentBlock::RedactedThinking { data: block.data.clone().unwrap_or_default() },
+            "tool_use" => ContentBlock::ToolUse { id: block.id.clone().unwrap_or_default(), name: block.name.clone().unwrap_or_default(), input: json!({}) },
+            _ => return,
+        };
+        self.blocks.insert(index, started);
+    }
+
+    fn delta(&mut self, index: usize, delta: &SseDelta) {
+        match (self.blocks.get_mut(&index), delta.delta_type.as_deref()) {
+            (Some(ContentBlock::Text { text }), Some("text_delta")) => text.push_str(delta.text.as_deref().unwrap_or_default()),
+            (Some(ContentBlock::Thinking { thinking, .. }), Some("thinking_delta")) => thinking.push_str(delta.thinking.as_deref().unwrap_or_default()),
+            (Some(ContentBlock::Thinking { signature, .. }), Some("signature_delta")) => signature.push_str(delta.signature.as_deref().unwrap_or_default()),
+            (Some(ContentBlock::ToolUse { .. }), Some("input_json_delta")) => self.tool_inputs.entry(index).or_default().push_str(delta.partial_json.as_deref().unwrap_or_default()),
+            _ => {}
+        }
+    }
+
+    /// The assistant turn to send back, every block in its place. An empty
+    /// text block is left out: the API refuses one.
+    fn into_blocks(self) -> Vec<ContentBlock> {
+        let Replay { blocks, tool_inputs } = self;
+        blocks
+            .into_iter()
+            .filter(|(_, block)| !matches!(block, ContentBlock::Text { text } if text.is_empty()))
+            .map(|(index, block)| match block {
+                ContentBlock::ToolUse { id, name, .. } => {
+                    let input = tool_inputs.get(&index).and_then(|raw| serde_json::from_str(raw).ok()).unwrap_or_else(|| json!({}));
+                    ContentBlock::ToolUse { id, name, input }
+                }
+                other => other,
+            })
+            .collect()
+    }
 }
 
 // ClaudeResponse and ResponseBlock are no longer needed (SSE replaces JSON parsing)
@@ -71,6 +140,7 @@ struct SseDelta {
     delta_type: Option<String>,
     text: Option<String>,
     thinking: Option<String>,
+    signature: Option<String>,
     partial_json: Option<String>,
     stop_reason: Option<String>,
 }
@@ -81,6 +151,10 @@ struct SseContentBlock {
     block_type: String,
     id: Option<String>,
     name: Option<String>,
+    text: Option<String>,
+    thinking: Option<String>,
+    signature: Option<String>,
+    data: Option<String>,
 }
 
 #[derive(Deserialize)]
@@ -122,8 +196,10 @@ pub async fn send(
     app_handle: &tauri::AppHandle,
     tts_tx: Option<tokio::sync::mpsc::Sender<TtsCommand>>,
     workload: crate::ai::Workload,
+    deeper: Option<Deeper>,
     ledger: &crate::ai::SideEffectLedger,
 ) -> Result<String, Box<dyn std::error::Error + Send + Sync>> {
+    let (thinking, output_config) = think_fields(deeper);
     let client = Client::builder()
         .read_timeout(std::time::Duration::from_secs(60))
         .build()?;
@@ -158,6 +234,8 @@ pub async fn send(
             tool_choice: final_round.then(|| json!({"type": "none"})),
             messages: claude_messages.clone(),
             stream: true,
+            thinking: thinking.clone(),
+            output_config: output_config.clone(),
         };
 
         let response = client
@@ -191,6 +269,7 @@ pub async fn send(
         let mut stop_reason: Option<String> = None;
         let mut response_started = false;
         let mut round_usage = RoundUsage::default();
+        let mut replay = Replay::default();
 
         while let Some(chunk_result) = stream.next().await {
             let chunk = match chunk_result {
@@ -264,6 +343,9 @@ pub async fn send(
                     }
                     "content_block_start" => {
                         if let Some(ref cb) = sse.content_block {
+                            if let Some(idx) = sse.index {
+                                replay.start(idx, cb);
+                            }
                             if cb.block_type == "tool_use" {
                                 if let (Some(ref id), Some(ref name), Some(idx)) =
                                     (&cb.id, &cb.name, sse.index)
@@ -287,6 +369,9 @@ pub async fn send(
                     }
                     "content_block_delta" => {
                         if let Some(ref delta) = sse.delta {
+                            if let Some(idx) = sse.index {
+                                replay.delta(idx, delta);
+                            }
                             match delta.delta_type.as_deref() {
                                 Some("text_delta") => {
                                     if let Some(ref text) = delta.text {
@@ -365,18 +450,25 @@ pub async fn send(
         // If there are tool calls, execute them and continue. The last round
         // runs no tools.
         if !tool_uses.is_empty() && !final_round {
-            // Build assistant message with text and tool_use blocks
-            let mut assistant_blocks: Vec<ContentBlock> = Vec::new();
-            for text in &text_parts {
-                assistant_blocks.push(ContentBlock::Text { text: text.clone() });
-            }
-            for (id, name, input) in &tool_uses {
-                assistant_blocks.push(ContentBlock::ToolUse {
-                    id: id.clone(),
-                    name: name.clone(),
-                    input: input.clone(),
-                });
-            }
+            // Build assistant message with text and tool_use blocks. A
+            // turn that asked for thinking sends the reply back as it came,
+            // thinking blocks included, which Anthropic requires with tools.
+            let assistant_blocks: Vec<ContentBlock> = if thinking.is_some() || output_config.is_some() {
+                replay.into_blocks()
+            } else {
+                let mut assistant_blocks = Vec::new();
+                for text in &text_parts {
+                    assistant_blocks.push(ContentBlock::Text { text: text.clone() });
+                }
+                for (id, name, input) in &tool_uses {
+                    assistant_blocks.push(ContentBlock::ToolUse {
+                        id: id.clone(),
+                        name: name.clone(),
+                        input: input.clone(),
+                    });
+                }
+                assistant_blocks
+            };
             claude_messages.push(ClaudeMessage {
                 role: "assistant".into(),
                 content: ClaudeContent::Blocks(assistant_blocks),
@@ -492,9 +584,64 @@ mod tests {
     #[test]
     fn only_the_last_round_turns_tools_off() {
         let request = |tool_choice| {
-            serde_json::to_value(ClaudeRequest { model: "m".into(), max_tokens: 1, system: String::new(), tools: Vec::new(), tool_choice, messages: Vec::new(), stream: true }).unwrap()
+            serde_json::to_value(ClaudeRequest { model: "m".into(), max_tokens: 1, system: String::new(), tools: Vec::new(), tool_choice, messages: Vec::new(), stream: true, thinking: None, output_config: None }).unwrap()
         };
         assert_eq!(request(Some(json!({"type": "none"})))["tool_choice"]["type"], "none");
         assert!(request(None).get("tool_choice").is_none());
+    }
+
+    /// "Think harder" maps to adaptive thinking and a higher effort, as far
+    /// as the registry says the model takes them; never a budget_tokens
+    /// budget (refused by the current models). Other turns send neither.
+    #[test]
+    fn think_harder_asks_for_adaptive_thinking_and_a_higher_effort() {
+        let body = |deeper| {
+            let (thinking, output_config) = think_fields(deeper);
+            serde_json::to_value(ClaudeRequest { model: "m".into(), max_tokens: 1, system: String::new(), tools: Vec::new(), tool_choice: None, messages: Vec::new(), stream: true, thinking, output_config }).unwrap()
+        };
+        let both = body(Some(Deeper { thinking: true, effort: true }));
+        assert_eq!(both["thinking"], json!({"type": "adaptive"}));
+        assert_eq!(both["output_config"], json!({"effort": "high"}));
+        assert!(!both.to_string().contains("budget_tokens"));
+        let effort = body(Some(Deeper { thinking: false, effort: true }));
+        assert!(effort.get("thinking").is_none() && effort["output_config"]["effort"] == "high");
+        let plain = body(None);
+        assert!(plain.get("thinking").is_none() && plain.get("output_config").is_none());
+    }
+
+    /// A turn that asked for thinking sends the reply back as it streamed:
+    /// the thinking block with its signature, the text and the tool call in
+    /// their order, and a redacted block untouched.
+    #[test]
+    fn thinking_blocks_go_back_unchanged_before_the_tool_call() {
+        let event = |data: serde_json::Value| serde_json::from_value::<SseEvent>(data).unwrap();
+        let mut replay = Replay::default();
+        for e in [
+            json!({"type": "content_block_start", "index": 0, "content_block": {"type": "thinking", "thinking": "", "signature": ""}}),
+            json!({"type": "content_block_delta", "index": 0, "delta": {"type": "thinking_delta", "thinking": "Check the "}}),
+            json!({"type": "content_block_delta", "index": 0, "delta": {"type": "thinking_delta", "thinking": "calendar."}}),
+            json!({"type": "content_block_delta", "index": 0, "delta": {"type": "signature_delta", "signature": "c2ln"}}),
+            json!({"type": "content_block_start", "index": 1, "content_block": {"type": "redacted_thinking", "data": "b3BhcXVl"}}),
+            json!({"type": "content_block_start", "index": 2, "content_block": {"type": "text", "text": ""}}),
+            json!({"type": "content_block_start", "index": 4, "content_block": {"type": "text", "text": ""}}),
+            json!({"type": "content_block_delta", "index": 2, "delta": {"type": "text_delta", "text": "Looking."}}),
+            json!({"type": "content_block_start", "index": 3, "content_block": {"type": "tool_use", "id": "t1", "name": "list_events", "input": {}}}),
+            json!({"type": "content_block_delta", "index": 3, "delta": {"type": "input_json_delta", "partial_json": "{\"days\":"}}),
+            json!({"type": "content_block_delta", "index": 3, "delta": {"type": "input_json_delta", "partial_json": "7}"}}),
+        ] {
+            let e = event(e);
+            match (e.event_type.as_str(), e.index) {
+                ("content_block_start", Some(i)) => replay.start(i, e.content_block.as_ref().unwrap()),
+                ("content_block_delta", Some(i)) => replay.delta(i, e.delta.as_ref().unwrap()),
+                _ => {}
+            }
+        }
+        let sent = serde_json::to_value(replay.into_blocks()).unwrap();
+        assert_eq!(sent, json!([
+            {"type": "thinking", "thinking": "Check the calendar.", "signature": "c2ln"},
+            {"type": "redacted_thinking", "data": "b3BhcXVl"},
+            {"type": "text", "text": "Looking."},
+            {"type": "tool_use", "id": "t1", "name": "list_events", "input": {"days": 7}},
+        ]));
     }
 }
