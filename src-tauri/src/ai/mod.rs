@@ -1144,6 +1144,12 @@ mod tests {
         assert_eq!(unsaved_choice("", keys, false).as_ref().map(row), Some(row(&chosen)));
         let tail: Vec<_> = router.provider_chain().iter().rev().take(2).map(|e| e.provider_type.clone()).collect();
         assert_eq!(tail, ["openai", "claude"]);
+        // Decided when asked, from the keys the router holds then, as the
+        // mail gate decides: not from a chain built when an earlier key was
+        // added (or before any was).
+        let mut not_rebuilt = AiRouter::new("");
+        not_rebuilt.set_claude_key("test-claude");
+        assert_eq!(not_rebuilt.chosen(&configured).map(|e| e.provider_type), Some("claude".to_string()));
         // A saved chain is followed as saved.
         router.set_provider_chain(vec![ProviderChainEntry { position: 0, provider_type: "openai".into(), endpoint_id: None, model_id: None, enabled: true, base_url: None }]);
         assert_eq!(router.chosen(&configured).unwrap().provider_type, "openai");

@@ -651,8 +651,10 @@ mod tests {
             assert!(refused(&claude_install));
         }
         {
+            // Keys not read yet: JARVIS cannot tell, which is not "no AI set up".
             let _keys = keys_found::without();
-            assert!(refused(&claude_install));
+            let not_read = check(&claude_install);
+            assert!(matches!(&not_read, Err(Blocked::Undecided(message)) if message.starts_with("JARVIS could not tell which AI would answer")), "{not_read:?}");
         }
         claude_install.conn.lock().unwrap().execute_batch("DROP TABLE provider_chain").unwrap();
         assert!(refused(&claude_install));
