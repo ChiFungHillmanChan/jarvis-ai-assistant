@@ -338,7 +338,7 @@ pub async fn test_mail_ai_connection(
             status.state = "action_required";
             status.error_code = Some(blocked.code());
             if let crate::ai::mail_policy::Blocked::NeedsConsent(request) = blocked {
-                status.consent = Some(request);
+                status.consent = Some(*request);
             }
             return Ok(status);
         }

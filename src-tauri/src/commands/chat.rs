@@ -129,8 +129,10 @@ async fn send_scoped(
     let msg_lower = message.to_lowercase();
     let history_session = session_id.clone();
 
+    // (history, context messages, the saved message's id, email held back)
+    type Turn = (Vec<(String, String)>, Vec<(String, String)>, i64, Option<crate::ai::mail_policy::Blocked>);
     let (history, context_messages, message_id, held_back) = tokio::task::spawn_blocking(
-        move || -> Result<(Vec<(String, String)>, Vec<(String, String)>, i64, Option<crate::ai::mail_policy::Blocked>), String> {
+        move || -> Result<Turn, String> {
             let (message_id, history) = if retrying { save_retried_turn(&db_arc, &history_session, &msg_clone)? } else { save_turn(&db_arc, &history_session, &msg_clone)? };
 
             // Only add context for questions about personal data (saves tokens)

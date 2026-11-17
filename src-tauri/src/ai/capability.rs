@@ -194,7 +194,8 @@ pub fn resolve(key: &str, entry: &ProviderChainEntry, configured: &[ProviderChai
     let registry = registry::current();
     match check(&registry, key, entry) {
         Ok(target) => Resolved::Ready(target),
-        Err((target, reason)) => {
+        Err(unready) => {
+            let (target, reason) = *unready;
             let mut alternatives = Vec::new();
             if let Reason::Disabled { replacement: Some(replacement) } = &reason {
                 let pick = Pick { model_id: Some(replacement.clone()), ..Pick::of(entry) };
@@ -238,7 +239,7 @@ pub fn is_offered(key: &str, pick: &Pick, configured: &[ProviderChainEntry]) -> 
     offered_for(key, configured).iter().any(|a| a.pick == *pick)
 }
 
-fn check(registry: &Registry, key: &str, entry: &ProviderChainEntry) -> Result<Target, (Target, Reason)> {
+fn check(registry: &Registry, key: &str, entry: &ProviderChainEntry) -> Result<Target, Box<(Target, Reason)>> {
     let pick = Pick::of(entry);
     // Speech providers are not chat rows: Whisper on this Mac and MiniMax
     // are asked for by name.
@@ -249,7 +250,7 @@ fn check(registry: &Registry, key: &str, entry: &ProviderChainEntry) -> Result<T
     };
     let Some(provider) = speech.or_else(|| super::mail_policy::registry_provider(entry)) else {
         let target = Target { label: entry.provider_type.clone(), pick, provider: entry.provider_type.clone(), model: None };
-        return Err((target, Reason::UnknownProvider));
+        return Err(Box::new((target, Reason::UnknownProvider)));
     };
     let model = match own_model_only(key) {
         Some(wires) => wires.contains(&provider).then(|| registry.feature_default(key, provider).map(str::to_string)).flatten(),
@@ -259,13 +260,13 @@ fn check(registry: &Registry, key: &str, entry: &ProviderChainEntry) -> Result<T
         }),
     };
     let target = Target { label: label(registry, provider, entry, model.as_deref()), pick, provider: provider.to_string(), model: model.clone() };
-    let Some(model) = model else { return Err((target, Reason::NoModel)) };
+    let Some(model) = model else { return Err(Box::new((target, Reason::NoModel))) };
     if let ModelState::Disabled { replacement } = registry.model_state(provider, &model) {
-        return Err((target, Reason::Disabled { replacement }));
+        return Err(Box::new((target, Reason::Disabled { replacement })));
     }
     if let (Some(capability), Some(entry)) = (needs(key, provider), describing(registry, provider, &model)) {
         if !has(entry, capability) {
-            return Err((target, Reason::Missing { capability: capability.to_string() }));
+            return Err(Box::new((target, Reason::Missing { capability: capability.to_string() })));
         }
     }
     Ok(target)

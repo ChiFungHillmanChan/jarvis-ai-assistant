@@ -178,7 +178,7 @@ pub fn list(db: &Database) -> Result<Vec<Given>, String> {
 #[tauri::command]
 pub fn ai_consent_needed(db: tauri::State<'_, std::sync::Arc<Database>>) -> Option<Request> {
     match super::mail_policy::check(&db) {
-        Err(super::mail_policy::Blocked::NeedsConsent(request)) => Some(request),
+        Err(super::mail_policy::Blocked::NeedsConsent(request)) => Some(*request),
         _ => None,
     }
 }

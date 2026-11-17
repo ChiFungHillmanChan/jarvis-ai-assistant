@@ -28,7 +28,7 @@ use crate::db::Database;
 pub enum Blocked {
     /// The provider's terms need the user's consent, not given yet (or
     /// given under milder terms than those now in force).
-    NeedsConsent(consent::Request),
+    NeedsConsent(Box<consent::Request>),
     /// A row type this build does not know: there is nothing to agree to.
     NotAllowed(String),
 }
@@ -116,7 +116,7 @@ fn allowed(db: &Database, entry: &ProviderChainEntry) -> Result<(), Blocked> {
     if consent::holds(db, &subject, terms) {
         return Ok(());
     }
-    Err(Blocked::NeedsConsent(consent::Request::new(subject, label, terms)))
+    Err(Blocked::NeedsConsent(Box::new(consent::Request::new(subject, label, terms))))
 }
 
 /// The name the card gives a subject, and the terms in force for it. An
@@ -393,7 +393,7 @@ mod tests {
     /// The consent card `check` asks for.
     fn card(db: &Database) -> consent::Request {
         match check(db) {
-            Err(Blocked::NeedsConsent(request)) => request,
+            Err(Blocked::NeedsConsent(request)) => *request,
             other => panic!("expected a consent card, got {other:?}"),
         }
     }
@@ -406,7 +406,10 @@ mod tests {
     /// consent, are allowed after it and ask again after it is revoked.
     #[test]
     fn each_data_terms_level_before_and_after_consent_and_after_revocation() {
-        let cases: [(&[(&str, Option<&str>, Option<&str>)], (&str, &str, &str, DataTerms)); 3] = [
+        // The saved chain, and the consent card it should ask for.
+        type Row<'a> = (&'a str, Option<&'a str>, Option<&'a str>);
+        type Card<'a> = (&'a str, &'a str, &'a str, DataTerms);
+        let cases: [(&[Row], Card); 3] = [
             (&[("gemini", None, None)], ("gemini", "", "Google Gemini", DataTerms::NeedsBillingConfirmation)),
             (&[("openai", KIMI, None)], ("kimi", "https://api.moonshot.ai/v1", "Kimi", DataTerms::Unknown)),
             (&[("local", None, Some("lan"))], ("ollama", "https://llm.example.com", "llm.example.com", DataTerms::Unknown)),
