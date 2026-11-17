@@ -376,7 +376,7 @@ pub fn think_harder_model(entry: &ProviderChainEntry) -> Option<String> {
 pub async fn think_harder_offered(db: tauri::State<'_, std::sync::Arc<crate::db::Database>>, router: tauri::State<'_, std::sync::Mutex<super::AiRouter>>) -> Result<Option<String>, String> {
     let router = router.lock().map_err(|e| e.to_string())?.clone();
     let configured = router.configured(&db).await;
-    Ok(super::chosen_entry(&router.provider_chain, router.chain_loaded_from_db, &configured).and_then(|row| think_harder_model(&row)))
+    Ok(router.chosen(&configured).and_then(|row| think_harder_model(&row)))
 }
 
 #[cfg(test)]

@@ -315,6 +315,90 @@ pub(crate) fn chosen_entry(chain: &[ProviderChainEntry], saved: bool, configured
     unsaved_chain_choice(chain, configured)
 }
 
+/// Which of the router's own keys exist (never the keys themselves), as
+/// `AiRouter::reload_keys` last found them.
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub(crate) struct KeysFound {
+    pub gemini: bool,
+    pub claude: bool,
+    pub openai: bool,
+}
+
+static KEYS_FOUND: std::sync::RwLock<Option<KeysFound>> = std::sync::RwLock::new(None);
+
+/// The keys the last `reload_keys` found. The mail gate uses them to work
+/// out which model a chain nobody saved runs on ([`unsaved_choice`])
+/// without a Keychain read of its own. None until the first read.
+pub(crate) fn keys_found() -> Option<KeysFound> {
+    #[cfg(test)]
+    return keys_found::get();
+    #[cfg(not(test))]
+    KEYS_FOUND.read().ok().and_then(|keys| *keys)
+}
+
+/// Tests set the keys the gate sees for this thread.
+#[cfg(test)]
+pub(crate) mod keys_found {
+    use super::KeysFound;
+    use std::cell::Cell;
+
+    thread_local! { static OVERRIDE: Cell<Option<KeysFound>> = const { Cell::new(None) }; }
+
+    pub(crate) fn get() -> Option<KeysFound> {
+        OVERRIDE.with(Cell::get)
+    }
+
+    pub(crate) struct Guard(Option<KeysFound>);
+
+    impl Drop for Guard {
+        fn drop(&mut self) {
+            OVERRIDE.with(|o| o.set(self.0));
+        }
+    }
+
+    pub(crate) fn with(keys: KeysFound) -> Guard {
+        Guard(OVERRIDE.with(|o| o.replace(Some(keys))))
+    }
+
+    /// As before the first Keychain read.
+    pub(crate) fn without() -> Guard {
+        Guard(OVERRIDE.with(|o| o.replace(None)))
+    }
+}
+
+/// The chain a request runs on when nobody saved one: the preset's rows,
+/// then Claude and then OpenAI when their keys exist and the preset has no
+/// row for them. Worked out when it is used, from the registry in force, so
+/// the router and the mail gate agree.
+pub(crate) fn unsaved_chain(preset: &str, keys: KeysFound) -> Vec<ProviderChainEntry> {
+    let mut chain = preset_chain(preset);
+    for (provider_type, keyed) in [("claude", keys.claude), ("openai", keys.openai)] {
+        if keyed && !chain.iter().any(|entry| entry.provider_type == provider_type) {
+            chain.push(ProviderChainEntry { position: chain.len() as i32, provider_type: provider_type.into(), endpoint_id: None, model_id: None, enabled: true, base_url: None });
+        }
+    }
+    chain
+}
+
+/// The model a request with no pick runs on when nobody saved a chain, by
+/// the rule in [`unsaved_chain_choice`]. The mail gate asks this
+/// (`mail_policy::check`); the router decides with the same two functions
+/// (`AiRouter::chosen`). `bedrock`: AWS credentials are saved.
+pub(crate) fn unsaved_choice(preset: &str, keys: KeysFound, bedrock: bool) -> Option<ProviderChainEntry> {
+    let keyed = [("gemini", keys.gemini), ("claude", keys.claude), ("openai", keys.openai), ("bedrock", bedrock)];
+    let configured: Vec<ProviderChainEntry> = keyed
+        .into_iter()
+        .filter(|(_, keyed)| *keyed)
+        .map(|(provider_type, _)| ProviderChainEntry { position: 0, provider_type: provider_type.into(), endpoint_id: None, model_id: None, enabled: true, base_url: None })
+        .collect();
+    unsaved_chain_choice(&unsaved_chain(preset, keys), &configured)
+}
+
+/// Whether AWS credentials are saved, as the router counts Bedrock keyed.
+pub(crate) fn bedrock_saved(db: &crate::db::Database) -> bool {
+    db.conn.lock().ok().is_some_and(|conn| conn.query_row("SELECT 1 FROM aws_credentials WHERE id = 1", [], |_| Ok(())).is_ok())
+}
+
 /// The choice for a chain nobody saved (DECISIONS, P06 "Failure handling",
 /// point 2): the first enabled row that has credentials counts as the
 /// user's choice, since nobody chose and there is nothing to switch away
@@ -467,6 +551,9 @@ pub struct AiRouter {
     /// built-in default, so a chain the user deliberately edited (even down
     /// to zero rows re-added by hand) is never appended to behind their back.
     chain_loaded_from_db: bool,
+    /// The preset the router was built from (`ai_provider`): a chain nobody
+    /// saved is worked out from it ([`unsaved_chain`]).
+    preset: String,
     /// Keys for OpenAI-compatible services by host, for a router built to
     /// test a choice before it is saved. Otherwise the Keychain is read when
     /// the service is used.
@@ -529,8 +616,24 @@ impl AiRouter {
             provider_chain: chain,
             local_endpoints: Vec::new(),
             chain_loaded_from_db: false,
+            preset: provider_setting.to_string(),
             compat_keys: HashMap::new(),
         }
+    }
+
+    /// Which of the router's own keys exist.
+    pub(crate) fn keys_found(&self) -> KeysFound {
+        KeysFound { gemini: self.gemini_key.is_some(), claude: self.claude_key.is_some(), openai: self.openai_key.is_some() }
+    }
+
+    /// The model a request with no pick runs on (P06): the first enabled row
+    /// of a saved chain, or for a chain nobody saved the one
+    /// [`unsaved_chain`] and the keys give now. None: no AI chosen.
+    pub(crate) fn chosen(&self, configured: &[ProviderChainEntry]) -> Option<ProviderChainEntry> {
+        if self.chain_loaded_from_db {
+            return chosen_entry(&self.provider_chain, true, configured);
+        }
+        chosen_entry(&unsaved_chain(&self.preset, self.keys_found()), false, configured)
     }
 
     /// Load provider chain from database (call after construction)
@@ -650,6 +753,9 @@ impl AiRouter {
         self.gemini_key = resolve_key_with("GEMINI_API_KEY", || from_keychain("gemini_api_key"));
         self.claude_key = resolve_key_with("ANTHROPIC_API_KEY", || from_keychain("claude_api_key"));
         self.openai_key = resolve_key_with("OPENAI_API_KEY", || from_keychain("openai_api_key"));
+        if let Ok(mut found) = KEYS_FOUND.write() {
+            *found = Some(self.keys_found());
+        }
     }
 
     /// Add Claude and/or OpenAI to the built-in default chain when the user
@@ -666,36 +772,9 @@ impl AiRouter {
         if self.chain_loaded_from_db {
             return;
         }
-        if self.claude_key.is_some()
-            && !self
-                .provider_chain
-                .iter()
-                .any(|entry| entry.provider_type == "claude")
-        {
-            self.provider_chain.push(ProviderChainEntry {
-                position: self.provider_chain.len() as i32,
-                provider_type: "claude".into(),
-                endpoint_id: None,
-                model_id: None,
-                enabled: true,
-                base_url: None,
-            });
-        }
-        if self.openai_key.is_some()
-            && !self
-                .provider_chain
-                .iter()
-                .any(|entry| entry.provider_type == "openai")
-        {
-            self.provider_chain.push(ProviderChainEntry {
-                position: self.provider_chain.len() as i32,
-                provider_type: "openai".into(),
-                endpoint_id: None,
-                model_id: None,
-                enabled: true,
-                base_url: None,
-            });
-        }
+        // Rebuilt rather than appended to, so the rows come in the same
+        // order whichever key was added first ([`unsaved_chain`]).
+        self.provider_chain = unsaved_chain(&self.preset, self.keys_found());
     }
 
     pub fn provider_chain(&self) -> &[ProviderChainEntry] {
@@ -850,7 +929,7 @@ impl AiRouter {
     /// whose credential is there (a compatible service or a local model is
     /// offered only on the model the user saved for it).
     pub(crate) async fn configured(&self, db: &crate::db::Database) -> Vec<ProviderChainEntry> {
-        let bedrock = db.conn.lock().ok().is_some_and(|conn| conn.query_row("SELECT 1 FROM aws_credentials WHERE id = 1", [], |_| Ok(())).is_ok());
+        let bedrock = bedrock_saved(db);
         let keyed = |provider_type: &str| match provider_type {
             "gemini" => self.gemini_key.is_some(),
             "claude" => self.claude_key.is_some(),
@@ -883,7 +962,7 @@ impl AiRouter {
     pub(crate) async fn google_content_card(&self, db: &crate::db::Database, feature: cost::Feature, message: String) -> String {
         let configured = self.configured(db).await;
         let key = capability::feature_key(feature, Workload::Volume);
-        let entry = capability::picked().map(|pick| pick.entry()).or_else(|| chosen_entry(&self.provider_chain, self.chain_loaded_from_db, &configured));
+        let entry = capability::picked().map(|pick| pick.entry()).or_else(|| self.chosen(&configured));
         let Some(entry) = entry else { return message };
         let target = match capability::resolve(key, &entry, &configured) {
             capability::Resolved::Ready(target) => target,
@@ -908,7 +987,7 @@ impl AiRouter {
         ledger: SideEffectLedger,
     ) -> Result<String, String> {
         let configured = self.configured(db).await;
-        let chosen = chosen_entry(&self.provider_chain, self.chain_loaded_from_db, &configured);
+        let chosen = self.chosen(&configured);
         let (messages, tts_tx, ledger_ref) = (&messages, &tts_tx, &ledger);
         run_chosen(
             chosen,
@@ -1043,6 +1122,32 @@ impl AiRouter {
 mod tests {
     use super::*;
     use std::collections::HashSet;
+
+    /// A chain nobody saved is worked out when the request is sent, from the
+    /// preset, the keys and the registry in force: the order keys were added
+    /// in does not change which model answers, and the mail gate gets the
+    /// same answer from the same function (review B, I-1).
+    #[tokio::test]
+    async fn the_model_an_unsaved_chain_runs_on_does_not_depend_on_the_order_keys_were_added() {
+        let db = crate::db::test_database();
+        let mut router = AiRouter::new("");
+        router.set_openai_key("test-openai");
+        router.append_default_fallbacks();
+        router.set_claude_key("test-claude");
+        router.append_default_fallbacks();
+        let configured = router.configured(&db).await;
+        let keys = KeysFound { gemini: false, claude: true, openai: true };
+        assert_eq!(router.keys_found(), keys);
+        let chosen = router.chosen(&configured).unwrap();
+        assert_eq!(chosen.provider_type, "claude");
+        let row = |e: &ProviderChainEntry| (e.provider_type.clone(), e.model_id.clone(), e.base_url.clone(), e.endpoint_id.clone());
+        assert_eq!(unsaved_choice("", keys, false).as_ref().map(row), Some(row(&chosen)));
+        let tail: Vec<_> = router.provider_chain().iter().rev().take(2).map(|e| e.provider_type.clone()).collect();
+        assert_eq!(tail, ["openai", "claude"]);
+        // A saved chain is followed as saved.
+        router.set_provider_chain(vec![ProviderChainEntry { position: 0, provider_type: "openai".into(), endpoint_id: None, model_id: None, enabled: true, base_url: None }]);
+        assert_eq!(router.chosen(&configured).unwrap().provider_type, "openai");
+    }
 
     /// Every tool the app defines is either an action (a resend or a
     /// picked "send again" would carry it out twice, so neither happens

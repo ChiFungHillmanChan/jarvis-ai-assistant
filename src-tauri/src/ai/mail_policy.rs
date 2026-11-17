@@ -38,6 +38,10 @@ pub enum Blocked {
     NotForGoogleContent { label: String, message: String },
     /// A row type this build does not know: there is nothing to agree to.
     NotAllowed(String),
+    /// JARVIS cannot tell which AI would receive it: the saved choice or
+    /// the keys could not be read, or no AI is set up. Fail closed; the
+    /// sentence says why, in the UI language.
+    Undecided(String),
 }
 
 impl Blocked {
@@ -46,6 +50,7 @@ impl Blocked {
             Blocked::NeedsConsent(_) => "consent_needed",
             Blocked::NotForGoogleContent { .. } => "google_content_not_sent",
             Blocked::NotAllowed(_) => "mail_ai_not_allowed",
+            Blocked::Undecided(_) => "mail_ai_undecided",
         }
     }
 
@@ -71,6 +76,7 @@ impl Blocked {
                  the user in one sentence that reading their email or calendar needs another AI."
             ),
             Blocked::NotAllowed(label) => format!("Email and calendar content is not shared with {label}, an AI service this version of JARVIS does not know."),
+            Blocked::Undecided(_) => "Gmail and Calendar content was not sent: JARVIS could not tell which AI service would receive it. Tell the user in one sentence.".to_string(),
         }
     }
 
@@ -81,6 +87,7 @@ impl Blocked {
             Blocked::NeedsConsent(request) => request.to_error(),
             Blocked::NotForGoogleContent { message, .. } => message.clone(),
             Blocked::NotAllowed(label) => format!("電郵內容不會傳送至 {label}：這個版本的 JARVIS 不認識這個 AI 服務。"),
+            Blocked::Undecided(message) => message.clone(),
         }
     }
 
@@ -98,7 +105,7 @@ impl Blocked {
                     super::notify::emit("ai-needs-model", serde_json::json!({ "feature": feature, "message": message, "model": label, "code": "google_content" }));
                 }
             }
-            Blocked::NotAllowed(_) => {}
+            Blocked::NotAllowed(_) | Blocked::Undecided(_) => {}
         }
     }
 }
@@ -112,17 +119,48 @@ pub(crate) fn not_for_google_content(label: &str, language: UiLanguage) -> Strin
 }
 
 /// Whether email content may go to the AI this request uses: a model
-/// picked in the error card for this one request, else the first enabled
-/// row of the saved list (the only one a request is sent to).
+/// picked in the error card for this one request, else [`receiver`].
 pub fn check(db: &Database) -> Result<(), Blocked> {
     if let Some(pick) = super::capability::picked() {
         return allowed(db, &pick.entry());
     }
-    let chosen = crate::commands::ai_choice::saved_chain(db).unwrap_or_default().into_iter().find(|entry| entry.enabled);
-    // No saved choice: an install from before setup asked, which chats with
-    // Gemini by default.
-    let chosen = chosen.unwrap_or(ProviderChainEntry { position: 0, provider_type: "gemini".into(), endpoint_id: None, model_id: None, enabled: true, base_url: None });
-    allowed(db, &chosen)
+    allowed(db, &receiver(db)?)
+}
+
+/// The row a request with no pick is sent to, as the router decides it
+/// (`AiRouter::chosen`): the first enabled row of a saved chain, else, for a
+/// chain nobody saved, [`super::unsaved_choice`] from the preset and the keys.
+/// Refused when any of that cannot be read, or no AI is set up (review B,
+/// I-1): never a guess.
+pub(crate) fn receiver(db: &Database) -> Result<ProviderChainEntry, Blocked> {
+    let language = UiLanguage::read(db);
+    let unreadable = || {
+        Blocked::Undecided(language.pick(
+            "JARVIS could not tell which AI would answer, so Gmail and Calendar content was not sent. Try again.",
+            "JARVIS 未能確定由哪個 AI 回覆，因此沒有傳送 Gmail 及日曆內容。請再試一次。",
+        ))
+    };
+    let none_set_up = || {
+        Blocked::Undecided(language.pick(
+            "No AI is set up to answer, so Gmail and Calendar content was not sent. Add a key or choose an AI in Settings.",
+            "尚未設定回覆的 AI，因此沒有傳送 Gmail 及日曆內容。請在設定中加入密鑰或選擇 AI。",
+        ))
+    };
+    let saved = crate::commands::ai_choice::saved_chain(db).map_err(|_| unreadable())?;
+    // The router follows a saved chain whenever it has rows (load_from_db).
+    if !saved.is_empty() {
+        return saved.into_iter().find(|entry| entry.enabled).ok_or_else(none_set_up);
+    }
+    let preset = {
+        let conn = db.conn.lock().map_err(|_| unreadable())?;
+        match conn.query_row("SELECT value FROM user_preferences WHERE key = 'ai_provider'", [], |row| row.get::<_, String>(0)) {
+            Ok(preset) => preset,
+            Err(rusqlite::Error::QueryReturnedNoRows) => String::new(),
+            Err(_) => return Err(unreadable()),
+        }
+    };
+    let keys = super::keys_found().ok_or_else(unreadable)?;
+    super::unsaved_choice(&preset, keys, super::bedrock_saved(db)).ok_or_else(none_set_up)
 }
 
 /// Whether Gmail and Calendar content may go to `entry` now: the models
@@ -416,6 +454,10 @@ impl<'a> PickedTurn<'a> {
                 format!("{label} will not see this answer or the chat before it: Gmail and Calendar content is not sent to {label}."),
                 format!("{label} 不會看到這個回覆及之前的對話：Gmail 及日曆內容不會傳送至 {label}。"),
             )),
+            Blocked::Undecided(_) => Some(language.pick(
+                "The AI you chose may not see this answer or the chat before it: JARVIS could not tell which AI answers next.",
+                "你選用的 AI 未必會看到這個回覆及之前的對話：JARVIS 未能確定下一次由哪個 AI 回覆。",
+            )),
         }
     }
 }
@@ -537,6 +579,63 @@ mod tests {
         db
     }
 
+    /// With no saved chain the gate judges the row the request runs on, by
+    /// the router's own rule (`ai::unsaved_choice`), not Gemini (review B,
+    /// I-1, with review A, M-2).
+    #[tokio::test]
+    async fn with_no_saved_chain_the_gate_judges_the_row_the_request_runs_on() {
+        use crate::ai::{keys_found, KeysFound};
+        let claude_only = KeysFound { claude: true, ..KeysFound::default() };
+        // A beta install: no saved chain, a Claude key only, and the Gemini
+        // confirmation V36 carried over.
+        let beta = db_with(&[], &[]);
+        agree_to_gemini(&beta);
+        let _keys = keys_found::with(claude_only);
+        let mut router = crate::ai::AiRouter::new("");
+        router.set_claude_key("test-claude");
+        router.append_default_fallbacks();
+        let runs_on = router.chosen(&router.configured(&beta).await).unwrap();
+        assert_eq!(runs_on.provider_type, "claude");
+        let row = |e: ProviderChainEntry| (e.provider_type, e.model_id, e.base_url, e.endpoint_id);
+        assert_eq!(row(receiver(&beta).unwrap()), row(runs_on));
+        assert_eq!(check(&beta), Ok(()));
+        {
+            // A fetched copy tightens Claude: refused, whatever was agreed to Gemini.
+            let _registry = crate::ai::registry::test_override::with(|r| r.providers.iter_mut().find(|p| p.id == "claude").unwrap().data_terms = DataTerms::Unknown);
+            assert!(matches!(check(&beta), Err(Blocked::NotForGoogleContent { .. })), "{:?}", check(&beta));
+        }
+        // The wrong card: only a Claude key and nothing agreed. Claude
+        // answers, so no Gemini consent card.
+        let claude_install = db_with(&[], &[]);
+        assert_eq!(check(&claude_install), Ok(()));
+        {
+            let _keys = keys_found::with(KeysFound { openai: true, ..KeysFound::default() });
+            assert_eq!(receiver(&claude_install).unwrap().provider_type, "openai");
+            assert_eq!(check(&claude_install), Ok(()));
+        }
+        {
+            // A Gemini key: the preset's first row answers, and its card is asked for.
+            let _keys = keys_found::with(KeysFound { gemini: true, claude: true, openai: true });
+            assert_eq!(card(&claude_install).subject().provider, "gemini");
+        }
+        // Fail closed: no key at all, keys not read yet, a chain that cannot be read.
+        let refused = |db: &Database| matches!(check(db), Err(Blocked::Undecided(_)));
+        {
+            let _keys = keys_found::with(KeysFound::default());
+            assert!(refused(&claude_install));
+        }
+        {
+            let _keys = keys_found::without();
+            assert!(refused(&claude_install));
+        }
+        claude_install.conn.lock().unwrap().execute_batch("DROP TABLE provider_chain").unwrap();
+        assert!(refused(&claude_install));
+        // A saved chain with every row turned off sends nothing: refused too.
+        let all_off = db_with(&[("claude", None, None)], &[]);
+        all_off.conn.lock().unwrap().execute("UPDATE provider_chain SET enabled = 0", []).unwrap();
+        assert!(refused(&all_off));
+    }
+
     #[test]
     fn providers_that_do_not_train_on_api_data_receive_email() {
         for chain in [
@@ -600,7 +699,9 @@ mod tests {
             consent::revoke(&db, &subject).unwrap();
             assert_eq!(not_sent(&db), label, "after revocation");
         }
-        // No saved choice means the old Gemini default.
+        // No saved choice: the preset's Gemini row answers when its key is
+        // there, so its card is asked for.
+        let _keys = crate::ai::keys_found::with(crate::ai::KeysFound { gemini: true, ..Default::default() });
         assert_eq!(card(&db_with(&[], &[])).provider, "gemini");
     }
 

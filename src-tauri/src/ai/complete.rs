@@ -52,7 +52,7 @@ pub struct Completion {
 /// a background job (mail sorting) records why and raises one notice.
 pub async fn complete(router: &AiRouter, db: &Database, request: Request<'_>) -> Result<Completion, String> {
     let configured = router.configured(db).await;
-    let chosen = super::chosen_entry(&router.provider_chain, router.chain_loaded_from_db, &configured);
+    let chosen = router.chosen(&configured);
     let ledger = super::SideEffectLedger::new();
     let request = &request;
     super::run_chosen(
