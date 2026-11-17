@@ -1,4 +1,5 @@
 import { invoke as tauriInvoke } from "@tauri-apps/api/core";
+import type { Pick } from "./ai-error.ts";
 import type { CheckoutPage, PaymentPage } from "./types";
 import type { UiLocale } from "../i18n/catalog";
 import type { MailAccount } from "./mail";
@@ -34,8 +35,9 @@ export async function createTask(title: string, description: string | null, dead
 export async function updateTask(id: number, status: string): Promise<void> {
   return invoke("update_task", { id, status });
 }
-export async function sendMessage(message: string, workload?: "tools" | "premium", sessionId?: string, runId?: string): Promise<ChatMessage> {
-  return invoke("send_message", { message, workload, sessionId, runId });
+/** `pick` and `retryOf`: the error card's choice, running the request `retryOf` names once more (P06). */
+export async function sendMessage(message: string, workload?: "tools" | "premium", sessionId?: string, runId?: string, pick?: Pick, retryOf?: string): Promise<ChatMessage> {
+  return invoke("send_message", { message, workload, sessionId, runId, pick, retryOf });
 }
 export async function getConversations(sessionId?: string): Promise<ChatMessage[]> {
   return invoke("get_conversations", { sessionId });

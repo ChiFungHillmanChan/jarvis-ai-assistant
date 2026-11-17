@@ -1,7 +1,11 @@
 import { useEffect, useRef, useState } from 'react';
 import { useUiLocale } from '../i18n';
 import { chooseAi, currentAi, listAiModels, type AiProvider, type CurrentAi } from '../lib/ai-choice';
-import { getOptionalPreference, openUrl, setPreference } from '../lib/commands';
+import { invoke } from '@tauri-apps/api/core';
+import { listen } from '@tauri-apps/api/event';
+import { openUrl } from '../lib/commands';
+import type { ConsentRequest } from '../lib/ai-error';
+import ConsentCard from './ConsentCard';
 import { aiModels, useAiModels, type AiModelCatalog } from '../lib/ai-models';
 import { localized, serviceFor, serviceLabel, setupOptions, type SetupOption } from '../lib/ai-catalog';
 import LocalMailSetup from './LocalMailSetup';
@@ -11,9 +15,6 @@ import '../styles/setup.css';
 // registry's (ai_models); this file has the form for each.
 type Option = SetupOption;
 type Region = string;
-
-/** Same key as ai::mail_policy in Rust. */
-const GEMINI_BILLING_CONFIRMED = 'gemini_billing_confirmed';
 
 function optionFor(ai: CurrentAi | null, catalog: AiModelCatalog | null): Option | null {
   if (!ai) return null;
@@ -42,7 +43,9 @@ export default function ChooseAi({ onChosen, onBusyChange }: { onChosen?: (ai: C
   const [busy, setBusy] = useState('');
   const [error, setError] = useState('');
   const [notice, setNotice] = useState('');
-  const [geminiBilled, setGeminiBilled] = useState(false);
+  // The consent card the chosen AI needs before email and calendar content
+  // goes to it (ai::consent::ai_consent_needed), or null.
+  const [consentNeeded, setConsentNeeded] = useState<ConsentRequest | null>(null);
   const mounted = useRef(true);
   const catalog = useAiModels();
 
@@ -59,9 +62,15 @@ export default function ChooseAi({ onChosen, onBusyChange }: { onChosen?: (ai: C
         if (known) setRegion(known.id); else setOtherUrl(saved);
       }
     }).catch(() => {});
-    void getOptionalPreference(GEMINI_BILLING_CONFIRMED).then(value => { if (mounted.current) setGeminiBilled(value === 'true'); }).catch(() => {});
     return () => { mounted.current = false; };
   }, []);
+  useEffect(() => {
+    let live = true;
+    const refresh = () => void invoke<ConsentRequest | null>('ai_consent_needed').then(needed => { if (live) setConsentNeeded(needed); }).catch(() => {});
+    refresh();
+    const stop = listen('ai-consent-changed', refresh);
+    return () => { live = false; void stop.then(unlisten => unlisten()).catch(() => {}); };
+  }, [current]);
   useEffect(() => { onBusyChange?.(!!busy); }, [busy]);
 
   const offered = setupOptions(catalog);
@@ -117,22 +126,17 @@ export default function ChooseAi({ onChosen, onBusyChange }: { onChosen?: (ai: C
   const options: [Option, string, string][] = offered.map(choice => [choice.option, localized(choice.name, text), localized(choice.hint, text)]);
   const ready = !!provider && consent && (!needsModel || !!model) && (option !== 'other' || !!otherUrl.trim());
 
-  async function confirmGeminiBilling(checked: boolean) {
-    try {
-      await setPreference(GEMINI_BILLING_CONFIRMED, checked ? 'true' : 'false');
-      if (!mounted.current) return;
-      setGeminiBilled(checked);
-      // Setup re-checks mail with Gemini once billing is confirmed.
-      if (checked && current) onChosen?.(current);
-    } catch { if (mounted.current) setError(text('Could not save this setting. Try again.', '未能儲存此設定，請重試。')); }
+  function consentGiven() {
+    setConsentNeeded(null);
+    // Setup checks mail again once the user agrees.
+    if (current) onChosen?.(current);
   }
 
   return <div className="setup-local choose-ai">
     <p className="setup-hint">{current
       ? text(`Now using: ${current.label}${current.model ? ` · ${current.model}` : ['openai', 'gemini', 'claude'].includes(current.provider) ? ' · latest model' : ''}. Choose again to switch; only one AI is used at a time.`, `目前使用：${current.label}${current.model ? `・${current.model}` : ['openai', 'gemini', 'claude'].includes(current.provider) ? '・最新模型' : ''}。重新選擇即可更換；每次只會使用一個 AI。`)
       : text('Choose the AI you already use. Only this AI is used for the assistant, voice replies and mail. You can change it later in Settings.', '請選擇你已在使用的 AI。AI 助理、語音回覆及電郵都只會使用這一個 AI，之後可在設定中更換。')}</p>
-    {current?.provider === 'gemini' && <label className="setup-checkbox"><input type="checkbox" checked={geminiBilled} disabled={!!busy} onChange={e => void confirmGeminiBilling(e.target.checked)} />{text('My Gemini API key has billing enabled. Google does not use paid-tier content to train its models, so JARVIS sends email to Gemini only after you confirm this.', '我的 Gemini API 金鑰已啟用付費。Google 不會以付費方案的內容訓練模型，因此 JARVIS 只會在你確認後才把電郵傳送給 Gemini。')}</label>}
-    {current?.provider === 'compatible' && <p className="setup-hint">{text(`Email is not sent to ${current.label}. Google's rules for Gmail data allow only AI services that do not train on it. Chat and voice use ${current.label}; for email analysis and sorting, choose OpenAI, Claude, a local Ollama model, or Gemini with billing enabled.`, `電郵內容不會傳送至 ${current.label}。Google 對 Gmail 資料的規定只容許不會以此訓練模型的 AI 處理電郵。對話及語音會使用 ${current.label}；如需電郵分析及自動整理，請改選 OpenAI、Claude、本機 Ollama 模型，或已啟用付費的 Gemini。`)}</p>}
+    {current && consentNeeded && <ConsentCard request={consentNeeded} onAgreed={consentGiven} />}
     <fieldset className="choose-ai-options" disabled={!!busy}>
       <legend>{text('Your AI', '你的 AI')}</legend>
       {options.map(([id, label, hint]) => <label key={id} className="setup-checkbox"><input type="radio" name="choose-ai" checked={option === id} onChange={() => pick(id)} /><span>{label}<small>{hint}</small></span></label>)}
@@ -168,9 +172,9 @@ export default function ChooseAi({ onChosen, onBusyChange }: { onChosen?: (ai: C
       <label className="setup-checkbox"><input type="checkbox" checked={consent} disabled={!!busy} onChange={e => setConsent(e.target.checked)} />{option === 'ollama'
         ? text('Testing sends a short message to Ollama on this Mac. Everything stays on this Mac.', '測試會向此 Mac 上的 Ollama 傳送一句簡短訊息，所有資料都留在此 Mac。')
         : option === 'kimi' || option === 'qwen' || option === 'other'
-          ? text(`Testing sends one short message to ${name}. After that, your chats and voice requests are sent to ${name} with your key, and ${name}'s charges apply. Email is not sent to ${name}.`, `測試會向${zhName}傳送一句簡短訊息。之後你的對話及語音指令會以你的密鑰傳送至${zhName.trimEnd()}，並按${zhName}的收費計算。電郵內容不會傳送至${zhName.trimEnd()}。`)
+          ? text(`Testing sends one short message to ${name}. After that, your chats and voice requests are sent to ${name} with your key, and ${name}'s charges apply. JARVIS cannot vouch for ${name}'s data terms, so email and calendar content is sent only after you agree on a card.`, `測試會向${zhName}傳送一句簡短訊息。之後你的對話及語音指令會以你的密鑰傳送至${zhName.trimEnd()}，並按${zhName}的收費計算。JARVIS 無法確認${zhName.trimEnd()}的資料條款，因此電郵及日曆內容只會在你按卡片同意後才傳送。`)
           : option === 'gemini'
-            ? text('Testing sends one short message to Gemini. After that, your chats and voice requests are sent to Gemini with your key, and Gemini\'s charges apply. The mail you ask JARVIS to analyse or sort is sent only after you confirm your key has billing enabled.', '測試會向 Gemini 傳送一句簡短訊息。之後你的對話及語音指令會以你的密鑰傳送至 Gemini，並按 Gemini 的收費計算。你要求 JARVIS 分析或整理的郵件，只會在你確認金鑰已啟用付費後才傳送。')
+            ? text('Testing sends one short message to Gemini. After that, your chats and voice requests are sent to Gemini with your key, and Gemini\'s charges apply. Email and calendar content is sent only after you confirm on a card that your key has billing set up.', '測試會向 Gemini 傳送一句簡短訊息。之後你的對話及語音指令會以你的密鑰傳送至 Gemini，並按 Gemini 的收費計算。電郵及日曆內容只會在你按卡片確認密鑰已設定付費後才傳送。')
             : text(`Testing sends one short message to ${name}. After that, your chats, voice requests and the mail you ask JARVIS to analyse or sort are sent to ${name} with your key, and ${name}'s charges apply.`, `測試會向${zhName}傳送一句簡短訊息。之後你的對話、語音指令，以及你要求 JARVIS 分析或整理的郵件，會以你的密鑰傳送至${zhName.trimEnd()}，並按${zhName}的收費計算。`)}</label>
       <button type="button" className="setup-primary" disabled={!ready || !!busy} onClick={testAndUse}>{text('Test and use this AI', '測試並使用這個 AI')}</button>
     </div>}
