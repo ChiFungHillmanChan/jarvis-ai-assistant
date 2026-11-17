@@ -357,6 +357,31 @@ fn credential_scope(entry: &ProviderChainEntry) -> String {
     }
 }
 
+/// What the chain walk does with a row before anything is sent.
+#[derive(Debug, PartialEq)]
+enum Gate {
+    /// Off, or its credential was already rejected this turn: try the next row.
+    Skip,
+    /// Its saved model is one the registry disabled: the turn ends here and
+    /// the next row is not tried in its place (ai/disabled.rs).
+    Stop(disabled::Disabled),
+    /// Send to it.
+    Send,
+}
+
+/// The walk's pre-send checks, in the order it applies them: enabled, then
+/// a credential rejected this turn, then a disabled saved model. Pure: the
+/// walk turns `Stop` into the message (and the notice) with `disabled::stop`.
+fn gate(entry: &ProviderChainEntry, dead_credentials: &HashSet<String>) -> Gate {
+    if !entry.enabled || dead_credentials.contains(&credential_scope(entry)) {
+        return Gate::Skip;
+    }
+    match disabled::check_entry(entry) {
+        Err(stopped) => Gate::Stop(stopped),
+        Ok(()) => Gate::Send,
+    }
+}
+
 /// Whether the router still has somewhere to go after `idx`: a later entry that
 /// is enabled and whose credential has not already been rejected this turn.
 fn has_live_entry_after(
@@ -790,16 +815,12 @@ impl AiRouter {
         let mut dead_credentials: HashSet<String> = HashSet::new();
 
         for (idx, entry) in self.provider_chain.iter().enumerate() {
-            if !entry.enabled {
-                continue;
-            }
-            if dead_credentials.contains(&credential_scope(entry)) {
-                continue;
-            }
             // A saved model the registry disabled stops the turn here: no
             // request is sent, and the next entry is not tried in its place.
-            if let Err(stopped) = disabled::check_entry(entry) {
-                return Err(disabled::stop(stopped, disabled::is_foreground(cost::current_feature()), bedrock::UiLanguage::read(db)));
+            match gate(entry, &dead_credentials) {
+                Gate::Skip => continue,
+                Gate::Stop(stopped) => return Err(disabled::stop(stopped, disabled::is_foreground(cost::current_feature()), bedrock::UiLanguage::read(db))),
+                Gate::Send => {}
             }
 
             let provider_name = match entry.provider_type.as_str() {
@@ -1687,18 +1708,48 @@ mod tests {
         assert_eq!(gemini_model_for(Some("pinned"), Workload::Premium), "pinned");
     }
 
-    /// The chat chain checks each row's saved model before anything is sent
-    /// and returns at once when the registry disabled it: no request, and no
-    /// fallback to the next row. (The loop needs a running app, so this reads
-    /// the loop's source; the check itself is tested in ai/disabled.rs and,
-    /// on the completion path, in ai/complete.rs.)
+    /// The walk's pre-send checks, by behaviour: a disabled saved model
+    /// stops the turn (Stop, not Skip, so the next row is not tried); a row
+    /// that is off or whose credential was rejected keeps being skipped,
+    /// whatever its model; anything else is sent.
     #[test]
-    fn the_chat_chain_stops_on_a_disabled_model_before_sending() {
-        let source = include_str!("mod.rs");
-        let body = &source[source.find("async fn run_provider_chain(").unwrap()..];
-        let guard = body.find("if let Err(stopped) = disabled::check_entry(entry) {\n                return Err(disabled::stop(").expect("the chain loop checks the saved model and returns");
-        let first_send = body.find("let result = match entry.provider_type.as_str()").unwrap();
-        assert!(guard < first_send, "the check runs before any provider is called");
+    fn the_chain_gate_stops_on_a_disabled_model_and_keeps_its_other_outcomes() {
+        let row = |provider_type: &str, model: Option<&str>, enabled: bool| ProviderChainEntry { position: 0, provider_type: provider_type.into(), endpoint_id: None, model_id: model.map(str::to_string), enabled, base_url: None };
+        let none = HashSet::new();
+        assert_eq!(gate(&row("openai", Some("gpt-5.6-luna"), true), &none), Gate::Send);
+        let _registry = crate::ai::registry::test_override::with(|r| {
+            let entry = r.models.iter_mut().find(|m| m.id == "gpt-5.6-luna").unwrap();
+            entry.status = crate::ai::registry::Status::Disabled;
+            entry.replacement = Some("gpt-6-luna".into());
+        });
+        let disabled_row = row("openai", Some("gpt-5.6-luna"), true);
+        let expected = disabled::Disabled { provider: "openai".into(), model: "gpt-5.6-luna".into(), replacement: Some("gpt-6-luna".into()) };
+        assert_eq!(gate(&disabled_row, &none), Gate::Stop(expected.clone()), "stops: the next row is not tried");
+        assert!(expected.message(bedrock::UiLanguage::En).starts_with("The model gpt-5.6-luna has been turned off"));
+        // The checks before it keep their outcomes, in the walk's order.
+        assert_eq!(gate(&row("openai", Some("gpt-5.6-luna"), false), &none), Gate::Skip, "a row that is off is skipped");
+        let dead: HashSet<String> = [credential_scope(&disabled_row)].into();
+        assert_eq!(gate(&disabled_row, &dead), Gate::Skip, "a rejected credential is skipped");
+        // Anything else is sent: another model, no saved model, another provider.
+        assert_eq!(gate(&row("openai", Some("gpt-6-luna"), true), &none), Gate::Send);
+        assert_eq!(gate(&row("openai", None, true), &none), Gate::Send, "no saved model follows the default");
+        assert_eq!(gate(&row("claude", Some("gpt-5.6-luna"), true), &none), Gate::Send, "another provider's id is not this entry's");
+    }
+
+    /// The walk itself needs a running app (`run_provider_chain` takes an
+    /// `AppHandle<Wry>`; Tauri's test feature is off), so its use of the
+    /// gate is read from the source, whitespace ignored: the gate runs
+    /// before any provider is called, and its Stop returns the disabled
+    /// message in the app's language. P06 reworks the walk and must make it
+    /// testable.
+    #[test]
+    fn the_chat_walk_returns_on_the_gates_stop_before_sending() {
+        let source: String = include_str!("mod.rs").split_whitespace().collect();
+        let body = &source[source.find("asyncfnrun_provider_chain(").unwrap()..];
+        let first_send = body.find("letresult=matchentry.provider_type.as_str()").unwrap();
+        let arm = ["matchgate(entry,&dead_credentials){", "Gate::Skip=>continue,", "Gate::Stop(stopped)=>returnErr(disabled::stop(stopped,disabled::is_foreground(cost::current_feature()),bedrock::UiLanguage::read(db))),", "Gate::Send=>{}", "}"].concat();
+        let at = body.find(&arm).expect("the walk matches on the gate and returns on Stop");
+        assert!(at < first_send, "the gate runs before any provider is called");
     }
 
     /// The geographies a saved Bedrock id is moved between are the registry's.
