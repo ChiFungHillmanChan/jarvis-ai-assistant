@@ -14,6 +14,8 @@ pub mod payments;
 pub mod scheduler;
 pub mod security;
 pub mod system;
+#[cfg(test)]
+mod test_log;
 pub mod tool_approval;
 pub mod tray;
 pub mod util;

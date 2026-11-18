@@ -77,9 +77,7 @@ pub async fn send_message(
     pick: Option<crate::ai::capability::Pick>,
     retry_of: Option<String>,
 ) -> Result<ChatMessage, String> {
-    let session_id = chat_session::identity(session_id, "legacy")?;
-    let run_id = chat_session::identity(run_id, &uuid::Uuid::new_v4().to_string())?;
-    refuse_acted_retry(retry_of.as_deref(), crate::ai::bedrock::UiLanguage::read(&db))?;
+    let (session_id, run_id) = begin_send(&db, session_id, run_id, retry_of.as_deref())?;
     let _guard = chat_session::FOREGROUND.try_lock().map_err(|_| "另一個助理任務進行中，請等完成後再試。".to_string())?;
     let context = chat_session::Context { session_id: session_id.clone(), run_id, app: app_handle.clone() };
     let retrying = retry_of.is_some();
@@ -88,6 +86,17 @@ pub async fn send_message(
     let _ = app_handle.emit("chat-state", json!({"state":"idle"}));
     result
     })).await
+}
+
+/// The session and run ids of a send, once a "send again" for a run that
+/// carried out an action has been refused ([`refuse_acted_retry`]). The
+/// command gets its ids only from here, so it cannot skip the refusal
+/// (review A, N-2).
+fn begin_send(db: &Database, session_id: Option<String>, run_id: Option<String>, retry_of: Option<&str>) -> Result<(String, String), String> {
+    let session_id = chat_session::identity(session_id, "legacy")?;
+    let run_id = chat_session::identity(run_id, &uuid::Uuid::new_v4().to_string())?;
+    refuse_acted_retry(retry_of, crate::ai::bedrock::UiLanguage::read(db))?;
+    Ok((session_id, run_id))
 }
 
 /// A request sent again from the error card (P06): never one that had
@@ -926,6 +935,18 @@ mod tests {
         assert_eq!(refuse_acted_retry(Some(&acted), UiLanguage::ZhHk).unwrap_err(), "這個請求已執行了操作，例如建立日曆事件或草稿。為免重複執行，JARVIS 不會再次傳送。");
         assert_eq!(refuse_acted_retry(Some(&uuid::Uuid::new_v4().to_string()), UiLanguage::En), Ok(()));
         assert_eq!(refuse_acted_retry(None, UiLanguage::En), Ok(()));
+    }
+
+    /// The command takes its session and run ids from the step that refuses
+    /// such a "send again", so it cannot skip the refusal (review A, N-2).
+    #[test]
+    fn the_send_command_refuses_a_run_that_acted_before_anything_runs() {
+        let db = crate::db::test_database();
+        let acted = uuid::Uuid::new_v4().to_string();
+        crate::ai::failure::note_acted(&acted);
+        let refused = refuse_acted_retry(Some(&acted), crate::ai::bedrock::UiLanguage::read(&db)).unwrap_err();
+        assert_eq!(begin_send(&db, Some("s1".into()), Some("r2".into()), Some(&acted)), Err(refused));
+        assert_eq!(begin_send(&db, Some("s1".into()), Some("r2".into()), None), Ok(("s1".to_string(), "r2".to_string())));
     }
 
     fn assert_next_turn_sees_none_of_it(db: &Database) {

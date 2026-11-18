@@ -1377,6 +1377,37 @@ mod tests {
         assert!(events.contains(&("chat-provider".to_string(), json!({"provider": "Gemini 3.7 Flash (Google Gemini)", "status": "failed"}))));
     }
 
+    /// A failed request is logged by `failure::log_line`: the service, the
+    /// failure class, the status and the provider's code, never the body
+    /// (review A, M-6 and N-2).
+    #[tokio::test]
+    async fn a_failed_request_is_logged_without_its_body() {
+        let chain = [chosen_row("gemini", None)];
+        let chosen = chosen_entry(&chain, true, &chain);
+        let body = r#"Gemini API error 400 Bad Request: {"error":{"message":"MAIL-CANARY Kenny owes","status":"INVALID_ARGUMENT"}}"#;
+        let logged = crate::test_log::capture(|| async { run_fake(chosen, None, &chain, cost::Feature::Chat, &SideEffectLedger::new(), vec![Err(body)]).await }).await;
+        let label = "Gemini 3.7 Flash (Google Gemini)";
+        assert!(logged.contains(&failure::log_line(label, body)), "{logged:?}");
+        assert!(!logged.iter().any(|line| line.contains("CANARY")), "{logged:?}");
+    }
+
+    /// The card names the model a chain nobody saved runs on (`chosen`),
+    /// not the preset's first row (review A, R48). Only Claude has a key,
+    /// and a fetched copy marks Claude's terms unknown.
+    #[tokio::test]
+    async fn the_google_content_card_names_the_model_an_unsaved_chain_runs_on() {
+        use crate::ai::registry::DataTerms;
+        let db = crate::db::test_database();
+        db.conn.lock().unwrap().execute("DELETE FROM provider_chain", []).unwrap();
+        let _registry = crate::ai::registry::test_override::with(|r| r.providers.iter_mut().find(|p| p.id == "claude").unwrap().data_terms = DataTerms::Unknown);
+        let mut router = AiRouter::new("gemini_primary").without_keys();
+        router.set_claude_key("test-c");
+        router.append_default_fallbacks();
+        assert_eq!(router.chosen(&router.configured(&db).await).map(|e| e.provider_type), Some("claude".into()));
+        let card = failure::parse(&router.google_content_card(&db, cost::Feature::MailAnalysis, "not sent".into()).await).expect("the card");
+        assert_eq!(card["model"]["pick"]["provider_type"], "claude", "{card}");
+    }
+
     /// A transient failure is sent once more to the same model, and only
     /// once; anything else ends on the card at once. OpenAI's own wire
     /// already resends a 429 or 5xx.
