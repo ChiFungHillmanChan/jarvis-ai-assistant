@@ -280,6 +280,9 @@ impl BedrockWire {
 enum StreamedBlock {
     Text(String),
     Call { id: String, name: String, input: String },
+    /// Reasoning the model sent unasked: sent back as it came, as main sent
+    /// AWS's reply whole.
+    Reasoning { text: String, signature: Option<String>, redacted: Option<Vec<u8>> },
 }
 
 /// One chat turn's requests to Bedrock.
@@ -371,6 +374,17 @@ impl Wire for BedrockWire {
                             input.push_str(tool.input());
                         }
                     }
+                    Some(ContentBlockDelta::ReasoningContent(piece)) => {
+                        use aws_sdk_bedrockruntime::types::ReasoningContentBlockDelta as Piece;
+                        if let StreamedBlock::Reasoning { text, signature, redacted } = blocks.entry(delta.content_block_index()).or_insert_with(|| StreamedBlock::Reasoning { text: String::new(), signature: None, redacted: None }) {
+                            match piece {
+                                Piece::Text(more) => text.push_str(more),
+                                Piece::Signature(more) => signature.get_or_insert_with(String::new).push_str(more),
+                                Piece::RedactedContent(more) => redacted.get_or_insert_with(Vec::new).extend_from_slice(more.as_ref()),
+                                _ => {}
+                            }
+                        }
+                    }
                     _ => {}
                 },
                 StreamEvent::MessageStop(message_stop) => stop = Some(message_stop.stop_reason().as_str().to_string()),
@@ -399,6 +413,13 @@ impl Wire for BedrockWire {
                     events.send(Event::ToolCall(Call { id: id.clone(), name: name.clone(), arguments }));
                     let tool_use = aws_sdk_bedrockruntime::types::ToolUseBlock::builder().tool_use_id(id).name(name).input(json_to_document(&parsed.unwrap_or_else(|| json!({})))).build().map_err(|e| RoundError::broken(e.to_string()))?;
                     content.push(ContentBlock::ToolUse(tool_use));
+                }
+                StreamedBlock::Reasoning { redacted: Some(data), .. } => {
+                    content.push(ContentBlock::ReasoningContent(aws_sdk_bedrockruntime::types::ReasoningContentBlock::RedactedContent(aws_smithy_types::Blob::new(data))));
+                }
+                StreamedBlock::Reasoning { text, signature, redacted: None } => {
+                    let reasoning = aws_sdk_bedrockruntime::types::ReasoningTextBlock::builder().text(text).set_signature(signature).build().map_err(|e| RoundError::broken(e.to_string()))?;
+                    content.push(ContentBlock::ReasoningContent(aws_sdk_bedrockruntime::types::ReasoningContentBlock::ReasoningText(reasoning)));
                 }
             }
         }

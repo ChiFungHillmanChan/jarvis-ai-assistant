@@ -1393,8 +1393,14 @@ pub(crate) mod bedrock_wire {
     fn converse(content: Value, stop: &str, usage: Value) -> Reply {
         let mut events = vec![("messageStart", json!({"role": "assistant"}))];
         for (index, block) in content.as_array().unwrap().iter().enumerate() {
+            let reasoning = &block["reasoningContent"];
             match block["text"].as_str() {
                 Some(text) => events.push(("contentBlockDelta", json!({"contentBlockIndex": index, "delta": {"text": text}}))),
+                None if reasoning["redactedContent"].is_string() => events.push(("contentBlockDelta", json!({"contentBlockIndex": index, "delta": {"reasoningContent": {"redactedContent": reasoning["redactedContent"]}}}))),
+                None if reasoning.is_object() => {
+                    events.push(("contentBlockDelta", json!({"contentBlockIndex": index, "delta": {"reasoningContent": {"text": reasoning["reasoningText"]["text"]}}})));
+                    events.push(("contentBlockDelta", json!({"contentBlockIndex": index, "delta": {"reasoningContent": {"signature": reasoning["reasoningText"]["signature"]}}})));
+                }
                 None => {
                     let tool = &block["toolUse"];
                     events.push(("contentBlockStart", json!({"contentBlockIndex": index, "start": {"toolUse": {"toolUseId": tool["toolUseId"], "name": tool["name"]}}})));
@@ -1631,6 +1637,29 @@ pub(crate) mod bedrock_wire {
             let lines = turn.window_lines();
             assert_eq!(&lines[lines.len() - 3..], &[status("Composing response...", "responding"), token(&fallback), token_done()]);
             assert_eq!(turn.voice.last(), Some(&format!("text: {fallback}")));
+        });
+    }
+
+    /// Reasoning the model sent in a round that calls a tool goes back with
+    /// the call as it came: its text and signature, or its redacted form
+    /// (main sent AWS's reply back whole).
+    #[test]
+    fn reasoning_goes_back_as_it_came() {
+        with_credentials(|db| async move {
+            let thought = json!({"reasoningContent": {"reasoningText": {"text": "The user wants this kept.", "signature": "c2lnbmF0dXJl"}}});
+            let hidden = json!({"reasoningContent": {"redactedContent": "cmVkYWN0ZWQ="}});
+            let call = json!({"toolUse": {"toolUseId": "tu_1", "name": "remember", "input": {"content": "Kenny is my accountant"}}});
+            let server = serve(vec![
+                converse(json!([thought.clone(), hidden.clone(), call.clone()]), "tool_use", usage(100, 10)),
+                converse(json!([{"text": "Saved."}]), "end_turn", usage(150, 5)),
+            ])
+            .await;
+            let _aws = point_bedrock_at(&server.base);
+            let turn = run_turn(&AiRouter::new("gemini_primary"), row(), &[("user", "Remember Kenny is my accountant")], &db, Workload::Tools, true).await;
+            assert_eq!(turn.reply.as_deref(), Ok("Saved."));
+            let seen = server.seen();
+            assert_eq!(seen.len(), 2);
+            assert_eq!(seen[1].body["messages"][1], json!({"role": "assistant", "content": [thought, hidden, call]}));
         });
     }
 
