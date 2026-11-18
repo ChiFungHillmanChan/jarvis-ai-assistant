@@ -202,13 +202,20 @@ impl Turn {
 /// One chat turn through `send_one`, as chat sends it: under the chat
 /// feature, with a voice channel, and the approval card answered `approve`.
 pub(crate) async fn run_turn(router: &AiRouter, entry: ProviderChainEntry, messages: &[(&str, &str)], db: &crate::db::Database, workload: Workload, approve: bool) -> Turn {
+    run_turn_as(router, entry, messages, db, workload, approve, cost::Feature::Chat, false).await
+}
+
+/// [`run_turn`] under another feature, with tools turned off when
+/// `tools_off` (as the briefing's classification sends it).
+#[allow(clippy::too_many_arguments)]
+pub(crate) async fn run_turn_as(router: &AiRouter, entry: ProviderChainEntry, messages: &[(&str, &str)], db: &crate::db::Database, workload: Workload, approve: bool, feature: cost::Feature, tools_off: bool) -> Turn {
     let window = Window::default();
     let (tx, mut rx) = tokio::sync::mpsc::channel(256);
     let ledger = SideEffectLedger::new();
     let auth = Arc::new(crate::auth::google::GoogleAuth::new_empty());
     let messages = messages.iter().map(|(role, text)| (role.to_string(), text.to_string())).collect();
-    let reply = crate::tool_approval::TEST_ANSWER
-        .scope(approve, cost::with_feature(cost::Feature::Chat, router.send_one(entry, messages, db, &auth, &window, Some(tx), workload, &ledger)))
+    let reply = crate::chat_session::TOOL_EXECUTION_DISABLED
+        .scope(tools_off, crate::tool_approval::TEST_ANSWER.scope(approve, cost::with_feature(feature, router.send_one(entry, messages, db, &auth, &window, Some(tx), workload, &ledger))))
         .await;
     let mut voice = Vec::new();
     while let Ok(command) = rx.try_recv() {
@@ -1641,5 +1648,603 @@ mod local_wire {
         assert_eq!(turn.reply, Err(format!("Local LLM API error 500 Internal Server Error: {}", json!({"error": "model not loaded"}))));
         assert_eq!(server.seen().len(), 1);
         assert!(rows(&db).is_empty());
+    }
+}
+
+// ---------------------------------------------------------------------------
+// The parity matrix (P07): each feature that reaches a model, run the same
+// way on every wire. The wire sections above pin each request in full; these
+// tests hold the features to one behaviour across them.
+// ---------------------------------------------------------------------------
+
+mod parity {
+    use super::*;
+    use crate::ai::complete::{complete, Request};
+    use crate::ai::local::backend::{BackendType, LocalEndpoint};
+
+    #[derive(Clone, Copy, Debug, PartialEq)]
+    pub(super) enum W {
+        OpenAi,
+        Compatible,
+        Claude,
+        Gemini,
+        Bedrock,
+        /// Best effort: a model on a local server that calls tools itself.
+        Local,
+    }
+
+    const ALL: [W; 6] = [W::OpenAi, W::Compatible, W::Claude, W::Gemini, W::Bedrock, W::Local];
+
+    const KEY: &str = "sk-fixture-parity-not-real";
+    const COMPAT_MODEL: &str = "unlisted-chat-1";
+    const LOCAL_MODEL: &str = "my-model";
+
+    /// One wire set up against a loopback server, as Settings saves it.
+    struct On {
+        wire: W,
+        server: Loopback,
+        router: AiRouter,
+        entry: ProviderChainEntry,
+        provider: String,
+        _pointed: Option<PointedAt>,
+    }
+
+    impl On {
+        /// The rows requests of these figures are stored as: one per turn,
+        /// or one per request on Bedrock.
+        fn rows(&self, feature: &str, model: &str, requests: &[(i64, i64)]) -> Vec<Row> {
+            let figures: Vec<(i64, i64, i64, i64)> = requests.iter().map(|&(input, output)| (input, output, 0, 0)).collect();
+            match self.wire {
+                W::Bedrock => figures.iter().map(|request| priced_row(&self.provider, feature, model, &[*request])).collect(),
+                W::Local => vec![Row {
+                    provider: "local".into(),
+                    feature: feature.into(),
+                    model: model.into(),
+                    input: requests.iter().map(|r| r.0).sum(),
+                    output: requests.iter().map(|r| r.1).sum(),
+                    cache_read: 0,
+                    cache_write: 0,
+                    cost: Some(0),
+                    price_unknown: false,
+                    registry_version: crate::ai::registry::current().version as i64,
+                }],
+                _ => vec![priced_row(&self.provider, feature, model, &figures)],
+            }
+        }
+
+        async fn turn(&self, text: &str, db: &crate::db::Database, approve: bool) -> Turn {
+            run_turn(&self.router, self.entry.clone(), &[("user", text)], db, Workload::Tools, approve).await
+        }
+    }
+
+    impl W {
+        async fn serve(self, replies: Vec<Reply>, db: &crate::db::Database) -> On {
+            let server = serve(replies).await;
+            let base = server.base.clone();
+            let mut router = AiRouter::new("gemini_primary");
+            let row = |provider_type: &str, model: Option<&str>, base_url: Option<String>, endpoint_id: Option<&str>| ProviderChainEntry {
+                position: 0,
+                provider_type: provider_type.into(),
+                endpoint_id: endpoint_id.map(Into::into),
+                model_id: model.map(Into::into),
+                enabled: true,
+                base_url,
+            };
+            let (entry, pointed) = match self {
+                W::OpenAi => {
+                    router.set_openai_key(KEY);
+                    (row("openai", None, None, None), Some(point_at(&format!("{base}/v1"))))
+                }
+                W::Compatible => {
+                    let url = format!("{base}/v1");
+                    router.set_compat_key(&url, KEY);
+                    (row("openai", Some(COMPAT_MODEL), Some(url), None), None)
+                }
+                W::Claude => {
+                    router.set_claude_key(KEY);
+                    (row("claude", None, None, None), Some(point_at(&base)))
+                }
+                W::Gemini => {
+                    router.set_gemini_key(KEY);
+                    (row("gemini", Some(crate::ai::models::GEMINI_FLASH), None, None), Some(point_at(&format!("{base}/v1beta"))))
+                }
+                W::Bedrock => (row("bedrock", Some(bedrock_wire::MODEL), None, None), Some(point_bedrock_at(&base))),
+                W::Local => {
+                    router.set_local_endpoints(vec![LocalEndpoint {
+                        id: "lm".into(),
+                        name: "Local".into(),
+                        url: base.clone(),
+                        backend_type: BackendType::Vllm,
+                        api_key: None,
+                        use_tls: false,
+                        connection_timeout_ms: 5000,
+                        keep_alive_minutes: 30,
+                        is_active: true,
+                        last_health_check: None,
+                        last_health_status: None,
+                    }]);
+                    // The mail gate reads where the saved endpoint is.
+                    db.conn.lock().unwrap().execute("INSERT OR REPLACE INTO local_endpoints (id, name, url, backend_type) VALUES ('lm', 'Local', ?1, 'vllm')", [&base]).unwrap();
+                    (row("local", Some(LOCAL_MODEL), None, Some("lm")), None)
+                }
+            };
+            router.set_provider_chain(vec![entry.clone()]);
+            let provider = cost::provider_id(&entry.provider_type, entry.base_url.as_deref());
+            On { wire: self, server, router, entry, provider, _pointed: pointed }
+        }
+
+        /// A streamed answer, in two pieces, of 100 tokens in and 10 out.
+        fn says(self, text: &str) -> Reply {
+            let (head, tail) = text.split_at(text.len() / 2);
+            match self {
+                W::OpenAi | W::Compatible | W::Local => Reply::openai_sse(&[
+                    json!({"choices": [{"delta": {"role": "assistant", "content": head}}]}),
+                    json!({"choices": [{"delta": {"content": tail}, "finish_reason": "stop"}]}),
+                    json!({"choices": [], "usage": {"prompt_tokens": 100, "completion_tokens": 10}}),
+                ]),
+                W::Claude => Reply::named_sse(&[
+                    ("message_start", json!({"type": "message_start", "message": {"id": "msg_1", "role": "assistant", "content": [], "usage": {"input_tokens": 100, "output_tokens": 1}}})),
+                    ("content_block_start", json!({"type": "content_block_start", "index": 0, "content_block": {"type": "text", "text": ""}})),
+                    ("content_block_delta", json!({"type": "content_block_delta", "index": 0, "delta": {"type": "text_delta", "text": head}})),
+                    ("content_block_delta", json!({"type": "content_block_delta", "index": 0, "delta": {"type": "text_delta", "text": tail}})),
+                    ("content_block_stop", json!({"type": "content_block_stop", "index": 0})),
+                    ("message_delta", json!({"type": "message_delta", "delta": {"stop_reason": "end_turn"}, "usage": {"output_tokens": 10}})),
+                    ("message_stop", json!({"type": "message_stop"})),
+                ]),
+                W::Gemini => Reply::sse(&[
+                    json!({"candidates": [{"content": {"role": "model", "parts": [{"text": head}]}}]}),
+                    json!({"candidates": [{"content": {"role": "model", "parts": [{"text": tail}]}, "finishReason": "STOP"}], "usageMetadata": {"promptTokenCount": 100, "candidatesTokenCount": 10}}),
+                ]),
+                W::Bedrock => bedrock_stream(&[
+                    ("messageStart", json!({"role": "assistant"})),
+                    ("contentBlockDelta", json!({"contentBlockIndex": 0, "delta": {"text": head}})),
+                    ("contentBlockDelta", json!({"contentBlockIndex": 0, "delta": {"text": tail}})),
+                    ("contentBlockStop", json!({"contentBlockIndex": 0})),
+                    ("messageStop", json!({"stopReason": "end_turn"})),
+                    ("metadata", json!({"usage": {"inputTokens": 100, "outputTokens": 10, "totalTokens": 110}})),
+                ]),
+            }
+        }
+
+        /// A streamed reply that calls one tool and says nothing, of 100
+        /// tokens in and 10 out.
+        fn calls(self, name: &str, args: Value) -> Reply {
+            let text = args.to_string();
+            match self {
+                W::OpenAi | W::Compatible | W::Local => Reply::openai_sse(&[
+                    json!({"choices": [{"delta": {"tool_calls": [{"index": 0, "id": "call_1", "type": "function", "function": {"name": name, "arguments": ""}}]}}]}),
+                    json!({"choices": [{"delta": {"tool_calls": [{"index": 0, "function": {"arguments": text}}]}, "finish_reason": "tool_calls"}]}),
+                    json!({"choices": [], "usage": {"prompt_tokens": 100, "completion_tokens": 10}}),
+                ]),
+                W::Claude => Reply::named_sse(&[
+                    ("message_start", json!({"type": "message_start", "message": {"id": "msg_1", "role": "assistant", "content": [], "usage": {"input_tokens": 100, "output_tokens": 1}}})),
+                    ("content_block_start", json!({"type": "content_block_start", "index": 0, "content_block": {"type": "tool_use", "id": "call_1", "name": name, "input": {}}})),
+                    ("content_block_delta", json!({"type": "content_block_delta", "index": 0, "delta": {"type": "input_json_delta", "partial_json": text}})),
+                    ("content_block_stop", json!({"type": "content_block_stop", "index": 0})),
+                    ("message_delta", json!({"type": "message_delta", "delta": {"stop_reason": "tool_use"}, "usage": {"output_tokens": 10}})),
+                    ("message_stop", json!({"type": "message_stop"})),
+                ]),
+                W::Gemini => Reply::sse(&[json!({
+                    "candidates": [{"content": {"role": "model", "parts": [{"functionCall": {"name": name, "args": args}}]}, "finishReason": "STOP"}],
+                    "usageMetadata": {"promptTokenCount": 100, "candidatesTokenCount": 10}
+                })]),
+                W::Bedrock => bedrock_stream(&[
+                    ("messageStart", json!({"role": "assistant"})),
+                    ("contentBlockStart", json!({"contentBlockIndex": 0, "start": {"toolUse": {"toolUseId": "call_1", "name": name}}})),
+                    ("contentBlockDelta", json!({"contentBlockIndex": 0, "delta": {"toolUse": {"input": text}}})),
+                    ("contentBlockStop", json!({"contentBlockIndex": 0})),
+                    ("messageStop", json!({"stopReason": "tool_use"})),
+                    ("metadata", json!({"usage": {"inputTokens": 100, "outputTokens": 10, "totalTokens": 110}})),
+                ]),
+            }
+        }
+
+        /// A plain completion's reply (not streamed), of 10 tokens in and 2
+        /// out.
+        fn completes(self, text: &str) -> Reply {
+            match self {
+                W::OpenAi | W::Compatible | W::Local => Reply::json(200, json!({"choices": [{"message": {"content": text}}], "usage": {"prompt_tokens": 10, "completion_tokens": 2}})),
+                W::Claude => Reply::json(200, json!({"content": [{"type": "text", "text": text}], "usage": {"input_tokens": 10, "output_tokens": 2}})),
+                W::Gemini => Reply::json(200, json!({"candidates": [{"content": {"parts": [{"text": text}]}}], "usageMetadata": {"promptTokenCount": 10, "candidatesTokenCount": 2}})),
+                W::Bedrock => Reply::json(
+                    200,
+                    json!({"output": {"message": {"role": "assistant", "content": [{"text": text}]}}, "stopReason": "end_turn", "usage": {"inputTokens": 10, "outputTokens": 2, "totalTokens": 12}, "metrics": {"latencyMs": 5}}),
+                ),
+            }
+        }
+
+        /// The tool results a request carried back to the model, in order.
+        fn results(self, body: &Value) -> Vec<String> {
+            let items = |list: &Value| list.as_array().cloned().unwrap_or_default();
+            match self {
+                W::OpenAi | W::Compatible | W::Local => items(&body["messages"]).iter().filter(|m| m["role"] == "tool").map(|m| m["content"].as_str().unwrap().to_string()).collect(),
+                W::Claude => items(&body["messages"])
+                    .iter()
+                    .flat_map(|m| items(&m["content"]))
+                    .filter(|block| block["type"] == "tool_result")
+                    .map(|block| block["content"].as_str().unwrap().to_string())
+                    .collect(),
+                W::Gemini => items(&body["contents"])
+                    .iter()
+                    .flat_map(|c| items(&c["parts"]))
+                    .filter_map(|part| part["functionResponse"]["response"]["result"].as_str().map(str::to_string))
+                    .collect(),
+                W::Bedrock => items(&body["messages"])
+                    .iter()
+                    .flat_map(|m| items(&m["content"]))
+                    .filter_map(|block| block["toolResult"]["content"][0]["text"].as_str().map(str::to_string))
+                    .collect(),
+            }
+        }
+
+        /// The model a request named.
+        fn model_sent(self, seen: &Seen) -> String {
+            match self {
+                W::Gemini => seen.path.split("/models/").nth(1).unwrap().split(':').next().unwrap().to_string(),
+                W::Bedrock => seen.path.trim_start_matches("/model/").split('/').next().unwrap().to_string(),
+                _ => seen.body["model"].as_str().unwrap().to_string(),
+            }
+        }
+
+        /// Where a plain completion of `model` is sent.
+        fn plain_path(self, model: &str) -> String {
+            match self {
+                W::OpenAi | W::Compatible | W::Local => "/v1/chat/completions".into(),
+                W::Claude => "/v1/messages".into(),
+                W::Gemini => format!("/v1beta/models/{model}:generateContent"),
+                W::Bedrock => format!("/model/{model}/converse"),
+            }
+        }
+
+        /// The plain request asks for one JSON object, by the provider's own
+        /// switch where it has one, else in words.
+        fn asks_for_json(self, body: &Value) -> bool {
+            let in_words = |text: Option<&str>| text.is_some_and(|text| text.contains(crate::ai::bedrock::JSON_INSTRUCTION));
+            match self {
+                W::OpenAi | W::Compatible | W::Local => body["response_format"] == json!({"type": "json_object"}),
+                W::Claude => in_words(body["system"].as_str()),
+                W::Gemini => body["generationConfig"]["responseMimeType"] == "application/json",
+                W::Bedrock => body["system"].as_array().is_some_and(|blocks| blocks.iter().any(|block| in_words(block["text"].as_str()))),
+            }
+        }
+    }
+
+    fn bedrock_stream(events: &[(&str, Value)]) -> Reply {
+        Reply::raw(200, crate::ai::bedrock::tests::EVENT_STREAM, crate::ai::bedrock::tests::converse_stream(events))
+    }
+
+    /// Runs `test` once per wire, each on its own database with AWS
+    /// credentials saved (Bedrock's; the others ignore them).
+    fn on_each<F, Fut>(wires: &[W], test: F)
+    where
+        F: Fn(W, Arc<crate::db::Database>) -> Fut,
+        Fut: std::future::Future<Output = ()>,
+    {
+        for &wire in wires {
+            bedrock_wire::with_credentials(|db| test(wire, db));
+        }
+    }
+
+    fn running_line(turn: &Turn, name: &str, args: &Value) -> bool {
+        turn.window_lines().contains(&running(tools::tool_status_label(name), json!(tools::tool_status_detail(name, &args.to_string()))))
+    }
+
+    fn tasks(db: &crate::db::Database) -> Vec<(String, Option<String>)> {
+        let conn = db.conn.lock().unwrap();
+        let mut stmt = conn.prepare("SELECT title, deadline FROM tasks ORDER BY id").unwrap();
+        let rows = stmt.query_map([], |r| Ok((r.get(0)?, r.get(1)?))).unwrap();
+        rows.map(|r| r.unwrap()).collect()
+    }
+
+    /// Chat and streaming: the answer is shown and spoken as it comes, and
+    /// the turn is stored under chat.
+    #[test]
+    fn chat_streams_the_answer() {
+        on_each(&ALL, |wire, db| async move {
+            let on = wire.serve(vec![wire.says("Hello there.")], &db).await;
+            let turn = on.turn("Hi", &db, false).await;
+            assert_eq!(turn.reply.as_deref(), Ok("Hello there."), "{wire:?}");
+            let seen = on.server.seen();
+            assert_eq!(seen.len(), 1, "{wire:?}");
+            let tokens: Vec<String> = turn.window_lines().into_iter().filter(|line| line.starts_with("chat-token")).collect();
+            assert_eq!(tokens, vec![token("Hello "), token("there."), token_done()], "{wire:?}");
+            assert_eq!(turn.voice, vec!["text: Hello ", "text: there."], "{wire:?}");
+            assert_eq!(turn.ledger.count(), 0, "{wire:?}");
+            assert_eq!(rows(&db), on.rows("chat", &wire.model_sent(&seen[0]), &[(100, 10)]), "{wire:?}");
+        });
+    }
+
+    /// A call that changes the user's data waits for the approval card:
+    /// allowed, it runs once and its result goes back to the model; declined,
+    /// it does not run and the model is told.
+    #[test]
+    fn a_tool_call_waits_for_approval() {
+        on_each(&ALL, |wire, db| async move {
+            let args = json!({"content": "Kenny is my accountant"});
+            let on = wire.serve(vec![wire.calls("remember", args.clone()), wire.says("Saved it.")], &db).await;
+            let turn = on.turn("Remember Kenny is my accountant", &db, true).await;
+            assert_eq!(turn.reply.as_deref(), Ok("Saved it."), "{wire:?}");
+            assert_eq!(memories(&db), vec!["Kenny is my accountant"], "{wire:?}");
+            assert_eq!(turn.ledger.count(), 1, "{wire:?}");
+            let seen = on.server.seen();
+            assert_eq!(seen.len(), 2, "{wire:?}");
+            assert_eq!(wire.results(&seen[1].body), vec![remembered("Kenny is my accountant").await], "{wire:?}");
+            assert!(running_line(&turn, "remember", &args), "{wire:?}");
+            assert_eq!(rows(&db), on.rows("tools", &wire.model_sent(&seen[0]), &[(100, 10), (100, 10)]), "{wire:?}");
+        });
+        on_each(&ALL, |wire, db| async move {
+            let on = wire.serve(vec![wire.calls("remember", json!({"content": "Kenny is my accountant"})), wire.says("Not saved.")], &db).await;
+            let turn = on.turn("Remember Kenny is my accountant", &db, false).await;
+            assert_eq!(turn.reply.as_deref(), Ok("Not saved."), "{wire:?}");
+            assert!(memories(&db).is_empty(), "{wire:?}");
+            // Noted when it was asked for, as before P07: a turn that may
+            // have acted is never sent again.
+            assert_eq!(turn.ledger.count(), 1, "{wire:?}");
+            let results = wire.results(&on.server.seen()[1].body);
+            assert_eq!(results.len(), 1, "{wire:?}");
+            assert!(results[0].starts_with("The user did not allow remember, so nothing was changed."), "{wire:?}: {}", results[0]);
+        });
+    }
+
+    /// Calendar tools: the call reaches the calendar with its arguments
+    /// whole (the status line shows the title it carried). With no Google
+    /// account in a test the calendar answers without a request to Google,
+    /// and that answer goes back to the model. Deleting an event asks first.
+    #[test]
+    fn calendar_tools() {
+        on_each(&ALL, |wire, db| async move {
+            let event = json!({"title": "Dentist", "start": "2026-12-01T10:00:00", "end": "2026-12-01T11:00:00"});
+            let on = wire.serve(vec![wire.calls("create_event", event.clone()), wire.says("I could not add it.")], &db).await;
+            let turn = on.turn("Add the dentist on 1 December at 10", &db, true).await;
+            assert_eq!(turn.reply.as_deref(), Ok("I could not add it."), "{wire:?}");
+            assert!(running_line(&turn, "create_event", &event), "{wire:?}: {:?}", turn.window_lines());
+            assert_eq!(wire.results(&on.server.seen()[1].body), vec!["Google account not connected. Please connect in Settings to use Calendar tools."], "{wire:?}");
+            drop(on);
+
+            let on = wire.serve(vec![wire.calls("delete_event", json!({"event_id": "evt_1"})), wire.says("Kept it.")], &db).await;
+            let turn = on.turn("Delete that event", &db, false).await;
+            assert_eq!(turn.reply.as_deref(), Ok("Kept it."), "{wire:?}");
+            let results = wire.results(&on.server.seen()[1].body);
+            assert!(results[0].starts_with("The user did not allow delete_event, so nothing was changed."), "{wire:?}: {results:?}");
+        });
+    }
+
+    /// Reminders: a task with a date, saved without asking, flagged on that
+    /// day and never promised at a time.
+    #[test]
+    fn a_reminder_is_a_dated_task() {
+        on_each(&ALL, |wire, db| async move {
+            let args = json!({"title": "Pay the invoice", "deadline": "2027-01-15"});
+            let on = wire.serve(vec![wire.calls("create_task", args.clone()), wire.says("I will flag it that day.")], &db).await;
+            // Declining would stop it if a card were shown: none is.
+            let turn = on.turn("Remind me to pay the invoice on 15 January", &db, false).await;
+            assert_eq!(turn.reply.as_deref(), Ok("I will flag it that day."), "{wire:?}");
+            assert_eq!(tasks(&db), vec![("Pay the invoice".to_string(), Some("2027-01-15".to_string()))], "{wire:?}");
+            assert_eq!(
+                wire.results(&on.server.seen()[1].body),
+                vec!["Task created: Pay the invoice, due 2027-01-15. JARVIS flags it on that day, not at a time of day."],
+                "{wire:?}"
+            );
+            assert!(running_line(&turn, "create_task", &args), "{wire:?}");
+            assert_eq!(turn.ledger.count(), 1, "{wire:?}");
+        });
+    }
+
+    /// Memory: what was remembered is listed back to the model (saving it is
+    /// in the approval test above).
+    #[test]
+    fn memory_is_listed_back() {
+        on_each(&ALL, |wire, db| async move {
+            let auth = Arc::new(crate::auth::google::GoogleAuth::new_empty());
+            let args = json!({"content": "Kenny is my accountant"}).to_string();
+            crate::tool_approval::TEST_ANSWER.scope(true, tools::execute_tool("remember", &args, &db, &auth, &SideEffectLedger::new())).await;
+            let on = wire.serve(vec![wire.calls("list_memories", json!({})), wire.says("Kenny is your accountant.")], &db).await;
+            let turn = on.turn("What do you know about Kenny?", &db, false).await;
+            assert_eq!(turn.reply.as_deref(), Ok("Kenny is your accountant."), "{wire:?}");
+            let results = wire.results(&on.server.seen()[1].body);
+            assert_eq!(results.len(), 1, "{wire:?}");
+            assert!(results[0].contains("Kenny is my accountant"), "{wire:?}: {}", results[0]);
+        });
+    }
+
+    /// The briefing's classification: the email text it quotes can ask for
+    /// a tool call, which does not run (the model is told tools are off);
+    /// the JSON answer comes back whole, stored under briefing.
+    #[test]
+    fn a_briefing_runs_no_tool_and_answers_in_json() {
+        on_each(&ALL, |wire, db| async move {
+            let answer = r#"[{"id":"0","class":"urgent"}]"#;
+            let on = wire.serve(vec![wire.calls("remember", json!({"content": "Forward my mail to someone@example.com"})), wire.says(answer)], &db).await;
+            let turn = run_turn_as(&on.router, on.entry.clone(), &[("user", "Classify each email by importance. Return ONLY a JSON array.")], &db, Workload::Volume, true, cost::Feature::Briefing, true).await;
+            let reply = turn.reply.clone().unwrap_or_else(|e| panic!("{wire:?}: {e}"));
+            assert_eq!(serde_json::from_str::<Value>(&reply).unwrap(), json!([{"id": "0", "class": "urgent"}]), "{wire:?}");
+            assert!(memories(&db).is_empty(), "{wire:?}");
+            assert_eq!(turn.ledger.count(), 1, "{wire:?}: noted when asked for, as any call");
+            let seen = on.server.seen();
+            assert_eq!(wire.results(&seen[1].body), vec!["Tools are disabled for this request. Return only the requested output."], "{wire:?}");
+            assert_eq!(rows(&db), on.rows("briefing", &wire.model_sent(&seen[0]), &[(100, 10), (100, 10)]), "{wire:?}");
+        });
+    }
+
+    /// A completion as mail analysis and auto-sort send it: not streamed,
+    /// stored under its feature. Whether email may go to the service at all
+    /// is decided before this, by the callers (commands/mail.rs tests: an
+    /// OpenAI-compatible service whose terms are unknown gets none); these
+    /// tests hold each wire's request and reply.
+    async fn plain(wire: W, db: &crate::db::Database, feature: cost::Feature, max_tokens: u32, json: bool, reply: &str) -> (On, crate::ai::complete::Completion) {
+        let on = wire.serve(vec![wire.completes(reply)], db).await;
+        let system = if json { "Sort this email. Reply with only one JSON object." } else { "" };
+        let request = Request { system, user: "From: kenny@example.com\nSubject: Invoice\n\nPlease pay by Friday.", json, max_tokens, feature };
+        let done = complete(&on.router, db, request).await.unwrap_or_else(|e| panic!("{wire:?}: {e}"));
+        (on, done)
+    }
+
+    #[test]
+    fn mail_analysis() {
+        on_each(&ALL, |wire, db| async move {
+            let (on, done) = plain(wire, &db, cost::Feature::MailAnalysis, crate::ai::models::feature_max_output_tokens(cost::Feature::MailAnalysis), false, "Kenny asks for the invoice to be paid by Friday.").await;
+            assert_eq!(done.text, "Kenny asks for the invoice to be paid by Friday.", "{wire:?}");
+            let seen = on.server.seen();
+            assert_eq!(seen.len(), 1, "{wire:?}");
+            let model = wire.model_sent(&seen[0]);
+            assert_eq!((seen[0].path.as_str(), done.model.as_str()), (wire.plain_path(&model).as_str(), model.as_str()), "{wire:?}");
+            assert!(!wire.asks_for_json(&seen[0].body), "{wire:?}");
+            assert_eq!(rows(&db), on.rows("mail_analysis", &model, &[(10, 2)]), "{wire:?}");
+        });
+    }
+
+    #[test]
+    fn auto_sort_asks_for_json() {
+        on_each(&ALL, |wire, db| async move {
+            let (on, done) = plain(wire, &db, cost::Feature::MailSort, crate::ai::models::feature_max_output_tokens(cost::Feature::MailSort), true, r#"{"category": "action", "needs_reply": true}"#).await;
+            assert_eq!(serde_json::from_str::<Value>(&done.text).unwrap(), json!({"category": "action", "needs_reply": true}), "{wire:?}");
+            let seen = on.server.seen();
+            assert_eq!(seen.len(), 1, "{wire:?}");
+            let model = wire.model_sent(&seen[0]);
+            assert_eq!(seen[0].path, wire.plain_path(&model), "{wire:?}");
+            assert!(wire.asks_for_json(&seen[0].body), "{wire:?}: {}", seen[0].body);
+            assert_eq!(rows(&db), on.rows("mail_sort", &model, &[(10, 2)]), "{wire:?}");
+        });
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Live smoke tests (P07): the real services, never run by default. Each is
+// ignored, and runs only with its JARVIS_LIVE_<PROVIDER>_KEY set, e.g.
+//
+//   JARVIS_LIVE_OPENAI_KEY=... cargo test --manifest-path src-tauri/Cargo.toml live_openai -- --ignored --nocapture
+//
+// Each sends one chat turn that should call `remember` (approved), then one
+// JSON completion, and prints only counts and lengths. The key is used for
+// the requests only: it is not printed, logged or saved.
+// ---------------------------------------------------------------------------
+
+mod live {
+    use super::*;
+    use crate::ai::complete::{complete, Request};
+
+    fn var(name: &str) -> Option<String> {
+        std::env::var(name).ok().map(|value| value.trim().to_string()).filter(|value| !value.is_empty())
+    }
+
+    fn entry(provider_type: &str, model: Option<String>, base_url: Option<String>, endpoint_id: Option<&str>) -> ProviderChainEntry {
+        ProviderChainEntry { position: 0, provider_type: provider_type.into(), endpoint_id: endpoint_id.map(Into::into), model_id: model, enabled: true, base_url }
+    }
+
+    /// `tools_expected`: a cloud model is held to calling the tool; a local
+    /// one is best effort.
+    async fn smoke(name: &str, mut router: AiRouter, entry: ProviderChainEntry, db: &crate::db::Database, tools_expected: bool) {
+        let turn = run_turn(&router, entry.clone(), &[("user", "Use the remember tool to save this fact: my live test colour is blue. Then answer in one short sentence.")], db, Workload::Tools, true).await;
+        let reply = turn.reply.unwrap_or_else(|e| panic!("{name} chat: {e}"));
+        assert!(!reply.trim().is_empty(), "{name}: an answer");
+        let saved = memories(db).len();
+        if tools_expected {
+            assert_eq!(saved, 1, "{name}: the remember call ran once");
+        }
+        assert!(!rows(db).is_empty(), "{name}: the turn is stored");
+        router.set_provider_chain(vec![entry]);
+        let done = complete(&router, db, Request { system: "", user: "Return a JSON object with one field \"ok\" set to true.", json: true, max_tokens: 1_024, feature: cost::Feature::Other })
+            .await
+            .unwrap_or_else(|e| panic!("{name} completion: {e}"));
+        let text = done.text.trim().trim_start_matches("```json").trim_end_matches("```").trim();
+        let parsed: Value = serde_json::from_str(text).unwrap_or_else(|_| panic!("{name}: the completion is not JSON ({} characters)", done.text.len()));
+        assert_eq!(parsed["ok"], true, "{name}");
+        println!("{name}: answer of {} characters, {saved} memory saved, JSON completion ok, {} usage rows", reply.chars().count(), rows(db).len());
+    }
+
+    fn skipped(names: &str) {
+        println!("skipped: set {names} to run this live test");
+    }
+
+    #[tokio::test]
+    #[ignore]
+    async fn live_openai() {
+        let Some(key) = var("JARVIS_LIVE_OPENAI_KEY") else { return skipped("JARVIS_LIVE_OPENAI_KEY") };
+        let mut router = AiRouter::new("gemini_primary");
+        router.set_openai_key(&key);
+        smoke("openai", router, entry("openai", None, None, None), &crate::db::test_database(), true).await;
+    }
+
+    #[tokio::test]
+    #[ignore]
+    async fn live_claude() {
+        let Some(key) = var("JARVIS_LIVE_CLAUDE_KEY") else { return skipped("JARVIS_LIVE_CLAUDE_KEY") };
+        let mut router = AiRouter::new("gemini_primary");
+        router.set_claude_key(&key);
+        smoke("claude", router, entry("claude", None, None, None), &crate::db::test_database(), true).await;
+    }
+
+    #[tokio::test]
+    #[ignore]
+    async fn live_gemini() {
+        let Some(key) = var("JARVIS_LIVE_GEMINI_KEY") else { return skipped("JARVIS_LIVE_GEMINI_KEY") };
+        let mut router = AiRouter::new("gemini_primary");
+        router.set_gemini_key(&key);
+        smoke("gemini", router, entry("gemini", None, None, None), &crate::db::test_database(), true).await;
+    }
+
+    /// Any OpenAI-compatible service: its address and a chat model on it.
+    #[tokio::test]
+    #[ignore]
+    async fn live_compatible() {
+        let (Some(key), Some(url), Some(model)) = (var("JARVIS_LIVE_COMPAT_KEY"), var("JARVIS_LIVE_COMPAT_URL"), var("JARVIS_LIVE_COMPAT_MODEL")) else {
+            return skipped("JARVIS_LIVE_COMPAT_KEY, JARVIS_LIVE_COMPAT_URL and JARVIS_LIVE_COMPAT_MODEL");
+        };
+        let mut router = AiRouter::new("gemini_primary");
+        router.set_compat_key(&url, &key);
+        smoke("compatible", router, entry("openai", Some(model), Some(url), None), &crate::db::test_database(), true).await;
+    }
+
+    /// The access key id in JARVIS_LIVE_BEDROCK_KEY, its secret in
+    /// JARVIS_LIVE_BEDROCK_SECRET, and the region (us-east-1 when unset).
+    /// The credentials go to the test build's in-memory Keychain stand-in.
+    #[test]
+    #[ignore]
+    fn live_bedrock() {
+        let (Some(key), Some(secret)) = (var("JARVIS_LIVE_BEDROCK_KEY"), var("JARVIS_LIVE_BEDROCK_SECRET")) else {
+            return skipped("JARVIS_LIVE_BEDROCK_KEY and JARVIS_LIVE_BEDROCK_SECRET");
+        };
+        let region = var("JARVIS_LIVE_BEDROCK_REGION").unwrap_or_else(|| "us-east-1".into());
+        let _keychain = crate::aws::credentials::tests::KEYCHAIN_GUARD.lock().unwrap_or_else(|e| e.into_inner());
+        let runtime = tokio::runtime::Builder::new_current_thread().enable_all().build().unwrap();
+        runtime.block_on(async {
+            let db = Arc::new(crate::db::test_database());
+            let creds = crate::aws::credentials::AwsCredentials {
+                access_key_id: key,
+                secret_access_key: secret,
+                inference_profile: crate::aws::credentials::inference_profile_for_region(&region).into(),
+                region,
+            };
+            crate::aws::credentials::AwsCredsRepo::new(db.clone()).save(&creds).await.unwrap();
+            smoke("bedrock", AiRouter::new("gemini_primary"), entry("bedrock", None, None, None), &db, true).await;
+        });
+        let _ = crate::security::keychain::KeychainStore::delete("com.jarvis.aws", "secret_access_key");
+    }
+
+    /// Best effort: a model on a local server (JARVIS_LIVE_LOCAL_URL, e.g.
+    /// http://127.0.0.1:11434, and JARVIS_LIVE_LOCAL_MODEL). It need not
+    /// call the tool; the turn and the JSON completion must work.
+    #[tokio::test]
+    #[ignore]
+    async fn live_local() {
+        let (Some(url), Some(model)) = (var("JARVIS_LIVE_LOCAL_URL"), var("JARVIS_LIVE_LOCAL_MODEL")) else {
+            return skipped("JARVIS_LIVE_LOCAL_URL and JARVIS_LIVE_LOCAL_MODEL");
+        };
+        let backend_type = crate::ai::local::detect_backend(&url).await;
+        let mut router = AiRouter::new("gemini_primary");
+        router.set_local_endpoints(vec![crate::ai::local::backend::LocalEndpoint {
+            id: "live".into(),
+            name: "Live".into(),
+            url,
+            backend_type,
+            api_key: var("JARVIS_LIVE_LOCAL_KEY"),
+            use_tls: false,
+            connection_timeout_ms: 5000,
+            keep_alive_minutes: 30,
+            is_active: true,
+            last_health_check: None,
+            last_health_status: None,
+        }]);
+        smoke("local", router, entry("local", Some(model), None, Some("live")), &crate::db::test_database(), false).await;
     }
 }
