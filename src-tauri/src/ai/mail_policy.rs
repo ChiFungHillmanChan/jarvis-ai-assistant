@@ -628,17 +628,24 @@ mod tests {
 
     /// The gate and the router agree with no saved chain, for every set of
     /// the three keys, with and without saved AWS credentials, under each
-    /// preset (and one the registry does not have): `receiver` is the row the
-    /// router's run sends to (`chosen` over what `configured` finds, as
-    /// `run_chosen` takes it), or both have none; `check` judges that row;
-    /// and a consent card names only that row (review B, r4-m2, from its
-    /// matrix). Both are called; the rule is not restated.
+    /// preset (one the registry does not have, and one with Bedrock first,
+    /// as a fetched copy could add): `receiver` is the row the router's run
+    /// sends to (`chosen` over what `configured` finds, as `run_chosen` takes
+    /// it), or both have none; `check` judges that row; and a consent card
+    /// names only that row (review B, r4-m2, from its matrix). Both are
+    /// called; the rule is not restated.
     #[tokio::test]
     async fn the_gate_and_the_router_agree_for_every_key_combination() {
+        use crate::ai::registry::doc::PresetEntry;
         use crate::ai::{keys_found, AiRouter, KeysFound};
+        let _registry = crate::ai::registry::test_override::with(|r| {
+            let mut bedrock_first = r.presets.chains[0].1.clone();
+            bedrock_first.entries = vec![PresetEntry { provider: "bedrock".into(), model: None }, PresetEntry { provider: "gemini".into(), model: None }];
+            r.presets.chains.push(("bedrock_first".into(), bedrock_first));
+        });
         let row = |e: &ProviderChainEntry| (e.provider_type.clone(), e.model_id.clone(), e.base_url.clone(), e.endpoint_id.clone());
         let mut cases = 0;
-        for preset in ["", "gemini_primary", "gemini_pro_only", "no_such_preset"] {
+        for preset in ["", "gemini_primary", "gemini_pro_only", "no_such_preset", "bedrock_first"] {
             for bits in 0..16u8 {
                 let keys = KeysFound { gemini: bits & 1 != 0, claude: bits & 2 != 0, openai: bits & 4 != 0 };
                 let bedrock = bits & 8 != 0;
@@ -681,7 +688,7 @@ mod tests {
                 cases += 1;
             }
         }
-        assert_eq!(cases, 64);
+        assert_eq!(cases, 80);
     }
 
     /// With no saved chain the gate judges the row the request runs on, by
