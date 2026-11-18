@@ -1352,6 +1352,27 @@ pub(crate) mod bedrock_wire {
         });
     }
 
+    /// A stream that ends without its stop is broken (P07): the window goes
+    /// back to idle, and the usage it did report is stored, since AWS bills
+    /// it.
+    #[test]
+    fn a_stream_without_its_stop() {
+        with_credentials(|db| async move {
+            let server = serve(vec![stream(&[
+                ("messageStart", json!({"role": "assistant"})),
+                ("contentBlockDelta", json!({"contentBlockIndex": 0, "delta": {"text": "Partly"}})),
+                ("metadata", json!({"usage": usage(40, 2)})),
+            ])])
+            .await;
+            let _aws = point_bedrock_at(&server.base);
+            let turn = run_turn(&AiRouter::new("gemini_primary"), row(), &[("user", "Hi")], &db, Workload::Tools, false).await;
+            let error = turn.reply.clone().unwrap_err();
+            assert!(error.contains("Bedrock stream ended before the reply was complete"), "{error}");
+            assert_eq!(turn.window_lines().last().unwrap(), "chat-state {\"state\":\"idle\"}");
+            assert_eq!(rows(&db), vec![one("bedrock", "chat", (40, 2, 0, 0))]);
+        });
+    }
+
     /// No saved credentials: nothing is sent.
     #[tokio::test]
     async fn no_credentials() {
@@ -1498,6 +1519,23 @@ mod local_wire {
             ]
         );
         assert_eq!(rows(&db), vec![local_row("tools", "qwen3:8b", 250, 15)]);
+    }
+
+    /// A model that calls tools itself runs its calls only when it stops to
+    /// call them (`tool_calls`), as before P07: calls in a reply that ended
+    /// for another reason are not run.
+    #[tokio::test]
+    async fn calls_run_only_on_a_tool_calls_stop() {
+        let server = serve(vec![Reply::openai_sse(&[
+            json!({"choices": [{"delta": {"content": "Done."}}]}),
+            json!({"choices": [{"delta": {"tool_calls": [{"index": 0, "id": "call_1", "type": "function", "function": {"name": "remember", "arguments": REMEMBER_ARGS}}]}, "finish_reason": "stop"}]}),
+        ])])
+        .await;
+        let db = crate::db::test_database();
+        let turn = run_turn(&router(&server.base, BackendType::Vllm), row("my-model"), &[("user", "Remember Kenny is my accountant")], &db, Workload::Tools, true).await;
+        assert_eq!(turn.reply.as_deref(), Ok("Done."));
+        assert!(memories(&db).is_empty());
+        assert_eq!(server.seen().len(), 1);
     }
 
     /// Calls streamed whole without an index are told apart by id, as on
