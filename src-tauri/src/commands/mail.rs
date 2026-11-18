@@ -33,16 +33,13 @@ fn typesafe_key() -> Option<String> {
 }
 
 /// The TypeSafe key, while TypeSafe may receive mail (ai::mail_policy,
-/// review B I-4); otherwise None, and the reason is raised once per launch.
-fn usable_typesafe(db: &Database, key: Option<String>) -> Option<String> {
-    let key = key?;
-    match crate::ai::mail_policy::may_send_to(db, "typesafe") {
-        Ok(()) => Some(key),
-        Err(blocked) => {
-            blocked.raise("mail_sort");
-            None
-        }
-    }
+/// review B I-4). No key: Ok(None), and the chosen AI classifies, the way
+/// the user set sorting up. A key the gate refuses: why, raised once per
+/// launch; the chosen AI does not classify in TypeSafe's place (review A,
+/// N-1; DECISIONS section 5, no automatic switch).
+fn usable_typesafe(db: &Database, key: Option<String>) -> Result<Option<String>, crate::ai::mail_policy::Blocked> {
+    let Some(key) = key else { return Ok(None) };
+    crate::ai::mail_policy::may_send_to(db, "typesafe").map(|()| Some(key)).inspect_err(|blocked| blocked.raise("mail_sort"))
 }
 
 fn openai_key() -> Result<String, String> {
@@ -83,11 +80,17 @@ fn chosen_ai_for_mail(db: &Database) -> Result<Option<crate::commands::ai_choice
 /// Whether the background sync should sort new mail: the user opted in, and
 /// either a TypeSafe key or a chosen AI that may read email can classify it.
 pub(crate) fn triage_ready(db: &Database) -> bool {
+    triage_ready_with(db, typesafe_key())
+}
+
+fn triage_ready_with(db: &Database, typesafe_key: Option<String>) -> bool {
     if !store::auto_triage_enabled(db).unwrap_or(false) {
         return false;
     }
-    if usable_typesafe(db, typesafe_key()).is_some() {
-        return true;
+    match usable_typesafe(db, typesafe_key) {
+        Ok(Some(_)) => return true,
+        Ok(None) => {}
+        Err(_) => return false,
     }
     match chosen_ai_for_mail(db) {
         Ok(chosen) => chosen.is_some(),
@@ -101,6 +104,11 @@ pub(crate) fn triage_ready(db: &Database) -> bool {
 }
 
 pub(crate) async fn triage_untriaged(db: &Database, language: Option<&str>) -> Result<MailTriageRun, String> {
+    triage_untriaged_with(db, language, typesafe_key).await
+}
+
+/// `typesafe_key` is read once the run's turn has come.
+async fn triage_untriaged_with(db: &Database, language: Option<&str>, typesafe_key: fn() -> Option<String>) -> Result<MailTriageRun, String> {
     if !store::auto_triage_enabled(db)? {
         return Err("請先在「分析設定」開啟自動整理。".into());
     }
@@ -108,7 +116,7 @@ pub(crate) async fn triage_untriaged(db: &Database, language: Option<&str>) -> R
     // consent withdrawn while an earlier run held the lock counts. triage_one
     // asks again before each message.
     let _run = TRIAGE_RUN.lock().await;
-    let typesafe = usable_typesafe(db, typesafe_key());
+    let typesafe = usable_typesafe(db, typesafe_key()).map_err(|blocked| blocked.user_message())?;
     // An AI that may not read email is left out; TypeSafe alone can still sort.
     let chosen = match chosen_ai_for_mail(db) {
         Ok(chosen) => chosen,
@@ -539,10 +547,12 @@ mod tests {
         fn a_typesafe_key_sorts_only_while_typesafe_may_receive_mail() {
             use crate::ai::registry::DataTerms;
             let db = crate::db::test_database();
-            assert_eq!(super::super::usable_typesafe(&db, Some("ts-test".into())).as_deref(), Some("ts-test"));
-            assert_eq!(super::super::usable_typesafe(&db, None), None);
+            assert_eq!(super::super::usable_typesafe(&db, Some("ts-test".into())), Ok(Some("ts-test".into())));
+            assert_eq!(super::super::usable_typesafe(&db, None), Ok(None));
             let _registry = crate::ai::registry::test_override::with(|r| r.providers.iter_mut().find(|p| p.id == "typesafe").unwrap().data_terms = DataTerms::Unknown);
-            assert_eq!(super::super::usable_typesafe(&db, Some("ts-test".into())), None);
+            assert_eq!(super::super::usable_typesafe(&db, Some("ts-test".into())), crate::ai::mail_policy::may_send_to(&db, "typesafe").map(|()| None));
+            assert!(super::super::usable_typesafe(&db, Some("ts-test".into())).is_err());
+            assert_eq!(super::super::usable_typesafe(&db, None), Ok(None), "no key: the chosen AI classifies, whatever TypeSafe's terms");
         }
 
         /// A model picked in the error card is gated like the saved choice:
@@ -570,20 +580,17 @@ mod tests {
         /// A run that waits for an earlier one is judged when its turn
         /// comes (review B, I-3 and R17): Gemini's consent is withdrawn while
         /// the earlier run holds the lock, and the waiting run then refuses
-        /// with the consent card. TypeSafe may not receive mail here, so
-        /// whatever key the environment holds only the chosen AI could sort;
-        /// the mailbox is empty, so nothing could be sent anyway.
+        /// with the consent card. No TypeSafe key, so only the chosen AI
+        /// could sort; the mailbox is empty, so nothing could be sent anyway.
         #[tokio::test]
         async fn a_run_waiting_for_an_earlier_one_is_judged_when_its_turn_comes() {
-            use crate::ai::registry::DataTerms;
-            let _registry = crate::ai::registry::test_override::with(|r| r.providers.iter_mut().find(|p| p.id == "typesafe").unwrap().data_terms = DataTerms::Unknown);
             let db = crate::db::test_database();
             crate::mail::store::set_auto_triage(&db, true).unwrap();
             use_ai(&db, "gemini", None);
             agree_to_gemini(&db);
             let earlier_run = super::super::TRIAGE_RUN.lock().await;
             let db = &db;
-            let (outcome, ()) = tokio::join!(super::super::triage_untriaged(db, Some("en")), async move {
+            let (outcome, ()) = tokio::join!(super::super::triage_untriaged_with(db, Some("en"), || None), async move {
                 // The run reaches the lock and waits.
                 for _ in 0..3 {
                     tokio::task::yield_now().await;
@@ -594,6 +601,41 @@ mod tests {
             let error = outcome.expect_err("the consent withdrawn while it waited counts");
             let Err(Blocked::NeedsConsent(request)) = crate::ai::mail_policy::check(db) else { panic!("Gemini needs consent again") };
             assert_eq!(error, request.to_error(), "the consent card");
+        }
+
+        /// Sorting where Gemini, the chosen AI, may read mail, with the
+        /// mailbox empty: nothing could be sent whatever a run did.
+        fn sorting_on_gemini() -> crate::db::Database {
+            let db = crate::db::test_database();
+            crate::mail::store::set_auto_triage(&db, true).unwrap();
+            use_ai(&db, "gemini", None);
+            agree_to_gemini(&db);
+            db
+        }
+
+        /// A TypeSafe key the gate refuses when a run begins stops the run
+        /// with the reason, as a refusal during a run leaves its message
+        /// unsorted: the chosen AI does not classify in TypeSafe's place
+        /// (review A, N-1; DECISIONS section 5, no automatic switch). The
+        /// background sync does not start such a run.
+        #[tokio::test]
+        async fn a_refused_typesafe_key_stops_the_run_rather_than_sorting_on_the_chosen_ai() {
+            use crate::ai::registry::DataTerms;
+            let db = sorting_on_gemini();
+            let _registry = crate::ai::registry::test_override::with(|r| r.providers.iter_mut().find(|p| p.id == "typesafe").unwrap().data_terms = DataTerms::Unknown);
+            let Err(refused) = crate::ai::mail_policy::may_send_to(&db, "typesafe") else { panic!("TypeSafe may not receive mail") };
+            assert!(!super::super::triage_ready_with(&db, Some("ts-test-not-real".into())), "the background sync does not sort");
+            let outcome = super::super::triage_untriaged_with(&db, Some("en"), || Some("ts-test-not-real".into())).await;
+            assert_eq!(outcome.map(|run| run.triaged), Err(refused.user_message()));
+        }
+
+        /// With no TypeSafe key the chosen AI classifies, as on main: the
+        /// way the user set sorting up, not a switch.
+        #[tokio::test]
+        async fn with_no_typesafe_key_the_chosen_ai_sorts_as_before() {
+            let db = sorting_on_gemini();
+            assert!(super::super::triage_ready_with(&db, None));
+            assert_eq!(super::super::triage_untriaged_with(&db, Some("en"), || None).await.map(|run| run.triaged), Ok(0));
         }
     }
 
