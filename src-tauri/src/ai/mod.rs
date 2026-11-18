@@ -474,6 +474,15 @@ const RESEND_DELAY: std::time::Duration = std::time::Duration::from_secs(1);
 #[cfg(test)]
 const RESEND_DELAY: std::time::Duration = std::time::Duration::from_millis(0);
 
+/// Whether the chat wire `row` is sent on resends a 429 or 5xx once itself
+/// ([`provider::Wire::resends_transient`]): the OpenAI wire does for
+/// api.openai.com and the compatible services, and not for a local server
+/// (`AiRouter::send_one` sends "openai" rows to it, "local" rows to its
+/// local mode). No other wire resends.
+pub(crate) fn resends_inside(row: &ProviderChainEntry) -> bool {
+    row.provider_type == "openai"
+}
+
 /// One request on the chosen model, with no other model tried in its place
 /// (DECISIONS.md section 5, "Failure handling"). Before anything is sent the
 /// model must support the feature (`capability::resolve`). A transient
@@ -484,8 +493,9 @@ const RESEND_DELAY: std::time::Duration = std::time::Duration::from_millis(0);
 ///
 /// `send` sends to one row; the router and `complete` pass the provider
 /// calls, the tests pass their own. `emit` gets the HUD events.
-/// `wire_resends`: the router's OpenAI-format wire already resends a 429 or
-/// 5xx once (openai::send_retrying), so this does not resend it again.
+/// `resends_inside`: whether the wire a row goes to already sent a 429 or
+/// 5xx once more itself ([`provider::Wire::resends_transient`]), so this does
+/// not send it again.
 #[allow(clippy::too_many_arguments)]
 pub(crate) async fn run_chosen<T, F, Fut>(
     chosen: Option<ProviderChainEntry>,
@@ -495,7 +505,7 @@ pub(crate) async fn run_chosen<T, F, Fut>(
     workload: Workload,
     ledger: &SideEffectLedger,
     language: bedrock::UiLanguage,
-    wire_resends: bool,
+    resends_inside: &(dyn Fn(&ProviderChainEntry) -> bool + Sync),
     may_receive_google_content: &(dyn Fn(&ProviderChainEntry) -> bool + Sync),
     mut emit: impl FnMut(&str, serde_json::Value),
     mut send: F,
@@ -558,7 +568,7 @@ where
             Err(error) => {
                 log::warn!("{}", failure::log_line(&label, &error));
                 let code = failure::code_of(&error);
-                let resent_inside = wire_resends && row.provider_type == "openai" && matches!(code, failure::Code::RateLimited | failure::Code::ServerError);
+                let resent_inside = resends_inside(&row) && matches!(code, failure::Code::RateLimited | failure::Code::ServerError);
                 let again = !resent && code.transient() && !resent_inside && ledger.count() == 0;
                 // `discard` drops what this attempt streamed, only when the
                 // resend is about to replace it.
@@ -1079,7 +1089,7 @@ impl AiRouter {
             workload,
             &ledger,
             bedrock::UiLanguage::read(db),
-            true,
+            &resends_inside,
             &|row| mail_policy::may_receive(db, row),
             |event, payload| {
                 let _ = app_handle.emit(event, payload);
@@ -1356,7 +1366,7 @@ mod tests {
         let sent = std::cell::RefCell::new(Vec::new());
         let replies = std::cell::RefCell::new(replies.into_iter());
         let mut events = Vec::new();
-        let result = run_chosen(chosen, picked, configured, feature, Workload::Volume, ledger, bedrock::UiLanguage::En, true, &|row| row.base_url.is_none(), |event, payload| events.push((event.to_string(), payload)), |row| {
+        let result = run_chosen(chosen, picked, configured, feature, Workload::Volume, ledger, bedrock::UiLanguage::En, &resends_inside, &|row| row.base_url.is_none(), |event, payload| events.push((event.to_string(), payload)), |row| {
             sent.borrow_mut().push(row);
             let reply = replies.borrow_mut().next().expect("sent more often than expected").map(str::to_string).map_err(str::to_string);
             async move { reply }

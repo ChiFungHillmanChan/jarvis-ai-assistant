@@ -70,7 +70,8 @@ pub async fn complete(router: &AiRouter, db: &Database, request: Request<'_>) ->
         Workload::Volume,
         &ledger,
         super::bedrock::UiLanguage::read(db),
-        false,
+        // Every wire sends a completion once (Wire::complete).
+        &|_| false,
         &|row| super::mail_policy::may_receive(db, row),
         |_, _| {},
         move |row| async move {

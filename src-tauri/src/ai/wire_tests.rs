@@ -2515,7 +2515,7 @@ mod resend_counts {
                 Workload::Tools,
                 &ledger,
                 crate::ai::bedrock::UiLanguage::En,
-                true,
+                &crate::ai::resends_inside,
                 &|_| true,
                 |_, _| {},
                 move |row| router_ref.send_one(row, messages.clone(), db, auth_ref, window_ref, None, Workload::Tools, ledger_ref),
@@ -2563,6 +2563,33 @@ mod resend_counts {
     #[test]
     fn gemini() {
         check(W::Gemini, 2, 2);
+    }
+
+    /// The router reads each wire's own statement: every wire, built as
+    /// send_one builds it, says what `resends_inside` says for its row.
+    #[test]
+    fn the_router_reads_what_each_wire_states() {
+        use crate::ai::provider::Wire;
+        let row = |provider_type: &str, base_url: Option<&str>| ProviderChainEntry { position: 0, provider_type: provider_type.into(), endpoint_id: None, model_id: Some("m".into()), enabled: true, base_url: base_url.map(Into::into) };
+        let endpoint = LocalEndpoint { id: "lm".into(), name: "Local".into(), url: "http://127.0.0.1:9".into(), backend_type: BackendType::Vllm, api_key: None, use_tls: false, connection_timeout_ms: 5000, keep_alive_minutes: 30, is_active: true, last_health_check: None, last_health_status: None };
+        let official = crate::ai::openai::OpenAiWire::new(KEY, crate::ai::openai::Target { base_url: None, model: Some("m"), deeper: None }).unwrap();
+        let compatible = crate::ai::openai::OpenAiWire::new(KEY, crate::ai::openai::Target { base_url: Some("http://127.0.0.1:9/v1"), model: Some("m"), deeper: None }).unwrap();
+        let local = crate::ai::openai::OpenAiWire::local(crate::ai::local::LocalChat::plain(endpoint), "m");
+        let claude = crate::ai::claude::ClaudeWire::new(KEY, "m");
+        let gemini = crate::ai::gemini::GeminiWire::new(KEY, "m", None);
+        let bedrock = crate::ai::bedrock::BedrockWire::new(crate::ai::bedrock::tests::fixture_creds("us-east-1"), "m");
+        let stated = [
+            (row("openai", None), official.resends_transient()),
+            (row("openai", Some("http://127.0.0.1:9/v1")), compatible.resends_transient()),
+            (row("local", None), local.resends_transient()),
+            (row("claude", None), claude.resends_transient()),
+            (row("gemini", None), gemini.resends_transient()),
+            (row("bedrock", None), bedrock.resends_transient()),
+        ];
+        for (row, resends) in stated {
+            assert_eq!(crate::ai::resends_inside(&row), resends, "{} {:?}", row.provider_type, row.base_url);
+        }
+        assert!(official.resends_transient() && compatible.resends_transient(), "OpenAI and the compatible services resend a 429 or 5xx themselves");
     }
 
     /// The AWS SDK makes three attempts itself (its standard retry), and

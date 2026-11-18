@@ -283,6 +283,13 @@ impl Wire for OpenAiWire {
         Metering::Turn { provider: self.target().provider(), model: self.model.clone() }
     }
 
+    /// OpenAI and the compatible services are sent a 429 or 5xx once more
+    /// here; a local server that failed is not busy elsewhere, so the
+    /// router's one resend is its only one.
+    fn resends_transient(&self) -> bool {
+        self.local.is_none()
+    }
+
     async fn start(&self, request: ChatRequest) -> Result<Conversation, String> {
         let (client, system, history) = match &self.local {
             Some(local) => {
@@ -311,30 +318,28 @@ impl Wire for OpenAiWire {
 
     async fn round(&self, conversation: &mut Conversation, final_round: bool, events: &mut Events<'_>) -> Result<(), RoundError> {
         let client = &conversation.client;
-        let response = match &self.local {
-            // Sent once: a local server that failed is not busy elsewhere.
+        let (url, key, body) = match &self.local {
             Some(local) => {
                 let tools = local.sends_tools().then(|| conversation.tools.clone());
                 let request = local.request(&self.model, conversation.messages.clone(), tools, final_round);
-                let mut builder = client.post(local.url()).header("Content-Type", "application/json");
-                if let Some(key) = local.api_key() {
-                    builder = builder.header("Authorization", format!("Bearer {}", key));
-                }
-                builder.json(&request).send().await
+                (local.url(), local.api_key(), serde_json::to_vec(&request))
             }
             None => {
                 let target = self.target();
                 let request = target.request(self.model.clone(), conversation.messages.clone(), conversation.tools.clone(), final_round);
-                send_retrying(|| {
-                    client
-                        .post(target.url())
-                        .header("Authorization", format!("Bearer {}", self.key))
-                        .header("Content-Type", "application/json")
-                        .json(&request)
-                })
-                .await
+                (target.url(), Some(self.key.as_str()), serde_json::to_vec(&request))
             }
-        }
+        };
+        let body = body.map_err(|e| RoundError::refused(e.to_string()))?;
+        let build = || {
+            let builder = client.post(&url).header("Content-Type", "application/json");
+            let builder = match key {
+                Some(key) => builder.header("Authorization", format!("Bearer {key}")),
+                None => builder,
+            };
+            builder.body(body.clone())
+        };
+        let response = if self.resends_transient() { send_retrying(build).await } else { build().send().await }
         .map_err(|e| RoundError::refused(e.to_string()))?;
 
         if !response.status().is_success() {

@@ -172,6 +172,14 @@ pub(crate) trait Wire: Send + Sync {
     /// Send the next request and report its reply.
     async fn round(&self, conversation: &mut Self::Conversation, final_round: bool, events: &mut Events<'_>) -> Result<(), RoundError>;
 
+    /// Whether the wire itself sends a chat request once more after a rate
+    /// limit or a server error (429, 5xx). The router then does not send it
+    /// again ([`super::resends_inside`]). A completion is sent once by every
+    /// wire, and once more by the router.
+    fn resends_transient(&self) -> bool {
+        false
+    }
+
     /// Whether the round's calls run, before the last round: the loop runs
     /// none on the last round, whatever the wire says.
     fn runs_calls(&self, _conversation: &Self::Conversation, round: &Round) -> bool {
