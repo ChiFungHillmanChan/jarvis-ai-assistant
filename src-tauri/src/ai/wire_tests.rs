@@ -3378,7 +3378,9 @@ mod live {
     #[tokio::test]
     #[ignore]
     async fn live_compatible() {
-        let (Some(key), Some(url), Some(model)) = (var("JARVIS_LIVE_COMPAT_KEY"), var("JARVIS_LIVE_COMPAT_URL"), var("JARVIS_LIVE_COMPAT_MODEL")) else {
+        // The test build refuses a compatible service's own address too, so
+        // this test takes the live opt-in like the others.
+        let (Some((key, _outside)), Some(url), Some(model)) = (live_key("JARVIS_LIVE_COMPAT_KEY"), var("JARVIS_LIVE_COMPAT_URL"), var("JARVIS_LIVE_COMPAT_MODEL")) else {
             return skipped("JARVIS_LIVE_COMPAT_KEY, JARVIS_LIVE_COMPAT_URL and JARVIS_LIVE_COMPAT_MODEL");
         };
         let mut router = AiRouter::new("gemini_primary");
