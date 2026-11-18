@@ -18,6 +18,8 @@ export interface ChatMessage {
   has_recording?: boolean;
   /** What JARVIS did for this reply. Kept for this app session only, never saved. */
   steps?: ChatStep[];
+  /** Under an answer from a model picked in the error card: that the chosen AI will not see it (P06). This app session only. */
+  note?: string;
 }
 
 export interface ChatStep { status: string; detail: string | null }

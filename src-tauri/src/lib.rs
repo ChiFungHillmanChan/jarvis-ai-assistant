@@ -14,6 +14,8 @@ pub mod payments;
 pub mod scheduler;
 pub mod security;
 pub mod system;
+#[cfg(test)]
+mod test_log;
 pub mod tool_approval;
 pub mod tray;
 pub mod util;
@@ -76,6 +78,7 @@ pub fn run() {
             // runs in the background and never holds startup.
             ai::registry::start();
             ai::disabled::init(app.handle().clone());
+            ai::notify::init(app.handle().clone());
             {
                 use tauri::Emitter;
                 let handle = app.handle().clone();
@@ -137,6 +140,8 @@ pub fn run() {
             router.load_from_db(&db);
             router.reload_keys();
             router.append_default_fallbacks();
+            // Before any job starts: the mail gate reads these.
+            router.publish_keys();
             log::info!("Provider chain: {} entries, {} local endpoints",
                 router.provider_chain().len(), router.local_endpoints().len());
 
@@ -492,6 +497,7 @@ pub fn run() {
             voice::commands::get_voice_state,
             voice::commands::toggle_mute,
             voice::commands::get_voice_settings,
+            voice::cloud_speech,
             voice::commands::get_voice_recording,
             voice::commands::set_voice_setting,
             voice::commands::list_tts_voices,
@@ -540,6 +546,12 @@ pub fn run() {
             ai::models::ai_models,
             ai::disabled::disabled_models,
             ai::disabled::confirm_model_replacement,
+            ai::consent::ai_consent_needed,
+            ai::consent::ai_google_content_note,
+            ai::consent::give_ai_consent,
+            ai::consent::revoke_ai_consent,
+            ai::consent::list_ai_consents,
+            ai::capability::think_harder_offered,
             commands::local_llm::update_model_override,
             commands::system::open_url,
             tool_approval::resolve_tool_approval,

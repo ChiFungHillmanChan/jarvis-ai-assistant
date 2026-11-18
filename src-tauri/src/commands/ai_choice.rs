@@ -125,6 +125,9 @@ fn save(db: &Database, choice: &AiChoice, entry: &ProviderChainEntry) -> Result<
     tx.commit().map_err(|e| e.to_string())
 }
 
+/// A router built as the launch builds one. It publishes nothing: one made
+/// live goes through `ai::install_live`, and one built for a single job (a
+/// sort run, a choice being tested) leaves the gate's keys as they are.
 pub(crate) fn rebuilt_router(db: &Database) -> AiRouter {
     let provider = db
         .conn
@@ -177,7 +180,7 @@ pub async fn choose_ai(
     )
     .await?;
     save(&db, &choice, &entry)?;
-    *router.lock().map_err(|e| e.to_string())? = rebuilt_router(&db);
+    crate::ai::install_live(&router, rebuilt_router(&db))?;
     describe(&[entry]).ok_or_else(|| "未能讀取所選 AI。".into())
 }
 

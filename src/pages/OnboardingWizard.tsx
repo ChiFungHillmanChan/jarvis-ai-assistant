@@ -5,6 +5,7 @@ import * as mail from '../lib/mail';
 import { canStartFirstAnalysis, triageConsentText } from '../lib/setup-flow';
 import { applyTestedMailSettings, getSetupStatus, setupError, testMailAiConnection, type SetupStatus } from '../lib/setup';
 import ChooseAi from '../components/ChooseAi';
+import { parseAiError, problemText } from '../lib/ai-error';
 import BedrockModelPicker from '../components/BedrockModelPicker';
 import { useBedrockModelList } from '../hooks/useBedrockModelList';
 import { modelChosen } from '../lib/bedrock-models';
@@ -72,7 +73,11 @@ export default function OnboardingWizard({ onComplete }: { onComplete: () => voi
     if (operation.current) return;
     operation.current = true; setBusy(label); setError(''); setNotice('');
     try { await action(); }
-    catch (reason) { if (mounted.current) setError(setupError(reason instanceof Error ? reason.message : String(reason), text)); }
+    catch (reason) {
+      const raw = reason instanceof Error ? reason.message : String(reason);
+      const problem = parseAiError(raw);
+      if (mounted.current) setError(problem ? problemText(problem, text) : setupError(raw, text));
+    }
     finally { operation.current = false; if (mounted.current) setBusy(''); }
   }
   const connectingGmail = text('Connecting Gmail', '連接 Gmail');

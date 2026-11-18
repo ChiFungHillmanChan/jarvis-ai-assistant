@@ -18,10 +18,10 @@ function markSeen(choice: DisabledChoice) {
 /**
  * A saved model the registry disabled: a blocking notice that names the
  * replacement and saves it only on Confirm. It opens once on its own, and
- * again whenever a request on that model stops (model-disabled).
- *
- * TODO(P06): a stopped foreground request should show P06's error card;
- * until P06 is merged this notice is the minimal blocking stand-in.
+ * again whenever a job on that model stops (model-disabled): a background
+ * job, or mail processing set to a model of its own. A request the user
+ * waits on shows the error card instead (ModelErrorCard, P06), which
+ * offers the same replacement.
  */
 export default function ModelDisabledNotice() {
   const { text } = useUiLocale();

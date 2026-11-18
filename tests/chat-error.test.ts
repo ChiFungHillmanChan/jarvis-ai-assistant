@@ -5,37 +5,24 @@ import { chatErrorText } from '../src/lib/chat-error.ts';
 const en = (english: string) => english;
 const zh = (_english: string, chinese: string) => chinese;
 
-test('an empty Gemini reply names Gemini and suggests another model', () => {
-  const error = 'All providers failed: gemini (gemini-3.6-flash): Gemini (gemini-3.6-flash) returned no text (finish_reason=STOP)';
-  assert.equal(chatErrorText(error, en).message, 'Gemini returned an empty answer. Try again, or choose another model in Settings → Your AI.');
-  assert.equal(chatErrorText(error, zh).message, 'Gemini 沒有回覆任何內容。請再試一次，或到「設定 → 你的 AI」改用其他模型。');
-  assert.equal(chatErrorText(error, en).detail, error);
+// P06: the router no longer walks a chain of providers, so a failed turn is
+// an error card (src/lib/ai-error.ts) and this line is what remains of it.
+
+test("a model failure is told in the card's own words, naming the model", () => {
+  const failure = { feature: 'chat', model: { pick: { provider_type: 'gemini' }, provider: 'gemini', model: 'm', label: 'Gemini Test (Google Gemini)' }, code: 'empty_reply', capability: null, message: 'Gemini Test (Google Gemini) returned an empty answer. Try again, or pick another model.', alternatives: [], actions_ran: 0 };
+  const error = JSON.stringify({ jarvis_ai: { kind: 'failure', failure } });
+  assert.deepEqual(chatErrorText(error, en), { message: failure.message, detail: null });
 });
 
-test('an empty reply from another provider keeps the general message', () => {
-  const error = 'All providers failed: gemini (gemini-3.6-flash): Gemini API error 500; Claude (claude-sonnet-4-6) returned no text';
-  assert.equal(chatErrorText(error, en).message, 'Your AI could not answer just now. Try again shortly.');
+test('held-back email names the service whose terms wait for agreement', () => {
+  const consent = { provider: 'kimi', base_url: 'https://api.moonshot.ai/v1', label: 'Kimi', terms: 'unknown', blocked_key: 'consentUnknownTermsBlocked', confirm_key: 'consentUnknownTermsConfirm' };
+  const error = JSON.stringify({ jarvis_ai: { kind: 'consent', consent } });
+  assert.equal(chatErrorText(error, en).message, "Email and calendar content waits for your agreement to Kimi's data terms.");
+  assert.equal(chatErrorText(error, zh).message, '電郵及日曆內容須待你同意 Kimi 的資料條款後才會傳送。');
 });
 
-test('an empty Gemini reply after a completed action says the action was kept', () => {
-  const error = 'Stopped after 1 completed action(s) so they are not repeated: gemini (gemini-3.7-flash): Gemini (gemini-3.7-flash) returned no text (finish_reason=STOP)';
-  assert.equal(chatErrorText(error, en).message, 'Gemini returned an empty answer. The actions already completed were kept and will not be repeated. Check the result, or choose another model in Settings → Your AI.');
-  assert.equal(chatErrorText(error, zh).message, 'Gemini 沒有回覆任何內容。已完成的操作已保留，不會重複執行。請檢查結果，或到「設定 → 你的 AI」改用其他模型。');
-  assert.equal(chatErrorText(error, en).detail, error);
-});
-
-test('a later provider that fails after an action is not reported as an empty Gemini reply', () => {
-  // Gemini returned nothing and ran no tool, so the router moved on; Claude
-  // ran a tool and then failed. The router's string holds both errors.
-  const error = 'Stopped after 1 completed action(s) so they are not repeated: gemini (gemini-3.7-flash): Gemini (gemini-3.7-flash) returned no text (finish_reason=STOP); claude (claude-sonnet-4-6): Claude API error 500';
+test('any other error is shown as the backend wrote it', () => {
+  const error = 'This request already carried out an action, such as creating an event or a draft. JARVIS does not send it again, so the action is not done twice.';
   assert.deepEqual(chatErrorText(error, en), { message: error, detail: null });
-  assert.deepEqual(chatErrorText(error, zh), { message: error, detail: null });
-  // The other way round, Gemini's empty reply is the last error and decides.
-  const geminiLast = 'Stopped after 1 completed action(s) so they are not repeated: claude (claude-sonnet-4-6): Claude API error 500; gemini (gemini-3.7-flash): Gemini (gemini-3.7-flash) returned no text (finish_reason=STOP)';
-  assert.match(chatErrorText(geminiLast, en).message, /^Gemini returned an empty answer\. The actions already completed were kept/);
-});
-
-test('another failure after a completed action is shown as the router wrote it', () => {
-  const error = 'Stopped after 2 completed action(s) so they are not repeated: claude (claude-sonnet-4-6): Claude API error 500';
-  assert.deepEqual(chatErrorText(error, en), { message: error, detail: null });
+  assert.deepEqual(chatErrorText('{not json', en), { message: '{not json', detail: null });
 });

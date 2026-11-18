@@ -46,24 +46,76 @@ pub(crate) fn whisper_language(setting: &str, n_vocab: i32) -> (Option<&'static 
     }
 }
 
+/// The cloud speech-to-text services this build can send to (P06). Which
+/// one, and which model, is the registry's `stt` feature for the AI the
+/// user chose (voice/mod.rs `speech_route`).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum SpeechWire {
+    Gemini,
+    /// OpenAI's transcription endpoint. Written and tested; used once a
+    /// registry version names an OpenAI `stt` model (DECISIONS.md,
+    /// 2026-11-17).
+    OpenAi,
+}
+
+const OPENAI_TRANSCRIPTIONS: &str = "https://api.openai.com/v1/audio/transcriptions";
+
 #[derive(Clone)]
 pub struct Transcriber {
+    wire: SpeechWire,
     api_key: String,
+    model: String,
 }
 
 impl Transcriber {
-    pub fn new(api_key: String) -> Result<Self, String> {
+    pub fn new(wire: SpeechWire, api_key: String, model: String) -> Result<Self, String> {
         if api_key.is_empty() {
-            return Err("Gemini API key required for speech-to-text".to_string());
+            return Err("An API key is required for cloud speech-to-text".to_string());
         }
-        Ok(Transcriber { api_key })
+        Ok(Transcriber { wire, api_key, model })
     }
 
     pub async fn transcribe(&self, audio_data: &[f32], db: &crate::db::Database) -> Result<String, String> {
         if audio_data.len() < 1600 {
             return Ok(String::new());
         }
+        match self.wire {
+            SpeechWire::Gemini => self.transcribe_gemini(audio_data, db).await,
+            SpeechWire::OpenAi => self.transcribe_openai(audio_data, db).await,
+        }
+    }
 
+    async fn transcribe_openai(&self, audio_data: &[f32], db: &crate::db::Database) -> Result<String, String> {
+        let wav_bytes = super::recordings::wav(audio_data)?;
+        let file = reqwest::multipart::Part::bytes(wav_bytes).file_name("speech.wav").mime_str("audio/wav").map_err(|e| e.to_string())?;
+        let form = openai_fields(&self.model, &read_stt_language(db)).into_iter().fold(reqwest::multipart::Form::new().part("file", file), |form, (name, value)| form.text(name, value));
+        // Bounded for the same reason as Gemini's below.
+        let client = reqwest::Client::builder()
+            .connect_timeout(std::time::Duration::from_secs(10))
+            .timeout(std::time::Duration::from_secs(90))
+            .build()
+            .map_err(|e| format!("OpenAI STT client: {}", e))?;
+        let started = std::time::Instant::now();
+        let resp = client
+            .post(OPENAI_TRANSCRIPTIONS)
+            .bearer_auth(&self.api_key)
+            .multipart(form)
+            .send()
+            .await
+            .map_err(|e| format!("OpenAI STT error: {}", e))?;
+        if !resp.status().is_success() {
+            let status = resp.status();
+            let body = resp.text().await.unwrap_or_default();
+            return Err(format!("OpenAI STT error {}: {}", status, body));
+        }
+        let result: serde_json::Value = resp.json().await.map_err(|e| e.to_string())?;
+        let (text, input, output) = openai_reply(&result);
+        crate::ai::cost::record_unpriced(db, "openai", crate::ai::cost::Feature::Stt, &self.model, input, output, started.elapsed().as_millis() as i64);
+        log::info!("Transcribed {} characters", text.chars().count());
+        Ok(text)
+    }
+
+    async fn transcribe_gemini(&self, audio_data: &[f32], db: &crate::db::Database) -> Result<String, String> {
         let wav_bytes = super::recordings::wav(audio_data)?;
         let base64_audio =
             base64::engine::general_purpose::STANDARD.encode(&wav_bytes);
@@ -93,7 +145,7 @@ impl Transcriber {
                 "maxOutputTokens": crate::ai::models::limits("gemini").stt_max_output_tokens.unwrap_or_default()
             }
         });
-        let model = crate::ai::models::default_for("stt", "gemini");
+        let model = self.model.clone();
 
         let url = format!(
             "{}/models/{}:generateContent",
@@ -142,6 +194,27 @@ impl Transcriber {
         log::info!("Transcribed {} characters", text.chars().count());
         Ok(text)
     }
+}
+
+/// The transcription request's form fields besides the audio: the model,
+/// and for a fixed dictation language the language. Cantonese goes as
+/// Chinese with the same prompt as local Whisper, which keeps the speaker's
+/// words in Traditional characters; "yue" is not an ISO 639-1 code.
+fn openai_fields(model: &str, setting: &str) -> Vec<(&'static str, String)> {
+    let mut fields = vec![("model", model.to_string()), ("response_format", "json".to_string())];
+    match setting {
+        "yue" => fields.extend([("language", "zh".to_string()), ("prompt", CANTONESE_PROMPT.to_string())]),
+        "en" => fields.push(("language", "en".to_string())),
+        _ => {}
+    }
+    fields
+}
+
+/// The transcript and the token counts of OpenAI's reply. A model billed
+/// by the second reports no tokens; the cost is left unknown either way.
+fn openai_reply(result: &serde_json::Value) -> (String, i64, i64) {
+    let usage = &result["usage"];
+    (result["text"].as_str().unwrap_or("").trim().to_string(), usage["input_tokens"].as_i64().unwrap_or(0), usage["output_tokens"].as_i64().unwrap_or(0))
 }
 
 /// Store one Gemini transcription. The audio is billed at Gemini's audio
@@ -287,6 +360,27 @@ impl LocalTranscriber {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// OpenAI's transcription request names the model, and for a fixed
+    /// language the language; Cantonese goes as Chinese with the Cantonese
+    /// prompt. Auto-detect sends neither.
+    #[test]
+    fn the_openai_transcription_request_follows_the_dictation_language() {
+        let fields = |setting| openai_fields("stt-model", setting);
+        assert_eq!(fields("auto"), [("model", "stt-model".to_string()), ("response_format", "json".to_string())]);
+        assert_eq!(fields("en")[2], ("language", "en".to_string()));
+        assert_eq!(fields("yue")[2..], [("language", "zh".to_string()), ("prompt", CANTONESE_PROMPT.to_string())]);
+    }
+
+    /// The transcript is trimmed; tokens are read when the reply has them,
+    /// and a reply billed by the second counts none.
+    #[test]
+    fn the_openai_transcription_reply_gives_the_text_and_tokens() {
+        let tokens = serde_json::json!({"text": " 聽日下晝三點開會 ", "usage": {"type": "tokens", "input_tokens": 120, "output_tokens": 9}});
+        assert_eq!(openai_reply(&tokens), ("聽日下晝三點開會".to_string(), 120, 9));
+        let seconds = serde_json::json!({"text": "hello", "usage": {"type": "duration", "seconds": 3}});
+        assert_eq!(openai_reply(&seconds), ("hello".to_string(), 0, 0));
+    }
 
     /// A Gemini transcription is stored as speech-to-text with its tokens,
     /// thinking included, and the cost unknown: audio input has its own rate.

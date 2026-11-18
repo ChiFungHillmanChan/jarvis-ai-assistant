@@ -48,6 +48,11 @@ const messages = {
   dailyBriefingNext: ['The next briefing comes at the next {time}.', '下一次簡報會在下一個 {time} 顯示。'],
   briefTitle: ['Today’s briefing', '今日簡報'], briefSummaryPending: ['The AI summary will be added when the network is available.', '網絡可用時會補上 AI 摘要。'],
   briefSummaryFailed: ['The AI summary could not be prepared: {reason}', '未能準備 AI 摘要：{reason}'], briefShownLate: ['Shown after its scheduled time, so it was not read aloud.', '顯示時間晚於排程時間，因此沒有朗讀。'],
+  // The consent card (src/components/ConsentCard.tsx). The keys are named by the model registry (providers[].consent_copy_keys).
+  consentGeminiBillingBlocked: ['Email, calendar content and voice recordings are not sent to {label} yet. Gemini’s free tier may use what it receives to improve Google’s products; the paid tier does not. Check that billing is set up for your Gemini API key, then confirm.', '電郵、日曆內容及語音錄音暫未傳送至 {label}。Gemini 免費方案可能會以收到的內容改進 Google 的產品，付費方案則不會。請先確認你的 Gemini API 密鑰已設定付費，然後按確認。'],
+  consentGeminiBillingConfirm: ['My Gemini API key has billing set up. Send email, calendar content and voice to {label}', '我的 Gemini API 密鑰已設定付費，可傳送電郵、日曆內容及語音至 {label}'],
+  consentUnknownTermsBlocked: ['Email and calendar content is not sent to {label} yet. JARVIS cannot vouch for how {label} handles what it receives: it may keep it or use it to train its models. Send it only if you accept that.', '電郵及日曆內容暫未傳送至 {label}。JARVIS 無法確認 {label} 如何處理收到的內容，對方可能會保留內容或用作訓練模型。請在接受這一點後才傳送。'],
+  consentUnknownTermsConfirm: ['I accept this. Send email and calendar content to {label}', '我接受，可傳送電郵及日曆內容至 {label}'],
 } as const;
 export type MessageKey = keyof typeof messages;
 export const catalog = {

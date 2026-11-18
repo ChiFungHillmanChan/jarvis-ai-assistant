@@ -7,7 +7,7 @@ const ZH: Record<string, string> = {
   'Reviewing earlier conversations...': '正在查閱之前的對話…',
   'Reviewing tool results...': '正在核對工具結果…',
   'Composing response...': '正在撰寫回覆…',
-  'Retrying with next provider...': '正在改用下一個 AI…',
+  'Trying the same model again...': '正在重試同一個模型…',
   'Searching emails...': '正在搜尋郵件…',
   'Reading email...': '正在閱讀郵件…',
   'Drafting email...': '正在起草郵件…',

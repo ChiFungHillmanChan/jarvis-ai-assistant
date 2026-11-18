@@ -23,9 +23,12 @@ pub struct Text {
 pub enum DataTerms {
     /// Email may be sent.
     Safe,
-    /// Email may be sent once the user confirms paid billing.
+    /// Email may be sent once the user confirms paid billing on the consent
+    /// card.
     NeedsBillingConfirmation,
-    /// Not checked: email is not sent (the consent card is P06).
+    /// JARVIS cannot confirm how the provider uses data: Gmail and Calendar
+    /// content is never sent (ai::mail_policy); a voice recording waits for
+    /// the user's consent (ai/consent.rs).
     Unknown,
 }
 
@@ -281,9 +284,17 @@ pub struct Prices {
     pub tiers: Vec<Tier>,
 }
 
+/// What JARVIS uses with a model today (registry/schema.json). P06's
+/// `ai::capability::resolve` reads these before a request is sent.
 #[derive(Debug, Clone, Deserialize, Serialize, PartialEq)]
 pub struct Capabilities {
     pub tools: bool,
+    pub streaming: bool,
+    pub json: bool,
+    pub json_schema: bool,
+    pub vision: bool,
+    pub thinking: bool,
+    pub reasoning_effort: bool,
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize, PartialEq)]

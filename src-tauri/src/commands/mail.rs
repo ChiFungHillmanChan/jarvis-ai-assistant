@@ -32,6 +32,16 @@ fn typesafe_key() -> Option<String> {
         .filter(|key| !key.is_empty())
 }
 
+/// The TypeSafe key, while TypeSafe may receive mail (ai::mail_policy,
+/// review B I-4). No key: Ok(None), and the chosen AI classifies, the way
+/// the user set sorting up. A key the gate refuses: why, raised once per
+/// launch; the chosen AI does not classify in TypeSafe's place (review A,
+/// N-1; DECISIONS section 5, no automatic switch).
+fn usable_typesafe(db: &Database, key: Option<String>) -> Result<Option<String>, crate::ai::mail_policy::Blocked> {
+    let Some(key) = key else { return Ok(None) };
+    crate::ai::mail_policy::may_send_to(db, "typesafe").map(|()| Some(key)).inspect_err(|blocked| blocked.raise("mail_sort"))
+}
+
 fn openai_key() -> Result<String, String> {
     select_openai_key(std::env::var("OPENAI_API_KEY").ok(), || {
         crate::security::keychain::KeychainStore::get(crate::ai::KEY_SERVICE, "openai_api_key")
@@ -70,15 +80,43 @@ fn chosen_ai_for_mail(db: &Database) -> Result<Option<crate::commands::ai_choice
 /// Whether the background sync should sort new mail: the user opted in, and
 /// either a TypeSafe key or a chosen AI that may read email can classify it.
 pub(crate) fn triage_ready(db: &Database) -> bool {
-    store::auto_triage_enabled(db).unwrap_or(false)
-        && (typesafe_key().is_some() || matches!(chosen_ai_for_mail(db), Ok(Some(_))))
+    triage_ready_with(db, typesafe_key())
+}
+
+fn triage_ready_with(db: &Database, typesafe_key: Option<String>) -> bool {
+    if !store::auto_triage_enabled(db).unwrap_or(false) {
+        return false;
+    }
+    match usable_typesafe(db, typesafe_key) {
+        Ok(Some(_)) => return true,
+        Ok(None) => {}
+        Err(_) => return false,
+    }
+    match chosen_ai_for_mail(db) {
+        Ok(chosen) => chosen.is_some(),
+        // Not skipped silently (P06): the consent card, or for content that
+        // is not sent to this AI at all a notice, once per launch.
+        Err(blocked) => {
+            blocked.raise("mail_sort");
+            false
+        }
+    }
 }
 
 pub(crate) async fn triage_untriaged(db: &Database, language: Option<&str>) -> Result<MailTriageRun, String> {
+    triage_untriaged_with(db, language, typesafe_key).await
+}
+
+/// `typesafe_key` is read once the run's turn has come.
+async fn triage_untriaged_with(db: &Database, language: Option<&str>, typesafe_key: fn() -> Option<String>) -> Result<MailTriageRun, String> {
     if !store::auto_triage_enabled(db)? {
         return Err("請先在「分析設定」開啟自動整理。".into());
     }
-    let typesafe = typesafe_key();
+    // The gate is asked once the run's turn has come (review B, I-3): a
+    // consent withdrawn while an earlier run held the lock counts. triage_one
+    // asks again before each message.
+    let _run = TRIAGE_RUN.lock().await;
+    let typesafe = usable_typesafe(db, typesafe_key()).map_err(|blocked| blocked.user_message())?;
     // An AI that may not read email is left out; TypeSafe alone can still sort.
     let chosen = match chosen_ai_for_mail(db) {
         Ok(chosen) => chosen,
@@ -103,7 +141,6 @@ pub(crate) async fn triage_untriaged(db: &Database, language: Option<&str>) -> R
     };
     let keys = triage::TriageKeys { typesafe, openai, openai_model, assistant };
     let language = if language == Some("en") { "en" } else { "zh-HK" };
-    let _run = TRIAGE_RUN.lock().await;
     triage::run(db, keys, language).await
 }
 
@@ -305,6 +342,7 @@ pub async fn mail_analyze_group(
     db: State<'_, Arc<Database>>,
     router: State<'_, std::sync::Mutex<crate::ai::AiRouter>>,
     group_id: i64,
+    pick: Option<crate::ai::capability::Pick>,
 ) -> Result<MailAnalysis, String> {
     let context = store::context(&db, group_id)?;
     if context.messages.is_empty() {
@@ -327,7 +365,6 @@ pub async fn mail_analyze_group(
         None
     };
     let assistant = if context.settings.processing_mode == "assistant" {
-        crate::ai::mail_policy::check(&db).map_err(|blocked| blocked.user_message())?;
         Some(analysis::AssistantRoute {
             router: router.lock().map_err(|e| e.to_string())?.clone(),
             db: db.inner().clone(),
@@ -335,7 +372,50 @@ pub async fn mail_analyze_group(
     } else {
         None
     };
-    analysis::analyze(context, creds, openai_key, assistant, Some(&db)).await
+    analyze_on(pick, &db, context, creds, openai_key, assistant).await
+}
+
+/// An analysis, in the scope of the model picked in the error card (P06),
+/// if any. On the chosen AI ("assistant" mode) the gate asks about the model
+/// the request runs on, so it is asked inside that scope: a pick is gated
+/// like the saved choice.
+async fn analyze_on(
+    pick: Option<crate::ai::capability::Pick>,
+    db: &Arc<Database>,
+    context: MailContext,
+    creds: Option<crate::aws::credentials::AwsCredentials>,
+    openai_key: Option<String>,
+    assistant: Option<analysis::AssistantRoute>,
+) -> Result<MailAnalysis, String> {
+    crate::ai::capability::with_pick(pick, async {
+        if let Some(route) = &assistant {
+            assistant_may_analyze(db, &route.router).await?;
+        }
+        // The modes on the user's own key follow the registry's terms too
+        // (review B, I-4). Not the chosen AI, so no capability check here.
+        let own_key = match context.settings.processing_mode.as_str() {
+            "openai" => Some("openai"),
+            "bedrock" => Some("bedrock"),
+            _ => None,
+        };
+        if let Some(provider) = own_key {
+            crate::ai::mail_policy::may_send_to(db, provider).map_err(|blocked| blocked.user_message())?;
+        }
+        analysis::analyze(context, creds, openai_key, assistant, Some(db)).await
+    })
+    .await
+}
+
+/// Whether an analysis may send the group's mail to the AI the request
+/// runs on (ai::mail_policy): the reason when not.
+async fn assistant_may_analyze(db: &Database, router: &crate::ai::AiRouter) -> Result<(), String> {
+    match crate::ai::mail_policy::check(db) {
+        Ok(()) => Ok(()),
+        // Not sent to this service: the error card, with the models that may
+        // receive it (P06, Google Limited Use).
+        Err(crate::ai::mail_policy::Blocked::NotForGoogleContent { message, .. }) => Err(router.google_content_card(db, crate::ai::cost::Feature::MailAnalysis, message).await),
+        Err(blocked) => Err(blocked.user_message()),
+    }
 }
 
 fn select_openai_key(
@@ -355,6 +435,209 @@ fn select_openai_key(
 #[cfg(test)]
 mod tests {
     use super::select_openai_key;
+
+    /// Google's Limited Use rules (DECISIONS, P06 "Google Limited Use",
+    /// 2026-11-17) for the two mail paths on the chosen AI. Analysis and AI
+    /// sorting send no mail to a service JARVIS cannot confirm (Kimi), even
+    /// after the user agreed to its terms; Gemini with billing confirmed and
+    /// a safe provider (OpenAI) receive it.
+    mod google_content {
+        use super::super::{analyze_on, assistant_may_analyze, chosen_ai_for_mail};
+        use crate::ai::mail_policy::test_support::{agree_to_gemini, agree_to_kimi, use_ai, KIMI};
+        use crate::ai::mail_policy::Blocked;
+        use std::sync::Arc;
+
+        fn on_kimi_after_agreeing() -> crate::db::Database {
+            let db = crate::db::test_database();
+            use_ai(&db, "openai", KIMI);
+            agree_to_kimi(&db);
+            db
+        }
+
+        #[test]
+        fn ai_sorting_sends_no_mail_to_an_unknown_terms_service() {
+            let db = on_kimi_after_agreeing();
+            assert!(matches!(chosen_ai_for_mail(&db), Err(Blocked::NotForGoogleContent { ref label, .. }) if label == "Kimi"));
+            let gemini = crate::db::test_database();
+            use_ai(&gemini, "gemini", None);
+            agree_to_gemini(&gemini);
+            assert!(matches!(chosen_ai_for_mail(&gemini), Ok(Some(_))));
+            let openai = crate::db::test_database();
+            use_ai(&openai, "openai", None);
+            assert!(matches!(chosen_ai_for_mail(&openai), Ok(Some(_))));
+        }
+
+        const QWEN: Option<&str> = Some("https://dashscope-intl.aliyuncs.com/compatible-mode/v1");
+
+        /// A router with keys for Kimi, Qwen and OpenAI given to it, so
+        /// nothing is read from the Keychain; `chain` is the saved choice.
+        fn router(chain: &[(&str, Option<&str>)]) -> crate::ai::AiRouter {
+            let mut router = crate::ai::AiRouter::new("gemini_primary");
+            router.set_provider_chain(
+                chain
+                    .iter()
+                    .enumerate()
+                    .map(|(position, (provider, base_url))| crate::ai::ProviderChainEntry { position: position as i32, provider_type: provider.to_string(), endpoint_id: None, model_id: base_url.map(|_| "kimi-k2".to_string()), enabled: true, base_url: base_url.map(str::to_string) })
+                    .collect(),
+            );
+            router.set_openai_key("test-openai");
+            router.set_compat_key(KIMI.unwrap(), "test-kimi");
+            router.set_compat_key(QWEN.unwrap(), "test-qwen");
+            router
+        }
+
+        fn card(error: &str) -> serde_json::Value {
+            crate::ai::failure::parse(error).unwrap_or_else(|| panic!("not the error card: {error}"))
+        }
+
+        fn offered(card: &serde_json::Value) -> Vec<(String, Option<String>)> {
+            card["alternatives"].as_array().unwrap().iter().map(|a| (a["pick"]["provider_type"].as_str().unwrap().to_string(), a["pick"]["base_url"].as_str().map(str::to_string))).collect()
+        }
+
+        /// Option A: the Email page shows the error card, offering the
+        /// models that may receive the mail (OpenAI here, not Kimi).
+        #[tokio::test]
+        async fn mail_analysis_sends_no_mail_to_an_unknown_terms_service() {
+            // Qwen can run mail analysis but may not receive the mail either.
+            let both = [("openai", KIMI), ("openai", QWEN), ("openai", None)];
+            let error = assistant_may_analyze(&on_kimi_after_agreeing(), &router(&both)).await.unwrap_err();
+            let card = card(&error);
+            assert_eq!(card["code"], "google_content");
+            assert!(card["message"].as_str().unwrap().starts_with("Gmail and Calendar content is not sent to Kimi"), "{card}");
+            assert_eq!(offered(&card), [("openai".to_string(), None)]);
+            let gemini = crate::db::test_database();
+            use_ai(&gemini, "gemini", None);
+            agree_to_gemini(&gemini);
+            assert_eq!(assistant_may_analyze(&gemini, &router(&[("gemini", None)])).await, Ok(()));
+            let openai = crate::db::test_database();
+            use_ai(&openai, "openai", None);
+            assert_eq!(assistant_may_analyze(&openai, &router(&[("openai", None)])).await, Ok(()));
+        }
+
+        fn own_key_context(mode: &str) -> crate::mail::models::MailContext {
+            crate::mail::models::MailContext {
+                group: crate::mail::models::MailGroup { id: 1, name: "Board".into(), instructions: String::new(), message_count: 0 },
+                messages: Vec::new(),
+                memories: Vec::new(),
+                settings: crate::mail::models::MailSettings { processing_mode: mode.into(), local_model: String::new(), bedrock_model: String::new(), openai_model: String::new() },
+            }
+        }
+
+        /// The Email page's OpenAI-key and Bedrock modes follow the
+        /// registry's terms too: a fetched copy that tightens OpenAI or
+        /// Bedrock takes effect there (review B, I-4). No key or credentials
+        /// are given, so nothing could be sent whatever the gate said.
+        #[tokio::test]
+        async fn the_email_pages_own_key_modes_follow_a_tightened_registry() {
+            use crate::ai::registry::DataTerms;
+            let db = Arc::new(crate::db::test_database());
+            for (mode, provider) in [("openai", "openai"), ("bedrock", "bedrock")] {
+                let _registry = crate::ai::registry::test_override::with(|r| r.providers.iter_mut().find(|p| p.id == provider).unwrap().data_terms = DataTerms::Unknown);
+                let error = analyze_on(None, &db, own_key_context(mode), None, None, None).await.unwrap_err();
+                assert!(error.starts_with("Gmail and Calendar content is not sent to "), "{mode}: {error}");
+            }
+            let _registry = crate::ai::registry::test_override::with(|r| r.providers.iter_mut().find(|p| p.id == "openai").unwrap().data_terms = DataTerms::NeedsBillingConfirmation);
+            let error = analyze_on(None, &db, own_key_context("openai"), None, None, None).await.unwrap_err();
+            let Err(Blocked::NeedsConsent(request)) = crate::ai::mail_policy::may_send_to(&db, "openai") else { panic!("OpenAI needs consent now") };
+            assert_eq!(error, request.to_error(), "the consent card");
+        }
+
+        /// A TypeSafe key sorts mail only while TypeSafe may receive it.
+        #[test]
+        fn a_typesafe_key_sorts_only_while_typesafe_may_receive_mail() {
+            use crate::ai::registry::DataTerms;
+            let db = crate::db::test_database();
+            assert_eq!(super::super::usable_typesafe(&db, Some("ts-test".into())), Ok(Some("ts-test".into())));
+            assert_eq!(super::super::usable_typesafe(&db, None), Ok(None));
+            let _registry = crate::ai::registry::test_override::with(|r| r.providers.iter_mut().find(|p| p.id == "typesafe").unwrap().data_terms = DataTerms::Unknown);
+            assert_eq!(super::super::usable_typesafe(&db, Some("ts-test".into())), crate::ai::mail_policy::may_send_to(&db, "typesafe").map(|()| None));
+            assert!(super::super::usable_typesafe(&db, Some("ts-test".into())).is_err());
+            assert_eq!(super::super::usable_typesafe(&db, None), Ok(None), "no key: the chosen AI classifies, whatever TypeSafe's terms");
+        }
+
+        /// A model picked in the error card is gated like the saved choice:
+        /// with OpenAI saved, picking Kimi for one analysis sends it nothing
+        /// (the gate is asked inside the pick's scope).
+        #[tokio::test]
+        async fn a_picked_unknown_terms_service_gets_no_mail_either() {
+            let db = Arc::new(crate::db::test_database());
+            use_ai(&db, "openai", None);
+            agree_to_kimi(&db);
+            let kimi = crate::ai::capability::Pick { provider_type: "openai".into(), base_url: KIMI.map(str::to_string), endpoint_id: None, model_id: Some("kimi-k2".into()) };
+            let route = crate::mail::analysis::AssistantRoute { router: router(&[("openai", None), ("openai", KIMI)]), db: db.clone() };
+            let context = crate::mail::models::MailContext {
+                group: crate::mail::models::MailGroup { id: 1, name: "Board".into(), instructions: String::new(), message_count: 0 },
+                messages: Vec::new(),
+                memories: Vec::new(),
+                settings: crate::mail::models::MailSettings { processing_mode: "assistant".into(), local_model: String::new(), bedrock_model: String::new(), openai_model: String::new() },
+            };
+            let card = card(&analyze_on(Some(kimi), &db, context, None, None, Some(route)).await.unwrap_err());
+            assert_eq!(card["code"], "google_content");
+            assert_eq!(card["model"]["pick"]["base_url"], KIMI.unwrap(), "the card names the picked model");
+            assert_eq!(offered(&card), [("openai".to_string(), None)]);
+        }
+
+        /// A run that waits for an earlier one is judged when its turn
+        /// comes (review B, I-3 and R17): Gemini's consent is withdrawn while
+        /// the earlier run holds the lock, and the waiting run then refuses
+        /// with the consent card. No TypeSafe key, so only the chosen AI
+        /// could sort; the mailbox is empty, so nothing could be sent anyway.
+        #[tokio::test]
+        async fn a_run_waiting_for_an_earlier_one_is_judged_when_its_turn_comes() {
+            let db = crate::db::test_database();
+            crate::mail::store::set_auto_triage(&db, true).unwrap();
+            use_ai(&db, "gemini", None);
+            agree_to_gemini(&db);
+            let earlier_run = super::super::TRIAGE_RUN.lock().await;
+            let db = &db;
+            let (outcome, ()) = tokio::join!(super::super::triage_untriaged_with(db, Some("en"), || None), async move {
+                // The run reaches the lock and waits.
+                for _ in 0..3 {
+                    tokio::task::yield_now().await;
+                }
+                crate::ai::consent::revoke(db, &crate::ai::consent::Subject { provider: "gemini".into(), base_url: String::new() }).unwrap();
+                drop(earlier_run);
+            });
+            let error = outcome.expect_err("the consent withdrawn while it waited counts");
+            let Err(Blocked::NeedsConsent(request)) = crate::ai::mail_policy::check(db) else { panic!("Gemini needs consent again") };
+            assert_eq!(error, request.to_error(), "the consent card");
+        }
+
+        /// Sorting where Gemini, the chosen AI, may read mail, with the
+        /// mailbox empty: nothing could be sent whatever a run did.
+        fn sorting_on_gemini() -> crate::db::Database {
+            let db = crate::db::test_database();
+            crate::mail::store::set_auto_triage(&db, true).unwrap();
+            use_ai(&db, "gemini", None);
+            agree_to_gemini(&db);
+            db
+        }
+
+        /// A TypeSafe key the gate refuses when a run begins stops the run
+        /// with the reason, as a refusal during a run leaves its message
+        /// unsorted: the chosen AI does not classify in TypeSafe's place
+        /// (review A, N-1; DECISIONS section 5, no automatic switch). The
+        /// background sync does not start such a run.
+        #[tokio::test]
+        async fn a_refused_typesafe_key_stops_the_run_rather_than_sorting_on_the_chosen_ai() {
+            use crate::ai::registry::DataTerms;
+            let db = sorting_on_gemini();
+            let _registry = crate::ai::registry::test_override::with(|r| r.providers.iter_mut().find(|p| p.id == "typesafe").unwrap().data_terms = DataTerms::Unknown);
+            let Err(refused) = crate::ai::mail_policy::may_send_to(&db, "typesafe") else { panic!("TypeSafe may not receive mail") };
+            assert!(!super::super::triage_ready_with(&db, Some("ts-test-not-real".into())), "the background sync does not sort");
+            let outcome = super::super::triage_untriaged_with(&db, Some("en"), || Some("ts-test-not-real".into())).await;
+            assert_eq!(outcome.map(|run| run.triaged), Err(refused.user_message()));
+        }
+
+        /// With no TypeSafe key the chosen AI classifies, as on main: the
+        /// way the user set sorting up, not a switch.
+        #[tokio::test]
+        async fn with_no_typesafe_key_the_chosen_ai_sorts_as_before() {
+            let db = sorting_on_gemini();
+            assert!(super::super::triage_ready_with(&db, None));
+            assert_eq!(super::super::triage_untriaged_with(&db, Some("en"), || None).await.map(|run| run.triaged), Ok(0));
+        }
+    }
 
     #[test]
     fn explicit_environment_key_does_not_access_keychain() {

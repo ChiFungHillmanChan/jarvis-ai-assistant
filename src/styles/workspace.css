@@ -127,6 +127,15 @@
 .tool-approval-decline:hover { background:var(--surface-hover); color:var(--text-primary); }
 /* Top right, clear of the update toast (bottom left) and the approval card (bottom right). */
 .unencrypted-notice { left:auto; right:16px; bottom:auto; top:16px; max-width:340px; }
+/* The consent card and the error card (P06), inline where the request was made. */
+.ai-card { display:flex; flex-direction:column; gap:8px; margin:8px 0; padding:12px 14px; border:1px solid rgba(0,180,255,0.45); border-radius:10px; background:var(--surface-solid); }
+.ai-card.is-error { border-color:rgba(255,100,100,0.5); }
+.ai-card p { margin:0; font-size:13px; line-height:1.5; color:var(--text-primary); }
+.ai-card small { font-size:11px; color:var(--text-muted); }
+.ai-card-picks { display:flex; flex-wrap:wrap; gap:6px; }
+/* Background notices: top right, below the unencrypted-database notice. */
+.ai-notice { left:auto; right:16px; bottom:auto; top:96px; max-width:360px; }
+.ai-notice .ai-card { margin:0; padding:0; border:0; background:transparent; }
 .tool-approval-more { font-family:var(--font-mono); font-size:10px; color:var(--text-muted); }
 .confirm-backdrop { position:fixed; inset:0; z-index:80; display:flex; align-items:center; justify-content:center; padding:24px; background:rgba(0,0,0,0.45); }
 .confirm-dialog { display:flex; flex-direction:column; gap:12px; width:min(420px, 100%); padding:16px 18px; border:1px solid var(--border-strong); border-radius:10px; background:var(--surface-solid); box-shadow:0 18px 40px rgba(0,0,0,0.4); }
@@ -224,6 +233,7 @@
 .voice-replay { display:inline-flex; align-items:center; gap:4px; margin-left:10px; padding:1px 8px; font-size:11px; color:var(--text-muted); background:none; border:1px solid var(--border-primary); border-radius:999px; cursor:pointer; }
 .voice-replay:hover, .voice-replay.is-playing { color:var(--text-primary); }
 .assistant-progress { display:flex; align-items:center; gap:8px; color:var(--text-muted); font-size:12px; padding:10px 0; }
+.assistant-note { margin:8px 0 0; font-size:12px; color:var(--text-muted); }
 .assistant-steps { margin-top:10px; font-size:12px; color:var(--text-muted); }
 .assistant-steps summary { cursor:pointer; width:max-content; }
 .assistant-steps summary:hover { color:var(--text-secondary); }

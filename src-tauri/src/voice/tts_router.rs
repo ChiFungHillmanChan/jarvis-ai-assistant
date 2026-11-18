@@ -47,7 +47,11 @@ impl TtsRouter {
             return Ok(TtsProvider::CosyVoice);
         }
         match read("tts_content_provider").as_str() {
-            "minimax"   => Ok(TtsProvider::Minimax),
+            // Content can be mail and calendar text (the briefing): a cloud
+            // voice gets it only when the registry marks its terms safe,
+            // otherwise the system voice reads it (P06; cloud to local only,
+            // as for speech to text).
+            "minimax" if terms_are_safe("minimax") => Ok(TtsProvider::Minimax),
             "cosyvoice" => Ok(TtsProvider::CosyVoice),
             _ => {
                 let voice = match req.language.as_str() {
@@ -58,6 +62,12 @@ impl TtsRouter {
             }
         }
     }
+}
+
+/// Whether the registry marks `provider`'s data terms safe now. A provider
+/// it does not list is not.
+fn terms_are_safe(provider: &str) -> bool {
+    crate::ai::registry::current().provider(provider).is_some_and(|p| p.data_terms == crate::ai::registry::DataTerms::Safe)
 }
 
 #[cfg(test)]
@@ -108,6 +118,27 @@ mod tests {
             text: "Done".into(), mode: TtsMode::Ack, language: "en".into(),
         }).unwrap();
         assert_eq!(p, TtsProvider::MacSay { voice: "Samantha".into() });
+    }
+
+    /// Content is spoken by a cloud voice only when the registry marks its
+    /// terms safe; otherwise by the system voice (review A I-2, review B
+    /// m7). A stale `tts_content_provider = 'minimax'` from an older build
+    /// sends nothing: MiniMax's terms are `unknown`.
+    #[test]
+    fn content_goes_to_a_cloud_voice_only_when_its_terms_are_safe() {
+        use crate::ai::registry::DataTerms;
+        let db = fresh_db_with_prefs();
+        db.conn.lock().unwrap().execute("UPDATE user_preferences SET value='minimax' WHERE key='tts_content_provider'", []).unwrap();
+        let r = TtsRouter::new(db);
+        let content = |language: &str| TtsRequest { text: "Your 3pm with Kenny moved.".into(), mode: TtsMode::Content, language: language.into() };
+        assert_eq!(r.select_provider(&content("yue")).unwrap(), TtsProvider::MacSay { voice: "Sin-ji".into() });
+        assert_eq!(r.select_provider(&content("en")).unwrap(), TtsProvider::MacSay { voice: "Samantha".into() });
+        for terms in [DataTerms::Unknown, DataTerms::NeedsBillingConfirmation] {
+            let _registry = crate::ai::registry::test_override::with(|reg| reg.providers.iter_mut().find(|p| p.id == "minimax").unwrap().data_terms = terms);
+            assert_eq!(r.select_provider(&content("en")).unwrap(), TtsProvider::MacSay { voice: "Samantha".into() }, "{terms:?}");
+        }
+        let _registry = crate::ai::registry::test_override::with(|reg| reg.providers.iter_mut().find(|p| p.id == "minimax").unwrap().data_terms = DataTerms::Safe);
+        assert_eq!(r.select_provider(&content("en")).unwrap(), TtsProvider::Minimax);
     }
 
     #[test]

@@ -451,7 +451,9 @@ async fn handle_wake_word_detection(
         Err(e) => {
             let _ = app_handle.emit("chat-voice-active", json!({"active": false}));
             let _ = app_handle.emit("chat-state", json!({"state": "idle"}));
-            return Err(e);
+            // The voice indicator and Settings show a sentence, not the
+            // error card's data.
+            return Err(crate::ai::failure::plain(&e, crate::ai::bedrock::UiLanguage::read(&db)));
         }
     };
     // The assistant turn goes through the shared guard, never the raw insert:
@@ -505,11 +507,11 @@ async fn transcribe_with_fallback(
     audio_data: &[f32],
     db: Arc<crate::db::Database>,
 ) -> Result<String, String> {
-    if let Some(transcriber) = crate::voice::cloud_transcriber(&db) {
+    if let Some((transcriber, label)) = crate::voice::cloud_transcriber(&db) {
         match transcriber.transcribe(audio_data, &db).await {
             Ok(text) if !text.is_empty() => return Ok(text),
             Ok(_) => log::info!("Wake-word cloud STT returned empty text, using local fallback"),
-            Err(e) => log::warn!("Wake-word cloud STT failed, using local fallback: {}", e),
+            Err(e) => log::warn!("{}", crate::voice::cloud_failure_line(&label, &e, true)),
         }
     }
 

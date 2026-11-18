@@ -1,4 +1,5 @@
 import { invoke } from "@tauri-apps/api/core";
+import type { Pick } from "./ai-error.ts";
 
 /** `calendar`: JARVIS may read this account's calendar (it is then an additional Google account in Settings). */
 export interface MailAccount { id: string; email: string; connected: boolean; last_synced: string | null; next_page_token: string | null; message_count: number; calendar: boolean }
@@ -37,7 +38,8 @@ export const mailListMemories = (groupId: number) => invoke<MailMemory[]>("mail_
 export const mailSaveMemory = (input: MailMemoryInput) => invoke<MailMemory>("mail_save_memory", { input });
 export const mailDeleteMemory = (memoryId: number) => invoke<void>("mail_delete_memory", { memoryId });
 export const mailSaveSettings = (input: MailSettings) => invoke<void>("mail_save_settings", { input });
-export const mailAnalyzeGroup = (groupId: number) => invoke<MailAnalysis>("mail_analyze_group", { groupId });
+/** `pick`: a model picked on the error card, for this one analysis (P06). */
+export const mailAnalyzeGroup = (groupId: number, pick: Pick | null = null) => invoke<MailAnalysis>("mail_analyze_group", { groupId, pick });
 export const mailTriageRun = (language: string) => invoke<MailTriageRun>("mail_triage_run", { language });
 export const mailSetAutoTriage = (enabled: boolean) => invoke<void>("mail_set_auto_triage", { enabled });
 export const mailSetAttention = (messageId: number, attention: boolean) => invoke<void>("mail_set_attention", { messageId, attention });

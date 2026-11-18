@@ -38,6 +38,9 @@ pub struct Target<'a> {
     pub base_url: Option<&'a str>,
     /// The chain row's model. On api.openai.com, None follows the registry's default.
     pub model: Option<&'a str>,
+    /// "Think harder" (P06), as far as the model takes it. Not offered on
+    /// this wire yet (capability::deeper), so None outside tests.
+    pub deeper: Option<super::capability::Deeper>,
 }
 
 impl Target<'_> {
@@ -75,7 +78,11 @@ impl Target<'_> {
             tools,
             max_completion_tokens: official.then_some(cap),
             max_tokens: (!official).then_some(cap),
-            reasoning_effort: if official { limits.chat_reasoning_effort } else { None },
+            reasoning_effort: match (official, self.deeper) {
+                (true, Some(deeper)) if deeper.effort => Some("high".into()),
+                (true, _) => limits.chat_reasoning_effort,
+                (false, _) => None,
+            },
             tool_choice: final_round.then_some("none"),
             stream: true,
             stream_options: StreamOptions { include_usage: true },
@@ -554,7 +561,7 @@ mod tests {
             limits(r, "openai_compat").chat_max_output_tokens = Some(555);
         });
         let wire = |base_url: Option<&str>| {
-            let target = Target { base_url, model: Some("m") };
+            let target = Target { base_url, model: Some("m"), deeper: None };
             serde_json::to_value(target.request("m".into(), Vec::new(), Vec::new(), false)).unwrap()
         };
         let official = wire(None);
@@ -562,8 +569,25 @@ mod tests {
         let kimi = wire(Some("https://api.moonshot.ai/v1"));
         assert_eq!((kimi["max_tokens"].as_u64(), kimi.get("reasoning_effort")), (Some(777), None));
         assert_eq!(wire(Some("https://api.deepseek.com/v1"))["max_tokens"].as_u64(), Some(555));
-        let target = Target { base_url: None, model: None };
+        let target = Target { base_url: None, model: None, deeper: None };
         assert_eq!(target.model().unwrap(), crate::ai::models::OPENAI_DEFAULT);
+    }
+
+    /// "Think harder" maps to a high reasoning effort on api.openai.com, for
+    /// a model that takes one. Written and tested, not offered yet: the chat
+    /// wire refuses tools with reasoning on (capability::deeper).
+    #[test]
+    fn think_harder_asks_for_a_high_reasoning_effort_on_openai_only() {
+        use crate::ai::capability::Deeper;
+        let effort = |base_url: Option<&'static str>, deeper| {
+            let target = Target { base_url, model: Some("m"), deeper };
+            serde_json::to_value(target.request("m".into(), Vec::new(), Vec::new(), false)).unwrap().get("reasoning_effort").cloned()
+        };
+        let high = Some(Deeper { thinking: true, effort: true });
+        assert_eq!(effort(None, high), Some(json!("high")));
+        assert_eq!(effort(None, None), crate::ai::models::limits("openai").chat_reasoning_effort.map(serde_json::Value::from));
+        assert_eq!(effort(None, Some(Deeper { thinking: true, effort: false })), effort(None, None), "no effort flag, no change");
+        assert_eq!(effort(Some("https://api.moonshot.ai/v1"), high), None, "compatible services get no reasoning_effort");
     }
 
     #[test]
@@ -599,8 +623,8 @@ mod tests {
     /// that nothing will run.
     #[test]
     fn only_the_last_round_turns_tools_off() {
-        let official = Target { base_url: None, model: None };
-        let compatible = Target { base_url: Some("https://api.moonshot.ai/v1"), model: Some("kimi-k2") };
+        let official = Target { base_url: None, model: None, deeper: None };
+        let compatible = Target { base_url: Some("https://api.moonshot.ai/v1"), model: Some("kimi-k2"), deeper: None };
         for target in [official, compatible] {
             let last = serde_json::to_value(target.request("m".into(), Vec::new(), Vec::new(), true)).unwrap();
             assert_eq!(last["tool_choice"], "none");
@@ -666,7 +690,7 @@ mod tests {
     #[ignore]
     async fn live_compatible_service_takes_the_tool_request() {
         let key = std::env::var("GEMINI_API_KEY").expect("GEMINI_API_KEY");
-        let target = Target { base_url: Some(crate::ai::complete::tests::GEMINI_COMPAT), model: Some(crate::ai::models::GEMINI_FLASH) };
+        let target = Target { base_url: Some(crate::ai::complete::tests::GEMINI_COMPAT), model: Some(crate::ai::models::GEMINI_FLASH), deeper: None };
         let messages = vec![
             OpenAIMessage { role: "system".into(), content: Some("You are JARVIS. Use tools to answer.".into()), tool_calls: None, tool_call_id: None },
             OpenAIMessage { role: "user".into(), content: Some("What is on my calendar today? Use the calendar tool.".into()), tool_calls: None, tool_call_id: None },

@@ -634,7 +634,7 @@ fn execute_memory_tool(
     // any message mentioning a meeting pulls in [CONTEXT] -- after they had
     // already clicked Allow.
     // Read before the lock below: `withheld` takes it too.
-    let withheld = crate::ai::mail_policy::withheld(db);
+    let withheld = crate::ai::mail_policy::withheld_shown(db, "memory");
     let conn = match db.conn.lock() {
         Ok(c) => c,
         Err(e) => return format!("Memory error: {}", e),
@@ -911,7 +911,7 @@ fn execute_local_data_tool(
         "list_tasks" => {
             // A task made from an email is not shown to an AI that may not
             // read email (ai::mail_policy::withheld).
-            let withheld = crate::ai::mail_policy::withheld(db);
+            let withheld = crate::ai::mail_policy::withheld_shown(db, "chat");
             let conn = db.conn.lock().map_err(|e| e.to_string())?;
             let mut stmt = conn
                 .prepare(
@@ -1529,6 +1529,14 @@ async fn execute_tool_inner(
     // model only when the chosen AI does not train on it (see ai::mail_policy).
     if matches!(name, "search_emails" | "read_email" | "list_follow_ups" | "update_follow_up" | "list_inbox_triage" | "list_events") {
         if let Err(blocked) = crate::ai::mail_policy::check(db) {
+            // The model is told why. Content that waits for consent puts the
+            // consent card up in the chat; content that is not sent to this
+            // service ends the turn on the error card, with the models that
+            // may receive it (P06).
+            match &blocked {
+                crate::ai::mail_policy::Blocked::NotForGoogleContent { message, .. } => ledger.refuse_google_content(message.clone()),
+                _ => blocked.raise("chat"),
+            }
             return blocked.tool_message();
         }
     }
@@ -1796,7 +1804,7 @@ where
 /// The memory block of the system prompt. Memories the chosen AI must not be
 /// shown are left out (ai::mail_policy::withheld).
 fn load_memory_block(db: &crate::db::Database) -> String {
-    let withheld = crate::ai::mail_policy::withheld(db);
+    let withheld = crate::ai::mail_policy::withheld_shown(db, "memory");
     let conn = match db.conn.lock() {
         Ok(c) => c,
         Err(_) => return String::new(),
@@ -2992,17 +3000,40 @@ mod local_data_tests {
         db
     }
 
+    /// Google's Limited Use rules (DECISIONS, P06 "Google Limited Use",
+    /// 2026-11-17): the mail and calendar tools give a service JARVIS cannot
+    /// confirm (Kimi) no content even after the user agreed to its terms;
+    /// Gemini with billing confirmed and a safe provider (OpenAI) get it.
     #[tokio::test]
     async fn email_and_calendar_tools_refuse_an_ai_that_may_train_on_them() {
+        use crate::ai::mail_policy::test_support::{agree_to_gemini, agree_to_kimi, use_ai, KIMI};
+        const MAIL: [&str; 4] = ["list_follow_ups", "list_inbox_triage", "read_email", "search_emails"];
+        let refused = |out: &str| out.starts_with("Gmail and Calendar content is not sent to");
         let db = mail_db();
-        db.conn.lock().unwrap().execute_batch(
-            "DELETE FROM provider_chain;
-             INSERT INTO provider_chain(position,provider_type,enabled,base_url) VALUES (0,'openai',1,'https://api.moonshot.ai/v1');",
-        ).unwrap();
-        for tool in ["list_follow_ups", "list_inbox_triage", "read_email", "search_emails", "list_events"] {
-            let out = run(tool, serde_json::json!({}), &db).await;
-            assert!(out.starts_with("Email and calendar content is not shared with Kimi"), "{tool}: {out}");
+        use_ai(&db, "openai", KIMI);
+        agree_to_kimi(&db);
+        let auth = Arc::new(crate::auth::google::GoogleAuth::new_empty());
+        for tool in MAIL.into_iter().chain(["list_events"]) {
+            // The turn's ledger records why: the turn ends on the error card.
+            let ledger = crate::ai::SideEffectLedger::new();
+            let out = execute_tool(tool, "{}", &db, &auth, &ledger).await;
+            assert!(out.starts_with("Gmail and Calendar content is not sent to Kimi"), "{tool}: {out}");
             assert!(!out.contains("Gold Badge"), "{tool} leaked mail content");
+            assert!(ledger.google_content_refused().is_some_and(|why| why.starts_with("Gmail and Calendar content is not sent to Kimi")), "{tool}");
+        }
+        for (provider, agree) in [("gemini", Some(agree_to_gemini as fn(&crate::db::Database))), ("openai", None)] {
+            let db = mail_db();
+            use_ai(&db, provider, None);
+            if let Some(agree) = agree {
+                agree(&db);
+            }
+            for tool in MAIL.into_iter().chain(["list_events"]) {
+                let ledger = crate::ai::SideEffectLedger::new();
+                let out = execute_tool(tool, "{}", &db, &auth, &ledger).await;
+                assert!(!refused(&out), "{provider} {tool}: {out}");
+                assert_eq!(ledger.google_content_refused(), None, "{provider} {tool}");
+            }
+            assert!(run("list_inbox_triage", serde_json::json!({}), &db).await.contains("Gold Badge"), "{provider}");
         }
     }
 
@@ -3301,7 +3332,7 @@ mod withheld_tests {
                 )
                 .unwrap();
         });
-        crate::ai::mail_policy::withheld_as_turn_begins(&db);
+        crate::ai::mail_policy::withheld_as_turn_begins(&db).unwrap();
         db
     }
 

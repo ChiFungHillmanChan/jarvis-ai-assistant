@@ -10,6 +10,9 @@ import { openUrl } from "../lib/commands";
 import { useAiModels } from "../lib/ai-models";
 import { cloudModelFor, formatRate, mailSetupModels } from "../lib/ai-catalog";
 import { useUiLocale } from "../i18n";
+import { parseAiError, type AiProblem, type Pick } from "../lib/ai-error";
+import ConsentCard from "../components/ConsentCard";
+import ModelErrorCard from "../components/ModelErrorCard";
 import BedrockModelPicker from "../components/BedrockModelPicker";
 import { useBedrockModelList } from "../hooks/useBedrockModelList";
 import { modelChosen } from "../lib/bedrock-models";
@@ -56,6 +59,9 @@ export default function EmailPage({ onSetup }: { onSetup?: () => void }) {
   const [analysis, setAnalysis] = useWorkspaceValue<{ groupId: number; result: MailAnalysis } | null>("mailAnalysis", null);
   const [editor, setEditor] = useState<Editor | null>(null);
   const [busy, setBusy] = useState("");
+  // The error card or consent card for the last AI request (P06), and how
+  // to run that request again after a pick or the user's agreement.
+  const [aiProblem, setAiProblem] = useState<{ problem: AiProblem; redo: (pick: Pick | null) => Promise<void> } | null>(null);
   const [loading, setLoading] = useState(false);
   const [reading, setReading] = useState(false);
   const [memoryLoading, setMemoryLoading] = useState(false);
@@ -168,12 +174,22 @@ export default function EmailPage({ onSetup }: { onSetup?: () => void }) {
     const timer = window.setInterval(refreshWorkspace, 3_000);
     return () => window.clearInterval(timer);
   }, [sorting, accountId]);
-  async function run(label: string, action: () => Promise<void>, refresh = true) {
+  async function run(label: string, action: () => Promise<void>, refresh = true, redo?: (pick: Pick | null) => Promise<void>) {
     if (operation.current) return;
-    operation.current = true; setBusy(label); setError(""); setNotice("");
+    operation.current = true; setBusy(label); setError(""); setNotice(""); setAiProblem(null);
     try { await action(); if (refresh) { setRevision(n => n + 1); setAnalysis(null); } }
-    catch (e) { setError(text(`${label} failed: ${String(e)}`, `${label}失敗：${String(e)}`)); }
+    catch (e) {
+      const problem = redo ? parseAiError(e) : null;
+      if (problem && redo) setAiProblem({ problem, redo });
+      else setError(text(`${label} failed: ${String(e)}`, `${label}失敗：${String(e)}`));
+    }
     finally { operation.current = false; setBusy(""); }
+  }
+  function analyze(id: number, pick: Pick | null = null): Promise<void> {
+    return run(text("Analyze group", "分析群組"), async () => { const result = await mail.mailAnalyzeGroup(id, pick); setAnalysis({ groupId: id, result }); }, false, next => analyze(id, next));
+  }
+  function sortWithAi(): Promise<void> {
+    return run(text("AI sorting", "AI 整理"), async () => setNotice(await triageNow(3)), true, () => sortWithAi());
   }
   const connectLabel = text("Connect Gmail", "連接 Gmail");
   function connectAccount() {
@@ -292,6 +308,9 @@ export default function EmailPage({ onSetup }: { onSetup?: () => void }) {
       <div><h1>{text("Mail", "電郵工作區")}</h1><p role="status" className="mail-status">{statusText || (noAi ? noAiText : triageReady ? text("AI sorts new mail as it arrives. Copies stay on this Mac.", "新郵件同步後由 AI 自動整理；郵件副本保存在此 Mac。") : text("Local copies of your mailboxes. Turn on AI sorting in Analysis settings.", "信箱的本機副本。可在「分析設定」開啟 AI 自動整理。"))}</p></div>
       <div className="mail-heading-actions">{onSetup && <button disabled={!!busy} onClick={onSetup}>{text("Setup guide", "設定導引")}</button>}<button disabled={!!busy || !workspace} onClick={openSettings}>{text("Analysis settings", "分析設定")}</button></div>
     </header>
+    {aiProblem && (aiProblem.problem.kind === "failure"
+      ? <ModelErrorCard failure={aiProblem.problem.failure} onRetry={pick => { const { redo } = aiProblem; setAiProblem(null); return redo(pick); }} />
+      : <ConsentCard request={aiProblem.problem.consent} onAgreed={() => { const { redo } = aiProblem; setAiProblem(null); void redo(null); }} onClose={() => setAiProblem(null)} />)}
     {error && <div role="alert" className="mail-alert"><span>{error}</span><button onClick={() => { setError(""); setRevision(n => n + 1); }}>{text("Reload", "重新載入")}</button></div>}
     <div className={`mail-layout${messageId !== null ? " has-message" : ""}`}>
       <nav className="mail-sidebar" aria-label={text("Mail views", "郵件分類")}>
@@ -326,7 +345,7 @@ export default function EmailPage({ onSetup }: { onSetup?: () => void }) {
           <div className="mail-toolbar-actions">
             <button disabled={!!busy || !(workspace?.accounts ?? []).some(item => item.connected)} onClick={() => sync(account && account.connected ? account : null)}>{busy === text("Sync mail", "同步郵件") ? text("Syncing…", "同步中…") : text("Sync", "同步")}</button>
             {triageReady
-              ? <button className="mail-primary" disabled={!!busy || !triage?.untriaged} onClick={() => run(text("AI sorting", "AI 整理"), async () => setNotice(await triageNow(3)))}>{triage?.untriaged ? text(`Sort ${triage.untriaged} with AI`, `AI 整理 ${triage.untriaged} 封`) : text("All sorted", "已全部整理")}</button>
+              ? <button className="mail-primary" disabled={!!busy || !triage?.untriaged} onClick={() => void sortWithAi()}>{triage?.untriaged ? text(`Sort ${triage.untriaged} with AI`, `AI 整理 ${triage.untriaged} 封`) : text("All sorted", "已全部整理")}</button>
               : noAi
               ? <button className="mail-primary" disabled={!!busy} onClick={onSetup ?? openSettings}>{text("Set up your AI", "設定你的 AI")}</button>
               : <button className="mail-primary" disabled={!!busy || !workspace} onClick={openSettings}>{text("Turn on AI sorting", "開啟 AI 整理")}</button>}
@@ -391,7 +410,7 @@ export default function EmailPage({ onSetup }: { onSetup?: () => void }) {
             <div className="mail-analysis">
               <h3>{text("Group analysis", "群組分析")}</h3>
               <p className="mail-hint">{workspace?.settings.processing_mode === "assistant" ? text("Uses the AI chosen in Settings → Your AI. The group's emails, instructions and active memories are sent to it.", "使用在「設定 → 你的 AI」選擇的 AI；群組郵件、指示及有效記憶會傳送至該 AI。") : workspace?.settings.processing_mode === "openai" ? text(`Uses ${workspace.settings.openai_model} on your OpenAI account. The group's emails, instructions and active memories are sent to OpenAI.`, `使用你 OpenAI 帳戶的 ${workspace.settings.openai_model}；群組郵件、指示及有效記憶會傳送至 OpenAI。`) : workspace?.settings.processing_mode === "bedrock" ? text("Uses your AWS Bedrock account. The group's emails, instructions and active memories are sent to AWS.", "使用你的 AWS Bedrock；群組郵件、指示及有效記憶會傳送至 AWS。") : text("Uses Ollama on this Mac only, with no cloud fallback.", "只使用此 Mac 上的 Ollama，不會自動改用雲端。")}</p>
-              <button className="mail-primary" disabled={!!busy} onClick={() => run(text("Analyze group", "分析群組"), async () => { const result = await mail.mailAnalyzeGroup(group.id); setAnalysis({ groupId: group.id, result }); }, false)}>{busy === text("Analyze group", "分析群組") ? text("Analysing…", "分析中…") : text("Analyse this group", "分析此群組")}</button>
+              <button className="mail-primary" disabled={!!busy} onClick={() => void analyze(group.id)}>{busy === text("Analyze group", "分析群組") ? text("Analysing…", "分析中…") : text("Analyse this group", "分析此群組")}</button>
               {analysis?.groupId === group.id && <div className="mail-analysis-result">
                 <p className="mail-hint">{analysisSource(analysis.result, text)}{analysis.result.input_tokens ? text(`, ${analysis.result.input_tokens + analysis.result.output_tokens} tokens`, `，${analysis.result.input_tokens + analysis.result.output_tokens} tokens`) : ""}{analysis.result.omitted_messages ? text(`, ${analysis.result.omitted_messages} emails not included`, `，${analysis.result.omitted_messages} 封未納入`) : ""}</p>
                 <ReadableContent text={analysis.result.text} sourceIds={analysis.result.source_ids} onSource={openSource} />

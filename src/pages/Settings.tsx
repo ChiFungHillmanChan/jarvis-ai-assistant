@@ -59,6 +59,7 @@ import { connectionStatuses, connectionsChanged } from "../lib/connections";
 import { DISPLAY_NAME_KEY, accountSectionVisible, displayNameChanged } from "../lib/account";
 import LocalAiSetup from "../components/LocalAiSetup";
 import ChooseAi from "../components/ChooseAi";
+import AiConsents from "../components/AiConsents";
 import { useAiModels } from "../lib/ai-models";
 import { currentAi, type CurrentAi } from "../lib/ai-choice";
 import { localized, serviceLabel } from "../lib/ai-catalog";
@@ -108,6 +109,19 @@ export default function Settings() {
   const [displayNameSaved, setDisplayNameSaved] = useState(false);
   const [apiKeyDrafts, setApiKeyDrafts] = useState<Record<string, string>>({});
   const [apiKeyStatus, setApiKeyStatus] = useState<Record<string, boolean>>({});
+  // The cloud speech-to-text a spoken request uses (voice::cloud_speech): the
+  // registry's model for the chosen AI, when its key is saved; else local.
+  // consent_needed: the recording waits for the user's agreement to its data
+  // terms (Settings → Your AI), and stays on this Mac until then.
+  const [speechService, setSpeechService] = useState<{ label: string; consent_needed: boolean } | null>(null);
+  useEffect(() => {
+    const refresh = () => void invoke<{ label: string; consent_needed: boolean } | null>("cloud_speech").then(setSpeechService).catch(() => setSpeechService(null));
+    refresh();
+    const stop = listen("ai-consent-changed", refresh);
+    return () => { void stop.then(unlisten => unlisten()).catch(() => {}); };
+  }, [apiKeyStatus]);
+  const cloudSpeech = speechService && !speechService.consent_needed ? speechService.label : null;
+  const speechWaits = speechService?.consent_needed ? speechService.label : null;
   const [apiKeyError, setApiKeyError] = useState<string | null>(null);
   // Whether accounts are available in this build -- unknown until this loads,
   // and unknown reads as unavailable so the Account section never flashes in
@@ -133,7 +147,6 @@ export default function Settings() {
   const [voiceSettings, setVoiceSettingsState] = useState<VoiceSettings | null>(null);
   const [ttsVoices, setTtsVoices] = useState<string[]>([]);
   const [wakeStatus, setWakeStatus] = useState<WakeWordStatus | null>(null);
-  // Gemini hears speech only when it is the chosen AI (voice/mod.rs).
   const [chosenAi, setChosenAi] = useState<CurrentAi | null>(null);
   useEffect(() => { void currentAi().then(setChosenAi).catch(() => {}); }, []);
   const [wakeBusy, setWakeBusy] = useState(false);
@@ -723,15 +736,17 @@ export default function Settings() {
     }
   }
 
-  // Mirrors VoiceEngine::is_available in src-tauri/src/voice/mod.rs: a Gemini
-  // key (env or Keychain, which is what get_api_key_status reports) or the
-  // downloaded local Whisper model. Without one of them push-to-talk errors out.
+  // Mirrors VoiceEngine::is_available in src-tauri/src/voice/mod.rs: the
+  // cloud speech-to-text the registry names for the chosen AI, with its key
+  // (cloud_speech), or the downloaded local Whisper model. Without one of
+  // them push-to-talk errors out.
   function getVoiceAvailabilityLine(): string {
-    const cloud = geminiSpeech;
+    const cloud = cloudSpeech;
     const local = Boolean(wakeStatus?.model_downloaded);
-    if (cloud && local) return text("Speech-to-text ready -- cloud Gemini, with the local Whisper model as fallback.", "語音辨識可用：雲端 Gemini，並以本機 Whisper 作後備。");
-    if (cloud) return text("Speech-to-text ready -- cloud Gemini.", "語音辨識可用：雲端 Gemini。");
+    if (cloud && local) return text(`Speech-to-text ready -- cloud ${cloud}, with the local Whisper model as fallback.`, `語音辨識可用：雲端 ${cloud}，並以本機 Whisper 作後備。`);
+    if (cloud) return text(`Speech-to-text ready -- cloud ${cloud}.`, `語音辨識可用：雲端 ${cloud}。`);
     if (local) return text("Speech-to-text ready -- local Whisper model.", "語音辨識可用：本機 Whisper 模型。");
+    if (speechWaits) return text(`Your voice goes to ${speechWaits} only after you agree to its data terms in Your AI above. Until then, voice input needs the speech model on this Mac (about 148 MB).`, `你的語音只會在你於上方「你的 AI」同意 ${speechWaits} 的資料條款後才傳送。在此之前，語音輸入需要此 Mac 上的語音模型（約 148 MB）。`);
     return chosenAi && chosenAi.provider !== "gemini"
       ? text(`Voice input uses a speech model on this Mac, so your voice does not go to ${chosenAi.label}. Download it once (about 148 MB).`, `語音輸入使用此 Mac 上的語音模型，聲音不會傳送至 ${chosenAi.label}。請先下載一次（約 148 MB）。`)
       : text("Voice input needs a Gemini key (Settings → Your AI) or the speech model on this Mac (about 148 MB).", "語音輸入需要 Gemini 密鑰（設定 → 你的 AI），或此 Mac 上的語音模型（約 148 MB）。");
@@ -774,8 +789,7 @@ export default function Settings() {
       ? voiceState.ModelDownloading
       : null;
   const wakeCanEnable = Boolean(wakeStatus?.model_downloaded || wakeStatus?.enabled);
-  const geminiSpeech = Boolean(apiKeyStatus["gemini"]) && (!chosenAi || chosenAi.provider === "gemini");
-  const voiceInputReady = geminiSpeech || Boolean(wakeStatus?.model_downloaded);
+  const voiceInputReady = Boolean(cloudSpeech) || Boolean(wakeStatus?.model_downloaded);
 
   const SECTIONS = [
     { id: "account", label: t("accountSection"), icon: <UserRound size={17} /> },
@@ -830,9 +844,10 @@ export default function Settings() {
             <h2 className="settings-heading">{text('Your AI', '你的 AI')}</h2>
             <ChooseAi onChosen={() => { getProviderChain().then(setChain).catch(() => {}); }} />
           </div>
+          <AiConsents />
           <div className="settings-panel">
             <h2 className="settings-heading">{text('Provider priority', '供應商優先次序')}</h2>
-            <div style={styles.hint}>{text('JARVIS tries enabled providers in this order. Use the arrows to change priority.', 'JARVIS 會依此次序嘗試已啟用的供應商。可使用箭頭調整優先次序。')}</div>
+            <div style={styles.hint}>{text('JARVIS uses the first enabled provider, and only that one. When it cannot answer, the error card offers the other AI services that have a saved key; JARVIS never switches on its own. Use the arrows to change the order.', 'JARVIS 只會使用第一個已啟用的供應商。它未能回覆時，錯誤卡會列出其他已儲存密鑰的 AI 服務供你選擇；JARVIS 不會自行更換。可使用箭頭調整次序。')}</div>
 
             {chain.map((entry, i) => {
               const label = entry.provider_type === "local"
@@ -1291,7 +1306,11 @@ export default function Settings() {
               </div>
             )}
             <div style={styles.privacyText}>
-              {text("Wake-word detection runs on this Mac. After it wakes, the full request uses cloud speech-to-text only when Gemini is the AI you chose; otherwise it stays on this Mac.", "喚醒詞偵測會在本機處理音訊。喚醒後，只有當你選擇的 AI 是 Gemini 時，完整指示才會使用雲端語音辨識；否則只在此 Mac 處理。")}
+              {cloudSpeech
+                ? text(`Wake-word detection runs on this Mac. After it wakes, the full request goes to ${cloudSpeech}, the speech-to-text of the AI you chose.`, `喚醒詞偵測會在本機處理音訊。喚醒後，完整指示會傳送至 ${cloudSpeech}，即你選擇的 AI 的語音辨識。`)
+                : speechWaits
+                  ? text(`Wake-word detection runs on this Mac, and so does the full request after it wakes, until you agree to ${speechWaits}'s data terms.`, `喚醒詞偵測會在本機處理音訊；在你同意 ${speechWaits} 的資料條款前，喚醒後的完整指示亦只在此 Mac 處理。`)
+                  : text("Wake-word detection runs on this Mac, and so does the full request after it wakes: the AI you chose has no cloud speech-to-text in JARVIS.", "喚醒詞偵測會在本機處理音訊，喚醒後的完整指示亦只在此 Mac 處理：你選擇的 AI 在 JARVIS 中沒有雲端語音辨識。")}
             </div>
             {wakeError && <div style={styles.errorText}>{wakeError}</div>}
           </div>
