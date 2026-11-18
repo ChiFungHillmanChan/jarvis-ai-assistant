@@ -790,6 +790,29 @@ mod claude_wire {
         assert_eq!(rows(&db), vec![priced_row("claude", "tools", &model, &[(1050, 20, 900, 100), (960, 4, 900, 0)])]);
     }
 
+    /// Calls run in the order the reply gave them, and go back in that
+    /// order (P07: they ran in hash order before).
+    #[tokio::test]
+    async fn calls_run_in_the_order_they_came() {
+        let mut first = vec![start(10, 0, 0)];
+        first.extend(tool_use(0, "toolu_a", &[r#"{"content":"First fact"}"#]));
+        first.extend(tool_use(1, "toolu_b", &[r#"{"content":"Second fact"}"#]));
+        first.extend(tool_use(2, "toolu_c", &[r#"{"content":"Third fact"}"#]));
+        first.extend(end("tool_use", 5));
+        let mut second = vec![start(10, 0, 0), text_block(0), text(0, "Saved."), stop(0)];
+        second.extend(end("end_turn", 4));
+        let server = serve(vec![Reply::named_sse(&first), Reply::named_sse(&second)]).await;
+        let _base = point_at(&server.base);
+        let db = crate::db::test_database();
+        let turn = run_turn(&router(), row(), &[("user", "Remember three facts")], &db, Workload::Tools, true).await;
+        assert_eq!(turn.reply.as_deref(), Ok("Saved."));
+        assert_eq!(memories(&db), vec!["First fact", "Second fact", "Third fact"]);
+        let seen = server.seen();
+        let ids = |message: &Value, field: &str| message["content"].as_array().unwrap().iter().map(|b| b[field].as_str().unwrap().to_string()).collect::<Vec<_>>();
+        assert_eq!(ids(&seen[1].body["messages"][1], "id"), ["toolu_a", "toolu_b", "toolu_c"]);
+        assert_eq!(ids(&seen[1].body["messages"][2], "tool_use_id"), ["toolu_a", "toolu_b", "toolu_c"]);
+    }
+
     /// Think harder: the thinking fields the registry says the model takes,
     /// the thinking shown as it streams, and the thinking block sent back
     /// with its signature before the call it led to.

@@ -1115,7 +1115,7 @@ impl AiRouter {
             "claude" => {
                 let Some(ref key) = self.claude_key else { return Err("No Claude API key configured".to_string()) };
                 let model = entry.model_id.clone().unwrap_or_else(crate::ai::models::claude_default);
-                claude::send(key, &model, messages, db, google_auth, app_handle, tts_tx, workload, deeper, ledger).await.map_err(|e| e.to_string())
+                provider::chat(&claude::ClaudeWire::new(key, &model), chat_request(db, messages, deeper), turn).await
             }
             "openai" if entry.base_url.is_some() => {
                 let base = entry.base_url.clone().unwrap_or_default();
