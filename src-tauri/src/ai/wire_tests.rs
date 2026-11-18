@@ -1936,6 +1936,40 @@ mod local_wire {
         assert_eq!(server.seen().len(), 1);
         assert!(rows(&db).is_empty());
     }
+
+    /// Pieces with neither an index nor an id: a piece goes to the call at
+    /// its position in the chunk. A call streamed in pieces, with the id and
+    /// name on the first, is one call (as before P07); two whole calls in
+    /// one chunk are two calls (before P07 a local server's pieces without
+    /// an index all went to the first call).
+    #[tokio::test]
+    async fn pieces_without_an_index_or_an_id_go_by_position() {
+        let server = serve(vec![
+            Reply::openai_sse(&[
+                json!({"choices": [{"delta": {"tool_calls": [{"id": "call_a", "type": "function", "function": {"name": "remember", "arguments": "{\"content\":"}}]}}]}),
+                json!({"choices": [{"delta": {"tool_calls": [{"function": {"arguments": "\"Kenny is my accountant\"}"}}]}, "finish_reason": "tool_calls"}]}),
+            ]),
+            text_reply("Saved.", None),
+            Reply::openai_sse(&[json!({"choices": [{"delta": {"tool_calls": [
+                {"type": "function", "function": {"name": "remember", "arguments": "{\"content\":\"First fact\"}"}},
+                {"type": "function", "function": {"name": "remember", "arguments": "{\"content\":\"Second fact\"}"}}
+            ]}, "finish_reason": "tool_calls"}]})]),
+            text_reply("Saved both.", None),
+        ])
+        .await;
+        let db = crate::db::test_database();
+        let router = router(&server.base, BackendType::Ollama);
+        let turn = run_turn(&router, row("qwen3:8b"), &[("user", "Remember Kenny is my accountant")], &db, Workload::Tools, true).await;
+        assert_eq!(turn.reply.as_deref(), Ok("Saved."));
+        assert_eq!(turn.ledger.count(), 1);
+        assert_eq!(memories(&db), vec!["Kenny is my accountant"]);
+        let turn = run_turn(&router, row("qwen3:8b"), &[("user", "Remember two facts")], &db, Workload::Tools, true).await;
+        assert_eq!(turn.reply.as_deref(), Ok("Saved both."));
+        assert_eq!(turn.ledger.count(), 2);
+        assert_eq!(memories(&db).len(), 3);
+        let seen = server.seen();
+        assert_eq!(seen[1].body["messages"][2]["tool_calls"], json!([{"id": "call_a", "type": "function", "function": {"name": "remember", "arguments": REMEMBER_ARGS}}]));
+    }
 }
 
 // ---------------------------------------------------------------------------
