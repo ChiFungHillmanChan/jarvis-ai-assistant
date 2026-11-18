@@ -2212,6 +2212,50 @@ mod local_wire {
         assert_eq!(seen[1].body["messages"][2]["tool_calls"], json!([{"id": "call_a", "type": "function", "function": {"name": "remember", "arguments": REMEMBER_ARGS}}]));
     }
 
+    /// A local server that refuses the tools field: Ollama answers 400
+    /// "... does not support tools" for a model JARVIS took, by its family
+    /// name, for one that calls tools. The turn ends on the error card after
+    /// one request: no request without tools, no change to described tools,
+    /// as before P07. Ollama's error is a plain string, not
+    /// `error.message`, so the card shows no reason from the server.
+    #[tokio::test]
+    async fn a_server_that_refuses_the_tools_field_ends_on_the_error_card() {
+        let server = serve(vec![Reply::json(400, json!({"error": "registry.ollama.ai/library/qwen3:8b does not support tools"}))]).await;
+        let db = crate::db::test_database();
+        let router = router(&server.base, BackendType::Ollama);
+        let entry = row("qwen3:8b");
+        let window = Window::default();
+        let ledger = SideEffectLedger::new();
+        let auth = Arc::new(crate::auth::google::GoogleAuth::new_empty());
+        let messages: Vec<(String, String)> = vec![("user".into(), "What is on my calendar?".into())];
+        let (messages, window_ref, auth_ref, ledger_ref, router_ref, db_ref) = (&messages, &window, &auth, &ledger, &router, &db);
+        let reply = cost::with_feature(
+            cost::Feature::Chat,
+            crate::ai::run_chosen(
+                Some(entry.clone()),
+                None,
+                &[entry],
+                cost::Feature::Chat,
+                Workload::Tools,
+                &ledger,
+                crate::ai::bedrock::UiLanguage::En,
+                &crate::ai::resends_inside,
+                &|_| true,
+                |_, _| {},
+                move |row| router_ref.send_one(row, messages.clone(), db_ref, auth_ref, window_ref, None, Workload::Tools, ledger_ref),
+            ),
+        )
+        .await;
+        let card = crate::ai::failure::parse(&reply.expect_err("refused")).expect("a card");
+        let seen = server.seen();
+        assert_eq!(seen.len(), 1, "sent once");
+        assert!(seen[0].body["tools"].as_array().is_some_and(|tools| !tools.is_empty()), "the tools field went with it");
+        let label = card["model"]["label"].as_str().unwrap().to_string();
+        assert_eq!(card["code"], "bad_request");
+        assert_eq!(card["message"], format!("{label} did not accept this request (400). Check the chosen model, or pick another one."));
+        assert_eq!(card["provider_reason"], Value::Null);
+    }
+
     /// The three shapes of the R5 ruling, for pieces that carry neither an
     /// index nor an id. A call whose arguments arrive over several chunks is
     /// one call. Two whole calls in one chunk are two calls, and the
