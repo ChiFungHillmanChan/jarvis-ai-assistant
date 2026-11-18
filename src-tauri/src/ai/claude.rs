@@ -352,7 +352,7 @@ pub async fn send(
 
                 // Handle error events
                 if event_type == "error" {
-                    log::error!("Claude SSE error: {}", data_str);
+                    log::error!("{}", super::failure::stream_error_line("Claude", &data_str));
                     let _ = app_handle.emit("chat-state", json!({"state": "idle"}));
                     round_usage.add_to(&mut turn);
                     turn.record_if_billed(db, workload, started_at.elapsed().as_millis() as i64);
@@ -363,11 +363,7 @@ pub async fn send(
                 let sse: SseEvent = match serde_json::from_str(&data_str) {
                     Ok(e) => e,
                     Err(e) => {
-                        log::warn!(
-                            "[STREAM-DEBUG] SSE parse failed: {} | data: {}",
-                            e,
-                            crate::util::truncate_bytes(&data_str, 200)
-                        );
+                        log::warn!("{}", super::failure::unparsed_event_line("Claude", &e, data_str.len()));
                         continue;
                     }
                 };

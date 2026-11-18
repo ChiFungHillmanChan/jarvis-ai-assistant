@@ -122,12 +122,34 @@ pub fn log_line(label: &str, err: &str) -> String {
     line
 }
 
+/// The log line for an error event in a reply stream (Claude's SSE
+/// `error`): the service and the event's own error type or code, never its
+/// message (review B, r4-m5).
+pub fn stream_error_line(label: &str, event: &str) -> String {
+    match plain_codes(event).as_slice() {
+        [] => format!("{label} stream error"),
+        codes => format!("{label} stream error: {}", codes.join(", ")),
+    }
+}
+
+/// The log line for a stream event that does not parse: where and how it
+/// failed and its length. Never its text, which can be reply text, nor
+/// serde_json's message, which quotes it (review B, r4-m5).
+pub fn unparsed_event_line(label: &str, error: &serde_json::Error, bytes: usize) -> String {
+    format!("{label} stream event did not parse ({:?} at line {}, column {}; {bytes} bytes)", error.classify(), error.line(), error.column())
+}
+
 /// `error.type`, `error.code` and `error.status` of a provider's JSON error
 /// reply, each only when it is a short plain code.
 fn provider_codes(err: &str) -> Vec<String> {
     let Some(rest) = err.split(" API error ").nth(1) else { return Vec::new() };
-    let Some(start) = rest.find('{') else { return Vec::new() };
-    let Some(Ok(value)) = serde_json::Deserializer::from_str(&rest[start..]).into_iter::<serde_json::Value>().next() else { return Vec::new() };
+    plain_codes(rest)
+}
+
+/// [`provider_codes`] of the first JSON object in `text`.
+fn plain_codes(text: &str) -> Vec<String> {
+    let Some(start) = text.find('{') else { return Vec::new() };
+    let Some(Ok(value)) = serde_json::Deserializer::from_str(&text[start..]).into_iter::<serde_json::Value>().next() else { return Vec::new() };
     let plain = |code: &&str| !code.is_empty() && code.len() <= 64 && code.chars().all(|c| c.is_ascii_alphanumeric() || matches!(c, '_' | '.' | '-'));
     ["/error/type", "/error/code", "/error/status"].iter().filter_map(|pointer| value.pointer(pointer)?.as_str()).filter(plain).map(str::to_string).collect()
 }
@@ -407,6 +429,27 @@ mod tests {
         for error in [gemini, openai, claude, odd] {
             assert!(!log_line("X", error).contains("CANARY"), "{error}");
         }
+    }
+
+    /// An error event in a reply stream (Claude's SSE `error`) is logged
+    /// with its type only, never its message (review B, r4-m5).
+    #[test]
+    fn a_stream_error_event_is_logged_without_its_message() {
+        let event = r#"{"type":"error","error":{"type":"overloaded_error","message":"MAIL-CANARY Kenny owes HK$12,000"}}"#;
+        assert_eq!(stream_error_line("Claude", event), "Claude stream error: overloaded_error");
+        assert_eq!(stream_error_line("Claude", "MAIL-CANARY, not JSON"), "Claude stream error");
+        assert_eq!(stream_error_line("Claude", r#"{"error":{"type":"MAIL-CANARY Kenny owes"}}"#), "Claude stream error");
+    }
+
+    /// A stream event that does not parse is logged by where and how it
+    /// failed, never by its text, which can be reply text (review B, r4-m5).
+    /// serde_json's own message quotes the text, so it is not used.
+    #[test]
+    fn an_event_that_does_not_parse_is_logged_without_its_text() {
+        let event = r#""MAIL-CANARY Kenny owes HK$12,000""#;
+        let error = serde_json::from_str::<u32>(event).unwrap_err();
+        assert!(error.to_string().contains("MAIL-CANARY"), "serde_json's message quotes it");
+        assert_eq!(unparsed_event_line("Claude", &error, event.len()), "Claude stream event did not parse (Data at line 1, column 34; 34 bytes)");
     }
     use crate::ai::capability::Pick;
 

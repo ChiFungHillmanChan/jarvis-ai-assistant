@@ -237,7 +237,6 @@ pub async fn send(
         let mut finish_reason: Option<String> = None;
         let mut event_count: usize = 0;
         let mut total_bytes: usize = 0;
-        let mut first_chunk_sample: Option<String> = None;
 
         while let Some(chunk_result) = stream.next().await {
             let chunk = match chunk_result {
@@ -251,10 +250,6 @@ pub async fn send(
             };
 
             total_bytes += chunk.len();
-            if first_chunk_sample.is_none() {
-                first_chunk_sample =
-                    Some(String::from_utf8_lossy(&chunk).chars().take(400).collect());
-            }
             buffer.extend(&chunk);
 
             while let Some(event_block) = buffer.next_event() {
@@ -276,11 +271,7 @@ pub async fn send(
                 let sse: StreamChunk = match serde_json::from_str(&data_str) {
                     Ok(c) => c,
                     Err(e) => {
-                        log::warn!(
-                            "[gemini] SSE parse failed: {} | data: {}",
-                            e,
-                            &data_str[..data_str.len().min(200)]
-                        );
+                        log::warn!("{}", super::failure::unparsed_event_line("Gemini", &e, data_str.len()));
                         continue;
                     }
                 };
@@ -438,13 +429,12 @@ pub async fn send(
             return Ok(tools::tool_limit_fallback(&tools::read_language_pref(db)).into());
         }
         log::warn!(
-            "[gemini] empty response: model={} finish_reason={:?} function_calls={} events={} bytes={} first_chunk={:?}",
+            "[gemini] empty response: model={} finish_reason={:?} function_calls={} events={} bytes={}",
             model,
             finish_reason,
             round.calls.len(),
             event_count,
-            total_bytes,
-            first_chunk_sample
+            total_bytes
         );
         turn.record(db, workload, started_at.elapsed().as_millis() as i64);
         return Err(empty_reply_error(model, finish_reason.as_deref()).into());
