@@ -42,6 +42,20 @@ pub(crate) fn point_at(base: &str) -> PointedAt {
     before
 }
 
+/// A redirect dropped inside another's scope leaves the outer one in force.
+#[test]
+fn a_redirect_dropped_inside_another_leaves_the_outer_one() {
+    let official = "https://api.example.invalid/v1";
+    let outer = point_at("http://127.0.0.1:1/v1");
+    {
+        let _inner = point_at("http://127.0.0.1:2/v1beta");
+        assert_eq!(api_base(official), "http://127.0.0.1:2/v1beta");
+    }
+    assert_eq!(api_base(official), "http://127.0.0.1:1/v1");
+    drop(outer);
+    assert_eq!(api_base(official), official);
+}
+
 /// Points this thread's Bedrock clients at `base` until dropped.
 pub(crate) fn point_bedrock_at(base: &str) -> PointedAt {
     let before = pointed();
