@@ -443,9 +443,16 @@ impl Wire for ClaudeWire {
         }
         events.send(Event::Usage(round_usage.figures()));
 
-        // In the order the calls came.
-        let tool_uses: Vec<(String, String, serde_json::Value)> =
-            tool_map.into_values().map(|(id, name, json_str)| (id, name, serde_json::from_str(&json_str).unwrap_or_default())).collect();
+        // In the order the calls came. A call with no arguments streams no
+        // input: it is the empty object, as Anthropic sent it in
+        // content_block_start, not null.
+        let tool_uses: Vec<(String, String, serde_json::Value)> = tool_map
+            .into_values()
+            .map(|(id, name, json_str)| {
+                let input = if json_str.trim().is_empty() { json!({}) } else { serde_json::from_str(&json_str).unwrap_or_default() };
+                (id, name, input)
+            })
+            .collect();
         for (id, name, input) in &tool_uses {
             events.send(Event::ToolCall(Call { id: id.clone(), name: name.clone(), arguments: serde_json::to_string(input).unwrap_or_default() }));
         }

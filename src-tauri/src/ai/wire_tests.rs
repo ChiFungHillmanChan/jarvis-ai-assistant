@@ -1063,6 +1063,28 @@ mod claude_wire {
         assert!(error.contains("307"), "{error}");
         assert_eq!(server.seen().len(), 1, "no second request");
     }
+
+    /// A call with no arguments streams no input: the tool gets `{}`, and
+    /// the call goes back with `"input": {}` (it was null before P07).
+    #[tokio::test]
+    async fn a_call_without_arguments_goes_back_as_an_empty_object() {
+        let mut first = vec![start(50, 0, 0)];
+        first.push(("content_block_start", json!({"type": "content_block_start", "index": 0, "content_block": {"type": "tool_use", "id": "toolu_1", "name": "list_memories", "input": {}}})));
+        first.push(stop(0));
+        first.extend(end("tool_use", 5));
+        let mut second = vec![start(60, 0, 0), text_block(0), text(0, "Nothing saved yet."), stop(0)];
+        second.extend(end("end_turn", 4));
+        let server = serve(vec![Reply::named_sse(&first), Reply::named_sse(&second)]).await;
+        let _base = point_at(&server.base);
+        let db = crate::db::test_database();
+        let turn = run_turn(&router(), row(), &[("user", "What do you remember?")], &db, Workload::Tools, true).await;
+        assert_eq!(turn.reply.as_deref(), Ok("Nothing saved yet."));
+        assert_eq!(turn.window_lines().iter().filter(|line| line.contains("\"detail\"")).count(), 1, "the call ran");
+        let seen = server.seen();
+        assert_eq!(seen.len(), 2);
+        assert_eq!(seen[1].body["messages"][1], json!({"role": "assistant", "content": [{"type": "tool_use", "id": "toolu_1", "name": "list_memories", "input": {}}]}));
+        assert_eq!(seen[1].body["messages"][2]["content"][0]["tool_use_id"], "toolu_1");
+    }
 }
 
 // ---------------------------------------------------------------------------
