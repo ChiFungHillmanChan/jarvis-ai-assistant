@@ -119,8 +119,9 @@ fn refuse_acted_retry(retry_of: Option<&str>, language: crate::ai::bedrock::UiLa
 /// The turn is moved to the heap before anything holds it. Every wrapper
 /// around a future keeps it inline, some of them twice, so the whole turn
 /// used to sit several times over inside the future of `send_message`
-/// (456 KB). A debug build put that on the stack and every typed message
-/// overflowed the worker thread's 2 MiB stack and aborted the app.
+/// (456 KB). In a debug build the function that polls the command keeps
+/// about five copies of that future in its stack frame (2.2 MiB), more than
+/// the worker thread's 2 MiB stack: every typed message aborted the app.
 fn on_pick<'a>(
     db: &'a Database,
     pick: Option<crate::ai::capability::Pick>,
@@ -156,12 +157,23 @@ fn answer(conn: &rusqlite::Connection, reply: String, session_id: &str, without_
 /// failed is returned as it is, with nothing saved. The UI language is read
 /// before the database lock is taken, because `UiLanguage::read` takes the
 /// same lock and a std mutex locked twice on one thread never returns.
-async fn answered(db: &Database, session_id: &str, turn: impl std::future::Future<Output = Result<String, String>>) -> Result<ChatMessage, String> {
-    let (sent, without_tools) = crate::ai::local::noting_no_tools(turn).await;
-    let reply = sent?;
-    let language = crate::ai::bedrock::UiLanguage::read(db);
-    let conn = db.conn.lock().map_err(|e| e.to_string())?;
-    answer(&conn, reply, session_id, without_tools, language)
+///
+/// The request is moved to the heap first, for the reason given at
+/// [`on_pick`]: held inline it made this future, and `send_scoped`'s, four
+/// times the size of the request.
+fn answered<'a>(
+    db: &'a Database,
+    session_id: &'a str,
+    turn: impl std::future::Future<Output = Result<String, String>> + 'a,
+) -> impl std::future::Future<Output = Result<ChatMessage, String>> + 'a {
+    let turn = Box::pin(turn);
+    async move {
+        let (sent, without_tools) = crate::ai::local::noting_no_tools(turn).await;
+        let reply = sent?;
+        let language = crate::ai::bedrock::UiLanguage::read(db);
+        let conn = db.conn.lock().map_err(|e| e.to_string())?;
+        answer(&conn, reply, session_id, without_tools, language)
+    }
 }
 
 async fn send_scoped(
@@ -1178,11 +1190,36 @@ mod tests {
         assert_eq!(not_picked.note, Some(note));
     }
 
-    /// What `send_message` holds for a turn does not grow with the turn.
-    /// It used to: the command's future held the whole turn several times
-    /// over, and a debug build aborted with a stack overflow on every typed
-    /// message (found in the native-qa window on 2026-11-18; no test runs
-    /// the command itself, which needs the running app).
+    /// The size of a command's future, read from its type: the command is
+    /// never called, so this needs no running app.
+    fn future_size<A, B, C, D, E, F: std::future::Future>(_: impl FnOnce(A, B, C, D, E) -> F) -> usize {
+        std::mem::size_of::<F>()
+    }
+
+    /// A typed message aborted a debug build with a stack overflow (found in
+    /// the native-qa window on 2026-11-18): the future of `send_message` held
+    /// the whole turn several times over (249,880 bytes after P06, 456,120
+    /// after P07), and the function that polls it keeps about five copies in
+    /// its stack frame. With the turn on the heap it is about 1 KB.
+    #[test]
+    fn the_send_command_holds_a_small_future() {
+        let size = future_size(|app: tauri::AppHandle, db: State<'static, Arc<Database>>, router: State<'static, Mutex<AiRouter>>, auth: State<'static, Arc<crate::auth::google::GoogleAuth>>, engine: State<'static, Arc<VoiceEngine>>| {
+            send_message(app, db, router, auth, engine, String::new(), None, None, None, None, None)
+        });
+        assert!(size < 16 * 1024, "send_message's future is {size} bytes");
+    }
+
+    /// The turn itself stays small too: both reply paths box the request
+    /// they hand to `answered`, which used to hold it inline four times.
+    #[test]
+    fn a_turn_holds_a_small_future() {
+        let size = future_size(|app: &'static tauri::AppHandle, db: &'static Arc<Database>, router: &'static Mutex<AiRouter>, auth: &'static Arc<crate::auth::google::GoogleAuth>, engine: &'static Arc<VoiceEngine>| {
+            send_scoped(app, db, router, auth, engine, String::new(), None, String::new(), false)
+        });
+        assert!(size < 16 * 1024, "send_scoped's future is {size} bytes");
+    }
+
+    /// What `on_pick` holds for a turn does not grow with the turn.
     #[test]
     fn a_turn_is_kept_out_of_the_future_the_command_holds() {
         let db = crate::db::test_database();
@@ -1194,6 +1231,21 @@ mod tests {
         assert!(std::mem::size_of_val(&turn) >= 100_000, "the turn itself is large");
         let held = on_pick(&db, None, turn);
         let size = std::mem::size_of_val(&held);
-        assert!(size < 1024, "the command holds {size} bytes for a turn of 100,000");
+        assert!(size < 4096, "on_pick holds {size} bytes for a turn of 100,000");
+    }
+
+    /// What `answered` holds for a request does not grow with the request.
+    #[test]
+    fn a_request_is_kept_out_of_the_future_a_turn_holds() {
+        let db = crate::db::test_database();
+        let request = async {
+            let large = [0u8; 100_000];
+            std::future::ready(()).await;
+            Ok(large.len().to_string())
+        };
+        assert!(std::mem::size_of_val(&request) >= 100_000, "the request itself is large");
+        let held = answered(&db, "s1", request);
+        let size = std::mem::size_of_val(&held);
+        assert!(size < 4096, "answered holds {size} bytes for a request of 100,000");
     }
 }
