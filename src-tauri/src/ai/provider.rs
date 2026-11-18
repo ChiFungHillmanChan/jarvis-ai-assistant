@@ -420,27 +420,32 @@ impl Meter {
             return;
         }
         let Metering::PerRequest { provider, model } = &self.metering else { return };
-        let disabled = crate::chat_session::TOOL_EXECUTION_DISABLED.try_with(|v| *v).unwrap_or(false);
-        if calls > 0 && !final_round && !disabled {
-            super::cost::note_tool_call();
-        }
+        note_tools_to_run(calls, final_round);
         match usage {
-            Some(usage) => super::cost::record_inference(db, provider, super::cost::current_feature(), workload, model, usage.input, usage.output, usage.cache_read, usage.cache_write, latency_ms),
+            Some(usage) => record_request(db, provider, workload, model, usage, latency_ms),
             None => log::warn!("{provider} reply carried no usage figures; no usage row stored"),
         }
     }
 
     /// A request failed part-way: its usage so far, then what the turn was
-    /// billed.
-    fn failed(mut self, db: &crate::db::Database, workload: Workload, usage: Option<Usage>) {
-        let latency = self.elapsed();
-        // A turn on this Mac is stored only when it succeeds, and a failed
-        // Bedrock request was not answered, so nothing is stored for it.
-        if let (Metering::PerTurn { .. }, Some(mut turn)) = (&self.metering, self.turn.take()) {
-            if let Some(usage) = usage {
-                turn.add_request(usage.input, usage.output, usage.cache_read, usage.cache_write);
+    /// billed. A turn on this Mac is stored only when it succeeds. A request
+    /// stored on its own is stored when its reply carried usage (AWS bills a
+    /// reply that holds no message); a refused one carries none.
+    fn failed(&mut self, db: &crate::db::Database, workload: Workload, usage: Option<Usage>, latency_ms: i64) {
+        let turn_latency = self.elapsed();
+        match (&self.metering, self.turn.take()) {
+            (Metering::PerTurn { .. }, Some(mut turn)) => {
+                if let Some(usage) = usage {
+                    turn.add_request(usage.input, usage.output, usage.cache_read, usage.cache_write);
+                }
+                turn.record_if_billed(db, workload, turn_latency);
             }
-            turn.record_if_billed(db, workload, latency);
+            (Metering::PerRequest { provider, model }, _) => {
+                if let Some(usage) = usage {
+                    record_request(db, provider, workload, model, usage, latency_ms);
+                }
+            }
+            _ => {}
         }
     }
 
@@ -452,6 +457,23 @@ impl Meter {
     }
 }
 
+/// A request stored on its own is stored as a tool request when the calls
+/// it asks for will run: `tools::execute_tool` marks the turn only once a
+/// tool runs, after this request's row. The last round runs no tools, and
+/// some requests turn tools off.
+pub(crate) fn note_tools_to_run(calls: usize, final_round: bool) {
+    let disabled = crate::chat_session::TOOL_EXECUTION_DISABLED.try_with(|v| *v).unwrap_or(false);
+    if calls > 0 && !final_round && !disabled {
+        super::cost::note_tool_call();
+    }
+}
+
+/// One request's row, under the feature of the request that started the
+/// turn.
+pub(crate) fn record_request(db: &crate::db::Database, provider: &str, workload: Workload, model: &str, usage: Usage, latency_ms: i64) {
+    super::cost::record_inference(db, provider, super::cost::current_feature(), workload, model, usage.input, usage.output, usage.cache_read, usage.cache_write, latency_ms);
+}
+
 /// One chat turn on `wire`: rounds of requests and tool calls until the
 /// model answers or the last round is reached.
 pub(crate) async fn chat<W: Wire>(wire: &W, request: ChatRequest, turn: Turn<'_>) -> Result<String, String> {
@@ -461,21 +483,7 @@ pub(crate) async fn chat<W: Wire>(wire: &W, request: ChatRequest, turn: Turn<'_>
     let max_rounds = wire.max_rounds();
     for number in 0..max_rounds {
         let final_round = number + 1 == max_rounds;
-        let sent_at = std::time::Instant::now();
-        let mut events = Events::new(turn.window, turn.voice.as_ref());
-        let result = wire.round(&mut conversation, final_round, &mut events).await;
-        let (mut round, usage) = events.finish();
-        let rules = wire.schema_rules();
-        round.calls = round.calls.into_iter().map(|call| rules.arguments(&tools, call)).collect();
-        if let Err(error) = result {
-            if error.idle {
-                turn.window.send("chat-state", json!({"state": "idle"}));
-            }
-            meter.failed(turn.db, turn.workload, usage);
-            return Err(error.message);
-        }
-        let runs = wire.runs_calls(&conversation, &round, final_round);
-        meter.request(turn.db, turn.workload, usage, round.calls.len(), final_round, sent_at.elapsed().as_millis() as i64);
+        let (round, runs) = one_request(wire, &mut conversation, &tools, final_round, &turn, &mut meter).await?;
         if runs {
             let results = run_calls(&round.calls, &turn).await;
             let answers = wire.answers_after_tools(&round);
@@ -497,6 +505,42 @@ pub(crate) async fn chat<W: Wire>(wire: &W, request: ChatRequest, turn: Turn<'_>
     finish(wire, &turn);
     meter.succeeded(turn.db, turn.workload);
     Ok(tools::tool_limit_fallback(&tools::read_language_pref(turn.db)).into())
+}
+
+/// One request of a turn: its events shown as they come, its calls'
+/// arguments as the tools take them, and its usage stored as the wire's
+/// metering says. Returns the round and whether its calls run.
+async fn one_request<W: Wire>(wire: &W, conversation: &mut W::Conversation, tools: &[tools::Tool], final_round: bool, turn: &Turn<'_>, meter: &mut Meter) -> Result<(Round, bool), String> {
+    let sent_at = std::time::Instant::now();
+    let mut events = Events::new(turn.window, turn.voice.as_ref());
+    let result = wire.round(conversation, final_round, &mut events).await;
+    let (mut round, usage) = events.finish();
+    let rules = wire.schema_rules();
+    round.calls = round.calls.into_iter().map(|call| rules.arguments(tools, call)).collect();
+    let latency_ms = sent_at.elapsed().as_millis() as i64;
+    if let Err(error) = result {
+        if error.idle {
+            turn.window.send("chat-state", json!({"state": "idle"}));
+        }
+        meter.failed(turn.db, turn.workload, usage, latency_ms);
+        return Err(error.message);
+    }
+    let runs = wire.runs_calls(conversation, &round, final_round);
+    meter.request(turn.db, turn.workload, usage, round.calls.len(), final_round, latency_ms);
+    Ok((round, runs))
+}
+
+/// The first request of a chat turn as `chat` sends it, with its usage
+/// stored, and its calls not run: for tests of a wire's usage rows.
+#[cfg(test)]
+pub(crate) async fn first_request<W: Wire>(wire: &W, chat_request: ChatRequest, db: &crate::db::Database, window: &(dyn Window + Sync)) -> Result<Round, String> {
+    let google_auth = std::sync::Arc::new(crate::auth::google::GoogleAuth::new_empty());
+    let ledger = SideEffectLedger::new();
+    let turn = Turn { db, google_auth: &google_auth, window, voice: None, workload: Workload::Tools, ledger: &ledger };
+    let mut meter = Meter::new(wire.metering());
+    let tools = chat_request.tools.clone();
+    let mut conversation = wire.start(chat_request).await?;
+    one_request(wire, &mut conversation, &tools, false, &turn, &mut meter).await.map(|(round, _)| round)
 }
 
 /// The chat window is told the answer is complete.

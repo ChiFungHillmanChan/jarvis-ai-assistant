@@ -1,17 +1,16 @@
 use super::tools;
 use crate::aws::credentials::AwsCredentials;
-use crate::voice::tts::TtsCommand;
 use aws_config::BehaviorVersion;
 use aws_sdk_bedrockruntime::config::Region;
 use aws_sdk_bedrockruntime::types::{
     CachePointBlock, CachePointType, ContentBlock, ConversationRole, InferenceConfiguration,
-    Message, StopReason, SystemContentBlock, TokenUsage, Tool, ToolConfiguration, ToolInputSchema,
+    Message, SystemContentBlock, TokenUsage, Tool, ToolConfiguration, ToolInputSchema,
     ToolResultBlock, ToolResultContentBlock, ToolResultStatus, ToolSpecification,
 };
 use aws_smithy_types::{Document, Number};
 use serde_json::json;
-use std::collections::{HashMap, HashSet};
-use crate::chat_session::ScopedEmitter;
+use std::collections::HashMap;
+use super::provider::{Call, ChatRequest, Event, Events, Metering, Outcome, Round, RoundError, Wire, SKIPPED};
 
 /// The Bedrock model: the registry's default. A debug build (development
 /// and the native QA app) may override it with AWS_BEDROCK_MODEL_ID; a
@@ -255,218 +254,135 @@ impl StoredUsage {
         };
         (stored.input != 0 || stored.output != 0 || usage.total_tokens() != 0).then_some(stored)
     }
-}
 
-#[allow(clippy::too_many_arguments)]
-pub async fn send(
-    creds: &AwsCredentials,
-    model_id: &str,
-    workload: crate::ai::Workload,
-    messages: Vec<(String, String)>,
-    db: &crate::db::Database,
-    google_auth: &std::sync::Arc<crate::auth::google::GoogleAuth>,
-    app_handle: &(impl ScopedEmitter + Sync),
-    tts_tx: Option<tokio::sync::mpsc::Sender<TtsCommand>>,
-    ledger: &crate::ai::SideEffectLedger,
-) -> Result<String, Box<dyn std::error::Error + Send + Sync>> {
-    let client = client_for(creds).await;
-    let tool_config = build_tool_config()?;
-
-    let mut bedrock_messages = build_messages(messages)?;
-    // A7: split system prompt into a byte-stable cacheable prefix and a
-    // per-request dynamic suffix.  The CachePoint sits between them so the
-    // static prefix is served from cache while the dynamic suffix (user name,
-    // date, memory) is sent fresh each call without invalidating the cache.
-    let static_prompt = tools::build_cacheable_system_prompt();
-    let user_name = crate::util::display_name(db);
-    let language = tools::read_language_pref(db);
-    let dynamic = tools::build_dynamic_suffix(&user_name, chrono::Local::now(), &language, db);
-    let system_blocks = build_system_blocks(static_prompt, dynamic)?;
-    let limits = crate::ai::models::limits("bedrock");
-    let inference_config = InferenceConfiguration::builder()
-        .max_tokens(limits.chat_max_output_tokens.unwrap_or_default() as i32)
-        .temperature(limits.chat_temperature.unwrap_or_default())
-        .build();
-
-    let turn = ChatTurn {
-        client: &client,
-        model_id,
-        system: &system_blocks,
-        tools: &tool_config,
-        inference: &inference_config,
-        db,
-        workload,
-    };
-
-    let max_iterations = limits.max_tool_rounds.unwrap_or_default() as usize;
-    for round in 0..max_iterations {
-        let final_round = round + 1 == max_iterations;
-        let (response, output_message, tool_uses) = converse_round(&turn, &bedrock_messages, final_round).await?;
-
-        let Some(output_message) = output_message else {
-            return Err("Bedrock returned no message output".into());
-        };
-
-        let text_parts = collect_text(&output_message);
-
-        // The last round runs no tools.
-        if (!tool_uses.is_empty() || response.stop_reason() == &StopReason::ToolUse) && !final_round {
-            bedrock_messages.push(output_message);
-
-            let mut executed_tools: HashSet<String> = HashSet::new();
-            let mut narrated = false;
-            let mut result_blocks: Vec<ContentBlock> = Vec::new();
-
-            for tool_use in &tool_uses {
-                let name = tool_use.name();
-                let args_value = document_to_json(tool_use.input());
-                let args_str = serde_json::to_string(&args_value).unwrap_or_default();
-                let call_key = crate::ai::tool_call_key(name, &args_str);
-                let content = if executed_tools.contains(&call_key) {
-                    log::info!("JARVIS skipping duplicate tool call: {}", name);
-                    "Skipped: already executed this tool with these arguments in this batch."
-                        .to_string()
-                } else {
-                    executed_tools.insert(call_key);
-                    log::info!("JARVIS tool call: {} ({} bytes of arguments)", name, args_str.len());
-
-                    let label = tools::tool_status_label(name);
-                    let _ = app_handle.emit(
-                        "chat-status",
-                        json!({
-                            "status": format!("Running: {}", label),
-                            "detail": tools::tool_status_detail(name, &args_str),
-                            "phase": "acting"
-                        }),
-                    );
-                    let _ = app_handle.emit("chat-tool-call", json!({"tool_name": name}));
-
-                    if !narrated {
-                        if let Some(ref tx) = tts_tx {
-                            let narration = tools::tool_voice_narration(name, &tools::read_language_pref(db));
-                            let _ = tx.try_send(TtsCommand::Narrate(narration.to_string()));
-                            narrated = true;
-                        }
-                    }
-
-                    ledger.note(name);
-                    let result = tools::execute_tool(name, &args_str, db, google_auth, ledger).await;
-                    log::info!("JARVIS tool result: {}", crate::util::truncate_bytes(&result, 200));
-                    result
-                };
-
-                let tool_result = ToolResultBlock::builder()
-                    .tool_use_id(tool_use.tool_use_id())
-                    .content(ToolResultContentBlock::Text(content))
-                    .status(ToolResultStatus::Success)
-                    .build()?;
-                result_blocks.push(ContentBlock::ToolResult(tool_result));
-            }
-            // Converse has no "no tools" choice while the history holds tool
-            // calls, so the next, last round is told in words.
-            if round + 2 == max_iterations {
-                result_blocks.push(ContentBlock::Text(FINAL_ROUND_NOTE.to_string()));
-            }
-
-            bedrock_messages.push(
-                Message::builder()
-                    .role(ConversationRole::User)
-                    .set_content(Some(result_blocks))
-                    .build()?,
-            );
-
-            let _ = app_handle.emit(
-                "chat-status",
-                json!({
-                    "status": "Reviewing tool results...",
-                    "phase": "thinking"
-                }),
-            );
-            continue;
-        }
-
-        let mut final_text = text_parts.join("");
-        if final_round && final_text.trim().is_empty() {
-            final_text = tools::tool_limit_fallback(&tools::read_language_pref(db)).to_string();
-        }
-        let _ = app_handle.emit(
-            "chat-status",
-            json!({
-                "status": "Composing response...",
-                "phase": "responding"
-            }),
-        );
-        if !final_text.is_empty() {
-            let _ = app_handle.emit("chat-token", json!({"token": final_text, "done": false}));
-            if let Some(ref tx) = tts_tx {
-                let _ = tx.try_send(TtsCommand::TextChunk(final_text.clone()));
-            }
-        }
-        let _ = app_handle.emit("chat-token", json!({"token": "", "done": true}));
-        return Ok(final_text);
+    fn figures(self) -> super::provider::Usage {
+        super::provider::Usage { input: self.input, output: self.output, cache_read: self.cache_read, cache_write: self.cache_write }
     }
-
-    // The last round always returns above.
-    let _ = app_handle.emit("chat-token", json!({"token": "", "done": true}));
-    Ok(tools::tool_limit_fallback(&tools::read_language_pref(db)).into())
 }
 
-/// What every request of one chat turn shares.
-struct ChatTurn<'a> {
-    client: &'a aws_sdk_bedrockruntime::Client,
+/// Bedrock's Converse API on the provider interface, with the user's own
+/// AWS credentials.
+pub(crate) struct BedrockWire {
+    creds: AwsCredentials,
     /// The id the requests are sent with, and the one their rows are stored
     /// against.
-    model_id: &'a str,
-    system: &'a [SystemContentBlock],
-    tools: &'a ToolConfiguration,
-    inference: &'a InferenceConfiguration,
-    db: &'a crate::db::Database,
-    workload: crate::ai::Workload,
+    model: String,
 }
 
-/// One request of a chat turn, and its usage row: the figures AWS returned
-/// for this request, stored against the model id it was sent with. A request
-/// that fails stores nothing, and neither does a reply without usage. The
-/// tool calls are noted first, so a request asking for a tool that will run
-/// is stored as tools.
-async fn converse_round(
-    turn: &ChatTurn<'_>,
-    messages: &[Message],
-    final_round: bool,
-) -> Result<
-    (
-        aws_sdk_bedrockruntime::operation::converse::ConverseOutput,
-        Option<Message>,
-        Vec<aws_sdk_bedrockruntime::types::ToolUseBlock>,
-    ),
-    Box<dyn std::error::Error + Send + Sync>,
-> {
-    let start = std::time::Instant::now();
-    let response = turn
-        .client
-        .converse()
-        .model_id(turn.model_id)
-        .set_messages(Some(messages.to_vec()))
-        .set_system(Some(turn.system.to_vec()))
-        .tool_config(turn.tools.clone())
-        .inference_config(turn.inference.clone())
-        .send()
-        .await
-        .map_err(converse_error)?;
-    let latency_ms = start.elapsed().as_millis() as i64;
-
-    let output_message = match response.output() {
-        Some(aws_sdk_bedrockruntime::types::ConverseOutput::Message(message)) => Some(message.clone()),
-        _ => None,
-    };
-    let tool_uses = output_message.as_ref().map(collect_tool_uses).unwrap_or_default();
-    note_tools_to_run(tool_uses.len(), final_round);
-
-    match response.usage() {
-        Some(usage) => record_metrics(turn.db, turn.workload, turn.model_id, usage, latency_ms).await,
-        None => log::warn!("Bedrock reply carried no usage figures; no usage row stored"),
+impl BedrockWire {
+    pub(crate) fn new(creds: AwsCredentials, model: &str) -> Self {
+        BedrockWire { creds, model: model.to_string() }
     }
-    Ok((response, output_message, tool_uses))
+}
+
+/// One chat turn's requests to Bedrock.
+pub(crate) struct Conversation {
+    client: aws_sdk_bedrockruntime::Client,
+    messages: Vec<Message>,
+    system: Vec<SystemContentBlock>,
+    tools: ToolConfiguration,
+    inference: InferenceConfiguration,
+    /// The reply of the round in progress, sent back with the results of
+    /// its calls.
+    reply: Option<Message>,
+}
+
+#[async_trait::async_trait]
+impl Wire for BedrockWire {
+    type Conversation = Conversation;
+
+    fn max_rounds(&self) -> usize {
+        crate::ai::models::limits("bedrock").max_tool_rounds.unwrap_or_default() as usize
+    }
+
+    /// A row per request: the figures AWS returned for that request, stored
+    /// against the model id it was sent with. A reply asking for a tool that
+    /// will run is stored as tools.
+    fn metering(&self) -> Metering {
+        Metering::PerRequest { provider: "bedrock".into(), model: self.model.clone() }
+    }
+
+    async fn start(&self, request: ChatRequest) -> Result<Conversation, String> {
+        let client = client_for(&self.creds).await;
+        let tools = build_tool_config(&request.tools).map_err(|e| e.to_string())?;
+        let messages = build_messages(request.messages).map_err(|e| e.to_string())?;
+        // A7: the system prompt is split into a byte-stable cacheable prefix
+        // and a per-request suffix, with the cache point between them.
+        let system = build_system_blocks(request.system.cacheable, request.system.dynamic).map_err(|e| e.to_string())?;
+        let limits = crate::ai::models::limits("bedrock");
+        let inference = InferenceConfiguration::builder()
+            .max_tokens(limits.chat_max_output_tokens.unwrap_or_default() as i32)
+            .temperature(limits.chat_temperature.unwrap_or_default())
+            .build();
+        Ok(Conversation { client, messages, system, tools, inference, reply: None })
+    }
+
+    async fn round(&self, conversation: &mut Conversation, _final_round: bool, events: &mut Events<'_>) -> Result<(), RoundError> {
+        let response = conversation
+            .client
+            .converse()
+            .model_id(&self.model)
+            .set_messages(Some(conversation.messages.clone()))
+            .set_system(Some(conversation.system.clone()))
+            .tool_config(conversation.tools.clone())
+            .inference_config(conversation.inference.clone())
+            .send()
+            .await
+            .map_err(|e| RoundError::refused(converse_error(e)))?;
+        if let Some(stored) = response.usage().and_then(StoredUsage::from_aws) {
+            events.send(Event::Usage(stored.figures()));
+        }
+        let Some(aws_sdk_bedrockruntime::types::ConverseOutput::Message(message)) = response.output() else {
+            return Err(RoundError::refused("Bedrock returned no message output"));
+        };
+        for (index, block) in message.content().iter().enumerate() {
+            match block {
+                ContentBlock::Text(text) if !text.is_empty() => events.send(Event::Text(text.clone())),
+                ContentBlock::ToolUse(tool_use) => events.send(Event::ToolStarted { key: index.to_string(), name: tool_use.name().to_string() }),
+                _ => {}
+            }
+        }
+        for tool_use in collect_tool_uses(message) {
+            let arguments = serde_json::to_string(&document_to_json(tool_use.input())).unwrap_or_default();
+            events.send(Event::ToolCall(Call { id: tool_use.tool_use_id().to_string(), name: tool_use.name().to_string(), arguments }));
+        }
+        conversation.reply = Some(message.clone());
+        events.send(Event::Done { stop: Some(response.stop_reason().as_str().to_string()) });
+        Ok(())
+    }
+
+    /// A reply that stopped for tools runs them even when it lists none.
+    /// The last round runs no tools.
+    fn runs_calls(&self, _conversation: &Conversation, round: &Round, final_round: bool) -> bool {
+        (!round.calls.is_empty() || round.stop.as_deref() == Some("tool_use")) && !final_round
+    }
+
+    fn add_results(&self, conversation: &mut Conversation, _round: Round, results: Vec<(Call, Outcome)>, next_is_final: bool) -> Result<(), String> {
+        conversation.messages.extend(conversation.reply.take());
+        let mut blocks = results
+            .into_iter()
+            .map(|(call, outcome)| {
+                let content = match outcome {
+                    Outcome::Ran(result) => result,
+                    Outcome::Duplicate => SKIPPED.to_string(),
+                };
+                ToolResultBlock::builder()
+                    .tool_use_id(call.id)
+                    .content(ToolResultContentBlock::Text(content))
+                    .status(ToolResultStatus::Success)
+                    .build()
+                    .map(ContentBlock::ToolResult)
+                    .map_err(|e| e.to_string())
+            })
+            .collect::<Result<Vec<_>, String>>()?;
+        // Converse has no "no tools" choice while the history holds tool
+        // calls, so the next, last round is told in words.
+        if next_is_final {
+            blocks.push(ContentBlock::Text(FINAL_ROUND_NOTE.to_string()));
+        }
+        conversation.messages.push(Message::builder().role(ConversationRole::User).set_content(Some(blocks)).build().map_err(|e| e.to_string())?);
+        Ok(())
+    }
 }
 
 /// Sent with the tool results before the last allowed round.
@@ -554,13 +470,13 @@ fn build_messages(
         .collect()
 }
 
-fn build_tool_config() -> Result<ToolConfiguration, Box<dyn std::error::Error + Send + Sync>> {
-    let mut tool_specs = tools::get_tool_definitions()
-        .into_iter()
+fn build_tool_config(tool_definitions: &[tools::Tool]) -> Result<ToolConfiguration, Box<dyn std::error::Error + Send + Sync>> {
+    let mut tool_specs = tool_definitions
+        .iter()
         .map(|tool| {
             let spec = ToolSpecification::builder()
-                .name(tool.name)
-                .description(tool.description)
+                .name(tool.name.clone())
+                .description(tool.description.clone())
                 .input_schema(ToolInputSchema::Json(json_to_document(&tool.parameters)))
                 .build()?;
             Ok(Tool::ToolSpec(spec))
@@ -603,40 +519,16 @@ fn collect_tool_uses(message: &Message) -> Vec<aws_sdk_bedrockruntime::types::To
         .collect()
 }
 
-/// Bedrock stores a row per request, and `tools::execute_tool` marks a chat
-/// turn as a tool turn only when the tool runs, after this request's row. So
-/// a response that asks for a tool which will run marks the turn first: the
-/// last round runs no tools, and some requests turn tools off.
-fn note_tools_to_run(tool_uses: usize, final_round: bool) {
-    let disabled = crate::chat_session::TOOL_EXECUTION_DISABLED.try_with(|v| *v).unwrap_or(false);
-    if tool_uses > 0 && !final_round && !disabled {
-        crate::ai::cost::note_tool_call();
-    }
-}
+#[cfg(test)]
+use super::provider::note_tools_to_run;
 
-async fn record_metrics(
-    db: &crate::db::Database,
-    workload: crate::ai::Workload,
-    model_id: &str,
-    usage: &TokenUsage,
-    latency_ms: i64,
-) {
-    let Some(stored) = StoredUsage::from_aws(usage) else {
-        log::warn!("Bedrock reply carried no usage figures; no usage row stored");
-        return;
-    };
-    crate::ai::cost::record_inference(
-        db,
-        "bedrock",
-        crate::ai::cost::current_feature(),
-        workload,
-        model_id,
-        stored.input,
-        stored.output,
-        stored.cache_read,
-        stored.cache_write,
-        latency_ms,
-    );
+/// One request's row through the usage path, from the figures AWS returned.
+#[cfg(test)]
+async fn record_metrics(db: &crate::db::Database, workload: crate::ai::Workload, model_id: &str, usage: &TokenUsage, latency_ms: i64) {
+    match StoredUsage::from_aws(usage) {
+        Some(stored) => super::provider::record_request(db, "bedrock", workload, model_id, stored.figures(), latency_ms),
+        None => log::warn!("Bedrock reply carried no usage figures; no usage row stored"),
+    }
 }
 
 /// Converse's inputTokens leaves out the tokens read from or written to the
@@ -772,6 +664,18 @@ pub(crate) mod tests {
         }
     }
 
+    /// The first request of a chat turn as the loop sends it, with the
+    /// static prompt "rules", the per-request part "today" and every tool.
+    async fn first_request(wire: &BedrockWire, text: &str, db: &crate::db::Database) -> Result<crate::ai::provider::Round, String> {
+        let request = crate::ai::provider::ChatRequest {
+            system: crate::ai::provider::SystemPrompt { cacheable: "rules".into(), dynamic: "today".into() },
+            messages: vec![("user".into(), text.into())],
+            tools: tools::get_tool_definitions(),
+            deeper: None,
+        };
+        crate::ai::provider::first_request(wire, request, db, &crate::ai::wire_tests::Window::default()).await
+    }
+
     /// One chat request, sent to a stand-in for AWS: the row holds the four
     /// figures AWS returned, against the model id that went out in the
     /// request.
@@ -779,14 +683,9 @@ pub(crate) mod tests {
     async fn a_chat_request_stores_the_usage_aws_returned_for_the_model_it_sent() {
         let server = aws_loopback(200, None, converse_json("Done.")).await;
         let db = crate::ai::cost::tests::temp_metrics_db("");
-        let client = client_for(&fixture_creds("ap-southeast-1")).await;
-        let tools = build_tool_config().unwrap();
-        let system = build_system_blocks("rules".into(), "today".into()).unwrap();
-        let inference = InferenceConfiguration::builder().max_tokens(64).build();
-        let turn = ChatTurn { client: &client, model_id: "apac.anthropic.claude-haiku-4-5-20251001-v1:0", system: &system, tools: &tools, inference: &inference, db: &db, workload: crate::ai::Workload::Tools };
-        let messages = build_messages(vec![("user".into(), "hi".into())]).unwrap();
-        let (_, message, tool_uses) = crate::ai::cost::with_feature(crate::ai::cost::Feature::Chat, converse_round(&turn, &messages, false)).await.unwrap();
-        assert!(message.is_some() && tool_uses.is_empty());
+        let wire = BedrockWire::new(fixture_creds("ap-southeast-1"), "apac.anthropic.claude-haiku-4-5-20251001-v1:0");
+        let round = crate::ai::cost::with_feature(crate::ai::cost::Feature::Chat, first_request(&wire, "hi", &db)).await.unwrap();
+        assert!(!round.texts.is_empty() && round.calls.is_empty());
 
         let received = server.await.unwrap();
         assert_eq!(received.path, "/model/apac.anthropic.claude-haiku-4-5-20251001-v1:0/converse");
@@ -799,8 +698,8 @@ pub(crate) mod tests {
         assert_eq!(crate::ai::cost::tests::cache_tokens(&db), vec![(800, 400)]);
     }
 
-    /// The order inside `converse_round`: a reply asking for a tool that will
-    /// run marks the turn before its row is stored, so that row is stored as
+    /// The order in the usage path: a reply asking for a tool that will run
+    /// marks the turn before its row is stored, so that row is stored as
     /// tools. Storing first would leave it as chat.
     #[tokio::test]
     async fn a_chat_request_whose_reply_asks_for_a_tool_is_stored_as_tools() {
@@ -809,15 +708,10 @@ pub(crate) mod tests {
         reply["stopReason"] = json!("tool_use");
         let server = aws_loopback(200, None, reply).await;
         let db = crate::ai::cost::tests::temp_metrics_db("");
-        let client = client_for(&fixture_creds("ap-southeast-1")).await;
-        let tools = build_tool_config().unwrap();
-        let system = build_system_blocks("rules".into(), "today".into()).unwrap();
-        let inference = InferenceConfiguration::builder().max_tokens(64).build();
-        let turn = ChatTurn { client: &client, model_id: "apac.anthropic.claude-haiku-4-5-20251001-v1:0", system: &system, tools: &tools, inference: &inference, db: &db, workload: crate::ai::Workload::Tools };
-        let messages = build_messages(vec![("user".into(), "what is on today?".into())]).unwrap();
-        let (_, _, tool_uses) = crate::ai::cost::with_feature(crate::ai::cost::Feature::Chat, converse_round(&turn, &messages, false)).await.unwrap();
+        let wire = BedrockWire::new(fixture_creds("ap-southeast-1"), "apac.anthropic.claude-haiku-4-5-20251001-v1:0");
+        let round = crate::ai::cost::with_feature(crate::ai::cost::Feature::Chat, first_request(&wire, "what is on today?", &db)).await.unwrap();
         server.await.unwrap();
-        assert_eq!(tool_uses.len(), 1, "the stand-in's reply asks for one tool");
+        assert_eq!(round.calls.len(), 1, "the stand-in's reply asks for one tool");
         assert_eq!(features(&db), vec!["tools"]);
         assert_eq!(crate::ai::cost::tests::usage_rows(&db)[0].input_tokens, 1_320, "the row holds this reply's usage");
     }
@@ -827,13 +721,8 @@ pub(crate) mod tests {
     async fn a_failed_chat_request_stores_nothing() {
         let server = aws_loopback(400, Some("ValidationException"), json!({"message": "PRIVATE-MAIL-CANARY"})).await;
         let db = crate::ai::cost::tests::temp_metrics_db("");
-        let client = client_for(&fixture_creds("ap-southeast-1")).await;
-        let tools = build_tool_config().unwrap();
-        let system = build_system_blocks("rules".into(), "today".into()).unwrap();
-        let inference = InferenceConfiguration::builder().max_tokens(64).build();
-        let turn = ChatTurn { client: &client, model_id: "global.anthropic.claude-sonnet-4-6", system: &system, tools: &tools, inference: &inference, db: &db, workload: crate::ai::Workload::Tools };
-        let messages = build_messages(vec![("user".into(), "hi".into())]).unwrap();
-        assert!(converse_round(&turn, &messages, false).await.is_err());
+        let wire = BedrockWire::new(fixture_creds("ap-southeast-1"), "global.anthropic.claude-sonnet-4-6");
+        assert!(first_request(&wire, "hi", &db).await.is_err());
         server.await.unwrap();
         assert!(crate::ai::cost::tests::usage_rows(&db).is_empty());
     }
@@ -846,15 +735,10 @@ pub(crate) mod tests {
         reply.as_object_mut().unwrap().remove("usage");
         let server = aws_loopback(200, None, reply).await;
         let db = crate::ai::cost::tests::temp_metrics_db("");
-        let client = client_for(&fixture_creds("us-east-1")).await;
-        let tools = build_tool_config().unwrap();
-        let system = build_system_blocks("rules".into(), "today".into()).unwrap();
-        let inference = InferenceConfiguration::builder().max_tokens(64).build();
-        let turn = ChatTurn { client: &client, model_id: "us.amazon.nova-pro-v1:0", system: &system, tools: &tools, inference: &inference, db: &db, workload: crate::ai::Workload::Tools };
-        let messages = build_messages(vec![("user".into(), "hi".into())]).unwrap();
+        let wire = BedrockWire::new(fixture_creds("us-east-1"), "us.amazon.nova-pro-v1:0");
         // Whether the SDK accepts a reply without usage or calls it
         // malformed, no row is stored for it.
-        let _ = converse_round(&turn, &messages, false).await;
+        let _ = first_request(&wire, "hi", &db).await;
         server.await.unwrap();
         assert!(crate::ai::cost::tests::usage_rows(&db).is_empty());
     }

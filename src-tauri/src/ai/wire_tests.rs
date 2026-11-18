@@ -1217,13 +1217,19 @@ pub(crate) mod bedrock_wire {
                     ]}
                 ])
             );
-            // The call is announced when it runs; the text of a round that
-            // called a tool is not shown.
+            // P07, as on every other wire: the text of a round that calls a
+            // tool is shown, and each call is announced when the reply
+            // arrives (before: on running, and the text was not shown).
             assert_eq!(
                 turn.window_lines(),
                 vec![
-                    running(tools::tool_status_label("remember"), json!(tools::tool_status_detail("remember", REMEMBER_ARGS))),
+                    status("Composing response...", "responding"),
+                    token("Let me save that."),
+                    planning("remember"),
                     tool_call("remember"),
+                    planning("remember"),
+                    tool_call("remember"),
+                    running(tools::tool_status_label("remember"), json!(tools::tool_status_detail("remember", REMEMBER_ARGS))),
                     status("Reviewing tool results...", "thinking"),
                     status("Composing response...", "responding"),
                     token("Saved."),

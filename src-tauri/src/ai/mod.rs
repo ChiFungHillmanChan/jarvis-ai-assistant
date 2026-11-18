@@ -1161,7 +1161,7 @@ impl AiRouter {
                 // at the region these credentials were saved for.
                 let model = apply_inference_profile(&model, &creds.inference_profile);
                 log::info!("Bedrock workload={:?} -> model={} (region={})", workload, model, creds.region);
-                bedrock::send(&creds, &model, workload, messages, db, google_auth, app_handle, tts_tx, ledger).await.map_err(|e| e.to_string())
+                provider::chat(&bedrock::BedrockWire::new(creds, &model), chat_request(db, messages, None), turn).await
             }
             "local" => {
                 let Some(endpoint_id) = entry.endpoint_id.as_deref() else { return Err("Local provider missing endpoint_id".to_string()) };
