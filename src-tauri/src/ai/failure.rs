@@ -167,6 +167,10 @@ pub fn status_code(status: u16, body_lower: &str) -> Code {
         400 | 413 | 422 => Code::BadRequest,
         404 => Code::NotFound,
         429 => Code::RateLimited,
+        // A redirect is not followed: the key and the conversation would go
+        // with it. It is not a server's passing trouble, so it is not sent
+        // again (P07).
+        300..=399 => Code::Failed,
         _ => Code::ServerError,
     }
 }
@@ -465,6 +469,8 @@ mod tests {
             ("Gemini API error 429 Too Many Requests: {\"error\":{}}", Code::RateLimited),
             ("Claude API error 503 Service Unavailable: overloaded", Code::ServerError),
             ("Local LLM API error 500 Internal Server Error: ", Code::ServerError),
+            ("Claude API error 307 Temporary Redirect: ", Code::Failed),
+            ("OpenAI API error 301 Moved Permanently: ", Code::Failed),
             ("No Gemini API key configured", Code::NoKey),
             ("bedrock: AWS credentials not configured in Settings", Code::NoKey),
             ("Gemini API error 404 Not Found: models/x is not found for API version v1beta", Code::NotFound),

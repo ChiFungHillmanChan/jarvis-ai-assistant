@@ -884,13 +884,12 @@ fn the_output_cap_accessors_read_the_registry() {
     assert_eq!(local_chat_max_output_tokens(1_000), 500, "at most half the context");
 }
 
-/// The local chat request cannot be built in a test (`send_local` needs a
-/// running app's handle), so this checks its source instead: the request's
-/// cap is the accessor above, and the old literal is gone.
+/// The local chat request's cap is the accessor above, and the old literal
+/// is gone. A source check; `wire_tests::local_wire` sends the request.
 #[test]
 fn the_local_chat_request_takes_its_cap_from_the_accessor() {
     let source = include_str!("../local/mod.rs");
-    assert_eq!(source.matches("max_tokens: Some(crate::ai::models::local_chat_max_output_tokens(context_length)),").count(), 1);
+    assert_eq!(source.matches("max_tokens: Some(crate::ai::models::local_chat_max_output_tokens(self.context_length)),").count(), 1);
     assert!(!source.contains("4096.min(") && !source.contains("4_096.min("), "no fixed cap is left beside it");
 }
 

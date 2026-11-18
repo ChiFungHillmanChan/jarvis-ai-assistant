@@ -1,11 +1,12 @@
 use super::tools;
-use crate::voice::tts::TtsCommand;
 use futures_util::StreamExt;
 use reqwest::Client;
 use serde::{Deserialize, Serialize};
 use serde_json::json;
-use std::collections::{HashMap, HashSet};
-use crate::chat_session::ScopedEmitter;
+use std::collections::HashMap;
+use super::provider::{Call, ChatRequest, Event, Events, Metering, Outcome, Round, RoundError, Wire, SKIPPED};
+use super::complete::{Completion, Request as PlainRequest};
+use super::bedrock::UiLanguage;
 
 #[derive(Serialize)]
 struct OpenAIRequest {
@@ -46,8 +47,16 @@ pub struct Target<'a> {
 impl Target<'_> {
     fn url(&self) -> String {
         match self.base_url {
-            Some(base) => format!("{base}/chat/completions"),
-            None => "https://api.openai.com/v1/chat/completions".into(),
+            Some(base) => {
+                // The test build refuses a compatible service's own address,
+                // as `api_base` refuses OpenAI's.
+                #[cfg(test)]
+                if !super::wire_tests::is_loopback(base) {
+                    super::wire_tests::refuse_outside("A compatible service", base);
+                }
+                format!("{base}/chat/completions")
+            }
+            None => format!("{}/chat/completions", super::api_base("https://api.openai.com/v1")),
         }
     }
 
@@ -96,10 +105,10 @@ struct StreamOptions {
 }
 
 #[derive(Deserialize, Debug, Default, Clone)]
-struct OpenAIUsage {
+pub(crate) struct OpenAIUsage {
     /// Includes the cached tokens below.
-    prompt_tokens: Option<i64>,
-    completion_tokens: Option<i64>,
+    pub(crate) prompt_tokens: Option<i64>,
+    pub(crate) completion_tokens: Option<i64>,
     #[serde(default)]
     prompt_tokens_details: Option<PromptTokensDetails>,
 }
@@ -110,11 +119,18 @@ struct PromptTokensDetails {
 }
 
 impl OpenAIUsage {
-    /// Fold one request into the turn. OpenAI caches long prompt prefixes on
-    /// its own and bills them at the cached rate.
-    fn add_to(&self, turn: &mut crate::ai::cost::TurnUsage) {
+    /// One request's figures. OpenAI caches long prompt prefixes on its own
+    /// and bills them at the cached rate; prompt_tokens includes them.
+    fn figures(&self) -> super::provider::Usage {
         let cached = self.prompt_tokens_details.as_ref().and_then(|d| d.cached_tokens).unwrap_or(0);
-        turn.add_request(self.prompt_tokens.unwrap_or(0), self.completion_tokens.unwrap_or(0), cached, 0);
+        super::provider::Usage { input: self.prompt_tokens.unwrap_or(0), output: self.completion_tokens.unwrap_or(0), cache_read: cached, cache_write: 0 }
+    }
+
+    /// Fold this request into a turn, as the usage path does.
+    #[cfg(test)]
+    fn add_to(&self, turn: &mut crate::ai::cost::TurnUsage) {
+        let figures = self.figures();
+        turn.add_request(figures.input, figures.output, figures.cache_read, figures.cache_write);
     }
 }
 
@@ -149,11 +165,17 @@ struct FunctionCall {
 
 // OpenAIResponse and OpenAIChoice are no longer needed (SSE replaces JSON parsing)
 
+/// One streamed chunk, from OpenAI, a compatible service or a local server.
 #[derive(Deserialize)]
-struct SseChunk {
-    #[serde(default)]
+pub(crate) struct SseChunk {
+    /// Absent, or null from some local servers, on a usage-only chunk.
+    #[serde(default, deserialize_with = "null_as_empty")]
     choices: Vec<SseChoice>,
-    usage: Option<OpenAIUsage>,
+    pub(crate) usage: Option<OpenAIUsage>,
+}
+
+fn null_as_empty<'de, D: serde::Deserializer<'de>>(deserializer: D) -> Result<Vec<SseChoice>, D::Error> {
+    Ok(Option::<Vec<SseChoice>>::deserialize(deserializer)?.unwrap_or_default())
 }
 
 #[derive(Deserialize)]
@@ -186,103 +208,172 @@ struct SseFunctionDelta {
     arguments: Option<String>,
 }
 
-/// The OpenAI model used by chat and the mail workspace.
+/// The OpenAI format on the provider interface: api.openai.com, an
+/// OpenAI-compatible service at the chain row's address, or a model on the
+/// user's own server.
+pub(crate) struct OpenAiWire {
+    key: String,
+    base_url: Option<String>,
+    model: String,
+    deeper: Option<super::capability::Deeper>,
+    /// A local server's own options: its address, key and tool mode.
+    local: Option<super::local::LocalChat>,
+}
 
-pub async fn send(
-    api_key: &str,
-    target: Target<'_>,
-    messages: Vec<(String, String)>,
-    db: &crate::db::Database,
-    google_auth: &std::sync::Arc<crate::auth::google::GoogleAuth>,
-    app_handle: &tauri::AppHandle,
-    tts_tx: Option<tokio::sync::mpsc::Sender<TtsCommand>>,
-    workload: crate::ai::Workload,
-    ledger: &crate::ai::SideEffectLedger,
-) -> Result<String, Box<dyn std::error::Error + Send + Sync>> {
-    let started_at = std::time::Instant::now();
-    let model_id = target.model()?;
-    let provider = target.provider();
-    let mut turn = crate::ai::cost::TurnUsage::new(&provider, &model_id);
-    let client = Client::builder()
-        .read_timeout(std::time::Duration::from_secs(60))
-        // A redirect would carry the key and the conversation elsewhere.
-        .redirect(reqwest::redirect::Policy::none())
-        .build()?;
-    let tool_defs = tools::get_tool_definitions();
-    let openai_tools = tools::to_openai_format(&tool_defs);
+impl OpenAiWire {
+    /// Fails when a compatible service has no model chosen.
+    pub(crate) fn new(key: &str, target: Target<'_>) -> Result<Self, String> {
+        let model = target.model()?;
+        Ok(OpenAiWire { key: key.to_string(), base_url: target.base_url.map(str::to_string), model, deeper: target.deeper, local: None })
+    }
 
-    let mut openai_messages: Vec<OpenAIMessage> = vec![OpenAIMessage {
-        role: "system".into(),
-        content: Some(tools::build_system_prompt(db)),
-        tool_calls: None,
-        tool_call_id: None,
-    }];
-    openai_messages.extend(
-        messages
-            .into_iter()
-            .filter(|(_, content)| !content.trim().is_empty())
-            .map(|(role, content)| OpenAIMessage {
-                role,
-                content: Some(content),
-                tool_calls: None,
-                tool_call_id: None,
-            }),
-    );
+    /// A model on a local server.
+    pub(crate) fn local(chat: super::local::LocalChat, model: &str) -> Self {
+        OpenAiWire { key: String::new(), base_url: None, model: model.to_string(), deeper: None, local: Some(chat) }
+    }
 
-    let max_iterations = crate::ai::models::max_tool_rounds(crate::ai::models::openai_format_provider(target.base_url));
-    for round in 0..max_iterations {
-        let final_round = round + 1 == max_iterations;
-        // Per-round usage: OpenAI sends one usage chunk per request, so
-        // overwrite within a round and fold into the turn when it ends.
-        let mut usage = OpenAIUsage::default();
-        let request = target.request(model_id.clone(), openai_messages.clone(), openai_tools.clone(), final_round);
+    /// The tools are described in the system prompt and the calls come back
+    /// in the reply's JSON text.
+    fn injects_tools(&self) -> bool {
+        self.local.as_ref().is_some_and(super::local::LocalChat::injects_tools)
+    }
 
-        let sent = send_retrying(|| {
-            client
-                .post(target.url())
-                .header("Authorization", format!("Bearer {}", api_key))
-                .header("Content-Type", "application/json")
-                .json(&request)
-        })
-        .await;
-        let response = match sent {
-            Ok(response) => response,
-            Err(e) => {
-                turn.record_if_billed(db, workload, started_at.elapsed().as_millis() as i64);
-                return Err(e.into());
+    /// One request's figures. A local turn stores no cache figures.
+    fn figures(&self, usage: &OpenAIUsage) -> super::provider::Usage {
+        let figures = usage.figures();
+        match self.local {
+            Some(_) => super::provider::Usage { cache_read: 0, cache_write: 0, ..figures },
+            None => figures,
+        }
+    }
+
+    fn target(&self) -> Target<'_> {
+        Target { base_url: self.base_url.as_deref(), model: Some(&self.model), deeper: self.deeper }
+    }
+
+    /// The service's name in an error.
+    fn name(&self) -> String {
+        if self.local.is_some() {
+            return "Local LLM".into();
+        }
+        self.base_url.as_deref().map(super::compat::label).unwrap_or_else(|| "OpenAI".into())
+    }
+}
+
+/// One chat turn's requests in the OpenAI format.
+pub(crate) struct Conversation {
+    client: Client,
+    messages: Vec<OpenAIMessage>,
+    tools: Vec<serde_json::Value>,
+    /// The assistant message of the round in progress, sent back with the
+    /// results of its calls. None when the round's calls, if any, came in
+    /// the text of a model the tools are described to.
+    reply: Option<OpenAIMessage>,
+}
+
+#[async_trait::async_trait]
+impl Wire for OpenAiWire {
+    type Conversation = Conversation;
+
+    fn max_rounds(&self) -> usize {
+        if self.local.is_some() {
+            return crate::ai::models::max_tool_rounds("ollama");
+        }
+        crate::ai::models::max_tool_rounds(crate::ai::models::openai_format_provider(self.base_url.as_deref()))
+    }
+
+    /// A local turn costs nothing and is stored only when it succeeds, so
+    /// a failed request does not inflate the turn count.
+    fn metering(&self) -> Metering {
+        if self.local.is_some() {
+            return Metering::AnsweredTurn { provider: "local".into(), model: self.model.clone() };
+        }
+        Metering::Turn { provider: self.target().provider(), model: self.model.clone() }
+    }
+
+    /// OpenAI and the compatible services are sent a 429 or 5xx once more
+    /// here; a local server that failed is not busy elsewhere, so the
+    /// router's one resend is its only one.
+    fn resends_transient(&self) -> bool {
+        self.local.is_none()
+    }
+
+    async fn start(&self, request: ChatRequest) -> Result<Conversation, String> {
+        let (client, system, history) = match &self.local {
+            Some(local) => {
+                let (system, history) = local.prepare(request.system.joined(), request.messages, &request.tools);
+                (local.client()?, system, history)
+            }
+            None => {
+                let client = Client::builder()
+                    .read_timeout(std::time::Duration::from_secs(60))
+                    // A redirect would carry the key and the conversation elsewhere.
+                    .redirect(reqwest::redirect::Policy::none())
+                    .build()
+                    .map_err(|e| e.to_string())?;
+                (client, request.system.joined(), request.messages)
             }
         };
+        let mut messages = vec![OpenAIMessage { role: "system".into(), content: Some(system), tool_calls: None, tool_call_id: None }];
+        messages.extend(
+            history
+                .into_iter()
+                .filter(|(_, content)| !content.trim().is_empty())
+                .map(|(role, content)| OpenAIMessage { role, content: Some(content), tool_calls: None, tool_call_id: None }),
+        );
+        Ok(Conversation { client, messages, tools: tools::to_openai_format(&request.tools), reply: None })
+    }
+
+    async fn round(&self, conversation: &mut Conversation, final_round: bool, events: &mut Events<'_>) -> Result<(), RoundError> {
+        let client = &conversation.client;
+        let (url, key, body) = match &self.local {
+            Some(local) => {
+                let tools = local.sends_tools().then(|| conversation.tools.clone());
+                let request = local.request(&self.model, conversation.messages.clone(), tools, final_round);
+                (local.url(), local.api_key(), serde_json::to_vec(&request))
+            }
+            None => {
+                let target = self.target();
+                let request = target.request(self.model.clone(), conversation.messages.clone(), conversation.tools.clone(), final_round);
+                (target.url(), Some(self.key.as_str()), serde_json::to_vec(&request))
+            }
+        };
+        let body = body.map_err(|e| RoundError::refused(e.to_string()))?;
+        let build = || {
+            let builder = client.post(&url).header("Content-Type", "application/json");
+            let builder = match key {
+                Some(key) => builder.header("Authorization", format!("Bearer {key}")),
+                None => builder,
+            };
+            builder.body(body.clone())
+        };
+        let response = if self.resends_transient() { send_retrying(build).await } else { build().send().await }
+        .map_err(|e| RoundError::refused(e.to_string()))?;
 
         if !response.status().is_success() {
             let status = response.status();
             let body = response.text().await.unwrap_or_default();
-            turn.record_if_billed(db, workload, started_at.elapsed().as_millis() as i64);
-            let name = target.base_url.map(super::compat::label).unwrap_or_else(|| "OpenAI".into());
-            return Err(format!("{name} API error {}: {}", status, body).into());
+            return Err(RoundError::refused(format!("{} API error {}: {}", self.name(), status, body)));
         }
 
+        // One usage chunk per request: the last one stands.
+        let mut usage = OpenAIUsage::default();
         let mut stream = response.bytes_stream();
         let mut buffer = super::SseByteBuffer::new();
         let mut text_parts: Vec<String> = Vec::new();
-        let mut tool_map: ToolSlots = HashMap::new(); // index -> (call_id, fn_name, arguments, extra_content)
-        let mut announced_tools: HashSet<usize> = HashSet::new();
+        let mut tool_map: ToolSlots = HashMap::new(); // slot -> (call_id, fn_name, arguments, extra_content)
         let mut finish_reason: Option<String> = None;
-        let mut response_started = false;
 
         while let Some(chunk_result) = stream.next().await {
             let chunk = match chunk_result {
                 Ok(bytes) => bytes,
                 Err(e) => {
-                    let _ = app_handle.emit("chat-state", json!({"state": "idle"}));
-                    usage.add_to(&mut turn);
-                    turn.record_if_billed(db, workload, started_at.elapsed().as_millis() as i64);
-                    return Err(format!("Stream error: {}", e).into());
+                    events.send(Event::Usage(self.figures(&usage)));
+                    return Err(RoundError::broken(format!("Stream error: {}", e)));
                 }
             };
-
             buffer.extend(&chunk);
 
-            // Process complete SSE events
             while let Some(event_block) = buffer.next_event() {
                 let mut data_str = String::new();
                 for line in event_block.lines() {
@@ -293,52 +384,26 @@ pub async fn send(
                         data_str = rest.to_string();
                     }
                 }
-
-                if data_str.is_empty() {
+                if data_str.is_empty() || data_str == "[DONE]" {
                     continue;
                 }
-                if data_str == "[DONE]" {
-                    continue;
-                }
-
                 let chunk: SseChunk = match serde_json::from_str(&data_str) {
                     Ok(c) => c,
                     Err(_) => continue,
                 };
-
                 if let Some(u) = chunk.usage.clone() {
                     usage = u;
                 }
-
                 for choice in &chunk.choices {
                     if let Some(ref delta) = choice.delta {
-                        // Text content
                         if let Some(ref content) = delta.content {
-                            if !response_started {
-                                response_started = true;
-                                let _ = app_handle.emit(
-                                    "chat-status",
-                                    json!({
-                                        "status": "Composing response...",
-                                        "phase": "responding"
-                                    }),
-                                );
-                            }
                             text_parts.push(content.clone());
-                            let _ = app_handle
-                                .emit("chat-token", json!({"token": content, "done": false}));
-                            if let Some(ref tx) = tts_tx {
-                                let _ = tx.try_send(TtsCommand::TextChunk(content.clone()));
-                            }
+                            events.send(Event::Text(content.clone()));
                         }
-
-                        // Tool calls
                         if let Some(ref tool_calls) = delta.tool_calls {
                             for (position, tc) in tool_calls.iter().enumerate() {
                                 let index = tool_slot(&tool_map, tc.index, tc.id.as_deref(), position);
-                                let entry = tool_map.entry(index).or_insert_with(|| {
-                                    (String::new(), String::new(), String::new(), None)
-                                });
+                                let entry = tool_map.entry(index).or_insert_with(|| (String::new(), String::new(), String::new(), None));
                                 if let Some(ref id) = tc.id {
                                     entry.0 = id.clone();
                                 }
@@ -348,18 +413,7 @@ pub async fn send(
                                 if let Some(ref func) = tc.function {
                                     if let Some(ref name) = func.name {
                                         entry.1 = name.clone();
-                                        let label = tools::tool_status_label(name);
-                                        let _ = app_handle.emit(
-                                            "chat-status",
-                                            json!({
-                                                "status": format!("Planning: {}", label),
-                                                "phase": "planning"
-                                            }),
-                                        );
-                                        if announced_tools.insert(index) {
-                                            let _ = app_handle
-                                                .emit("chat-tool-call", json!({"tool_name": name}));
-                                        }
+                                        events.send(Event::ToolStarted { key: index.to_string(), name: name.clone() });
                                     }
                                     if let Some(ref args) = func.arguments {
                                         entry.2.push_str(args);
@@ -368,131 +422,155 @@ pub async fn send(
                             }
                         }
                     }
-
                     if let Some(ref fr) = choice.finish_reason {
                         finish_reason = Some(fr.clone());
                     }
                 }
             }
         }
+        events.send(Event::Usage(self.figures(&usage)));
 
-        usage.add_to(&mut turn);
-
-        // Handle tool calls. Some compatible services finish a tool-call
-        // turn with "stop", so any complete call counts; a reply cut off by
-        // the length limit may carry half-written arguments. The last round
-        // runs no tools: a service that ignores tool_choice gets the fallback.
-        if !tool_map.is_empty() && finish_reason.as_deref() != Some("length") && !final_round {
-            let text_content = text_parts.join("");
-            let mut tool_calls_vec: Vec<ToolCall> = Vec::new();
-            let mut sorted_indices: Vec<usize> = tool_map.keys().copied().collect();
-            sorted_indices.sort();
-            for idx in &sorted_indices {
-                let (ref call_id, ref fn_name, ref args, ref extra) = tool_map[idx];
-                tool_calls_vec.push(ToolCall {
-                    id: call_id.clone(),
-                    call_type: "function".into(),
-                    function: FunctionCall {
-                        name: fn_name.clone(),
-                        arguments: args.clone(),
-                    },
-                    extra_content: extra.clone(),
-                });
-            }
-
-            // Push assistant message with tool calls
-            openai_messages.push(OpenAIMessage {
-                role: "assistant".into(),
-                content: if text_content.is_empty() {
-                    None
-                } else {
-                    Some(text_content)
-                },
-                tool_calls: Some(tool_calls_vec.clone()),
-                tool_call_id: None,
-            });
-
-            // Execute each tool -- deduplicate identical calls (e.g. 4x the same
-            // open_url), but let a fan-out with different arguments through.
-            let mut executed_tools: std::collections::HashSet<String> =
-                std::collections::HashSet::new();
-            let mut narrated = false;
-            for tc in &tool_calls_vec {
-                let call_key = crate::ai::tool_call_key(&tc.function.name, &tc.function.arguments);
-                let is_duplicate = executed_tools.contains(&call_key);
-                if is_duplicate {
-                    log::info!("JARVIS skipping duplicate tool call: {}", tc.function.name);
-                    openai_messages.push(OpenAIMessage {
-                        role: "tool".into(),
-                        content: Some(
-                            "Skipped: already executed this tool with these arguments in this batch."
-                                .to_string(),
-                        ),
-                        tool_calls: None,
-                        tool_call_id: Some(tc.id.clone()),
-                    });
-                    continue;
-                }
-                executed_tools.insert(call_key);
-                log::info!(
-                    "JARVIS tool call: {} ({} bytes of arguments)",
-                    tc.function.name,
-                    tc.function.arguments.len()
-                );
-                let label = tools::tool_status_label(&tc.function.name);
-                let _ = app_handle.emit(
-                    "chat-status",
-                    json!({
-                        "status": format!("Running: {}", label),
-                        "detail": tools::tool_status_detail(&tc.function.name, &tc.function.arguments),
-                        "phase": "acting"
-                    }),
-                );
-                if !narrated {
-                    if let Some(ref tx) = tts_tx {
-                        // Always narrate -- this also flushes any buffered AI text
-                        let narration = tools::tool_voice_narration(&tc.function.name, &tools::read_language_pref(db));
-                        let _ = tx.try_send(TtsCommand::Narrate(narration.to_string()));
-                        narrated = true;
-                    }
-                }
-                ledger.note(&tc.function.name);
-                let result =
-                    tools::execute_tool(&tc.function.name, &tc.function.arguments, db, google_auth, ledger)
-                        .await;
-                log::info!("JARVIS tool result: {}", crate::util::truncate_bytes(&result, 200));
-                openai_messages.push(OpenAIMessage {
-                    role: "tool".into(),
-                    content: Some(result),
-                    tool_calls: None,
-                    tool_call_id: Some(tc.id.clone()),
-                });
-            }
-            let _ = app_handle.emit(
-                "chat-status",
-                json!({
-                    "status": "Reviewing tool results...",
-                    "phase": "thinking"
-                }),
-            );
-            continue;
+        let mut slots: Vec<usize> = tool_map.keys().copied().collect();
+        slots.sort();
+        let tool_calls: Vec<ToolCall> = slots
+            .iter()
+            .map(|slot| {
+                let (ref id, ref name, ref arguments, ref extra) = tool_map[slot];
+                ToolCall { id: id.clone(), call_type: "function".into(), function: FunctionCall { name: name.clone(), arguments: arguments.clone() }, extra_content: extra.clone() }
+            })
+            .collect();
+        for call in &tool_calls {
+            events.send(Event::ToolCall(Call { id: call.id.clone(), name: call.function.name.clone(), arguments: call.function.arguments.clone() }));
         }
-
-        // No tool calls -- emit done and return the text
-        let _ = app_handle.emit("chat-token", json!({"token": "", "done": true}));
-        if turn.is_empty() && !text_parts.is_empty() {
-            log::warn!("[openai] no usage chunk received for non-empty response; recording zero tokens");
-        }
-        turn.record(db, workload, started_at.elapsed().as_millis() as i64);
         let text = text_parts.join("");
-        if final_round && text.trim().is_empty() {
-            return Ok(tools::tool_limit_fallback(&tools::read_language_pref(db)).into());
+        if tool_calls.is_empty() && self.injects_tools() {
+            // Shown as it streamed; not announced before it runs.
+            for call in super::local::parse_tool_calls_from_response(&text).0.into_iter().flatten() {
+                // `null` is a call with no arguments, as on main (R3-m3).
+                let arguments = if call.arguments.is_null() { "{}".into() } else { serde_json::to_string(&call.arguments).unwrap_or_else(|_| "{}".into()) };
+                events.send(Event::ToolCall(Call { id: String::new(), name: call.name, arguments }));
+            }
         }
-        return Ok(text);
+        conversation.reply = (!tool_calls.is_empty()).then(|| OpenAIMessage {
+            role: "assistant".into(),
+            content: (!text.is_empty()).then_some(text),
+            tool_calls: Some(tool_calls),
+            tool_call_id: None,
+        });
+        events.send(Event::Done { stop: finish_reason });
+        Ok(())
     }
 
-    // The last round always returns above.
-    Ok(tools::tool_limit_fallback(&tools::read_language_pref(db)).into())
+    /// Some compatible services finish a tool-call reply with "stop", so any
+    /// complete call counts. A local server's calls run only on
+    /// "tool_calls"; calls written in the text of a model the tools are
+    /// described to always run. (The loop runs none on the last round, where
+    /// a service that ignores tool_choice gets the fallback, nor on a
+    /// "length" stop.)
+    fn runs_calls(&self, conversation: &Conversation, round: &Round) -> bool {
+        if round.calls.is_empty() {
+            return false;
+        }
+        match (&self.local, &conversation.reply) {
+            (None, _) => true,
+            (Some(_), Some(_)) => round.stop.as_deref() == Some("tool_calls"),
+            (Some(_), None) => true,
+        }
+    }
+
+    /// A reply cut off by the length limit may carry half-written arguments.
+    fn stopped_at_limit(&self, round: &Round) -> bool {
+        round.stop.as_deref() == Some("length")
+    }
+
+    fn add_results(&self, conversation: &mut Conversation, round: Round, results: Vec<(Call, Outcome)>, _next_is_final: bool) -> Result<(), String> {
+        if conversation.reply.is_none() {
+            // Calls written in the text: each result goes back as the
+            // model's text and a user message, and a repeated call is
+            // dropped without a word.
+            let text = round.text();
+            for (call, outcome) in results {
+                let Outcome::Ran(result) = outcome else { continue };
+                conversation.messages.push(OpenAIMessage { role: "assistant".into(), content: Some(text.clone()), tool_calls: None, tool_call_id: None });
+                conversation.messages.push(OpenAIMessage {
+                    role: "user".into(),
+                    content: Some(format!(
+                        "Tool '{}' returned: {}\n\nNow respond to the user based on this result. Do NOT call any more tools. Respond in plain text.",
+                        call.name, result
+                    )),
+                    tool_calls: None,
+                    tool_call_id: None,
+                });
+            }
+            return Ok(());
+        }
+        conversation.messages.extend(conversation.reply.take());
+        for (call, outcome) in results {
+            let content = match outcome {
+                Outcome::Ran(result) => result,
+                Outcome::Duplicate => SKIPPED.to_string(),
+            };
+            conversation.messages.push(OpenAIMessage { role: "tool".into(), content: Some(content), tool_calls: None, tool_call_id: Some(call.id) });
+        }
+        Ok(())
+    }
+
+    /// A model the tools are described to answers in JSON: its "response"
+    /// is the reply, and a call on the last round is answered, not run.
+    fn reply(&self, conversation: &Conversation, round: Round, final_round: bool, language: &str) -> Result<String, String> {
+        let text = round.text();
+        if self.injects_tools() && conversation.reply.is_none() {
+            if final_round {
+                if let Some(reply) = super::local::last_round_reply(&text, language) {
+                    return Ok(reply);
+                }
+            }
+            let (calls, response) = super::local::parse_tool_calls_from_response(&text);
+            // A call written in the text is never the answer: a round whose
+            // calls did not run answers with what else it said (R3-m3).
+            if !response.is_empty() || calls.is_some_and(|calls| !calls.is_empty()) {
+                return Ok(response);
+            }
+        }
+        if final_round && text.trim().is_empty() {
+            return Ok(tools::tool_limit_fallback(language).into());
+        }
+        Ok(text)
+    }
+
+    async fn complete(&self, request: &PlainRequest<'_>, _language: UiLanguage) -> Result<Completion, String> {
+        let client = super::compat::client()?;
+        if let Some(local) = &self.local {
+            return local.complete(&client, &self.model, request).await;
+        }
+        let name = self.name();
+        let body = chat_completions_body(&self.model, request, self.base_url.is_none());
+        let value = super::complete::post(&client, &self.target().url(), &name, |r| r.bearer_auth(&self.key), &body).await?;
+        chat_completions_result(&value, name, self.model.clone())
+    }
+}
+
+/// OpenAI Chat Completions body. api.openai.com takes
+/// `max_completion_tokens`; compatible services and Ollama take `max_tokens`.
+pub(crate) fn chat_completions_body(model: &str, request: &PlainRequest<'_>, official: bool) -> serde_json::Value {
+    let mut messages = Vec::new();
+    if !request.system.is_empty() {
+        messages.push(json!({"role": "system", "content": request.system}));
+    }
+    messages.push(json!({"role": "user", "content": request.user}));
+    let mut body = json!({"model": model, "messages": messages});
+    body[if official { "max_completion_tokens" } else { "max_tokens" }] = json!(request.max_tokens);
+    if request.json {
+        body["response_format"] = json!({"type": "json_object"});
+    }
+    body
+}
+
+pub(crate) fn chat_completions_result(value: &serde_json::Value, provider: String, model: String) -> Result<Completion, String> {
+    let text = value.pointer("/choices/0/message/content").and_then(serde_json::Value::as_str).unwrap_or_default().to_string();
+    let mut done = super::complete::done(text, provider, model, value.pointer("/usage/prompt_tokens"), value.pointer("/usage/completion_tokens"))?;
+    done.cached_tokens = value.pointer("/usage/prompt_tokens_details/cached_tokens").and_then(serde_json::Value::as_i64).unwrap_or(0);
+    Ok(done)
 }
 
 type ToolSlots = HashMap<usize, (String, String, String, Option<serde_json::Value>)>;
@@ -546,6 +624,21 @@ fn retry_delay(status: u16, retry_after: Option<&str>) -> Option<std::time::Dura
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The test build refuses a compatible service's own address before any
+    /// request, chat and completion alike (both build it here); a loopback
+    /// address passes.
+    #[test]
+    fn a_compatible_service_address_is_refused_in_tests() {
+        for base in ["https://api.moonshot.ai/v1", "https://dashscope-intl.aliyuncs.com/compatible-mode/v1"] {
+            let target = Target { base_url: Some(base), model: Some("m"), deeper: None };
+            let refused = std::panic::catch_unwind(|| target.url()).expect_err("refused");
+            assert!(refused.downcast_ref::<String>().is_some_and(|message| message.starts_with(&format!("A compatible service: a test request to {base} was refused"))), "{base}");
+        }
+        for base in ["http://127.0.0.1:9/v1", "http://localhost:9/v1"] {
+            assert_eq!(Target { base_url: Some(base), model: Some("m"), deeper: None }.url(), format!("{base}/chat/completions"));
+        }
+    }
 
     /// The output cap and reasoning effort are the registry's: OpenAI's own
     /// for api.openai.com, the compatible service's for any other address.

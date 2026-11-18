@@ -1,11 +1,12 @@
 use super::tools;
-use crate::voice::tts::TtsCommand;
 use futures_util::StreamExt;
 use reqwest::Client;
 use serde::{Deserialize, Serialize};
 use serde_json::json;
-use std::collections::{BTreeMap, HashMap, HashSet};
-use crate::chat_session::ScopedEmitter;
+use std::collections::BTreeMap;
+use super::provider::{Call, ChatRequest, Event, Events, Metering, Outcome, Round, RoundError, Wire, SKIPPED};
+use super::complete::{Completion, Request as PlainRequest};
+use super::bedrock::UiLanguage;
 use super::capability::Deeper;
 
 #[derive(Serialize)]
@@ -242,74 +243,99 @@ struct RoundUsage {
 }
 
 impl RoundUsage {
+    fn figures(&self) -> super::provider::Usage {
+        super::provider::Usage { input: self.input + self.cache_read + self.cache_write, output: self.output, cache_read: self.cache_read, cache_write: self.cache_write }
+    }
+
+    /// Fold this request into a turn, as the usage path does.
+    #[cfg(test)]
     fn add_to(&self, turn: &mut crate::ai::cost::TurnUsage) {
-        turn.add_request(self.input + self.cache_read + self.cache_write, self.output, self.cache_read, self.cache_write);
+        let figures = self.figures();
+        turn.add_request(figures.input, figures.output, figures.cache_read, figures.cache_write);
     }
 }
 
 
-pub async fn send(
-    api_key: &str,
-    model: &str,
-    messages: Vec<(String, String)>,
-    db: &crate::db::Database,
-    google_auth: &std::sync::Arc<crate::auth::google::GoogleAuth>,
-    app_handle: &tauri::AppHandle,
-    tts_tx: Option<tokio::sync::mpsc::Sender<TtsCommand>>,
-    workload: crate::ai::Workload,
-    deeper: Option<Deeper>,
-    ledger: &crate::ai::SideEffectLedger,
-) -> Result<String, Box<dyn std::error::Error + Send + Sync>> {
-    let client = Client::builder()
-        .read_timeout(std::time::Duration::from_secs(60))
-        .build()?;
-    let tool_defs = tools::get_tool_definitions();
-    let claude_tools = tools::to_claude_format(&tool_defs);
-    // Pre-compute static fields once to avoid re-allocating each iteration
-    let model: String = model.into();
-    let system: String = tools::build_system_prompt(db);
+/// Anthropic's Messages API on the provider interface.
+pub(crate) struct ClaudeWire {
+    key: String,
+    model: String,
+}
 
-    let mut turn = crate::ai::cost::TurnUsage::new("claude", &model);
-    let started_at = std::time::Instant::now();
+impl ClaudeWire {
+    pub(crate) fn new(key: &str, model: &str) -> Self {
+        ClaudeWire { key: key.to_string(), model: model.to_string() }
+    }
+}
 
-    let limits = crate::ai::models::limits("claude");
-    let max_iterations = limits.max_tool_rounds.unwrap_or_default() as usize;
-    let api_version = limits.api_version.unwrap_or_default();
-    let mut requests = TurnRequests::new(model.clone(), limits.chat_max_output_tokens.unwrap_or_default(), system, claude_tools, messages, deeper);
-    for round in 0..max_iterations {
-        let final_round = round + 1 == max_iterations;
-        let request = requests.request(final_round);
+/// One chat turn's requests to Claude.
+pub(crate) struct Conversation {
+    client: Client,
+    api_version: String,
+    requests: TurnRequests,
+    /// The round in progress, as it streamed: sent back with the results of
+    /// its calls.
+    reply: Option<RoundSent>,
+}
 
-        let response = client
-            .post("https://api.anthropic.com/v1/messages")
-            .header("x-api-key", api_key)
-            .header("anthropic-version", &api_version)
+/// A round's replay, its text parts and its tool calls (id, name, input).
+type RoundSent = (Replay, Vec<String>, Vec<(String, String, serde_json::Value)>);
+
+#[async_trait::async_trait]
+impl Wire for ClaudeWire {
+    type Conversation = Conversation;
+
+    fn max_rounds(&self) -> usize {
+        crate::ai::models::limits("claude").max_tool_rounds.unwrap_or_default() as usize
+    }
+
+    fn metering(&self) -> Metering {
+        Metering::Turn { provider: "claude".into(), model: self.model.clone() }
+    }
+
+    async fn start(&self, request: ChatRequest) -> Result<Conversation, String> {
+        let client = Client::builder()
+            .read_timeout(std::time::Duration::from_secs(60))
+            // A redirect would carry the key (x-api-key) and the conversation elsewhere.
+            .redirect(reqwest::redirect::Policy::none())
+            .build()
+            .map_err(|e| e.to_string())?;
+        let limits = crate::ai::models::limits("claude");
+        let requests = TurnRequests::new(
+            self.model.clone(),
+            limits.chat_max_output_tokens.unwrap_or_default(),
+            request.system.joined(),
+            tools::to_claude_format(&request.tools),
+            request.messages,
+            request.deeper,
+        );
+        Ok(Conversation { client, api_version: limits.api_version.unwrap_or_default(), requests, reply: None })
+    }
+
+    async fn round(&self, conversation: &mut Conversation, final_round: bool, events: &mut Events<'_>) -> Result<(), RoundError> {
+        let request = conversation.requests.request(final_round);
+        let response = conversation
+            .client
+            .post(format!("{}/v1/messages", super::api_base("https://api.anthropic.com")))
+            .header("x-api-key", &self.key)
+            .header("anthropic-version", &conversation.api_version)
             .header("content-type", "application/json")
             .json(&request)
             .send()
-            .await;
-        let response = match response {
-            Ok(response) => response,
-            Err(e) => {
-                turn.record_if_billed(db, workload, started_at.elapsed().as_millis() as i64);
-                return Err(e.into());
-            }
-        };
+            .await
+            .map_err(|e| RoundError::refused(e.to_string()))?;
 
         if !response.status().is_success() {
             let status = response.status();
             let body = response.text().await.unwrap_or_default();
-            turn.record_if_billed(db, workload, started_at.elapsed().as_millis() as i64);
-            return Err(format!("Claude API error {}: {}", status, body).into());
+            return Err(RoundError::refused(format!("Claude API error {}: {}", status, body)));
         }
 
         let mut stream = response.bytes_stream();
         let mut buffer = super::SseByteBuffer::new();
         let mut text_parts: Vec<String> = Vec::new();
-        let mut tool_map: HashMap<usize, (String, String, String)> = HashMap::new();
-        let mut announced_tools: HashSet<usize> = HashSet::new();
+        let mut tool_map: BTreeMap<usize, (String, String, String)> = BTreeMap::new();
         let mut stop_reason: Option<String> = None;
-        let mut response_started = false;
         let mut round_usage = RoundUsage::default();
         let mut replay = Replay::default();
 
@@ -317,21 +343,16 @@ pub async fn send(
             let chunk = match chunk_result {
                 Ok(bytes) => bytes,
                 Err(e) => {
-                    let _ = app_handle.emit("chat-state", json!({"state": "idle"}));
-                    round_usage.add_to(&mut turn);
-                    turn.record_if_billed(db, workload, started_at.elapsed().as_millis() as i64);
-                    return Err(format!("Stream error: {}", e).into());
+                    events.send(Event::Usage(round_usage.figures()));
+                    return Err(RoundError::broken(format!("Stream error: {}", e)));
                 }
             };
-
             buffer.extend(&chunk);
 
-            // Process complete SSE events (separated by \n\n)
+            // Complete SSE events (separated by a blank line).
             while let Some(event_block) = buffer.next_event() {
-                // Parse SSE lines
                 let mut event_type = String::new();
                 let mut data_str = String::new();
-
                 for line in event_block.lines() {
                     if line.starts_with(':') {
                         continue;
@@ -342,24 +363,14 @@ pub async fn send(
                         data_str = rest.to_string();
                     }
                 }
-
-                if data_str.is_empty() {
+                if data_str.is_empty() || data_str == "[DONE]" {
                     continue;
                 }
-                if data_str == "[DONE]" {
-                    continue;
-                }
-
-                // Handle error events
                 if event_type == "error" {
                     log::error!("{}", super::failure::stream_error_line("Claude", &data_str));
-                    let _ = app_handle.emit("chat-state", json!({"state": "idle"}));
-                    round_usage.add_to(&mut turn);
-                    turn.record_if_billed(db, workload, started_at.elapsed().as_millis() as i64);
-                    return Err(format!("Claude stream error: {}", data_str).into());
+                    events.send(Event::Usage(round_usage.figures()));
+                    return Err(RoundError::broken(format!("Claude stream error: {}", data_str)));
                 }
-
-                // Parse the data JSON
                 let sse: SseEvent = match serde_json::from_str(&data_str) {
                     Ok(e) => e,
                     Err(e) => {
@@ -367,16 +378,13 @@ pub async fn send(
                         continue;
                     }
                 };
-
                 log::debug!("[claude] SSE: {}", sse.event_type);
                 match sse.event_type.as_str() {
                     "message_start" => {
-                        if let Some(ref msg) = sse.message {
-                            if let Some(ref u) = msg.usage {
-                                round_usage.input = u.input_tokens.unwrap_or(0);
-                                round_usage.cache_read = u.cache_read_input_tokens.unwrap_or(0);
-                                round_usage.cache_write = u.cache_creation_input_tokens.unwrap_or(0);
-                            }
+                        if let Some(u) = sse.message.as_ref().and_then(|m| m.usage.as_ref()) {
+                            round_usage.input = u.input_tokens.unwrap_or(0);
+                            round_usage.cache_read = u.cache_read_input_tokens.unwrap_or(0);
+                            round_usage.cache_write = u.cache_creation_input_tokens.unwrap_or(0);
                         }
                     }
                     "content_block_start" => {
@@ -385,22 +393,9 @@ pub async fn send(
                                 replay.start(idx, cb);
                             }
                             if cb.block_type == "tool_use" {
-                                if let (Some(ref id), Some(ref name), Some(idx)) =
-                                    (&cb.id, &cb.name, sse.index)
-                                {
+                                if let (Some(ref id), Some(ref name), Some(idx)) = (&cb.id, &cb.name, sse.index) {
                                     tool_map.insert(idx, (id.clone(), name.clone(), String::new()));
-                                    let label = tools::tool_status_label(name);
-                                    let _ = app_handle.emit(
-                                        "chat-status",
-                                        json!({
-                                            "status": format!("Planning: {}", label),
-                                            "phase": "planning"
-                                        }),
-                                    );
-                                    if announced_tools.insert(idx) {
-                                        let _ = app_handle
-                                            .emit("chat-tool-call", json!({"tool_name": name}));
-                                    }
+                                    events.send(Event::ToolStarted { key: idx.to_string(), name: name.clone() });
                                 }
                             }
                         }
@@ -413,42 +408,17 @@ pub async fn send(
                             match delta.delta_type.as_deref() {
                                 Some("text_delta") => {
                                     if let Some(ref text) = delta.text {
-                                        if !response_started {
-                                            response_started = true;
-                                            let _ = app_handle.emit(
-                                                "chat-status",
-                                                json!({
-                                                    "status": "Composing response...",
-                                                    "phase": "responding"
-                                                }),
-                                            );
-                                        }
                                         text_parts.push(text.clone());
-                                        let _ = app_handle.emit(
-                                            "chat-token",
-                                            json!({"token": text, "done": false}),
-                                        );
-                                        if let Some(ref tx) = tts_tx {
-                                            let _ =
-                                                tx.try_send(TtsCommand::TextChunk(text.clone()));
-                                        }
+                                        events.send(Event::Text(text.clone()));
                                     }
                                 }
                                 Some("thinking_delta") => {
                                     if let Some(ref text) = delta.thinking {
-                                        let _ = app_handle.emit(
-                                            "chat-thinking",
-                                            json!({
-                                                "text": text,
-                                                "done": false
-                                            }),
-                                        );
+                                        events.send(Event::Thinking(text.clone()));
                                     }
                                 }
                                 Some("input_json_delta") => {
-                                    if let (Some(ref pj), Some(idx)) =
-                                        (&delta.partial_json, sse.index)
-                                    {
+                                    if let (Some(ref pj), Some(idx)) = (&delta.partial_json, sse.index) {
                                         if let Some(entry) = tool_map.get_mut(&idx) {
                                             entry.2.push_str(pj);
                                         }
@@ -459,10 +429,8 @@ pub async fn send(
                         }
                     }
                     "message_delta" => {
-                        if let Some(ref delta) = sse.delta {
-                            if let Some(ref sr) = delta.stop_reason {
-                                stop_reason = Some(sr.clone());
-                            }
+                        if let Some(ref sr) = sse.delta.as_ref().and_then(|d| d.stop_reason.clone()) {
+                            stop_reason = Some(sr.clone());
                         }
                         // Cumulative for the message, so it replaces.
                         if let Some(ref u) = sse.usage {
@@ -473,106 +441,109 @@ pub async fn send(
                 }
             }
         }
+        events.send(Event::Usage(round_usage.figures()));
 
-        round_usage.add_to(&mut turn);
-
-        // Collect tool calls from the map
+        // In the order the calls came. A call with no arguments streams no
+        // input: it is the empty object, as Anthropic sent it in
+        // content_block_start, not null.
         let tool_uses: Vec<(String, String, serde_json::Value)> = tool_map
             .into_values()
             .map(|(id, name, json_str)| {
-                let input = serde_json::from_str(&json_str).unwrap_or_default();
+                let input = if json_str.trim().is_empty() { json!({}) } else { serde_json::from_str(&json_str).unwrap_or_default() };
                 (id, name, input)
             })
             .collect();
-
-        // If there are tool calls, execute them and continue. The last round
-        // runs no tools.
-        if !tool_uses.is_empty() && !final_round {
-            requests.add_reply(replay, &text_parts, &tool_uses);
-
-            // Execute tools -- deduplicate identical calls (e.g. 4x the same
-            // open_url), but let a fan-out with different arguments through.
-            let mut result_blocks = Vec::new();
-            let mut executed_tools: std::collections::HashSet<String> =
-                std::collections::HashSet::new();
-            let mut narrated = false;
-            for (id, name, input) in &tool_uses {
-                let args_str = serde_json::to_string(input).unwrap_or_default();
-                let call_key = crate::ai::tool_call_key(name, &args_str);
-                let is_duplicate = executed_tools.contains(&call_key);
-                if is_duplicate {
-                    log::info!("JARVIS skipping duplicate tool call: {}", name);
-                    result_blocks.push(ContentBlock::ToolResult {
-                        tool_use_id: id.clone(),
-                        content: "Skipped: already executed this tool with these arguments in this batch."
-                            .to_string(),
-                    });
-                    continue;
-                }
-                executed_tools.insert(call_key);
-                log::info!("JARVIS tool call: {} ({} bytes of arguments)", name, args_str.len());
-                let label = tools::tool_status_label(name);
-                let _ = app_handle.emit(
-                    "chat-status",
-                    json!({
-                        "status": format!("Running: {}", label),
-                        "detail": tools::tool_status_detail(name, &args_str),
-                        "phase": "acting"
-                    }),
-                );
-                if !narrated {
-                    if let Some(ref tx) = tts_tx {
-                        // Always narrate -- this also flushes any buffered AI text
-                        let narration = tools::tool_voice_narration(name, &tools::read_language_pref(db));
-                        let _ = tx.try_send(TtsCommand::Narrate(narration.to_string()));
-                        narrated = true;
-                    }
-                }
-                ledger.note(name);
-                let result = tools::execute_tool(name, &args_str, db, google_auth, ledger).await;
-                log::info!("JARVIS tool result: {}", crate::util::truncate_bytes(&result, 200));
-                result_blocks.push(ContentBlock::ToolResult {
-                    tool_use_id: id.clone(),
-                    content: result,
-                });
-            }
-            requests.add_results(result_blocks);
-
-            // If stop_reason is "end_turn", we're done even with tool calls
-            if stop_reason.as_deref() == Some("end_turn") && !text_parts.is_empty() {
-                let _ = app_handle.emit("chat-token", json!({"token": "", "done": true}));
-                let _ = app_handle.emit("chat-thinking", json!({"text": "", "done": true}));
-                turn.record(db, workload, started_at.elapsed().as_millis() as i64);
-                return Ok(text_parts.join(""));
-            }
-            let _ = app_handle.emit(
-                "chat-status",
-                json!({
-                    "status": "Reviewing tool results...",
-                    "phase": "thinking"
-                }),
-            );
-            continue;
+        for (id, name, input) in &tool_uses {
+            events.send(Event::ToolCall(Call { id: id.clone(), name: name.clone(), arguments: serde_json::to_string(input).unwrap_or_default() }));
         }
-
-        // No tool calls -- emit done and return text
-        let _ = app_handle.emit("chat-token", json!({"token": "", "done": true}));
-        let _ = app_handle.emit("chat-thinking", json!({"text": "", "done": true}));
-        turn.record(db, workload, started_at.elapsed().as_millis() as i64);
-        if !text_parts.is_empty() {
-            return Ok(text_parts.join(""));
-        }
-        if final_round {
-            return Ok(tools::tool_limit_fallback(&tools::read_language_pref(db)).into());
-        }
-        return Ok(String::new());
+        conversation.reply = Some((replay, text_parts, tool_uses));
+        events.send(Event::Done { stop: stop_reason });
+        Ok(())
     }
 
-    let _ = app_handle.emit("chat-token", json!({"token": "", "done": true}));
-    let _ = app_handle.emit("chat-thinking", json!({"text": "", "done": true}));
-    turn.record(db, workload, started_at.elapsed().as_millis() as i64);
-    // The last round always returns above.
-    Ok(tools::tool_limit_fallback(&tools::read_language_pref(db)).into())
+    fn add_results(&self, conversation: &mut Conversation, _round: Round, results: Vec<(Call, Outcome)>, _next_is_final: bool) -> Result<(), String> {
+        let (replay, text_parts, tool_uses) = conversation.reply.take().unwrap_or_default();
+        conversation.requests.add_reply(replay, &text_parts, &tool_uses);
+        let blocks = results
+            .into_iter()
+            .map(|(call, outcome)| ContentBlock::ToolResult {
+                tool_use_id: call.id,
+                content: match outcome {
+                    Outcome::Ran(result) => result,
+                    Outcome::Duplicate => SKIPPED.to_string(),
+                },
+            })
+            .collect();
+        conversation.requests.add_results(blocks);
+        Ok(())
+    }
+
+    /// The reply said it was done as well as calling tools: its text is the
+    /// answer once they ran.
+    /// A reply cut off by the output limit may hold a call half written, as
+    /// OpenAI's "length".
+    fn stopped_at_limit(&self, round: &Round) -> bool {
+        round.stop.as_deref() == Some("max_tokens")
+    }
+
+    fn answers_after_tools(&self, round: &Round) -> bool {
+        round.stop.as_deref() == Some("end_turn") && !round.texts.is_empty()
+    }
+
+    fn reply(&self, _conversation: &Conversation, round: Round, final_round: bool, language: &str) -> Result<String, String> {
+        // Whitespace is nothing said: a last round of only that gets the
+        // fallback, as on the other wires.
+        if !round.text().trim().is_empty() {
+            return Ok(round.text());
+        }
+        if final_round {
+            return Ok(tools::tool_limit_fallback(language).into());
+        }
+        Ok(String::new())
+    }
+
+    fn shows_thinking(&self) -> bool {
+        true
+    }
+
+    async fn complete(&self, request: &PlainRequest<'_>, _language: UiLanguage) -> Result<Completion, String> {
+        let client = super::compat::client()?;
+        let body = claude_body(&self.model, request);
+        let url = format!("{}/v1/messages", super::api_base("https://api.anthropic.com"));
+        let value = super::complete::post(&client, &url, "Claude", |r| r.header("x-api-key", &self.key).header("anthropic-version", crate::ai::models::anthropic_version()), &body).await?;
+        claude_result(&value, self.model.clone())
+    }
+}
+
+/// A JSON request to Claude asks for the object in words
+/// (`bedrock::JSON_INSTRUCTION`), as Bedrock does, and the reply is checked
+/// after its row is stored (`store_then_check`). No tool, no forced
+/// `tool_choice` and no prefilled reply: Claude's current models refuse a
+/// forced tool choice and a prefill with a 400 (P06 fix round 4, which
+/// replaced P02's forced tool call).
+pub(crate) fn claude_body(model: &str, request: &PlainRequest<'_>) -> serde_json::Value {
+    let mut body = json!({
+        "model": model,
+        "max_tokens": request.max_tokens,
+        "messages": [{"role": "user", "content": request.user}],
+    });
+    let system = match (request.system.is_empty(), request.json) {
+        (true, false) => None,
+        (true, true) => Some(super::bedrock::JSON_INSTRUCTION.to_string()),
+        (false, false) => Some(request.system.to_string()),
+        (false, true) => Some(format!("{}\n\n{}", request.system, super::bedrock::JSON_INSTRUCTION)),
+    };
+    if let Some(system) = system {
+        body["system"] = json!(system);
+    }
+    body
+}
+
+/// The reply's text blocks.
+pub(crate) fn claude_result(value: &serde_json::Value, model: String) -> Result<Completion, String> {
+    let blocks = value.get("content").and_then(serde_json::Value::as_array).cloned().unwrap_or_default();
+    let text = blocks.iter().filter(|b| b.get("type").and_then(serde_json::Value::as_str) == Some("text")).filter_map(|b| b.get("text").and_then(serde_json::Value::as_str)).collect::<String>();
+    super::complete::done(text, "Claude".into(), model, value.pointer("/usage/input_tokens"), value.pointer("/usage/output_tokens"))
 }
 
 #[cfg(test)]

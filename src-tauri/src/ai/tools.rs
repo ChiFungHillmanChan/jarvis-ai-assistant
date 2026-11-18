@@ -447,21 +447,6 @@ pub fn to_claude_format(tools: &[Tool]) -> Vec<serde_json::Value> {
         .collect()
 }
 
-/// Format tools for Gemini API format (functionDeclarations)
-pub fn to_gemini_format(tools: &[Tool]) -> Vec<serde_json::Value> {
-    let declarations: Vec<serde_json::Value> = tools
-        .iter()
-        .map(|t| {
-            json!({
-                "name": t.name,
-                "description": t.description,
-                "parameters": super::gemini::sanitize_schema(&t.parameters),
-            })
-        })
-        .collect();
-    vec![json!({ "functionDeclarations": declarations })]
-}
-
 /// Map tool names to user-friendly status labels for streaming UI.
 pub fn tool_status_label(name: &str) -> &'static str {
     match name {

@@ -15,9 +15,12 @@ pub mod gemini;
 pub mod local;
 pub mod openai;
 pub mod persona;
+pub(crate) mod provider;
 pub mod registry;
 pub mod routing;
 pub mod tools;
+#[cfg(test)]
+pub(crate) mod wire_tests;
 pub use routing::{classify_workload, Workload};
 
 use crate::voice::tts::TtsCommand;
@@ -125,6 +128,26 @@ fn resolve_key_with(env_var: &str, fallback: impl FnOnce() -> Option<String>) ->
         Ok(v) if !v.trim().is_empty() => Some(v),
         _ => fallback().filter(|v| !v.trim().is_empty()),
     }
+}
+
+/// A chat turn's request, the same for every provider.
+fn chat_request(db: &crate::db::Database, messages: Vec<(String, String)>, deeper: Option<capability::Deeper>) -> provider::ChatRequest {
+    provider::ChatRequest { system: provider::SystemPrompt::for_request(db), messages, tools: tools::get_tool_definitions(), deeper }
+}
+
+/// The address a provider's own API is reached at: `official`, except in a
+/// test, which points it at a loopback server (`wire_tests::serve`) and is
+/// refused the provider's own address (`wire_tests::refuse_outside`).
+pub(crate) fn api_base(official: &str) -> String {
+    #[cfg(test)]
+    {
+        if let Some(base) = wire_tests::API_BASE.with(|base| base.borrow().clone()) {
+            return base;
+        }
+        let wire = if official.contains("openai.com") { "OpenAI" } else if official.contains("anthropic.com") { "Claude" } else if official.contains("googleapis.com") { "Gemini" } else { "A provider" };
+        wire_tests::refuse_outside(wire, official);
+    }
+    official.to_string()
 }
 
 /// Position and length of the next SSE event delimiter, whichever of
@@ -456,6 +479,15 @@ const RESEND_DELAY: std::time::Duration = std::time::Duration::from_secs(1);
 #[cfg(test)]
 const RESEND_DELAY: std::time::Duration = std::time::Duration::from_millis(0);
 
+/// Whether the chat wire `row` is sent on resends a 429 or 5xx once itself
+/// ([`provider::Wire::resends_transient`]): the OpenAI wire does for
+/// api.openai.com and the compatible services, and not for a local server
+/// (`AiRouter::send_one` sends "openai" rows to it, "local" rows to its
+/// local mode). No other wire resends.
+pub(crate) fn resends_inside(row: &ProviderChainEntry) -> bool {
+    row.provider_type == "openai"
+}
+
 /// One request on the chosen model, with no other model tried in its place
 /// (DECISIONS.md section 5, "Failure handling"). Before anything is sent the
 /// model must support the feature (`capability::resolve`). A transient
@@ -466,8 +498,9 @@ const RESEND_DELAY: std::time::Duration = std::time::Duration::from_millis(0);
 ///
 /// `send` sends to one row; the router and `complete` pass the provider
 /// calls, the tests pass their own. `emit` gets the HUD events.
-/// `wire_resends`: the router's OpenAI-format wire already resends a 429 or
-/// 5xx once (openai::send_retrying), so this does not resend it again.
+/// `resends_inside`: whether the wire a row goes to already sent a 429 or
+/// 5xx once more itself ([`provider::Wire::resends_transient`]), so this does
+/// not send it again.
 #[allow(clippy::too_many_arguments)]
 pub(crate) async fn run_chosen<T, F, Fut>(
     chosen: Option<ProviderChainEntry>,
@@ -477,7 +510,7 @@ pub(crate) async fn run_chosen<T, F, Fut>(
     workload: Workload,
     ledger: &SideEffectLedger,
     language: bedrock::UiLanguage,
-    wire_resends: bool,
+    resends_inside: &(dyn Fn(&ProviderChainEntry) -> bool + Sync),
     may_receive_google_content: &(dyn Fn(&ProviderChainEntry) -> bool + Sync),
     mut emit: impl FnMut(&str, serde_json::Value),
     mut send: F,
@@ -540,7 +573,7 @@ where
             Err(error) => {
                 log::warn!("{}", failure::log_line(&label, &error));
                 let code = failure::code_of(&error);
-                let resent_inside = wire_resends && row.provider_type == "openai" && matches!(code, failure::Code::RateLimited | failure::Code::ServerError);
+                let resent_inside = resends_inside(&row) && matches!(code, failure::Code::RateLimited | failure::Code::ServerError);
                 let again = !resent && code.transient() && !resent_inside && ledger.count() == 0;
                 // `discard` drops what this attempt streamed, only when the
                 // resend is about to replace it.
@@ -1061,7 +1094,7 @@ impl AiRouter {
             workload,
             &ledger,
             bedrock::UiLanguage::read(db),
-            true,
+            &resends_inside,
             &|row| mail_policy::may_receive(db, row),
             |event, payload| {
                 let _ = app_handle.emit(event, payload);
@@ -1079,7 +1112,7 @@ impl AiRouter {
         messages: Vec<(String, String)>,
         db: &crate::db::Database,
         google_auth: &std::sync::Arc<crate::auth::google::GoogleAuth>,
-        app_handle: &tauri::AppHandle,
+        app_handle: &(impl ScopedEmitter + Sync),
         tts_tx: Option<tokio::sync::mpsc::Sender<TtsCommand>>,
         workload: Workload,
         ledger: &SideEffectLedger,
@@ -1087,29 +1120,28 @@ impl AiRouter {
         // "Think harder", as far as the model takes it; nothing extra for a
         // model whose button is hidden.
         let deeper = capability::deeper_for(&entry, workload);
+        let turn = provider::Turn { db, google_auth, window: app_handle, voice: tts_tx.clone(), workload, ledger };
         match entry.provider_type.as_str() {
             "gemini" => {
                 let Some(ref key) = self.gemini_key else { return Err("No Gemini API key configured".to_string()) };
                 let model = gemini_model_for(entry.model_id.as_deref(), workload);
-                gemini::send(key, &model, messages, db, google_auth, app_handle, tts_tx, workload, deeper, ledger).await.map_err(|e| e.to_string())
+                provider::chat(&gemini::GeminiWire::new(key, &model, deeper), chat_request(db, messages, deeper), turn).await
             }
             "claude" => {
                 let Some(ref key) = self.claude_key else { return Err("No Claude API key configured".to_string()) };
                 let model = entry.model_id.clone().unwrap_or_else(crate::ai::models::claude_default);
-                claude::send(key, &model, messages, db, google_auth, app_handle, tts_tx, workload, deeper, ledger).await.map_err(|e| e.to_string())
+                provider::chat(&claude::ClaudeWire::new(key, &model), chat_request(db, messages, deeper), turn).await
             }
             "openai" if entry.base_url.is_some() => {
                 let base = entry.base_url.clone().unwrap_or_default();
                 let Some(key) = self.compat_key(&base).await else { return Err(format!("No {} API key configured", compat::label(&base))) };
-                openai::send(&key, openai::Target { base_url: Some(&base), model: entry.model_id.as_deref(), deeper }, messages, db, google_auth, app_handle, tts_tx, workload, ledger)
-                    .await
-                    .map_err(|e| e.to_string())
+                let wire = openai::OpenAiWire::new(&key, openai::Target { base_url: Some(&base), model: entry.model_id.as_deref(), deeper })?;
+                provider::chat(&wire, chat_request(db, messages, deeper), turn).await
             }
             "openai" => {
                 let Some(ref key) = self.openai_key else { return Err("No OpenAI API key configured".to_string()) };
-                openai::send(key, openai::Target { base_url: None, model: entry.model_id.as_deref(), deeper }, messages, db, google_auth, app_handle, tts_tx, workload, ledger)
-                    .await
-                    .map_err(|e| e.to_string())
+                let wire = openai::OpenAiWire::new(key, openai::Target { base_url: None, model: entry.model_id.as_deref(), deeper })?;
+                provider::chat(&wire, chat_request(db, messages, deeper), turn).await
             }
             "bedrock" => {
                 // Load AwsCredentials directly from sqlite + keychain.  We do the
@@ -1144,7 +1176,7 @@ impl AiRouter {
                 // at the region these credentials were saved for.
                 let model = apply_inference_profile(&model, &creds.inference_profile);
                 log::info!("Bedrock workload={:?} -> model={} (region={})", workload, model, creds.region);
-                bedrock::send(&creds, &model, workload, messages, db, google_auth, app_handle, tts_tx, ledger).await.map_err(|e| e.to_string())
+                provider::chat(&bedrock::BedrockWire::new(creds, &model), chat_request(db, messages, None), turn).await
             }
             "local" => {
                 let Some(endpoint_id) = entry.endpoint_id.as_deref() else { return Err("Local provider missing endpoint_id".to_string()) };
@@ -1173,9 +1205,8 @@ impl AiRouter {
                 let backend = local::get_backend(&endpoint.backend_type);
                 let detected_cap = backend.detect_tool_capability(&endpoint.url, model_id).await;
 
-                local::send_local(endpoint, model_id, messages, detected_cap, context_length, tool_override.as_deref(), db, google_auth, app_handle, tts_tx, workload, ledger)
-                    .await
-                    .map_err(|e| e.to_string())
+                let chat = local::LocalChat::new(endpoint.clone(), detected_cap, context_length, tool_override.as_deref());
+                provider::chat(&openai::OpenAiWire::local(chat, model_id), chat_request(db, messages, None), turn).await
             }
             unknown => Err(format!("Unknown provider type: {}", unknown)),
         }
@@ -1340,7 +1371,7 @@ mod tests {
         let sent = std::cell::RefCell::new(Vec::new());
         let replies = std::cell::RefCell::new(replies.into_iter());
         let mut events = Vec::new();
-        let result = run_chosen(chosen, picked, configured, feature, Workload::Volume, ledger, bedrock::UiLanguage::En, true, &|row| row.base_url.is_none(), |event, payload| events.push((event.to_string(), payload)), |row| {
+        let result = run_chosen(chosen, picked, configured, feature, Workload::Volume, ledger, bedrock::UiLanguage::En, &resends_inside, &|row| row.base_url.is_none(), |event, payload| events.push((event.to_string(), payload)), |row| {
             sent.borrow_mut().push(row);
             let reply = replies.borrow_mut().next().expect("sent more often than expected").map(str::to_string).map_err(str::to_string);
             async move { reply }

@@ -213,7 +213,10 @@ async fn client_for(creds: &AwsCredentials) -> aws_sdk_bedrock::Client {
     #[cfg(test)]
     let loader = match crate::ai::bedrock::tests::LOOPBACK.with(|endpoint| endpoint.borrow().clone()) {
         Some(endpoint) => loader.endpoint_url(endpoint),
-        None => loader,
+        None => {
+            crate::ai::wire_tests::refuse_outside("Bedrock", &format!("bedrock.{}.amazonaws.com", creds.region));
+            loader
+        }
     };
     aws_sdk_bedrock::Client::new(&loader.load().await)
 }
@@ -372,6 +375,19 @@ mod tests {
 
     fn refused(status: u16, code: &'static str) -> Reply {
         Reply { status, error_type: Some(code), body: json!({"message": "fixture refusal"}) }
+    }
+
+    /// The control-plane client is refused before any request when no
+    /// loopback is pointed, as the runtime one is (the fail-closed test
+    /// build): a test cannot reach AWS.
+    #[test]
+    fn a_control_plane_client_without_a_loopback_is_refused() {
+        LOOPBACK.with(|slot| *slot.borrow_mut() = None);
+        let runtime = tokio::runtime::Builder::new_current_thread().enable_all().build().unwrap();
+        let refused = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| runtime.block_on(client_for(&fixture_creds("eu-west-2"))))).map(|_| ()).expect_err("refused");
+        assert!(refused.downcast_ref::<String>().is_some_and(|message| message.starts_with("Bedrock: a test request to bedrock.eu-west-2.amazonaws.com was refused")));
+        let _endpoint = point_at("http://127.0.0.1:9".into());
+        runtime.block_on(client_for(&fixture_creds("eu-west-2")));
     }
 
     /// Clears the endpoint when a test ends, so a later test on the same
