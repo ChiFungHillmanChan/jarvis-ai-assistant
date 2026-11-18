@@ -1418,6 +1418,32 @@ mod local_wire {
         assert_eq!(rows(&db), vec![local_row("tools", "qwen3:8b", 250, 15)]);
     }
 
+    /// Calls streamed whole without an index are told apart by id, as on
+    /// OpenAI's own parser (P07: they all went to one slot before), and a
+    /// usage chunk whose choices are null still counts.
+    #[tokio::test]
+    async fn calls_without_an_index_are_told_apart_by_id() {
+        let call = |id: &str, content: &str| json!({"choices": [{"delta": {"tool_calls": [{"id": id, "type": "function", "function": {"name": "remember", "arguments": json!({"content": content}).to_string()}}]}}]});
+        let server = serve(vec![
+            Reply::openai_sse(&[
+                call("call_a", "First fact"),
+                call("call_b", "Second fact"),
+                json!({"choices": [{"delta": {}, "finish_reason": "tool_calls"}]}),
+                json!({"choices": null, "usage": {"prompt_tokens": 100, "completion_tokens": 10}}),
+            ]),
+            text_reply("Saved.", Some((150, 5))),
+        ])
+        .await;
+        let db = crate::db::test_database();
+        let turn = run_turn(&router(&server.base, BackendType::Ollama), row("qwen3:8b"), &[("user", "Remember two facts")], &db, Workload::Tools, true).await;
+        assert_eq!(turn.reply.as_deref(), Ok("Saved."));
+        assert_eq!(memories(&db), vec!["First fact", "Second fact"]);
+        let seen = server.seen();
+        let ids: Vec<&str> = seen[1].body["messages"][2]["tool_calls"].as_array().unwrap().iter().map(|c| c["id"].as_str().unwrap()).collect();
+        assert_eq!(ids, ["call_a", "call_b"]);
+        assert_eq!(rows(&db), vec![local_row("tools", "qwen3:8b", 250, 15)]);
+    }
+
     /// A model that cannot call tools itself (any server JARVIS cannot ask):
     /// the tools are described in the system prompt, the reply is asked for
     /// as JSON, a call in it runs, and its result goes back in words. A

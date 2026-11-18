@@ -1190,9 +1190,8 @@ impl AiRouter {
                 let backend = local::get_backend(&endpoint.backend_type);
                 let detected_cap = backend.detect_tool_capability(&endpoint.url, model_id).await;
 
-                local::send_local(endpoint, model_id, messages, detected_cap, context_length, tool_override.as_deref(), db, google_auth, app_handle, tts_tx, workload, ledger)
-                    .await
-                    .map_err(|e| e.to_string())
+                let chat = local::LocalChat::new(endpoint.clone(), detected_cap, context_length, tool_override.as_deref());
+                provider::chat(&openai::OpenAiWire::local(chat, model_id), chat_request(db, messages, None), turn).await
             }
             unknown => Err(format!("Unknown provider type: {}", unknown)),
         }
