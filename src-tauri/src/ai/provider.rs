@@ -527,12 +527,15 @@ pub(crate) async fn chat<W: Wire>(wire: &W, request: ChatRequest, turn: Turn<'_>
             turn.window.send("chat-status", json!({"status": "Reviewing tool results...", "phase": "thinking"}));
             continue;
         }
-        let streamed = !round.texts.is_empty();
+        // Whitespace is not an answer: a round that streamed only that is
+        // answered with the fallback, and logs no missing usage (main logged
+        // it for a non-empty response only).
+        let streamed = !round.text().trim().is_empty();
         let reply = wire.reply(&conversation, round, final_round, &tools::read_language_pref(turn.db));
         if let Ok(text) = &reply {
             // An answer that did not stream (the fallback on an empty last
             // round) is shown and spoken in one piece.
-            if !streamed && !text.is_empty() {
+            if !streamed && !text.trim().is_empty() {
                 Events::new(turn.window, turn.voice.as_ref()).send(Event::Text(text.clone()));
             }
         }

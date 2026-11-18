@@ -861,6 +861,28 @@ mod openai_wire {
         assert_eq!(rows(&db), vec![priced_row("openai", "chat", &model, &[(0, 0, 0, 0)])]);
     }
 
+    /// A reply with no text, or only an empty piece, and no usage figures
+    /// logs no missing usage: the line is for a non-empty response, as on
+    /// main (N05).
+    #[tokio::test]
+    async fn an_empty_reply_without_usage_figures_logs_nothing() {
+        let server = serve(vec![
+            Reply::openai_sse(&[json!({"choices": [{"delta": {}, "finish_reason": "stop"}]})]),
+            Reply::openai_sse(&[json!({"choices": [{"delta": {"role": "assistant", "content": ""}, "finish_reason": "stop"}]})]),
+        ])
+        .await;
+        let _base = point_at(&format!("{}/v1", server.base));
+        let db = crate::db::test_database();
+        for _ in 0..2 {
+            let logged = crate::test_log::capture(|| async {
+                run_turn(&router(), official(), &[("user", "Hi")], &db, Workload::Tools, false).await;
+            })
+            .await;
+            assert!(!logged.iter().any(|line| line.contains("no usage figures")), "{logged:?}");
+        }
+        assert_eq!(server.seen().len(), 2);
+    }
+
     /// A call that takes no arguments may stream no argument text: it runs.
     #[tokio::test]
     async fn a_call_with_no_argument_text_runs() {
@@ -2979,6 +3001,32 @@ mod parity {
             let fallback = fallback(&db);
             assert_eq!(turn.reply.as_ref(), Ok(&fallback), "{wire:?}");
             assert_eq!(shown_and_spoken(&turn), (vec![fallback.clone()], vec![fallback.clone()]), "{wire:?}");
+        });
+    }
+
+    /// A last round that streamed only whitespace (n-2). Where the wire
+    /// answers it with the fallback (the OpenAI format and Bedrock), the
+    /// fallback is shown and spoken after the whitespace; before this round
+    /// it was returned but neither shown nor spoken. Claude and Gemini answer
+    /// with the whitespace as it streamed, as before P07.
+    #[test]
+    fn a_last_round_of_only_whitespace() {
+        on_each(&ALL, |wire, db| async move {
+            let _rounds = two_rounds();
+            let on = wire.serve(vec![wire.calls("remember", json!({"content": "Kenny is my accountant"})), wire.says("\n")], &db).await;
+            let turn = on.turn("Remember Kenny is my accountant", &db, true).await;
+            // Some wires stream an empty piece first; the pieces are compared
+            // joined.
+            let (shown, spoken) = shown_and_spoken(&turn);
+            if matches!(wire, W::Claude | W::Gemini) {
+                assert_eq!(turn.reply.as_deref(), Ok("\n"), "{wire:?}");
+                assert_eq!((shown.concat(), spoken.concat()), ("\n".to_string(), "\n".to_string()), "{wire:?}");
+                return;
+            }
+            let fallback = fallback(&db);
+            assert_eq!(turn.reply.as_ref(), Ok(&fallback), "{wire:?}");
+            assert_eq!((shown.concat(), spoken.concat()), (format!("\n{fallback}"), format!("\n{fallback}")), "{wire:?}");
+            assert_eq!((shown.last(), spoken.last()), (Some(&fallback), Some(&fallback)), "{wire:?}: the fallback in one piece");
         });
     }
 
