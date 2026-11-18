@@ -466,9 +466,15 @@ impl Meter {
         }
     }
 
-    fn succeeded(mut self, db: &crate::db::Database, workload: Workload) {
+    /// The turn answered; `answered` when its last reply streamed text.
+    fn succeeded(mut self, db: &crate::db::Database, workload: Workload, answered: bool) {
         let latency = self.elapsed();
         if let Some(turn) = self.turn.take() {
+            if let Metering::Turn { provider, model } = &self.metering {
+                if answered && turn.is_empty() {
+                    log::warn!("[{provider}] no usage figures received for a non-empty response; recording zero tokens (model={model})");
+                }
+            }
             turn.record(db, workload, latency);
         }
     }
@@ -505,22 +511,36 @@ pub(crate) async fn chat<W: Wire>(wire: &W, request: ChatRequest, turn: Turn<'_>
             let results = run_calls(&round.calls, &turn).await;
             let answers = wire.answers_after_tools(&round);
             let text = round.text();
-            wire.add_results(&mut conversation, round, results, number + 2 == max_rounds)?;
+            // The results not added is a failed request: what the turn was
+            // billed is stored, and the router sees the calls that ran.
+            if let Err(error) = wire.add_results(&mut conversation, round, results, number + 2 == max_rounds) {
+                meter.failed(turn.db, turn.workload, None, 0);
+                return Err(error);
+            }
             if answers {
                 finish(wire, &turn);
-                meter.succeeded(turn.db, turn.workload);
+                meter.succeeded(turn.db, turn.workload, !text.is_empty());
                 return Ok(text);
             }
             turn.window.send("chat-status", json!({"status": "Reviewing tool results...", "phase": "thinking"}));
             continue;
         }
+        let streamed = !round.texts.is_empty();
+        let reply = wire.reply(&conversation, round, final_round, &tools::read_language_pref(turn.db));
+        if let Ok(text) = &reply {
+            // An answer that did not stream (the fallback on an empty last
+            // round) is shown and spoken in one piece.
+            if !streamed && !text.is_empty() {
+                Events::new(turn.window, turn.voice.as_ref()).send(Event::Text(text.clone()));
+            }
+        }
         finish(wire, &turn);
-        meter.succeeded(turn.db, turn.workload);
-        return wire.reply(&conversation, round, final_round, &tools::read_language_pref(turn.db));
+        meter.succeeded(turn.db, turn.workload, streamed);
+        return reply;
     }
     // Only when the registry allows no round at all.
     finish(wire, &turn);
-    meter.succeeded(turn.db, turn.workload);
+    meter.succeeded(turn.db, turn.workload, false);
     Ok(tools::tool_limit_fallback(&tools::read_language_pref(turn.db)).into())
 }
 

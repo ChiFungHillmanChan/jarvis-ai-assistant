@@ -734,6 +734,43 @@ mod openai_wire {
         let narration = tools::tool_voice_narration("remember", &tools::read_language_pref(&db));
         assert_eq!(turn.voice, vec![format!("narrate: {narration}"), "text: Saved.".into()]);
     }
+
+    /// The fallback on an empty last round is shown and spoken in one piece,
+    /// as Bedrock did before P07 (P07: on every wire).
+    #[tokio::test]
+    async fn the_fallback_is_shown_and_spoken() {
+        let _registry = crate::ai::registry::test_override::with(|r| r.providers.iter_mut().find(|p| p.id == "openai").unwrap().limits.max_tool_rounds = Some(2));
+        let server = serve(vec![
+            Reply::openai_sse(&[json!({"choices": [{"delta": {"tool_calls": [{"index": 0, "id": "call_1", "function": {"name": "remember", "arguments": REMEMBER_ARGS}}]}, "finish_reason": "tool_calls"}]})]),
+            Reply::openai_sse(&[json!({"choices": [{"delta": {}, "finish_reason": "stop"}]})]),
+        ])
+        .await;
+        let _base = point_at(&format!("{}/v1", server.base));
+        let db = crate::db::test_database();
+        let turn = run_turn(&router(), official(), &[("user", "Remember Kenny is my accountant")], &db, Workload::Tools, true).await;
+        let fallback = fallback(&db);
+        assert_eq!(turn.reply.as_ref(), Ok(&fallback));
+        let lines = turn.window_lines();
+        assert_eq!(&lines[lines.len() - 3..], &[status("Composing response...", "responding"), token(&fallback), token_done()]);
+        assert_eq!(turn.voice.last(), Some(&format!("text: {fallback}")));
+    }
+
+    /// A reply without usage figures is stored as zeros, and the log says
+    /// so, with none of the reply.
+    #[tokio::test]
+    async fn a_reply_without_usage_figures_is_logged() {
+        let server = serve(vec![Reply::openai_sse(&[json!({"choices": [{"delta": {"content": "Your dentist is Mary."}, "finish_reason": "stop"}]})])]).await;
+        let _base = point_at(&format!("{}/v1", server.base));
+        let db = crate::db::test_database();
+        let logged = crate::test_log::capture(|| async {
+            run_turn(&router(), official(), &[("user", "Hi")], &db, Workload::Tools, false).await;
+        })
+        .await;
+        let model = crate::ai::models::openai_default();
+        assert!(logged.contains(&format!("[openai] no usage figures received for a non-empty response; recording zero tokens (model={model})")), "{logged:?}");
+        assert!(!logged.iter().any(|line| line.contains("dentist")), "{logged:?}");
+        assert_eq!(rows(&db), vec![priced_row("openai", "chat", &model, &[(0, 0, 0, 0)])]);
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -1212,6 +1249,22 @@ mod gemini_wire {
         assert_eq!(server.seen().len(), 1, "no resend inside the wire");
         assert!(rows(&db).is_empty());
     }
+
+    /// A reply without usageMetadata is stored as zeros, and the log says
+    /// so, with none of the reply.
+    #[tokio::test]
+    async fn a_reply_without_usage_figures_is_logged() {
+        let server = serve(vec![Reply::sse(&[chunk(json!([{"text": "Your dentist is Mary."}]), Some("STOP"), None)])]).await;
+        let _base = point_at(&format!("{}/v1beta", server.base));
+        let db = crate::db::test_database();
+        let logged = crate::test_log::capture(|| async {
+            run_turn(&router(), row(), &[("user", "Hi")], &db, Workload::Tools, false).await;
+        })
+        .await;
+        let model = crate::ai::models::GEMINI_FLASH;
+        assert!(logged.contains(&format!("[gemini] no usage figures received for a non-empty response; recording zero tokens (model={model})")), "{logged:?}");
+        assert!(!logged.iter().any(|line| line.contains("dentist")), "{logged:?}");
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -1487,6 +1540,24 @@ pub(crate) mod bedrock_wire {
         let db = crate::db::test_database();
         let turn = run_turn(&AiRouter::new("gemini_primary"), row(), &[("user", "Hi")], &db, Workload::Tools, false).await;
         assert_eq!(turn.reply, Err("bedrock: AWS credentials not configured in Settings".into()));
+    }
+
+    /// The fallback on an empty last round did not stream: it reaches the
+    /// window as one token and the voice in one piece.
+    #[test]
+    fn the_fallback_is_shown_and_spoken() {
+        with_credentials(|db| async move {
+            let _registry = crate::ai::registry::test_override::with(|r| r.providers.iter_mut().find(|p| p.id == "bedrock").unwrap().limits.max_tool_rounds = Some(2));
+            let call = converse(json!([{"toolUse": {"toolUseId": "tu_1", "name": "remember", "input": {"content": "Kenny is my accountant"}}}]), "tool_use", usage(10, 1));
+            let server = serve(vec![call, converse(json!([]), "end_turn", usage(10, 0))]).await;
+            let _aws = point_bedrock_at(&server.base);
+            let turn = run_turn(&AiRouter::new("gemini_primary"), row(), &[("user", "Remember Kenny is my accountant")], &db, Workload::Tools, true).await;
+            let fallback = fallback(&db);
+            assert_eq!(turn.reply.as_ref(), Ok(&fallback));
+            let lines = turn.window_lines();
+            assert_eq!(&lines[lines.len() - 3..], &[status("Composing response...", "responding"), token(&fallback), token_done()]);
+            assert_eq!(turn.voice.last(), Some(&format!("text: {fallback}")));
+        });
     }
 }
 
@@ -2602,5 +2673,69 @@ mod resend_counts {
     #[test]
     fn local() {
         check(W::Local, 2, 2);
+    }
+}
+
+// ---------------------------------------------------------------------------
+// The shared loop (provider::chat) on a wire written for the test.
+// ---------------------------------------------------------------------------
+
+mod shared_loop {
+    use super::*;
+    use crate::ai::provider::{Call, ChatRequest, Event, Events, Metering, Outcome, Round, RoundError, Usage, Wire};
+
+    /// A wire whose first reply calls `remember`, and whose results cannot
+    /// be added to the next request (as a Converse builder that fails).
+    struct ResultsFail;
+
+    #[async_trait::async_trait]
+    impl Wire for ResultsFail {
+        type Conversation = ();
+
+        fn max_rounds(&self) -> usize {
+            3
+        }
+
+        fn metering(&self) -> Metering {
+            Metering::Turn { provider: "openai".into(), model: crate::ai::models::openai_default() }
+        }
+
+        async fn start(&self, _request: ChatRequest) -> Result<(), String> {
+            Ok(())
+        }
+
+        async fn round(&self, _conversation: &mut (), _final_round: bool, events: &mut Events<'_>) -> Result<(), RoundError> {
+            events.send(Event::ToolCall(Call { id: "call_1".into(), name: "remember".into(), arguments: REMEMBER_ARGS.into() }));
+            events.send(Event::Usage(Usage { input: 100, output: 10, cache_read: 0, cache_write: 0 }));
+            events.send(Event::Done { stop: Some("tool_calls".into()) });
+            Ok(())
+        }
+
+        fn add_results(&self, _conversation: &mut (), _round: Round, _results: Vec<(Call, Outcome)>, _next_is_final: bool) -> Result<(), String> {
+            Err("The results could not be added.".into())
+        }
+
+        async fn complete(&self, _request: &crate::ai::complete::Request<'_>, _language: crate::ai::bedrock::UiLanguage) -> Result<crate::ai::complete::Completion, String> {
+            Err("not used".into())
+        }
+    }
+
+    /// Results that cannot be added end the turn as a failed request does:
+    /// what the turn was billed is stored, and the call that ran is in the
+    /// ledger, so the router does not send the request again.
+    #[tokio::test]
+    async fn results_that_cannot_be_added_fail_the_turn_as_a_request_does() {
+        let db = crate::db::test_database();
+        let window = Window::default();
+        let ledger = SideEffectLedger::new();
+        let auth = Arc::new(crate::auth::google::GoogleAuth::new_empty());
+        let request = ChatRequest { system: crate::ai::provider::SystemPrompt::for_request(&db), messages: vec![("user".into(), "Remember Kenny is my accountant".into())], tools: tools::get_tool_definitions(), deeper: None };
+        let turn = crate::ai::provider::Turn { db: &db, google_auth: &auth, window: &window, voice: None, workload: Workload::Tools, ledger: &ledger };
+        let reply = crate::tool_approval::TEST_ANSWER.scope(true, cost::with_feature(cost::Feature::Chat, crate::ai::provider::chat(&ResultsFail, request, turn))).await;
+        assert_eq!(reply, Err("The results could not be added.".to_string()));
+        assert_eq!(ledger.count(), 1);
+        assert_eq!(memories(&db), vec!["Kenny is my accountant"]);
+        let model = crate::ai::models::openai_default();
+        assert_eq!(rows(&db), vec![priced_row("openai", "tools", &model, &[(100, 10, 0, 0)])]);
     }
 }
