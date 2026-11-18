@@ -16,25 +16,37 @@ thread_local! {
     pub(super) static API_BASE: RefCell<Option<String>> = const { RefCell::new(None) };
 }
 
-/// Points this thread's provider requests at `base` until dropped.
-pub(crate) struct PointedAt;
+/// Points this thread's provider requests at `base` until dropped. A drop
+/// puts back where requests went before, not the provider's own address: a
+/// guard dropped inside another's scope leaves the outer one in force, so a
+/// test cannot fall through to a real service.
+pub(crate) struct PointedAt {
+    api: Option<String>,
+    bedrock: Option<String>,
+}
 
 impl Drop for PointedAt {
     fn drop(&mut self) {
-        API_BASE.with(|base| *base.borrow_mut() = None);
-        crate::ai::bedrock::tests::LOOPBACK.with(|endpoint| *endpoint.borrow_mut() = None);
+        API_BASE.with(|base| *base.borrow_mut() = self.api.take());
+        crate::ai::bedrock::tests::LOOPBACK.with(|endpoint| *endpoint.borrow_mut() = self.bedrock.take());
     }
 }
 
+fn pointed() -> PointedAt {
+    PointedAt { api: API_BASE.with(|base| base.borrow().clone()), bedrock: crate::ai::bedrock::tests::LOOPBACK.with(|endpoint| endpoint.borrow().clone()) }
+}
+
 pub(crate) fn point_at(base: &str) -> PointedAt {
+    let before = pointed();
     API_BASE.with(|slot| *slot.borrow_mut() = Some(base.to_string()));
-    PointedAt
+    before
 }
 
 /// Points this thread's Bedrock clients at `base` until dropped.
 pub(crate) fn point_bedrock_at(base: &str) -> PointedAt {
+    let before = pointed();
     crate::ai::bedrock::tests::LOOPBACK.with(|endpoint| *endpoint.borrow_mut() = Some(base.to_string()));
-    PointedAt
+    before
 }
 
 /// One reply the loopback server sends.
@@ -2647,18 +2659,34 @@ mod parity {
     /// is decided before this, by the callers (commands/mail.rs tests: an
     /// OpenAI-compatible service whose terms are unknown gets none); these
     /// tests hold each wire's request and reply.
-    async fn plain(wire: W, db: &crate::db::Database, feature: cost::Feature, max_tokens: u32, json: bool, reply: &str) -> (On, crate::ai::complete::Completion) {
+    async fn plain(wire: W, db: &crate::db::Database, feature: cost::Feature, max_tokens: u32, json: bool, reply: &str) -> (On, Result<crate::ai::complete::Completion, String>) {
         let on = wire.serve(vec![wire.completes(reply)], db).await;
+        // Mail goes to Gemini once the user confirmed billing on their key.
+        if wire == W::Gemini {
+            crate::ai::mail_policy::test_support::agree_to_gemini(db);
+        }
         let system = if json { "Sort this email. Reply with only one JSON object." } else { "" };
         let request = Request { system, user: "From: kenny@example.com\nSubject: Invoice\n\nPlease pay by Friday.", json, max_tokens, feature };
-        let done = complete(&on.router, db, request).await.unwrap_or_else(|e| panic!("{wire:?}: {e}"));
+        let done = complete(&on.router, db, request).await;
         (on, done)
+    }
+
+    /// A service whose terms JARVIS cannot confirm is sent no mail: the
+    /// completion refuses before any request (decision 115).
+    fn refused(wire: W, on: &On, done: &Result<crate::ai::complete::Completion, String>) {
+        let error = done.as_ref().err().unwrap_or_else(|| panic!("{wire:?}: mail was sent"));
+        assert!(error.starts_with("Gmail and Calendar content is not sent to"), "{wire:?}: {error}");
+        assert!(on.server.seen().is_empty(), "{wire:?}");
     }
 
     #[test]
     fn mail_analysis() {
         on_each(&ALL, |wire, db| async move {
             let (on, done) = plain(wire, &db, cost::Feature::MailAnalysis, crate::ai::models::feature_max_output_tokens(cost::Feature::MailAnalysis), false, "Kenny asks for the invoice to be paid by Friday.").await;
+            if wire == W::Compatible {
+                return refused(wire, &on, &done);
+            }
+            let done = done.unwrap_or_else(|e| panic!("{wire:?}: {e}"));
             assert_eq!(done.text, "Kenny asks for the invoice to be paid by Friday.", "{wire:?}");
             let seen = on.server.seen();
             assert_eq!(seen.len(), 1, "{wire:?}");
@@ -2673,6 +2701,10 @@ mod parity {
     fn auto_sort_asks_for_json() {
         on_each(&ALL, |wire, db| async move {
             let (on, done) = plain(wire, &db, cost::Feature::MailSort, crate::ai::models::feature_max_output_tokens(cost::Feature::MailSort), true, r#"{"category": "action", "needs_reply": true}"#).await;
+            if wire == W::Compatible {
+                return refused(wire, &on, &done);
+            }
+            let done = done.unwrap_or_else(|e| panic!("{wire:?}: {e}"));
             assert_eq!(serde_json::from_str::<Value>(&done.text).unwrap(), json!({"category": "action", "needs_reply": true}), "{wire:?}");
             let seen = on.server.seen();
             assert_eq!(seen.len(), 1, "{wire:?}");
@@ -3013,11 +3045,13 @@ mod resend_counts {
         server.seen().len()
     }
 
-    /// Requests a completion sends to a busy service.
+    /// Requests a completion sends to a busy service. The rule does not
+    /// depend on the feature: one that carries no mail is used, so that the
+    /// compatible service, which is sent no mail, is measured too.
     async fn completion_requests(wire: W, db: &crate::db::Database) -> usize {
         let server = serve((0..8).map(|_| busy(wire)).collect()).await;
         let (router, _entry, _pointed) = set_up(wire, &server.base);
-        let request = Request { system: "", user: "From: kenny@example.com\nSubject: Invoice\n\nPlease pay by Friday.", json: false, max_tokens: 300, feature: cost::Feature::MailAnalysis };
+        let request = Request { system: "", user: "Reply with the single word OK.", json: false, max_tokens: 300, feature: cost::Feature::Other };
         let done = complete(&router, db, request).await;
         assert!(done.is_err(), "{wire:?}");
         server.seen().len()

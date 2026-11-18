@@ -22,6 +22,7 @@
 
 use super::bedrock::UiLanguage;
 use super::compat;
+use super::cost::Feature;
 use super::consent::{self, Subject};
 use super::registry::DataTerms;
 use super::ProviderChainEntry;
@@ -199,13 +200,28 @@ pub fn may_receive(db: &Database, entry: &ProviderChainEntry) -> bool {
     allowed(db, entry).is_ok()
 }
 
+/// The features whose requests carry Gmail or Calendar content, or text
+/// drawn from it, which `ai::complete` judges before it sends: mail
+/// analysis and mail sorting send mail, the briefing sends mail and events,
+/// and a memory can hold what was saved from an email. Every feature is
+/// named, so a new one has to be decided here.
+pub(crate) fn carries_google_content(feature: Feature) -> bool {
+    match feature {
+        Feature::MailAnalysis | Feature::MailSort | Feature::Briefing | Feature::Memory => true,
+        // Chat and tool turns are judged per tool call (ai::tools); speech
+        // has its own gate (voice::cloud_speech_for); `Other` is the one-word test
+        // of a chosen AI.
+        Feature::Chat | Feature::Tools | Feature::Stt | Feature::Tts | Feature::Other => false,
+    }
+}
+
 /// The registry's data terms decide (`providers[].data_terms`): safe
 /// receives email, Gemini's billing terms once the user agreed under them,
 /// and `unknown` never, consent or not: Google's Limited Use rules cover
 /// Gmail and Calendar content, and JARVIS cannot confirm how such a service
 /// uses it. The bundled registry is the floor: a fetched copy can tighten a
 /// provider, never loosen one (registry::load::apply_floor).
-fn allowed(db: &Database, entry: &ProviderChainEntry) -> Result<(), Blocked> {
+pub(crate) fn allowed(db: &Database, entry: &ProviderChainEntry) -> Result<(), Blocked> {
     let Some(provider) = registry_provider(entry) else {
         return Err(Blocked::NotAllowed(entry.provider_type.clone()));
     };

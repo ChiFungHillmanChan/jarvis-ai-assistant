@@ -60,11 +60,21 @@ pub struct Completion {
 pub async fn complete(router: &AiRouter, db: &Database, request: Request<'_>) -> Result<Completion, String> {
     let configured = router.configured(db).await;
     let chosen = router.chosen(&configured);
+    let picked = super::capability::picked();
+    // Gmail and Calendar content goes only where mail_policy allows, judged
+    // on the row this request goes to (a model picked in the error card,
+    // else the chosen one), as mail_policy::may_send_on judges it. Refused
+    // before any request; the caller's own gate shows the card or notice.
+    if super::mail_policy::carries_google_content(request.feature) {
+        if let Some(receiver) = picked.as_ref().map(super::capability::Pick::entry).or_else(|| chosen.clone()) {
+            super::mail_policy::allowed(db, &receiver).map_err(|blocked| blocked.user_message())?;
+        }
+    }
     let ledger = super::SideEffectLedger::new();
     let request = &request;
     super::run_chosen(
         chosen,
-        super::capability::picked(),
+        picked,
         &configured,
         request.feature,
         Workload::Volume,
@@ -652,6 +662,8 @@ pub(crate) mod tests {
 
     /// The row says what the completion was for and names the service by its
     /// provider id; a model without a price is stored with the cost unknown.
+    /// (Not mail sorting: no mail goes to a service whose terms JARVIS cannot
+    /// confirm.)
     #[tokio::test]
     async fn a_completion_is_stored_with_its_feature_and_provider_id() {
         let (port, server) = one_reply(json!({"choices": [{"message": {"content": "{\"category\": \"action\"}"}}], "usage": {"prompt_tokens": 300, "completion_tokens": 20}})).await;
@@ -660,7 +672,7 @@ pub(crate) mod tests {
         router.set_compat_key(&base, "sk-fixture-not-a-real-key");
         router.set_provider_chain(vec![ProviderChainEntry { position: 0, provider_type: "openai".into(), endpoint_id: None, model_id: Some("unlisted-chat-1".into()), enabled: true, base_url: Some(base) }]);
         let db = crate::ai::cost::tests::temp_metrics_db("");
-        let done = complete(&router, &db, sort_request(true)).await.unwrap();
+        let done = complete(&router, &db, Request { feature: Feature::Other, ..sort_request(true) }).await.unwrap();
         assert_eq!((done.cost_micro, done.price_unknown), (None, true));
         let request = server.await.unwrap();
         assert!(request.starts_with("POST /v1/chat/completions"), "{request}");
@@ -668,7 +680,7 @@ pub(crate) mod tests {
             crate::ai::cost::tests::usage_rows(&db),
             vec![crate::ai::cost::tests::UsageRow {
                 provider: "compat:127.0.0.1".into(),
-                feature: "mail_sort".into(),
+                feature: "other".into(),
                 model_id: "unlisted-chat-1".into(),
                 input_tokens: 300,
                 output_tokens: 20,
@@ -802,6 +814,71 @@ pub(crate) mod tests {
             seen[0].body,
             json!({"model": "unlisted-chat-1", "messages": [{"role": "system", "content": "Sort this."}, {"role": "user", "content": "From: a@example.com"}], "max_tokens": 300, "response_format": {"type": "json_object"}})
         );
+    }
+
+    /// Gmail and Calendar content (decision 115): for each feature that
+    /// carries it, a completion refuses before any request when mail_policy
+    /// would not let the row receive it: a service whose terms JARVIS
+    /// cannot confirm, and Gemini before the user confirmed billing, chosen
+    /// or picked in the error card. A row that may receive it still gets its
+    /// one request; so does Gemini once billing is confirmed.
+    #[tokio::test]
+    async fn google_content_goes_only_where_mail_policy_allows() {
+        use crate::ai::capability::{with_pick, Pick};
+        use crate::ai::mail_policy::{carries_google_content, test_support::agree_to_gemini};
+        let reply = || Reply::json(200, json!({"choices": [{"message": {"content": "Kenny asks for the invoice."}}], "candidates": [{"content": {"parts": [{"text": "Kenny asks for the invoice."}]}}], "usage": {"prompt_tokens": 10, "completion_tokens": 2}, "usageMetadata": {"promptTokenCount": 10, "candidatesTokenCount": 2}}));
+        for feature in [Feature::MailAnalysis, Feature::MailSort, Feature::Briefing, Feature::Memory] {
+            assert!(carries_google_content(feature), "{feature:?}");
+            let request = || Request { system: "", user: "From: kenny@example.com\nSubject: Invoice\n\nPlease pay by Friday.", json: false, max_tokens: 300, feature };
+            let server = serve((0..4).map(|_| reply()).collect()).await;
+            let compat_url = format!("{}/v1", server.base);
+            let mut router = AiRouter::new("gemini_primary");
+            router.set_compat_key(&compat_url, "sk-fixture-compat-not-real");
+            router.set_gemini_key("gemini-fixture-not-real");
+            router.set_openai_key("sk-fixture-openai-not-real");
+            let unknown = row("openai", Some("unlisted-chat-1"), Some(&compat_url), None);
+            let gemini = row("gemini", Some(crate::ai::models::GEMINI_FLASH), None, None);
+            let openai = row("openai", None, None, None);
+            let db = crate::db::test_database();
+            let sent = || server.seen().len();
+
+            router.set_provider_chain(vec![unknown.clone()]);
+            let error = complete(&router, &db, request()).await.unwrap_err();
+            assert!(error.contains("JARVIS cannot confirm how this service uses data"), "{feature:?}: {error}");
+            assert_eq!(sent(), 0, "{feature:?}: unknown terms");
+
+            // OpenAI and Gemini at the stand-in, one at a time.
+            let at_gemini = point_at(&format!("{}/v1beta", server.base));
+            router.set_provider_chain(vec![gemini.clone()]);
+            let error = complete(&router, &db, request()).await.unwrap_err();
+            assert!(error.contains(r#""kind":"consent""#), "{feature:?}: {error}");
+            assert_eq!(sent(), 0, "{feature:?}: Gemini before billing is confirmed");
+            drop(at_gemini);
+
+            let at_openai = point_at(&format!("{}/v1", server.base));
+            // Picked in the error card, with an allowed AI chosen.
+            router.set_provider_chain(vec![openai.clone(), unknown.clone()]);
+            let error = with_pick(Some(Pick::of(&unknown)), complete(&router, &db, request())).await.unwrap_err();
+            assert!(error.contains("JARVIS cannot confirm how this service uses data"), "{feature:?}: {error}");
+            assert_eq!(sent(), 0, "{feature:?}: a picked service with unknown terms");
+            // No notice or card of its own: the caller's gate raises that.
+            for name in std::collections::BTreeSet::from([crate::ai::capability::feature_key(feature, Workload::Volume), feature.as_str()]) {
+                for raised in [format!("google_content|127.0.0.1|{name}"), format!("consent|gemini||{name}")] {
+                    assert!(crate::ai::notify::first_time(&raised), "{feature:?}: {raised} was raised");
+                }
+            }
+
+            router.set_provider_chain(vec![openai.clone()]);
+            complete(&router, &db, request()).await.unwrap_or_else(|e| panic!("{feature:?}: {e}"));
+            assert_eq!(sent(), 1, "{feature:?}: OpenAI may receive it");
+            drop(at_openai);
+
+            agree_to_gemini(&db);
+            let _at_gemini = point_at(&format!("{}/v1beta", server.base));
+            router.set_provider_chain(vec![gemini.clone()]);
+            complete(&router, &db, request()).await.unwrap_or_else(|e| panic!("{feature:?}: {e}"));
+            assert_eq!(sent(), 2, "{feature:?}: Gemini once billing is confirmed");
+        }
     }
 
     /// P07: the official OpenAI completion takes its model as chat does

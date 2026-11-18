@@ -142,6 +142,8 @@ async fn mail_analysis_with_the_chosen_ai_asks_for_the_registry_cap() {
     let _registry = registry_with_caps();
     let (port, seen) = capture(ollama_reply("Send the quote by Friday. [郵件 #101]")).await;
     let db = Arc::new(crate::db::test_database());
+    // The completion's mail gate reads where the saved endpoint is.
+    db.conn.lock().unwrap().execute(&format!("INSERT INTO local_endpoints(id, name, url, backend_type) VALUES ('loopback', 'Loopback', 'http://127.0.0.1:{port}', 'ollama')"), []).unwrap();
     let route = super::analysis::AssistantRoute { router: chosen_local_ai(port), db: db.clone() };
     let analysis = tokio::time::timeout(Duration::from_secs(10), super::analysis::analyze(analysis_context("assistant"), None, None, Some(route), Some(&db))).await.expect("the loopback reply arrives");
     assert!(analysis.is_ok(), "{:?}", analysis.err());
