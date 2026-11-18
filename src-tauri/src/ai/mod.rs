@@ -20,7 +20,7 @@ pub mod registry;
 pub mod routing;
 pub mod tools;
 #[cfg(test)]
-mod wire_tests;
+pub(crate) mod wire_tests;
 pub use routing::{classify_workload, Workload};
 
 use crate::voice::tts::TtsCommand;

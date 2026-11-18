@@ -30,6 +30,11 @@ pub(crate) fn refuse_outside(wire: &str, address: &str) {
     }
 }
 
+/// Whether `base` is an address on this Mac, where the tests' servers are.
+pub(crate) fn is_loopback(base: &str) -> bool {
+    reqwest::Url::parse(base).ok().and_then(|url| url.host_str().map(str::to_string)).is_some_and(|host| matches!(host.as_str(), "127.0.0.1" | "localhost" | "[::1]" | "::1"))
+}
+
 /// Lets this thread's requests reach the providers' own addresses until
 /// dropped; the drop puts back what was there before. Made only in `live`,
 /// by [`live_key`], for a test that holds a JARVIS_LIVE_<PROVIDER>_KEY value.
@@ -77,10 +82,18 @@ fn a_test_request_to_a_provider_is_refused_unless_redirected() {
     let creds = crate::aws::credentials::AwsCredentials { access_key_id: "AKIAFIXTURE".into(), secret_access_key: "fixture".into(), region: "us-east-1".into(), inference_profile: "us".into() };
     let bedrock = || runtime.block_on(crate::ai::bedrock::tests::client(&creds));
     assert!(refused(&|| { bedrock(); }).starts_with("Bedrock: a test request to"), "Bedrock");
+    let loopback = || crate::ai::bedrock::tests::LOOPBACK.with(|endpoint| endpoint.borrow().clone());
     {
-        let _loopback = point_bedrock_at("http://127.0.0.1:3");
+        let _outer = point_bedrock_at("http://127.0.0.1:3");
+        {
+            let _inner = point_bedrock_at("http://127.0.0.1:4");
+            assert_eq!(loopback().as_deref(), Some("http://127.0.0.1:4"));
+            bedrock();
+        }
+        assert_eq!(loopback().as_deref(), Some("http://127.0.0.1:3"), "Bedrock: the outer loopback after the inner one dropped");
         bedrock();
     }
+    assert_eq!(loopback(), None);
     assert!(refused(&|| { bedrock(); }).contains("was refused"), "Bedrock: after the redirect dropped");
     // The live opt-in, made by hand here with what `live_key` sets: in force
     // while held, gone with its guard.

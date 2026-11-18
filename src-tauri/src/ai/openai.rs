@@ -47,7 +47,15 @@ pub struct Target<'a> {
 impl Target<'_> {
     fn url(&self) -> String {
         match self.base_url {
-            Some(base) => format!("{base}/chat/completions"),
+            Some(base) => {
+                // The test build refuses a compatible service's own address,
+                // as `api_base` refuses OpenAI's.
+                #[cfg(test)]
+                if !super::wire_tests::is_loopback(base) {
+                    super::wire_tests::refuse_outside("A compatible service", base);
+                }
+                format!("{base}/chat/completions")
+            }
             None => format!("{}/chat/completions", super::api_base("https://api.openai.com/v1")),
         }
     }
@@ -616,6 +624,21 @@ fn retry_delay(status: u16, retry_after: Option<&str>) -> Option<std::time::Dura
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The test build refuses a compatible service's own address before any
+    /// request, chat and completion alike (both build it here); a loopback
+    /// address passes.
+    #[test]
+    fn a_compatible_service_address_is_refused_in_tests() {
+        for base in ["https://api.moonshot.ai/v1", "https://dashscope-intl.aliyuncs.com/compatible-mode/v1"] {
+            let target = Target { base_url: Some(base), model: Some("m"), deeper: None };
+            let refused = std::panic::catch_unwind(|| target.url()).expect_err("refused");
+            assert!(refused.downcast_ref::<String>().is_some_and(|message| message.starts_with(&format!("A compatible service: a test request to {base} was refused"))), "{base}");
+        }
+        for base in ["http://127.0.0.1:9/v1", "http://localhost:9/v1"] {
+            assert_eq!(Target { base_url: Some(base), model: Some("m"), deeper: None }.url(), format!("{base}/chat/completions"));
+        }
+    }
 
     /// The output cap and reasoning effort are the registry's: OpenAI's own
     /// for api.openai.com, the compatible service's for any other address.
