@@ -115,19 +115,25 @@ fn refuse_acted_retry(retry_of: Option<&str>, language: crate::ai::bedrock::UiLa
 /// one (P06). What a picked turn saves is withheld from a chosen AI that
 /// may not receive Gmail and Calendar content, and the answer says so
 /// (mail_policy::PickedTurn).
-async fn on_pick(
-    db: &Database,
+///
+/// The turn is moved to the heap before anything holds it. Every wrapper
+/// around a future keeps it inline, some of them twice, so the whole turn
+/// used to sit several times over inside the future of `send_message`
+/// (456 KB). A debug build put that on the stack and every typed message
+/// overflowed the worker thread's 2 MiB stack and aborted the app.
+fn on_pick<'a>(
+    db: &'a Database,
     pick: Option<crate::ai::capability::Pick>,
-    turn: impl std::future::Future<Output = Result<ChatMessage, String>>,
-) -> Result<ChatMessage, String> {
+    turn: impl std::future::Future<Output = Result<ChatMessage, String>> + 'a,
+) -> impl std::future::Future<Output = Result<ChatMessage, String>> + 'a {
+    let turn = Box::pin(turn);
     let picked = pick.is_some();
-    crate::ai::capability::with_pick(pick, async {
+    crate::ai::capability::with_pick(pick, async move {
         let recorded = if picked { crate::ai::mail_policy::PickedTurn::begin(db)? } else { None };
         let mut answer = turn.await?;
         answer.note = joined([answer.note.take(), recorded.as_ref().and_then(|turn| turn.note())]);
         Ok(answer)
     })
-    .await
 }
 
 /// The notes under one answer, one per line.
@@ -1170,5 +1176,24 @@ mod tests {
         assert_eq!(picked.note, Some(format!("{note}\nKimi will not see this answer or the chat before it: Gmail and Calendar content is not sent to Kimi.")));
         let not_picked = on_pick(&db, None, std::future::ready(Ok(reply(&note)))).await.unwrap();
         assert_eq!(not_picked.note, Some(note));
+    }
+
+    /// What `send_message` holds for a turn does not grow with the turn.
+    /// It used to: the command's future held the whole turn several times
+    /// over, and a debug build aborted with a stack overflow on every typed
+    /// message (found in the native-qa window on 2026-11-18; no test runs
+    /// the command itself, which needs the running app).
+    #[test]
+    fn a_turn_is_kept_out_of_the_future_the_command_holds() {
+        let db = crate::db::test_database();
+        let turn = async {
+            let large = [0u8; 100_000];
+            std::future::ready(()).await;
+            Ok(ChatMessage { id: None, role: "assistant".into(), content: large.len().to_string(), created_at: None, has_recording: false, note: None })
+        };
+        assert!(std::mem::size_of_val(&turn) >= 100_000, "the turn itself is large");
+        let held = on_pick(&db, None, turn);
+        let size = std::mem::size_of_val(&held);
+        assert!(size < 1024, "the command holds {size} bytes for a turn of 100,000");
     }
 }
