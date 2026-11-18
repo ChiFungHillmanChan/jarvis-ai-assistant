@@ -3316,8 +3316,9 @@ mod parity {
 // ---------------------------------------------------------------------------
 
 /// Only these tests reach a provider, and only with its key set: OpenAI,
-/// Claude, Gemini and Bedrock hold the opt-in from `live_key` while they
-/// run; the compatible and local ones go to the address in their row.
+/// Claude, Gemini, Bedrock and the compatible service hold the opt-in from
+/// `live_key` while they run; the local one goes to the address in its row,
+/// which the test build does not judge.
 mod live {
     use super::*;
     use crate::ai::complete::{complete, Request};
@@ -3639,6 +3640,9 @@ mod resend_counts {
         }
     }
 
+    /// Requests a completion sends to a busy service. The rule does not
+    /// depend on the feature: one that carries no mail is used, so that the
+    /// compatible service, which is sent no mail, is measured too.
     async fn completion_requests(wire: W, db: &crate::db::Database) -> usize {
         let server = serve((0..8).map(|_| busy(wire)).collect()).await;
         let (router, _entry, _pointed) = set_up(wire, &server.base);

@@ -1097,6 +1097,25 @@ mod tests {
         assert_eq!(contents(history), ["What is on my calendar?", "Hi.", "你好。", "Hello.", "And tomorrow?"]);
     }
 
+    /// Both reply paths of `send_scoped` (web search and the normal turn)
+    /// answer through `answered`, the one place that reads the UI language
+    /// before it takes the database lock. `send_scoped` itself takes no
+    /// lock, saves no answer, and reads no language, so it cannot lock the
+    /// database twice (C-1). The test above calls `answered` directly; this
+    /// reads the source, because `send_scoped` needs the running app.
+    #[test]
+    fn send_scoped_answers_only_through_answered() {
+        let shipped = include_str!("chat.rs").split("\n#[cfg(test)]\nmod tests {").next().unwrap();
+        let start = shipped.find("\nasync fn send_scoped(").expect("send_scoped");
+        let body = &shipped[start..];
+        let body = &body[..body.find("\n}\n").expect("the end of send_scoped")];
+        assert_eq!(body.matches("answered(db, &session_id, async").count(), 2, "both reply paths answer through answered");
+        let outside = body.replace("answered(", "");
+        for taken in ["conn.lock()", "answer(", "UiLanguage::read", "read_language_pref", "persist_scoped_reply"] {
+            assert!(!outside.contains(taken), "send_scoped calls {taken} itself");
+        }
+    }
+
     /// What both chat paths run once the request returns (`answered`): the
     /// answer comes back, the reply is saved, the note shows in the saved UI
     /// language when the local model ran without tools, and a failed request
