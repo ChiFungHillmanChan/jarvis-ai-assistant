@@ -7,9 +7,9 @@ use aws_sdk_bedrockruntime::types::{
     Message, SystemContentBlock, TokenUsage, Tool, ToolConfiguration, ToolInputSchema,
     ToolResultBlock, ToolResultContentBlock, ToolResultStatus, ToolSpecification,
 };
-use aws_smithy_types::{Document, Number};
+use aws_smithy_types::Document;
 use serde_json::json;
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 use super::provider::{Call, ChatRequest, Event, Events, Metering, Outcome, Round, RoundError, Wire, SKIPPED};
 
 /// The Bedrock model: the registry's default. A debug build (development
@@ -260,8 +260,8 @@ impl StoredUsage {
     }
 }
 
-/// Bedrock's Converse API on the provider interface, with the user's own
-/// AWS credentials.
+/// Bedrock's ConverseStream API on the provider interface, with the user's
+/// own AWS credentials.
 pub(crate) struct BedrockWire {
     creds: AwsCredentials,
     /// The id the requests are sent with, and the one their rows are stored
@@ -273,6 +273,12 @@ impl BedrockWire {
     pub(crate) fn new(creds: AwsCredentials, model: &str) -> Self {
         BedrockWire { creds, model: model.to_string() }
     }
+}
+
+/// One block of a streamed reply.
+enum StreamedBlock {
+    Text(String),
+    Call { id: String, name: String, input: String },
 }
 
 /// One chat turn's requests to Bedrock.
@@ -317,10 +323,13 @@ impl Wire for BedrockWire {
         Ok(Conversation { client, messages, system, tools, inference, reply: None })
     }
 
+    /// One ConverseStream request: the text is shown and spoken as it
+    /// comes, each call announced when it starts.
     async fn round(&self, conversation: &mut Conversation, _final_round: bool, events: &mut Events<'_>) -> Result<(), RoundError> {
-        let response = conversation
+        use aws_sdk_bedrockruntime::types::{ContentBlockDelta, ContentBlockStart, ConverseStreamOutput as StreamEvent};
+        let mut output = conversation
             .client
-            .converse()
+            .converse_stream()
             .model_id(&self.model)
             .set_messages(Some(conversation.messages.clone()))
             .set_system(Some(conversation.system.clone()))
@@ -329,25 +338,69 @@ impl Wire for BedrockWire {
             .send()
             .await
             .map_err(|e| RoundError::refused(converse_error(e)))?;
-        if let Some(stored) = response.usage().and_then(StoredUsage::from_aws) {
-            events.send(Event::Usage(stored.figures()));
-        }
-        let Some(aws_sdk_bedrockruntime::types::ConverseOutput::Message(message)) = response.output() else {
-            return Err(RoundError::refused("Bedrock returned no message output"));
-        };
-        for (index, block) in message.content().iter().enumerate() {
-            match block {
-                ContentBlock::Text(text) if !text.is_empty() => events.send(Event::Text(text.clone())),
-                ContentBlock::ToolUse(tool_use) => events.send(Event::ToolStarted { key: index.to_string(), name: tool_use.name().to_string() }),
+        // The reply's blocks by index: text, or a call and its input so far.
+        let mut blocks: BTreeMap<i32, StreamedBlock> = BTreeMap::new();
+        let mut stop: Option<String> = None;
+        let mut usage: Option<StoredUsage> = None;
+        loop {
+            let event = match output.stream.recv().await {
+                Ok(Some(event)) => event,
+                Ok(None) => break,
+                Err(e) => return Err(RoundError::broken(converse_error(e))),
+            };
+            match event {
+                StreamEvent::ContentBlockStart(start) => {
+                    if let Some(ContentBlockStart::ToolUse(tool)) = start.start() {
+                        let index = start.content_block_index();
+                        blocks.insert(index, StreamedBlock::Call { id: tool.tool_use_id().to_string(), name: tool.name().to_string(), input: String::new() });
+                        events.send(Event::ToolStarted { key: index.to_string(), name: tool.name().to_string() });
+                    }
+                }
+                StreamEvent::ContentBlockDelta(delta) => match delta.delta() {
+                    Some(ContentBlockDelta::Text(text)) => {
+                        if let StreamedBlock::Text(sofar) = blocks.entry(delta.content_block_index()).or_insert_with(|| StreamedBlock::Text(String::new())) {
+                            sofar.push_str(text);
+                        }
+                        if !text.is_empty() {
+                            events.send(Event::Text(text.clone()));
+                        }
+                    }
+                    Some(ContentBlockDelta::ToolUse(tool)) => {
+                        if let Some(StreamedBlock::Call { input, .. }) = blocks.get_mut(&delta.content_block_index()) {
+                            input.push_str(tool.input());
+                        }
+                    }
+                    _ => {}
+                },
+                StreamEvent::MessageStop(message_stop) => stop = Some(message_stop.stop_reason().as_str().to_string()),
+                StreamEvent::Metadata(metadata) => usage = metadata.usage().and_then(StoredUsage::from_aws),
                 _ => {}
             }
         }
-        for tool_use in collect_tool_uses(message) {
-            let arguments = serde_json::to_string(&document_to_json(tool_use.input())).unwrap_or_default();
-            events.send(Event::ToolCall(Call { id: tool_use.tool_use_id().to_string(), name: tool_use.name().to_string(), arguments }));
+        if let Some(usage) = usage {
+            events.send(Event::Usage(usage.figures()));
         }
-        conversation.reply = Some(message.clone());
-        events.send(Event::Done { stop: Some(response.stop_reason().as_str().to_string()) });
+        if stop.is_none() {
+            return Err(RoundError::broken("Bedrock stream ended before the reply was complete"));
+        }
+        let mut content = Vec::new();
+        for block in blocks.into_values() {
+            match block {
+                // Converse refuses an empty text block in the history.
+                StreamedBlock::Text(text) if text.is_empty() => {}
+                StreamedBlock::Text(text) => content.push(ContentBlock::Text(text)),
+                StreamedBlock::Call { id, name, input } => {
+                    // A call with no input streams none; input cut short
+                    // runs as no arguments.
+                    let input: serde_json::Value = serde_json::from_str(&input).ok().filter(serde_json::Value::is_object).unwrap_or_else(|| json!({}));
+                    events.send(Event::ToolCall(Call { id: id.clone(), name: name.clone(), arguments: input.to_string() }));
+                    let tool_use = aws_sdk_bedrockruntime::types::ToolUseBlock::builder().tool_use_id(id).name(name).input(json_to_document(&input)).build().map_err(|e| RoundError::broken(e.to_string()))?;
+                    content.push(ContentBlock::ToolUse(tool_use));
+                }
+            }
+        }
+        conversation.reply = Some(Message::builder().role(ConversationRole::Assistant).set_content(Some(content)).build().map_err(|e| RoundError::broken(e.to_string()))?);
+        events.send(Event::Done { stop });
         Ok(())
     }
 
@@ -508,17 +561,6 @@ fn collect_text(message: &Message) -> Vec<String> {
         .collect()
 }
 
-fn collect_tool_uses(message: &Message) -> Vec<aws_sdk_bedrockruntime::types::ToolUseBlock> {
-    message
-        .content()
-        .iter()
-        .filter_map(|block| match block {
-            ContentBlock::ToolUse(tool_use) => Some(tool_use.clone()),
-            _ => None,
-        })
-        .collect()
-}
-
 #[cfg(test)]
 use super::provider::note_tools_to_run;
 
@@ -565,27 +607,6 @@ fn json_to_document(value: &serde_json::Value) -> Document {
     }
 }
 
-fn document_to_json(document: &Document) -> serde_json::Value {
-    match document {
-        Document::Null => serde_json::Value::Null,
-        Document::Bool(value) => serde_json::Value::Bool(*value),
-        Document::String(value) => serde_json::Value::String(value.clone()),
-        Document::Array(values) => {
-            serde_json::Value::Array(values.iter().map(document_to_json).collect())
-        }
-        Document::Object(values) => serde_json::Value::Object(
-            values
-                .iter()
-                .map(|(key, value)| (key.clone(), document_to_json(value)))
-                .collect(),
-        ),
-        Document::Number(Number::PosInt(value)) => serde_json::Value::Number((*value).into()),
-        Document::Number(Number::NegInt(value)) => serde_json::Value::Number((*value).into()),
-        Document::Number(Number::Float(value)) => serde_json::Number::from_f64(*value)
-            .map(serde_json::Value::Number)
-            .unwrap_or(serde_json::Value::Null),
-    }
-}
 
 #[cfg(test)]
 pub(crate) mod tests {
@@ -609,6 +630,12 @@ pub(crate) mod tests {
     /// with that error code. The model id travels in the path, percent
     /// encoded; `path` is decoded.
     pub(crate) async fn aws_loopback(status: u16, error_type: Option<&str>, body: serde_json::Value) -> tokio::task::JoinHandle<Received> {
+        aws_loopback_with(status, error_type, "application/json", body.to_string().into_bytes()).await
+    }
+
+    /// `aws_loopback` with a body of any type, such as a ConverseStream
+    /// reply.
+    pub(crate) async fn aws_loopback_with(status: u16, error_type: Option<&str>, content_type: &'static str, body: Vec<u8>) -> tokio::task::JoinHandle<Received> {
         use tokio::io::{AsyncReadExt, AsyncWriteExt};
         let listener = tokio::net::TcpListener::bind((std::net::Ipv4Addr::LOCALHOST, 0)).await.unwrap();
         let endpoint = format!("http://127.0.0.1:{}", listener.local_addr().unwrap().port());
@@ -631,10 +658,10 @@ pub(crate) mod tests {
                 }
                 assert!(count > 0, "the request ended early");
             };
-            let body = body.to_string();
             let reason = if status == 200 { "OK" } else { "Error" };
-            let reply = format!("HTTP/1.1 {status} {reason}\r\nContent-Type: application/json\r\n{error_header}Content-Length: {}\r\nConnection: close\r\n\r\n{body}", body.len());
-            stream.write_all(reply.as_bytes()).await.unwrap();
+            let head = format!("HTTP/1.1 {status} {reason}\r\nContent-Type: {content_type}\r\n{error_header}Content-Length: {}\r\nConnection: close\r\n\r\n", body.len());
+            stream.write_all(head.as_bytes()).await.unwrap();
+            stream.write_all(&body).await.unwrap();
             let text = String::from_utf8_lossy(&request).to_string();
             let line = text.lines().next().unwrap_or_default().to_string();
             Received {
@@ -654,6 +681,68 @@ pub(crate) mod tests {
             "metrics": {"latencyMs": 7}
         })
     }
+
+    /// One message of AWS's event stream: the prelude (total and header
+    /// lengths, their CRC32), string headers, the payload and the CRC32 of
+    /// everything before it.
+    pub(crate) fn event_message(headers: &[(&str, &str)], payload: &[u8]) -> Vec<u8> {
+        fn crc32(bytes: &[u8]) -> u32 {
+            let mut crc = !0u32;
+            for &byte in bytes {
+                crc ^= byte as u32;
+                for _ in 0..8 {
+                    crc = if crc & 1 != 0 { (crc >> 1) ^ 0xEDB8_8320 } else { crc >> 1 };
+                }
+            }
+            !crc
+        }
+        let mut encoded = Vec::new();
+        for (name, value) in headers {
+            encoded.push(name.len() as u8);
+            encoded.extend_from_slice(name.as_bytes());
+            encoded.push(7); // a string value
+            encoded.extend_from_slice(&(value.len() as u16).to_be_bytes());
+            encoded.extend_from_slice(value.as_bytes());
+        }
+        let total = 12 + encoded.len() + payload.len() + 4;
+        let mut message = Vec::with_capacity(total);
+        message.extend_from_slice(&(total as u32).to_be_bytes());
+        message.extend_from_slice(&(encoded.len() as u32).to_be_bytes());
+        let prelude = crc32(&message);
+        message.extend_from_slice(&prelude.to_be_bytes());
+        message.extend_from_slice(&encoded);
+        message.extend_from_slice(payload);
+        let checksum = crc32(&message);
+        message.extend_from_slice(&checksum.to_be_bytes());
+        message
+    }
+
+    /// A ConverseStream reply: each (event type, payload) as an event.
+    pub(crate) fn converse_stream(events: &[(&str, serde_json::Value)]) -> Vec<u8> {
+        events.iter().flat_map(|(kind, payload)| event_message(&[(":event-type", kind), (":content-type", "application/json"), (":message-type", "event")], payload.to_string().as_bytes())).collect()
+    }
+
+    /// An error part-way through a ConverseStream reply, as AWS sends it.
+    pub(crate) fn stream_exception(kind: &str, message: &str) -> Vec<u8> {
+        event_message(&[(":exception-type", kind), (":content-type", "application/json"), (":message-type", "exception")], json!({"message": message}).to_string().as_bytes())
+    }
+
+    /// `converse_json` as a ConverseStream reply: the text in two pieces,
+    /// then the stop reason and the same usage figures.
+    pub(crate) fn converse_stream_text(text: &str) -> Vec<u8> {
+        let (first, rest) = text.split_at(text.len() / 2);
+        let usage = converse_json(text)["usage"].clone();
+        converse_stream(&[
+            ("messageStart", json!({"role": "assistant"})),
+            ("contentBlockDelta", json!({"contentBlockIndex": 0, "delta": {"text": first}})),
+            ("contentBlockDelta", json!({"contentBlockIndex": 0, "delta": {"text": rest}})),
+            ("contentBlockStop", json!({"contentBlockIndex": 0})),
+            ("messageStop", json!({"stopReason": "end_turn"})),
+            ("metadata", json!({"usage": usage, "metrics": {"latencyMs": 7}})),
+        ])
+    }
+
+    pub(crate) const EVENT_STREAM: &str = "application/vnd.amazon.eventstream";
 
     pub(crate) fn fixture_creds(region: &str) -> AwsCredentials {
         AwsCredentials {
@@ -681,14 +770,14 @@ pub(crate) mod tests {
     /// request.
     #[tokio::test]
     async fn a_chat_request_stores_the_usage_aws_returned_for_the_model_it_sent() {
-        let server = aws_loopback(200, None, converse_json("Done.")).await;
+        let server = aws_loopback_with(200, None, EVENT_STREAM, converse_stream_text("Done.")).await;
         let db = crate::ai::cost::tests::temp_metrics_db("");
         let wire = BedrockWire::new(fixture_creds("ap-southeast-1"), "apac.anthropic.claude-haiku-4-5-20251001-v1:0");
         let round = crate::ai::cost::with_feature(crate::ai::cost::Feature::Chat, first_request(&wire, "hi", &db)).await.unwrap();
         assert!(!round.texts.is_empty() && round.calls.is_empty());
 
         let received = server.await.unwrap();
-        assert_eq!(received.path, "/model/apac.anthropic.claude-haiku-4-5-20251001-v1:0/converse");
+        assert_eq!(received.path, "/model/apac.anthropic.claude-haiku-4-5-20251001-v1:0/converse-stream");
         let rows = crate::ai::cost::tests::usage_rows(&db);
         assert_eq!(rows.len(), 1);
         assert_eq!(rows[0].model_id, "apac.anthropic.claude-haiku-4-5-20251001-v1:0", "stored against the id that was sent");
@@ -703,10 +792,14 @@ pub(crate) mod tests {
     /// tools. Storing first would leave it as chat.
     #[tokio::test]
     async fn a_chat_request_whose_reply_asks_for_a_tool_is_stored_as_tools() {
-        let mut reply = converse_json("");
-        reply["output"]["message"]["content"] = json!([{"toolUse": {"toolUseId": "tooluse_fixture_1", "name": "list_calendar_events", "input": {}}}]);
-        reply["stopReason"] = json!("tool_use");
-        let server = aws_loopback(200, None, reply).await;
+        let reply = converse_stream(&[
+            ("messageStart", json!({"role": "assistant"})),
+            ("contentBlockStart", json!({"contentBlockIndex": 0, "start": {"toolUse": {"toolUseId": "tooluse_fixture_1", "name": "list_calendar_events"}}})),
+            ("contentBlockStop", json!({"contentBlockIndex": 0})),
+            ("messageStop", json!({"stopReason": "tool_use"})),
+            ("metadata", json!({"usage": converse_json("")["usage"], "metrics": {"latencyMs": 7}})),
+        ]);
+        let server = aws_loopback_with(200, None, EVENT_STREAM, reply).await;
         let db = crate::ai::cost::tests::temp_metrics_db("");
         let wire = BedrockWire::new(fixture_creds("ap-southeast-1"), "apac.anthropic.claude-haiku-4-5-20251001-v1:0");
         let round = crate::ai::cost::with_feature(crate::ai::cost::Feature::Chat, first_request(&wire, "what is on today?", &db)).await.unwrap();
@@ -731,9 +824,13 @@ pub(crate) mod tests {
     /// zeros.
     #[tokio::test]
     async fn a_chat_reply_without_usage_stores_nothing() {
-        let mut reply = converse_json("Done.");
-        reply.as_object_mut().unwrap().remove("usage");
-        let server = aws_loopback(200, None, reply).await;
+        let reply = converse_stream(&[
+            ("messageStart", json!({"role": "assistant"})),
+            ("contentBlockDelta", json!({"contentBlockIndex": 0, "delta": {"text": "Done."}})),
+            ("messageStop", json!({"stopReason": "end_turn"})),
+            ("metadata", json!({"metrics": {"latencyMs": 7}})),
+        ]);
+        let server = aws_loopback_with(200, None, EVENT_STREAM, reply).await;
         let db = crate::ai::cost::tests::temp_metrics_db("");
         let wire = BedrockWire::new(fixture_creds("us-east-1"), "us.amazon.nova-pro-v1:0");
         // Whether the SDK accepts a reply without usage or calls it

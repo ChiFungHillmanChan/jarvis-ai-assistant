@@ -1147,8 +1147,28 @@ pub(crate) mod bedrock_wire {
         body
     }
 
+    /// A ConverseStream reply holding the Converse message `content`: each
+    /// block streamed whole, then the stop reason and the usage.
     fn converse(content: Value, stop: &str, usage: Value) -> Reply {
-        Reply::json(200, json!({"output": {"message": {"role": "assistant", "content": content}}, "stopReason": stop, "usage": usage, "metrics": {"latencyMs": 5}}))
+        let mut events = vec![("messageStart", json!({"role": "assistant"}))];
+        for (index, block) in content.as_array().unwrap().iter().enumerate() {
+            match block["text"].as_str() {
+                Some(text) => events.push(("contentBlockDelta", json!({"contentBlockIndex": index, "delta": {"text": text}}))),
+                None => {
+                    let tool = &block["toolUse"];
+                    events.push(("contentBlockStart", json!({"contentBlockIndex": index, "start": {"toolUse": {"toolUseId": tool["toolUseId"], "name": tool["name"]}}})));
+                    events.push(("contentBlockDelta", json!({"contentBlockIndex": index, "delta": {"toolUse": {"input": tool["input"].to_string()}}})));
+                }
+            }
+            events.push(("contentBlockStop", json!({"contentBlockIndex": index})));
+        }
+        events.push(("messageStop", json!({"stopReason": stop})));
+        events.push(("metadata", json!({"usage": usage, "metrics": {"latencyMs": 5}})));
+        stream(&events)
+    }
+
+    fn stream(events: &[(&str, Value)]) -> Reply {
+        Reply::raw(200, crate::ai::bedrock::tests::EVENT_STREAM, crate::ai::bedrock::tests::converse_stream(events))
     }
 
     fn usage(input: i64, output: i64) -> Value {
@@ -1162,13 +1182,13 @@ pub(crate) mod bedrock_wire {
     #[test]
     fn a_text_turn() {
         with_credentials(|db| async move {
-            let server = serve(vec![Reply::json(200, crate::ai::bedrock::tests::converse_json("Hello."))]).await;
+            let server = serve(vec![Reply::raw(200, crate::ai::bedrock::tests::EVENT_STREAM, crate::ai::bedrock::tests::converse_stream_text("Hello."))]).await;
             let _aws = point_bedrock_at(&server.base);
             let turn = run_turn(&AiRouter::new("gemini_primary"), row(), &[("assistant", "Earlier"), ("user", "Hi"), ("assistant", " "), ("user", "What is on today?")], &db, Workload::Tools, false).await;
             assert_eq!(turn.reply.as_deref(), Ok("Hello."));
             let seen = server.seen();
             assert_eq!(seen.len(), 1);
-            assert_eq!((seen[0].method.as_str(), seen[0].path.as_str()), ("POST", format!("/model/{MODEL}/converse").as_str()));
+            assert_eq!((seen[0].method.as_str(), seen[0].path.as_str()), ("POST", format!("/model/{MODEL}/converse-stream").as_str()));
             assert!(seen[0].header("authorization").unwrap().starts_with("AWS4-HMAC-SHA256 Credential=AKIAFIXTURENOTREAL/"));
             // A leading assistant run is dropped, an empty row too, and the
             // user rows either side of it merge.
@@ -1181,9 +1201,10 @@ pub(crate) mod bedrock_wire {
                     "inferenceConfig": {"maxTokens": 4096, "temperature": "<temperature>"}
                 })
             );
-            // Converse is not streamed: the whole answer arrives at once.
-            assert_eq!(turn.window_lines(), vec![status("Composing response...", "responding"), token("Hello."), token_done()]);
-            assert_eq!(turn.voice, vec!["text: Hello."]);
+            // P07: ConverseStream, so the answer is shown and spoken as it
+            // comes (before: Converse, the whole answer at once).
+            assert_eq!(turn.window_lines(), vec![status("Composing response...", "responding"), token("Hel"), token("lo."), token_done()]);
+            assert_eq!(turn.voice, vec!["text: Hel", "text: lo."]);
             assert_eq!(rows(&db), vec![one("bedrock", "chat", (1320, 45, 800, 400))]);
         });
     }
@@ -1273,6 +1294,54 @@ pub(crate) mod bedrock_wire {
             assert!(error.contains("ValidationException"), "{error}");
             assert!(rows(&db).is_empty());
             assert!(turn.window.is_empty());
+        });
+    }
+
+    /// A call's input can come in several pieces; it runs once whole.
+    #[test]
+    fn a_call_streamed_in_pieces() {
+        with_credentials(|db| async move {
+            let server = serve(vec![
+                stream(&[
+                    ("messageStart", json!({"role": "assistant"})),
+                    ("contentBlockStart", json!({"contentBlockIndex": 0, "start": {"toolUse": {"toolUseId": "tu_1", "name": "remember"}}})),
+                    ("contentBlockDelta", json!({"contentBlockIndex": 0, "delta": {"toolUse": {"input": "{\"content\":"}}})),
+                    ("contentBlockDelta", json!({"contentBlockIndex": 0, "delta": {"toolUse": {"input": "\"Kenny is my accountant\"}"}}})),
+                    ("contentBlockStop", json!({"contentBlockIndex": 0})),
+                    ("messageStop", json!({"stopReason": "tool_use"})),
+                    ("metadata", json!({"usage": usage(100, 10)})),
+                ]),
+                converse(json!([{"text": "Saved."}]), "end_turn", usage(150, 5)),
+            ])
+            .await;
+            let _aws = point_bedrock_at(&server.base);
+            let turn = run_turn(&AiRouter::new("gemini_primary"), row(), &[("user", "Remember Kenny is my accountant")], &db, Workload::Tools, true).await;
+            assert_eq!(turn.reply.as_deref(), Ok("Saved."));
+            assert_eq!(memories(&db), vec!["Kenny is my accountant"]);
+            let seen = server.seen();
+            assert_eq!(seen[1].body["messages"][1], json!({"role": "assistant", "content": [{"toolUse": {"toolUseId": "tu_1", "name": "remember", "input": {"content": "Kenny is my accountant"}}}]}));
+        });
+    }
+
+    /// An error part-way through the stream ends the turn: the window goes
+    /// back to idle, and with no usage figures received nothing is stored.
+    #[test]
+    fn a_broken_stream() {
+        with_credentials(|db| async move {
+            let mut body = crate::ai::bedrock::tests::converse_stream(&[
+                ("messageStart", json!({"role": "assistant"})),
+                ("contentBlockDelta", json!({"contentBlockIndex": 0, "delta": {"text": "Partly"}})),
+            ]);
+            body.extend(crate::ai::bedrock::tests::stream_exception("modelStreamErrorException", "The model stopped."));
+            let server = serve(vec![Reply::raw(200, crate::ai::bedrock::tests::EVENT_STREAM, body)]).await;
+            let _aws = point_bedrock_at(&server.base);
+            let turn = run_turn(&AiRouter::new("gemini_primary"), row(), &[("user", "Hi")], &db, Workload::Tools, false).await;
+            let error = turn.reply.clone().unwrap_err();
+            assert!(error.starts_with("Bedrock converse: "), "{error}");
+            assert!(error.contains("ModelStreamErrorException"), "{error}");
+            assert_eq!(server.seen().len(), 1);
+            assert_eq!(turn.window_lines(), vec![status("Composing response...", "responding"), token("Partly"), "chat-state {\"state\":\"idle\"}".to_string()]);
+            assert!(rows(&db).is_empty());
         });
     }
 
