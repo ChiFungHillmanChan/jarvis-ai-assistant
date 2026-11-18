@@ -1704,6 +1704,43 @@ pub(crate) mod bedrock_wire {
             assert_eq!(second["messages"][2]["content"][0]["toolResult"]["toolUseId"], "tu_1");
         });
     }
+
+    /// A reply that stops for tools but names none still ends its round:
+    /// what it said goes back, with no results, and the model is asked
+    /// again (as on main; see "Found and not fixed").
+    #[test]
+    fn a_tool_use_stop_without_a_call_runs_the_round() {
+        with_credentials(|db| async move {
+            let server = serve(vec![
+                converse(json!([{"text": "Checking."}]), "tool_use", usage(100, 10)),
+                converse(json!([{"text": "Nothing to do."}]), "end_turn", usage(150, 5)),
+            ])
+            .await;
+            let _aws = point_bedrock_at(&server.base);
+            let turn = run_turn(&AiRouter::new("gemini_primary"), row(), &[("user", "Hi")], &db, Workload::Tools, true).await;
+            assert_eq!(turn.reply.as_deref(), Ok("Nothing to do."));
+            let seen = server.seen();
+            assert_eq!(seen.len(), 2);
+            assert_eq!(&seen[1].body["messages"].as_array().unwrap()[1..], &[json!({"role": "assistant", "content": [{"text": "Checking."}]}), json!({"role": "user", "content": []})]);
+        });
+    }
+
+    /// An empty text block is not sent back: Converse refuses one.
+    #[test]
+    fn empty_text_is_not_sent_back() {
+        with_credentials(|db| async move {
+            let call = json!({"toolUse": {"toolUseId": "tu_1", "name": "remember", "input": {"content": "Kenny is my accountant"}}});
+            let server = serve(vec![
+                converse(json!([{"text": ""}, call.clone()]), "tool_use", usage(100, 10)),
+                converse(json!([{"text": "Saved."}]), "end_turn", usage(150, 5)),
+            ])
+            .await;
+            let _aws = point_bedrock_at(&server.base);
+            let turn = run_turn(&AiRouter::new("gemini_primary"), row(), &[("user", "Remember Kenny is my accountant")], &db, Workload::Tools, true).await;
+            assert_eq!(turn.reply.as_deref(), Ok("Saved."));
+            assert_eq!(server.seen()[1].body["messages"][1], json!({"role": "assistant", "content": [call]}));
+        });
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -2094,6 +2131,26 @@ mod local_wire {
         let native = detected(ToolCapability::Native);
         let ((), without_tools) = crate::ai::local::noting_no_tools(async { let _ = native.prepare(String::new(), Vec::new(), &[]); }).await;
         assert!(!without_tools, "detected as native");
+    }
+
+    /// A turn on this Mac is stored only when it succeeds: a turn that
+    /// fails after a tool round stores nothing, though the first request
+    /// reported usage.
+    #[tokio::test]
+    async fn a_turn_that_fails_after_a_tool_round_stores_nothing() {
+        let server = serve(vec![
+            Reply::openai_sse(&[
+                json!({"choices": [{"delta": {"tool_calls": [{"index": 0, "id": "call_1", "type": "function", "function": {"name": "remember", "arguments": REMEMBER_ARGS}}]}, "finish_reason": "tool_calls"}]}),
+                json!({"choices": [], "usage": {"prompt_tokens": 100, "completion_tokens": 10}}),
+            ]),
+            Reply::json(500, json!({"error": "model unloaded"})),
+        ])
+        .await;
+        let db = crate::db::test_database();
+        let turn = run_turn(&router(&server.base, BackendType::Vllm), row("my-model"), &[("user", "Remember Kenny is my accountant")], &db, Workload::Tools, true).await;
+        assert!(turn.reply.is_err());
+        assert_eq!(server.seen().len(), 2);
+        assert!(rows(&db).is_empty());
     }
 }
 
