@@ -6,10 +6,17 @@
 //! Error bodies can echo the request (mail text), so they are never
 //! surfaced: only the provider and the HTTP status are.
 use super::cost::Feature;
-use super::{compat, gemini, AiRouter, ProviderChainEntry, Workload};
+use super::openai::{OpenAiWire, Target};
+use super::provider::Wire;
+use super::{compat, AiRouter, ProviderChainEntry, Workload};
 use crate::db::Database;
-use serde_json::{json, Value};
+use serde_json::Value;
 use std::time::Instant;
+// Each wire's own plain request format, which the tests below check.
+#[cfg(test)]
+use serde_json::json;
+#[cfg(test)]
+use super::{bedrock::bedrock_result, claude::{claude_body, claude_result}, gemini::gemini_result, openai::{chat_completions_body, chat_completions_result}};
 
 pub struct Request<'a> {
     pub system: &'a str,
@@ -123,84 +130,42 @@ fn record(db: &Database, provider: &str, feature: Feature, done: &mut Completion
     super::cost::record_inference(db, provider, feature, Workload::Volume, &done.model, done.input_tokens, done.output_tokens, done.cached_tokens, done.cache_write_tokens, latency_ms);
 }
 
+/// The request on one chain row: its key and model as the row says, then
+/// the wire's own plain request.
 async fn complete_one(router: &AiRouter, db: &Database, entry: &ProviderChainEntry, request: &Request<'_>) -> Result<Completion, String> {
-    let client = compat::client()?;
+    let language = super::bedrock::UiLanguage::read(db);
     match entry.provider_type.as_str() {
         "openai" => {
-            let (url, key, model, name) = match entry.base_url.as_deref() {
+            let wire = match entry.base_url.as_deref() {
                 Some(base) => {
                     let key = router.compat_key(base).await.ok_or_else(|| format!("尚未設定 {} API 密鑰。", compat::label(base)))?;
                     let model = entry.model_id.clone().filter(|m| !m.trim().is_empty()).ok_or_else(|| format!("尚未為 {} 選擇模型。", compat::label(base)))?;
-                    (format!("{base}/chat/completions"), key, model, compat::label(base))
+                    OpenAiWire::new(&key, Target { base_url: Some(base), model: Some(&model), deeper: None })?
                 }
                 None => {
                     let key = router.openai_key.clone().ok_or("尚未設定 OpenAI API 密鑰。")?;
-                    (format!("{}/chat/completions", super::api_base("https://api.openai.com/v1")), key, entry.model_id.clone().unwrap_or_else(crate::ai::models::openai_default), "OpenAI".to_string())
+                    OpenAiWire::new(&key, Target { base_url: None, model: entry.model_id.as_deref(), deeper: None })?
                 }
             };
-            let body = chat_completions_body(&model, request, entry.base_url.is_none());
-            let value = post(&client, &url, &name, |r| r.bearer_auth(&key), &body).await?;
-            chat_completions_result(&value, name, model)
+            wire.complete(request, language).await
         }
         "local" => {
             let endpoint_id = entry.endpoint_id.as_deref().unwrap_or_default();
             let endpoint = router.find_endpoint(endpoint_id).ok_or("本機 AI 端點不存在或已停用。")?;
             let model = entry.model_id.clone().ok_or("尚未選擇本機模型。")?;
-            let base = endpoint.url.trim_end_matches('/');
-            if matches!(endpoint.backend_type, super::local::backend::BackendType::Ollama) {
-                // Ollama's OpenAI endpoint keeps its small default context and
-                // drops the start of a long prompt (the instructions) silently.
-                let mut messages = Vec::new();
-                if !request.system.is_empty() {
-                    messages.push(json!({"role": "system", "content": request.system}));
-                }
-                messages.push(json!({"role": "user", "content": request.user}));
-                // The context window asked of Ollama (the registry's
-                // completion_context_tokens): a triaged email (6,000
-                // characters), its instructions and the sender's known
-                // follow-ups fit with room to answer.
-                let mut body = json!({"model": model, "messages": messages, "stream": false, "options": {"num_ctx": crate::ai::models::limits("ollama").completion_context_tokens.unwrap_or_default(), "num_predict": request.max_tokens}});
-                if request.json {
-                    body["format"] = json!("json");
-                }
-                let value = post(&client, &format!("{base}/api/chat"), "Ollama", |r| r, &body).await?;
-                let text = value.pointer("/message/content").and_then(Value::as_str).unwrap_or_default().to_string();
-                return done(text, "Ollama".into(), model, value.get("prompt_eval_count"), value.get("eval_count"));
-            }
-            let body = chat_completions_body(&model, request, false);
-            let key = endpoint.api_key.clone();
-            let value = post(&client, &format!("{base}/v1/chat/completions"), "本機 AI", |r| match &key {
-                Some(key) if !key.is_empty() => r.bearer_auth(key),
-                _ => r,
-            }, &body).await?;
-            chat_completions_result(&value, "本機 AI".into(), model)
+            OpenAiWire::local(super::local::LocalChat::plain(endpoint.clone()), &model).complete(request, language).await
         }
         "gemini" => {
             let key = router.gemini_key.clone().ok_or("尚未設定 Gemini API 密鑰。")?;
             let model = super::gemini_model_for(entry.model_id.as_deref(), Workload::Volume);
-            let mut body = json!({
-                "contents": [{"role": "user", "parts": [{"text": request.user}]}],
-                "generationConfig": {"maxOutputTokens": request.max_tokens},
-            });
-            if !request.system.is_empty() {
-                body["systemInstruction"] = json!({"parts": [{"text": request.system}]});
-            }
-            if request.json {
-                body["generationConfig"]["responseMimeType"] = json!("application/json");
-            }
-            let url = format!("{}/models/{model}:generateContent", super::api_base(gemini::API_BASE));
-            let value = post(&client, &url, "Gemini", |r| r.header("x-goog-api-key", &key), &body).await?;
-            gemini_result(&value, model)
+            super::gemini::GeminiWire::new(&key, &model, None).complete(request, language).await
         }
         "claude" => {
             let key = router.claude_key.clone().ok_or("尚未設定 Claude API 密鑰。")?;
             let model = entry.model_id.clone().unwrap_or_else(crate::ai::models::claude_default);
-            let body = claude_body(&model, request);
-            let value = post(&client, &format!("{}/v1/messages", super::api_base("https://api.anthropic.com")), "Claude", |r| r.header("x-api-key", &key).header("anthropic-version", crate::ai::models::anthropic_version()), &body).await?;
-            claude_result(&value, model)
+            super::claude::ClaudeWire::new(&key, &model).complete(request, language).await
         }
         "bedrock" => {
-            let language = super::bedrock::UiLanguage::read(db);
             // A saved row whose Keychain item is gone (after a restore, say)
             // fails here. The user is asked to save the credentials again;
             // the Keychain or database text goes to the log only.
@@ -220,63 +185,9 @@ async fn complete_one(router: &AiRouter, db: &Database, entry: &ProviderChainEnt
             // the stored profile, and the two agree). This id is the one sent
             // and the one its row is stored against.
             let model = super::apply_inference_profile(&super::bedrock_model(entry), &creds.inference_profile);
-            let plain = super::bedrock::plain_request(request.system, request.user, request.json, request.max_tokens, language)?;
-            let output = super::bedrock::converse_plain(&creds, &model, plain, language).await?;
-            Ok(bedrock_result(&output, model))
+            super::bedrock::BedrockWire::new(creds, &model).complete(request, language).await
         }
         other => Err(format!("{other} 暫不支援這項功能，請在設定中改用其他 AI。")),
-    }
-}
-
-/// A JSON request to Claude asks for the object in words
-/// (`bedrock::JSON_INSTRUCTION`), as Bedrock does, and the reply is checked
-/// after its row is stored (`store_then_check`). No tool, no forced
-/// `tool_choice` and no prefilled reply: Claude's current models refuse a
-/// forced tool choice and a prefill with a 400 (P06 fix round 4, which
-/// replaced P02's forced tool call).
-fn claude_body(model: &str, request: &Request<'_>) -> Value {
-    let mut body = json!({
-        "model": model,
-        "max_tokens": request.max_tokens,
-        "messages": [{"role": "user", "content": request.user}],
-    });
-    let system = match (request.system.is_empty(), request.json) {
-        (true, false) => None,
-        (true, true) => Some(super::bedrock::JSON_INSTRUCTION.to_string()),
-        (false, false) => Some(request.system.to_string()),
-        (false, true) => Some(format!("{}\n\n{}", request.system, super::bedrock::JSON_INSTRUCTION)),
-    };
-    if let Some(system) = system {
-        body["system"] = json!(system);
-    }
-    body
-}
-
-/// The reply's text blocks.
-fn claude_result(value: &Value, model: String) -> Result<Completion, String> {
-    let blocks = value.get("content").and_then(Value::as_array).cloned().unwrap_or_default();
-    let text = blocks.iter().filter(|b| b.get("type").and_then(Value::as_str) == Some("text")).filter_map(|b| b.get("text").and_then(Value::as_str)).collect::<String>();
-    done(text, "Claude".into(), model, value.pointer("/usage/input_tokens"), value.pointer("/usage/output_tokens"))
-}
-
-/// The reply as Bedrock wrote it, with the usage AWS returned for it. An
-/// empty reply and a JSON request are checked after the row is stored
-/// (`store_then_check`).
-fn bedrock_result(output: &aws_sdk_bedrockruntime::operation::converse::ConverseOutput, model: String) -> Completion {
-    let (text, usage) = super::bedrock::plain_result(output);
-    let usage_missing = usage.is_none();
-    let usage = usage.unwrap_or_default();
-    Completion {
-        text,
-        provider: "Bedrock".into(),
-        model,
-        input_tokens: usage.input,
-        output_tokens: usage.output,
-        cached_tokens: usage.cache_read,
-        cache_write_tokens: usage.cache_write,
-        usage_missing,
-        cost_micro: None,
-        price_unknown: false,
     }
 }
 
@@ -288,44 +199,8 @@ fn json_object_text(text: &str) -> Option<String> {
     value.is_object().then(|| value.to_string())
 }
 
-/// OpenAI Chat Completions body. api.openai.com takes
-/// `max_completion_tokens`; compatible services and Ollama take `max_tokens`.
-fn chat_completions_body(model: &str, request: &Request<'_>, official: bool) -> Value {
-    let mut messages = Vec::new();
-    if !request.system.is_empty() {
-        messages.push(json!({"role": "system", "content": request.system}));
-    }
-    messages.push(json!({"role": "user", "content": request.user}));
-    let mut body = json!({"model": model, "messages": messages});
-    body[if official { "max_completion_tokens" } else { "max_tokens" }] = json!(request.max_tokens);
-    if request.json {
-        body["response_format"] = json!({"type": "json_object"});
-    }
-    body
-}
-
-fn chat_completions_result(value: &Value, provider: String, model: String) -> Result<Completion, String> {
-    let text = value.pointer("/choices/0/message/content").and_then(Value::as_str).unwrap_or_default().to_string();
-    let mut done = done(text, provider, model, value.pointer("/usage/prompt_tokens"), value.pointer("/usage/completion_tokens"))?;
-    done.cached_tokens = value.pointer("/usage/prompt_tokens_details/cached_tokens").and_then(Value::as_i64).unwrap_or(0);
-    Ok(done)
-}
-
-fn gemini_result(value: &Value, model: String) -> Result<Completion, String> {
-    let text = value
-        .pointer("/candidates/0/content/parts")
-        .and_then(Value::as_array)
-        .map(|parts| parts.iter().filter(|p| p.get("thought").and_then(Value::as_bool) != Some(true)).filter_map(|p| p.get("text").and_then(Value::as_str)).collect::<String>())
-        .unwrap_or_default();
-    let usage = |field: &str| value.pointer(&format!("/usageMetadata/{field}")).and_then(Value::as_i64).unwrap_or(0);
-    let mut done = done(text, "Gemini".into(), model, value.pointer("/usageMetadata/promptTokenCount"), value.pointer("/usageMetadata/candidatesTokenCount"))?;
-    // Thinking is billed as output; candidatesTokenCount leaves it out.
-    done.output_tokens += usage("thoughtsTokenCount");
-    done.cached_tokens = usage("cachedContentTokenCount");
-    Ok(done)
-}
-
-fn done(text: String, provider: String, model: String, input: Option<&Value>, output: Option<&Value>) -> Result<Completion, String> {
+/// A reply's text and the usage it reported. An empty reply is an error.
+pub(crate) fn done(text: String, provider: String, model: String, input: Option<&Value>, output: Option<&Value>) -> Result<Completion, String> {
     if text.trim().is_empty() {
         return Err(format!("{provider} 沒有回覆內容。"));
     }
@@ -343,7 +218,9 @@ fn done(text: String, provider: String, model: String, input: Option<&Value>, ou
     })
 }
 
-async fn post(
+/// One plain request: the reply's JSON, or what went wrong in the user's
+/// terms.
+pub(crate) async fn post(
     client: &reqwest::Client,
     url: &str,
     name: &str,

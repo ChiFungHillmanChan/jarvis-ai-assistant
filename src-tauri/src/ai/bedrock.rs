@@ -11,6 +11,7 @@ use aws_smithy_types::Document;
 use serde_json::json;
 use std::collections::{BTreeMap, HashMap};
 use super::provider::{Call, ChatRequest, Event, Events, Metering, Outcome, Round, RoundError, Wire, SKIPPED};
+use super::complete::Completion;
 
 /// The Bedrock model: the registry's default. A debug build (development
 /// and the native QA app) may override it with AWS_BEDROCK_MODEL_ID; a
@@ -435,6 +436,35 @@ impl Wire for BedrockWire {
         }
         conversation.messages.push(Message::builder().role(ConversationRole::User).set_content(Some(blocks)).build().map_err(|e| e.to_string())?);
         Ok(())
+    }
+
+    /// A plain Converse request: not streamed, with no tools and no cache
+    /// points.
+    async fn complete(&self, request: &super::complete::Request<'_>, language: UiLanguage) -> Result<Completion, String> {
+        let plain = plain_request(request.system, request.user, request.json, request.max_tokens, language)?;
+        let output = converse_plain(&self.creds, &self.model, plain, language).await?;
+        Ok(bedrock_result(&output, self.model.clone()))
+    }
+}
+
+/// The reply as Bedrock wrote it, with the usage AWS returned for it. An
+/// empty reply and a JSON request are checked after the row is stored
+/// (`store_then_check`).
+pub(crate) fn bedrock_result(output: &aws_sdk_bedrockruntime::operation::converse::ConverseOutput, model: String) -> Completion {
+    let (text, usage) = super::bedrock::plain_result(output);
+    let usage_missing = usage.is_none();
+    let usage = usage.unwrap_or_default();
+    Completion {
+        text,
+        provider: "Bedrock".into(),
+        model,
+        input_tokens: usage.input,
+        output_tokens: usage.output,
+        cached_tokens: usage.cache_read,
+        cache_write_tokens: usage.cache_write,
+        usage_missing,
+        cost_micro: None,
+        price_unknown: false,
     }
 }
 

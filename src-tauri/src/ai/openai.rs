@@ -5,6 +5,8 @@ use serde::{Deserialize, Serialize};
 use serde_json::json;
 use std::collections::HashMap;
 use super::provider::{Call, ChatRequest, Event, Events, Metering, Outcome, Round, RoundError, Wire, SKIPPED};
+use super::complete::{Completion, Request as PlainRequest};
+use super::bedrock::UiLanguage;
 
 #[derive(Serialize)]
 struct OpenAIRequest {
@@ -514,6 +516,40 @@ impl Wire for OpenAiWire {
         }
         Ok(text)
     }
+
+    async fn complete(&self, request: &PlainRequest<'_>, _language: UiLanguage) -> Result<Completion, String> {
+        let client = super::compat::client()?;
+        if let Some(local) = &self.local {
+            return local.complete(&client, &self.model, request).await;
+        }
+        let name = self.name();
+        let body = chat_completions_body(&self.model, request, self.base_url.is_none());
+        let value = super::complete::post(&client, &self.target().url(), &name, |r| r.bearer_auth(&self.key), &body).await?;
+        chat_completions_result(&value, name, self.model.clone())
+    }
+}
+
+/// OpenAI Chat Completions body. api.openai.com takes
+/// `max_completion_tokens`; compatible services and Ollama take `max_tokens`.
+pub(crate) fn chat_completions_body(model: &str, request: &PlainRequest<'_>, official: bool) -> serde_json::Value {
+    let mut messages = Vec::new();
+    if !request.system.is_empty() {
+        messages.push(json!({"role": "system", "content": request.system}));
+    }
+    messages.push(json!({"role": "user", "content": request.user}));
+    let mut body = json!({"model": model, "messages": messages});
+    body[if official { "max_completion_tokens" } else { "max_tokens" }] = json!(request.max_tokens);
+    if request.json {
+        body["response_format"] = json!({"type": "json_object"});
+    }
+    body
+}
+
+pub(crate) fn chat_completions_result(value: &serde_json::Value, provider: String, model: String) -> Result<Completion, String> {
+    let text = value.pointer("/choices/0/message/content").and_then(serde_json::Value::as_str).unwrap_or_default().to_string();
+    let mut done = super::complete::done(text, provider, model, value.pointer("/usage/prompt_tokens"), value.pointer("/usage/completion_tokens"))?;
+    done.cached_tokens = value.pointer("/usage/prompt_tokens_details/cached_tokens").and_then(serde_json::Value::as_i64).unwrap_or(0);
+    Ok(done)
 }
 
 type ToolSlots = HashMap<usize, (String, String, String, Option<serde_json::Value>)>;

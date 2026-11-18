@@ -5,6 +5,8 @@ use serde::{Deserialize, Serialize};
 use serde_json::json;
 use std::collections::BTreeMap;
 use super::provider::{Call, ChatRequest, Event, Events, Metering, Outcome, Round, RoundError, Wire, SKIPPED};
+use super::complete::{Completion, Request as PlainRequest};
+use super::bedrock::UiLanguage;
 use super::capability::Deeper;
 
 #[derive(Serialize)]
@@ -480,6 +482,45 @@ impl Wire for ClaudeWire {
     fn shows_thinking(&self) -> bool {
         true
     }
+
+    async fn complete(&self, request: &PlainRequest<'_>, _language: UiLanguage) -> Result<Completion, String> {
+        let client = super::compat::client()?;
+        let body = claude_body(&self.model, request);
+        let url = format!("{}/v1/messages", super::api_base("https://api.anthropic.com"));
+        let value = super::complete::post(&client, &url, "Claude", |r| r.header("x-api-key", &self.key).header("anthropic-version", crate::ai::models::anthropic_version()), &body).await?;
+        claude_result(&value, self.model.clone())
+    }
+}
+
+/// A JSON request to Claude asks for the object in words
+/// (`bedrock::JSON_INSTRUCTION`), as Bedrock does, and the reply is checked
+/// after its row is stored (`store_then_check`). No tool, no forced
+/// `tool_choice` and no prefilled reply: Claude's current models refuse a
+/// forced tool choice and a prefill with a 400 (P06 fix round 4, which
+/// replaced P02's forced tool call).
+pub(crate) fn claude_body(model: &str, request: &PlainRequest<'_>) -> serde_json::Value {
+    let mut body = json!({
+        "model": model,
+        "max_tokens": request.max_tokens,
+        "messages": [{"role": "user", "content": request.user}],
+    });
+    let system = match (request.system.is_empty(), request.json) {
+        (true, false) => None,
+        (true, true) => Some(super::bedrock::JSON_INSTRUCTION.to_string()),
+        (false, false) => Some(request.system.to_string()),
+        (false, true) => Some(format!("{}\n\n{}", request.system, super::bedrock::JSON_INSTRUCTION)),
+    };
+    if let Some(system) = system {
+        body["system"] = json!(system);
+    }
+    body
+}
+
+/// The reply's text blocks.
+pub(crate) fn claude_result(value: &serde_json::Value, model: String) -> Result<Completion, String> {
+    let blocks = value.get("content").and_then(serde_json::Value::as_array).cloned().unwrap_or_default();
+    let text = blocks.iter().filter(|b| b.get("type").and_then(serde_json::Value::as_str) == Some("text")).filter_map(|b| b.get("text").and_then(serde_json::Value::as_str)).collect::<String>();
+    super::complete::done(text, "Claude".into(), model, value.pointer("/usage/input_tokens"), value.pointer("/usage/output_tokens"))
 }
 
 #[cfg(test)]

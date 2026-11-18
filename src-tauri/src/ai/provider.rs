@@ -208,6 +208,14 @@ pub(crate) trait Wire: Send + Sync {
     fn schema_rules(&self) -> &'static SchemaRules {
         &SchemaRules::JSON_SCHEMA
     }
+
+    /// One plain request for a feature that is not a chat turn (mail
+    /// analysis, mail sorting, the one-word check): no tools, not streamed,
+    /// with this provider's body as it was before the interface. With
+    /// `request.json` the reply is asked to be one JSON object, by the
+    /// provider's own switch where it has one; the prompt says so too.
+    /// `language` is that of the errors a user can see.
+    async fn complete(&self, request: &super::complete::Request<'_>, language: super::bedrock::UiLanguage) -> Result<super::complete::Completion, String>;
 }
 
 /// What one provider accepts in a tool's parameters: P02's Gemini

@@ -4,6 +4,8 @@ use reqwest::Client;
 use serde::{Deserialize, Serialize};
 use serde_json::json;
 use super::provider::{Call, ChatRequest, Event, Events, Metering, Outcome, Round, RoundError, SchemaRules, Wire, SKIPPED};
+use super::complete::{Completion, Request as PlainRequest};
+use super::bedrock::UiLanguage;
 
 pub const API_BASE: &str = "https://generativelanguage.googleapis.com/v1beta";
 
@@ -355,6 +357,37 @@ impl Wire for GeminiWire {
         );
         Err(empty_reply_error(&self.model, round.stop.as_deref()))
     }
+
+    async fn complete(&self, request: &PlainRequest<'_>, _language: UiLanguage) -> Result<Completion, String> {
+        let client = super::compat::client()?;
+        let mut body = json!({
+            "contents": [{"role": "user", "parts": [{"text": request.user}]}],
+            "generationConfig": {"maxOutputTokens": request.max_tokens},
+        });
+        if !request.system.is_empty() {
+            body["systemInstruction"] = json!({"parts": [{"text": request.system}]});
+        }
+        if request.json {
+            body["generationConfig"]["responseMimeType"] = json!("application/json");
+        }
+        let url = format!("{}/models/{}:generateContent", super::api_base(API_BASE), self.model);
+        let value = super::complete::post(&client, &url, "Gemini", |r| r.header("x-goog-api-key", &self.key), &body).await?;
+        gemini_result(&value, self.model.clone())
+    }
+}
+
+pub(crate) fn gemini_result(value: &serde_json::Value, model: String) -> Result<Completion, String> {
+    let text = value
+        .pointer("/candidates/0/content/parts")
+        .and_then(serde_json::Value::as_array)
+        .map(|parts| parts.iter().filter(|p| p.get("thought").and_then(serde_json::Value::as_bool) != Some(true)).filter_map(|p| p.get("text").and_then(serde_json::Value::as_str)).collect::<String>())
+        .unwrap_or_default();
+    let usage = |field: &str| value.pointer(&format!("/usageMetadata/{field}")).and_then(serde_json::Value::as_i64).unwrap_or(0);
+    let mut done = super::complete::done(text, "Gemini".into(), model, value.pointer("/usageMetadata/promptTokenCount"), value.pointer("/usageMetadata/candidatesTokenCount"))?;
+    // Thinking is billed as output; candidatesTokenCount leaves it out.
+    done.output_tokens += usage("thoughtsTokenCount");
+    done.cached_tokens = usage("cachedContentTokenCount");
+    Ok(done)
 }
 
 /// Map persisted `(role, content)` rows to Gemini contents. Rows whose content

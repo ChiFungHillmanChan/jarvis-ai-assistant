@@ -103,6 +103,44 @@ impl LocalChat {
         LocalChat { endpoint, capability, context_length }
     }
 
+    /// A model on `endpoint` for plain requests, which send no tools and
+    /// set their own context.
+    pub(crate) fn plain(endpoint: LocalEndpoint) -> Self {
+        LocalChat { endpoint, capability: ToolCapability::ChatOnly, context_length: 0 }
+    }
+
+    /// One plain request. Ollama's own endpoint, because its OpenAI one
+    /// keeps its small default context and drops the start of a long prompt
+    /// (the instructions) silently; other servers' OpenAI-compatible one.
+    pub(crate) async fn complete(&self, client: &Client, model: &str, request: &crate::ai::complete::Request<'_>) -> Result<crate::ai::complete::Completion, String> {
+        let base = self.endpoint.url.trim_end_matches('/');
+        if matches!(self.endpoint.backend_type, BackendType::Ollama) {
+            let mut messages = Vec::new();
+            if !request.system.is_empty() {
+                messages.push(json!({"role": "system", "content": request.system}));
+            }
+            messages.push(json!({"role": "user", "content": request.user}));
+            // The context window asked of Ollama (the registry's
+            // completion_context_tokens): a triaged email (6,000
+            // characters), its instructions and the sender's known
+            // follow-ups fit with room to answer.
+            let mut body = json!({"model": model, "messages": messages, "stream": false, "options": {"num_ctx": crate::ai::models::limits("ollama").completion_context_tokens.unwrap_or_default(), "num_predict": request.max_tokens}});
+            if request.json {
+                body["format"] = json!("json");
+            }
+            let value = crate::ai::complete::post(client, &format!("{base}/api/chat"), "Ollama", |r| r, &body).await?;
+            let text = value.pointer("/message/content").and_then(serde_json::Value::as_str).unwrap_or_default().to_string();
+            return crate::ai::complete::done(text, "Ollama".into(), model.to_string(), value.get("prompt_eval_count"), value.get("eval_count"));
+        }
+        let body = crate::ai::openai::chat_completions_body(model, request, false);
+        let key = self.endpoint.api_key.clone();
+        let value = crate::ai::complete::post(client, &format!("{base}/v1/chat/completions"), "本機 AI", |r| match &key {
+            Some(key) if !key.is_empty() => r.bearer_auth(key),
+            _ => r,
+        }, &body).await?;
+        crate::ai::openai::chat_completions_result(&value, "本機 AI".into(), model.to_string())
+    }
+
     pub(crate) fn client(&self) -> Result<Client, String> {
         Client::builder()
             .timeout(std::time::Duration::from_secs(120))
