@@ -1377,6 +1377,59 @@ mod tests {
         assert!(events.contains(&("chat-provider".to_string(), json!({"provider": "Gemini 3.7 Flash (Google Gemini)", "status": "failed"}))));
     }
 
+    /// Every replacement of the live router goes through `install_live`,
+    /// which publishes its keys, and the launch publishes before any job
+    /// starts (review B, r5-m1). These run only in the Tauri app, so the
+    /// source is read: the three callers use `install_live`, no code
+    /// assigns a router through a guard anywhere else, and `lib.rs` calls
+    /// `publish_keys` after the fallbacks are added and before the first
+    /// task is spawned.
+    #[test]
+    fn the_live_router_is_replaced_only_through_install_live() {
+        let callers = [
+            ("commands/ai_choice.rs", include_str!("../commands/ai_choice.rs"), "crate::ai::install_live(&router, rebuilt_router(&db))?;"),
+            ("commands/settings.rs", include_str!("../commands/settings.rs"), "crate::ai::install_live(&router, rebuilt)?;"),
+            ("ai/disabled.rs", include_str!("disabled.rs"), "super::install_live(&router, crate::commands::ai_choice::rebuilt_router(&db))?;"),
+        ];
+        for (file, source, call) in callers {
+            assert!(source.contains(call), "{file} replaces the live router through install_live");
+        }
+        let holders = [
+            ("ai/mod.rs", include_str!("mod.rs")),
+            ("ai/capability.rs", include_str!("capability.rs")),
+            ("commands/assistant.rs", include_str!("../commands/assistant.rs")),
+            ("commands/chat.rs", include_str!("../commands/chat.rs")),
+            ("commands/cron.rs", include_str!("../commands/cron.rs")),
+            ("commands/local_llm.rs", include_str!("../commands/local_llm.rs")),
+            ("commands/mail.rs", include_str!("../commands/mail.rs")),
+            ("commands/scheduler.rs", include_str!("../commands/scheduler.rs")),
+            ("commands/setup.rs", include_str!("../commands/setup.rs")),
+            ("lib.rs", include_str!("../lib.rs")),
+            ("scheduler/daily_briefing.rs", include_str!("../scheduler/daily_briefing.rs")),
+            ("scheduler/scheduled_briefing.rs", include_str!("../scheduler/scheduled_briefing.rs")),
+            ("voice/commands.rs", include_str!("../voice/commands.rs")),
+            ("voice/wake_word.rs", include_str!("../voice/wake_word.rs")),
+        ]
+        .into_iter()
+        .chain(callers.iter().map(|(file, source, _)| (*file, *source)));
+        for (file, source) in holders {
+            let assigned: Vec<&str> = source
+                .lines()
+                .map(str::trim)
+                .filter(|line| line.starts_with('*') && line.contains(" = ") && !line.contains("=="))
+                .filter(|line| line.split(" = ").next().is_some_and(|target| target.contains("router")) || line.contains("rebuilt"))
+                .collect();
+            let allowed: &[&str] = if file == "ai/mod.rs" { &["*router = next;"] } else { &[] };
+            assert_eq!(assigned, allowed, "{file}: a router assigned outside install_live");
+        }
+        let lib = include_str!("../lib.rs");
+        let at = |needle: &str| lib.find(needle).unwrap_or_else(|| panic!("lib.rs: {needle}"));
+        let publish = at("router.publish_keys();");
+        assert!(at("router.append_default_fallbacks();") < publish, "published after the fallbacks are added");
+        assert!(publish < at("tauri::async_runtime::spawn("), "published before any task is spawned");
+        assert!(publish < at("scheduler::Scheduler::new("), "published before the scheduler starts");
+    }
+
     /// A failed request is logged by `failure::log_line`: the service, the
     /// failure class, the status and the provider's code, never the body
     /// (review A, M-6 and N-2).

@@ -26,6 +26,10 @@ pub fn emit<S: Serialize + Clone>(event: &str, payload: S) {
 /// True the first time `key` is seen this launch, so a background job that
 /// keeps failing for the same reason raises its notice once.
 pub fn first_time(key: &str) -> bool {
+    // Tests running side by side each see their own launch, so one test's
+    // notice does not hide another's.
+    #[cfg(test)]
+    let key = &format!("{key}|{:?}", std::thread::current().id());
     static SEEN: OnceLock<Mutex<HashSet<String>>> = OnceLock::new();
     SEEN.get_or_init(Default::default).lock().map(|mut seen| seen.insert(key.to_string())).unwrap_or(true)
 }

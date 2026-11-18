@@ -793,7 +793,9 @@ async fn triage_one(
             // The saved OpenAI model is disabled: not sent, no other model
             // in its place (ai/disabled.rs). The message stays untriaged.
             Some(Err(crate::ai::disabled::stop(stopped, false, crate::ai::bedrock::UiLanguage::read(db))))
-        } else if let (Some(_), Err(error)) = (keys.openai.as_deref(), still_allowed(db, "openai")) {
+        } else if let Some(Err(error)) = keys.openai.as_deref().map(|_| still_allowed(db, "openai")) {
+            // Asked only with an OpenAI key: without one the summary goes to
+            // the chosen AI, and no OpenAI notice is raised (review A, N-4).
             Some(Err(error))
         } else if let Some(openai_key) = keys.openai.as_deref() {
             let started = Instant::now();
@@ -1458,6 +1460,41 @@ mod tests {
         let outcome = triage_one(&db, &client, Endpoints::Loopback(port), &with_jev, &owners, "en", ann(12)).await;
         assert_eq!(paths.lock().unwrap().as_slice(), ["/v1/systemone"], "Jev classified; the summary was not asked of Gemini");
         assert!(asks_consent_for_gemini(&outcome.error), "{:?}", outcome.error);
+    }
+
+    /// The OpenAI summary's gate is asked only with an OpenAI key (review
+    /// A, N-4). With none, OpenAI's tightened terms raise no notice for a
+    /// service the user does not use, and the summary goes to the chosen AI
+    /// as before (Claude here, with no key, so it fails on this Mac). With
+    /// a key the summary is refused with OpenAI's consent card, as before.
+    /// Nothing reaches OpenAI either way.
+    #[tokio::test]
+    async fn the_openai_summary_asks_the_gate_only_with_an_openai_key() {
+        use crate::ai::mail_policy::test_support::use_ai;
+        use crate::ai::registry::DataTerms;
+        let db = crate::db::test_database();
+        use_ai(&db, "claude", None);
+        let _registry = crate::ai::registry::test_override::with(|r| r.providers.iter_mut().find(|p| p.id == "openai").unwrap().data_terms = DataTerms::NeedsBillingConfirmation);
+        let mut router = crate::ai::AiRouter::new("").without_keys();
+        router.load_from_db(&db);
+        let (port, paths) = sorting_fixture().await;
+        let client = reqwest::Client::builder().timeout(Duration::from_secs(10)).build().unwrap();
+        let owners = ["me@example.com".to_string()];
+        let asks_openai = |line: &String| line.contains("openai's terms");
+
+        let no_openai_key = TriageKeys { typesafe: Some("ts-test-not-real".into()), openai: None, openai_model: "gpt-5.6-luna".into(), assistant: Some(router) };
+        let mut outcome = None;
+        let logged = crate::test_log::capture(|| async { outcome = Some(triage_one(&db, &client, Endpoints::Loopback(port), &no_openai_key, &owners, "en", ann(21)).await) }).await;
+        assert!(!logged.iter().any(asks_openai), "no OpenAI notice: {logged:?}");
+        let error = outcome.unwrap().error.unwrap_or_default();
+        assert!(error.contains("Claude") && !error.contains("openai"), "the summary was asked of the chosen AI: {error}");
+        assert_eq!(std::mem::take(&mut *paths.lock().unwrap()), ["/v1/systemone"]);
+
+        let with_key = TriageKeys { openai: Some("sk-test-not-sent".into()), ..no_openai_key };
+        let outcome = triage_one(&db, &client, Endpoints::Loopback(port), &with_key, &owners, "en", ann(22)).await;
+        let Err(crate::ai::mail_policy::Blocked::NeedsConsent(request)) = crate::ai::mail_policy::may_send_to(&db, "openai") else { panic!("OpenAI needs consent") };
+        assert_eq!(outcome.error, Some(request.to_error()));
+        assert_eq!(paths.lock().unwrap().as_slice(), ["/v1/systemone"], "nothing reached OpenAI");
     }
 
     /// A consent withdrawn while a sort run is going stops the messages not

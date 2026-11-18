@@ -626,6 +626,22 @@ mod tests {
         db
     }
 
+    /// With no saved chain, the gate on a run's router judges the row that
+    /// router's own keys choose (`chosen_now` with what `configured`
+    /// finds; review A, N-3): only a Claude key, so Claude, which may
+    /// receive mail.
+    #[tokio::test]
+    async fn a_router_with_no_saved_chain_is_judged_by_the_row_its_keys_choose() {
+        let db = crate::db::test_database();
+        db.conn.lock().unwrap().execute("DELETE FROM provider_chain", []).unwrap();
+        let mut router = crate::ai::AiRouter::new("").without_keys();
+        router.load_from_db(&db);
+        router.set_claude_key("test-c");
+        router.append_default_fallbacks();
+        assert_eq!(router.chosen_now(&db).await.map(|e| e.provider_type), Some("claude".into()));
+        assert_eq!(may_send_on(&db, &router).await, Ok(()));
+    }
+
     /// The gate and the router agree with no saved chain, for every set of
     /// the three keys, with and without saved AWS credentials, under each
     /// preset (one the registry does not have, and one with Bedrock first,
