@@ -254,7 +254,7 @@ pub async fn send(
     messages: Vec<(String, String)>,
     db: &crate::db::Database,
     google_auth: &std::sync::Arc<crate::auth::google::GoogleAuth>,
-    app_handle: &tauri::AppHandle,
+    app_handle: &(impl ScopedEmitter + Sync),
     tts_tx: Option<tokio::sync::mpsc::Sender<TtsCommand>>,
     workload: crate::ai::Workload,
     deeper: Option<Deeper>,
@@ -281,7 +281,7 @@ pub async fn send(
         let request = requests.request(final_round);
 
         let response = client
-            .post("https://api.anthropic.com/v1/messages")
+            .post(format!("{}/v1/messages", super::api_base("https://api.anthropic.com")))
             .header("x-api-key", api_key)
             .header("anthropic-version", &api_version)
             .header("content-type", "application/json")

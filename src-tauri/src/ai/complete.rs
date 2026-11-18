@@ -135,7 +135,7 @@ async fn complete_one(router: &AiRouter, db: &Database, entry: &ProviderChainEnt
                 }
                 None => {
                     let key = router.openai_key.clone().ok_or("尚未設定 OpenAI API 密鑰。")?;
-                    ("https://api.openai.com/v1/chat/completions".to_string(), key, entry.model_id.clone().unwrap_or_else(crate::ai::models::openai_default), "OpenAI".to_string())
+                    (format!("{}/chat/completions", super::api_base("https://api.openai.com/v1")), key, entry.model_id.clone().unwrap_or_else(crate::ai::models::openai_default), "OpenAI".to_string())
                 }
             };
             let body = chat_completions_body(&model, request, entry.base_url.is_none());
@@ -188,7 +188,7 @@ async fn complete_one(router: &AiRouter, db: &Database, entry: &ProviderChainEnt
             if request.json {
                 body["generationConfig"]["responseMimeType"] = json!("application/json");
             }
-            let url = format!("{}/models/{model}:generateContent", gemini::API_BASE);
+            let url = format!("{}/models/{model}:generateContent", super::api_base(gemini::API_BASE));
             let value = post(&client, &url, "Gemini", |r| r.header("x-goog-api-key", &key), &body).await?;
             gemini_result(&value, model)
         }
@@ -196,7 +196,7 @@ async fn complete_one(router: &AiRouter, db: &Database, entry: &ProviderChainEnt
             let key = router.claude_key.clone().ok_or("尚未設定 Claude API 密鑰。")?;
             let model = entry.model_id.clone().unwrap_or_else(crate::ai::models::claude_default);
             let body = claude_body(&model, request);
-            let value = post(&client, "https://api.anthropic.com/v1/messages", "Claude", |r| r.header("x-api-key", &key).header("anthropic-version", crate::ai::models::anthropic_version()), &body).await?;
+            let value = post(&client, &format!("{}/v1/messages", super::api_base("https://api.anthropic.com")), "Claude", |r| r.header("x-api-key", &key).header("anthropic-version", crate::ai::models::anthropic_version()), &body).await?;
             claude_result(&value, model)
         }
         "bedrock" => {
@@ -857,4 +857,5 @@ pub(crate) mod tests {
         let error = complete(&router, &db, Request { system: "", user: "hi", json: false, max_tokens: 10, feature: Feature::Other }).await.unwrap_err();
         assert!(error.contains("尚未選擇 AI"), "{error}");
     }
+
 }

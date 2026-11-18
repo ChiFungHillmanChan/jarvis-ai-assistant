@@ -47,7 +47,7 @@ impl Target<'_> {
     fn url(&self) -> String {
         match self.base_url {
             Some(base) => format!("{base}/chat/completions"),
-            None => "https://api.openai.com/v1/chat/completions".into(),
+            None => format!("{}/chat/completions", super::api_base("https://api.openai.com/v1")),
         }
     }
 
@@ -194,7 +194,7 @@ pub async fn send(
     messages: Vec<(String, String)>,
     db: &crate::db::Database,
     google_auth: &std::sync::Arc<crate::auth::google::GoogleAuth>,
-    app_handle: &tauri::AppHandle,
+    app_handle: &(impl ScopedEmitter + Sync),
     tts_tx: Option<tokio::sync::mpsc::Sender<TtsCommand>>,
     workload: crate::ai::Workload,
     ledger: &crate::ai::SideEffectLedger,

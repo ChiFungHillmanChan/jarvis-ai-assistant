@@ -18,6 +18,8 @@ pub mod persona;
 pub mod registry;
 pub mod routing;
 pub mod tools;
+#[cfg(test)]
+mod wire_tests;
 pub use routing::{classify_workload, Workload};
 
 use crate::voice::tts::TtsCommand;
@@ -125,6 +127,16 @@ fn resolve_key_with(env_var: &str, fallback: impl FnOnce() -> Option<String>) ->
         Ok(v) if !v.trim().is_empty() => Some(v),
         _ => fallback().filter(|v| !v.trim().is_empty()),
     }
+}
+
+/// The address a provider's own API is reached at: `official`, except in a
+/// test that points it at a loopback server (`wire_tests::serve`).
+pub(crate) fn api_base(official: &str) -> String {
+    #[cfg(test)]
+    if let Some(base) = wire_tests::API_BASE.with(|base| base.borrow().clone()) {
+        return base;
+    }
+    official.to_string()
 }
 
 /// Position and length of the next SSE event delimiter, whichever of
@@ -1079,7 +1091,7 @@ impl AiRouter {
         messages: Vec<(String, String)>,
         db: &crate::db::Database,
         google_auth: &std::sync::Arc<crate::auth::google::GoogleAuth>,
-        app_handle: &tauri::AppHandle,
+        app_handle: &(impl ScopedEmitter + Sync),
         tts_tx: Option<tokio::sync::mpsc::Sender<TtsCommand>>,
         workload: Workload,
         ledger: &SideEffectLedger,

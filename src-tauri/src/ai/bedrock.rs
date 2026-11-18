@@ -265,7 +265,7 @@ pub async fn send(
     messages: Vec<(String, String)>,
     db: &crate::db::Database,
     google_auth: &std::sync::Arc<crate::auth::google::GoogleAuth>,
-    app_handle: &tauri::AppHandle,
+    app_handle: &(impl ScopedEmitter + Sync),
     tts_tx: Option<tokio::sync::mpsc::Sender<TtsCommand>>,
     ledger: &crate::ai::SideEffectLedger,
 ) -> Result<String, Box<dyn std::error::Error + Send + Sync>> {

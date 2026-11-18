@@ -164,7 +164,7 @@ pub async fn send(
     messages: Vec<(String, String)>,
     db: &crate::db::Database,
     google_auth: &std::sync::Arc<crate::auth::google::GoogleAuth>,
-    app_handle: &tauri::AppHandle,
+    app_handle: &(impl ScopedEmitter + Sync),
     tts_tx: Option<tokio::sync::mpsc::Sender<TtsCommand>>,
     workload: crate::ai::Workload,
     deeper: Option<crate::ai::capability::Deeper>,
@@ -193,7 +193,7 @@ pub async fn send(
         let mut usage = UsageMetadata::default();
         let url = format!(
             "{}/models/{}:streamGenerateContent?alt=sse",
-            API_BASE, model
+            super::api_base(API_BASE), model
         );
 
         let mut request_body = json!({
