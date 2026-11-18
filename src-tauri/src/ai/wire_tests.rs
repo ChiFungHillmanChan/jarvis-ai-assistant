@@ -3253,13 +3253,11 @@ mod parity {
         });
     }
 
-    /// A last round that streamed only whitespace (n-2). Where the wire
-    /// answers it with the fallback (the OpenAI format and Bedrock), the
-    /// fallback is shown and spoken after the whitespace; before round 3b
-    /// it was returned but neither shown nor spoken. Claude and Gemini give
-    /// the whitespace as their answer, which is nothing said: an empty reply
-    /// (C5). Before round 4 the turn answered with the whitespace, as before
-    /// P07.
+    /// A last round that streamed only whitespace (n-2). Every wire answers
+    /// it with the fallback, shown and spoken after the whitespace. Before
+    /// round 3b the OpenAI format and Bedrock returned the fallback but
+    /// neither showed nor spoke it; Claude and Gemini answered with the
+    /// whitespace, as before P07, until the last round.
     #[test]
     fn a_last_round_of_only_whitespace() {
         on_each(&ALL, |wire, db| async move {
@@ -3979,6 +3977,10 @@ mod resend_counts {
         bedrock_wire::with_credentials(|db| async move {
             let (requests, card) = chat_turn_to(W::Claude, &db, whitespace_beside_a_lookup).await;
             assert_eq!((requests, card["code"].clone(), card["actions_ran"].clone()), (2, json!("empty_reply"), json!(0)), "{card}");
+            // Each attempt is billed, so each is stored with its figures.
+            let model = crate::ai::models::claude_default();
+            let attempt = || priced_row("claude", "tools", &model, &[(10, 10, 0, 0)]);
+            assert_eq!(rows(&db), vec![attempt(), attempt()]);
         });
     }
 }
