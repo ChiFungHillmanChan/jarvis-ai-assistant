@@ -80,6 +80,12 @@ pub async fn detect_backend(url: &str) -> BackendType {
     BackendType::Generic
 }
 
+/// Told to a model that takes no tools (chat only, set by the user or a
+/// context under 4,096 tokens). The prompt above it says to use tools and
+/// to try them before saying anything is out of reach; without this the
+/// model may say it checked or saved something it could not.
+pub(crate) const NO_TOOLS_NOTE: &str = "\n\nIn this conversation you have no tools: the model JARVIS is using cannot call them. The instructions above about calling tools do not apply. Never say or suggest that you checked, opened, created, saved or remembered anything. When the user asks for something that needs a tool (their mail, calendar, tasks, files, apps or your memory), say in one sentence that this model cannot use tools, so it cannot do that here, and that they can choose a model that supports tools in Settings.";
+
 /// A chat model on a local server, which the OpenAI wire talks to: how it
 /// takes tools (natively, described in the system prompt, or not at all),
 /// its context window and where it is.
@@ -125,13 +131,17 @@ impl LocalChat {
     }
 
     /// The system prompt, with the tools that fit described for a model that
-    /// cannot call them itself, and the conversation cut to fit the context.
+    /// cannot call them itself, or a model that takes no tools told so; and
+    /// the conversation cut to fit the context.
     pub(crate) fn prepare(&self, mut system_prompt: String, messages: Vec<(String, String)>, tools: &[tools::Tool]) -> (String, Vec<(String, String)>) {
         if self.injects_tools() {
             let max_tools = ContextManager::max_tools_for_context(self.context_length);
             let user_msg = messages.last().map(|(_, c)| c.as_str()).unwrap_or("");
             let relevant = select_relevant_tools(tools, user_msg, max_tools);
             system_prompt.push_str(&build_tool_injection_prompt(&relevant));
+        }
+        if matches!(self.capability, ToolCapability::ChatOnly) {
+            system_prompt.push_str(NO_TOOLS_NOTE);
         }
         let ctx_manager = ContextManager::new(self.context_length, self.injects_tools());
         let system_tokens = ContextManager::count_tokens(&system_prompt);

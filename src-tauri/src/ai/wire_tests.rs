@@ -1533,6 +1533,30 @@ mod local_wire {
         assert_eq!(rows(&db), vec![local_row("chat", "my-model", 0, 0), local_row("chat", "small-model", 0, 0)]);
     }
 
+    /// A model that takes no tools, by the user's setting or a small
+    /// context, is told so at the end of its system prompt, after the
+    /// prompt that tells models to use tools (P07, the lead's ruling: not
+    /// in the reply). A model that takes tools is not.
+    #[tokio::test]
+    async fn a_model_without_tools_is_told_it_has_none() {
+        let server = serve((0..4).map(|_| text_reply("Hi.", None)).collect()).await;
+        let db = crate::db::test_database();
+        overrides(&db, &server.base, "my-model", None, "chat_only");
+        overrides(&db, &server.base, "small-model", Some(2048), "auto");
+        overrides(&db, &server.base, "json-model", None, "prompt_injected");
+        let router = router(&server.base, BackendType::Vllm);
+        for model in ["my-model", "small-model", "json-model", "qwen3:8b"] {
+            let turn = run_turn(&router, row(model), &[("user", "What is on my calendar?")], &db, Workload::Tools, false).await;
+            assert_eq!(turn.reply.as_deref(), Ok("Hi."));
+        }
+        let seen = server.seen();
+        let systems: Vec<String> = seen.iter().map(|request| system_of(&request.body)).collect();
+        assert!(systems[0].ends_with(crate::ai::local::NO_TOOLS_NOTE), "chat only: {}", systems[0]);
+        assert!(systems[1].ends_with(crate::ai::local::NO_TOOLS_NOTE), "small context");
+        assert_eq!(systems.iter().filter(|system| system.contains(crate::ai::local::NO_TOOLS_NOTE)).count(), 2, "described or native tools: not told");
+        assert!(crate::ai::local::NO_TOOLS_NOTE.contains("this model cannot use tools"));
+    }
+
     /// A refusal is not sent again and stores nothing.
     #[tokio::test]
     async fn a_refused_request() {
