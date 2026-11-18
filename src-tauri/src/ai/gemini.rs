@@ -352,7 +352,10 @@ impl Wire for GeminiWire {
     /// the loop refused earlier, with its sentence after nothing said.
     fn reply(&self, conversation: &Conversation, round: Round, final_round: bool, language: &str) -> Result<String, String> {
         if !round.texts.is_empty() {
-            return Ok(round.text());
+            // Whitespace is nothing said: a last round of only that gets the
+            // fallback, as on the other wires.
+            let text = round.text();
+            return Ok(if final_round && text.trim().is_empty() { tools::tool_limit_fallback(language).into() } else { text });
         }
         if !round.calls.is_empty() {
             return Ok(if final_round { tools::tool_limit_fallback(language).into() } else { String::new() });

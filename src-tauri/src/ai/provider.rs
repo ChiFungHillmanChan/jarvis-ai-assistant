@@ -204,7 +204,10 @@ pub(crate) trait Wire: Send + Sync {
         false
     }
 
-    /// The turn's answer from its last round.
+    /// The turn's answer from its last round. `final_round` here means the
+    /// turn ran out of rounds after a tool round, when a blank reply gets
+    /// the fallback; the loop passes false for a first round, even when it
+    /// is also the last.
     fn reply(&self, conversation: &Self::Conversation, round: Round, final_round: bool, language: &str) -> Result<String, String> {
         let _ = conversation;
         let text = round.text();
@@ -541,7 +544,11 @@ pub(crate) async fn chat<W: Wire>(wire: &W, request: ChatRequest, turn: Turn<'_>
         // it for a non-empty response only).
         let streamed = !round.text().trim().is_empty();
         let stop = round.stop.clone();
-        let reply = match wire.reply(&conversation, round, final_round, &tools::read_language_pref(turn.db)) {
+        // The fallback ("I looked in a few places...") is for a turn that ran
+        // out of rounds after a tool round. A blank first round is an empty
+        // reply even when it is also the last.
+        let ran_out = final_round && number > 0;
+        let reply = match wire.reply(&conversation, round, ran_out, &tools::read_language_pref(turn.db)) {
             // A round whose calls were refused ends with what the model said
             // and the sentence that nothing was done (R3-m2): shown and
             // spoken once, and part of the answer saved. It comes before the

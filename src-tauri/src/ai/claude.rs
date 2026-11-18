@@ -491,7 +491,9 @@ impl Wire for ClaudeWire {
     }
 
     fn reply(&self, _conversation: &Conversation, round: Round, final_round: bool, language: &str) -> Result<String, String> {
-        if !round.texts.is_empty() {
+        // Whitespace is nothing said: a last round of only that gets the
+        // fallback, as on the other wires.
+        if !round.text().trim().is_empty() {
             return Ok(round.text());
         }
         if final_round {

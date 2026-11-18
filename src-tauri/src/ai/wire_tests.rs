@@ -3269,12 +3269,6 @@ mod parity {
             // Some wires stream an empty piece first; the pieces are compared
             // joined.
             let (shown, spoken) = shown_and_spoken(&turn);
-            if matches!(wire, W::Claude | W::Gemini) {
-                let error = turn.reply.as_ref().expect_err(&format!("{wire:?}"));
-                assert_eq!(crate::ai::failure::code_of(error), crate::ai::failure::Code::EmptyReply, "{wire:?}: {error}");
-                assert_eq!((shown.concat(), spoken.concat()), ("\n".to_string(), "\n".to_string()), "{wire:?}");
-                return;
-            }
             let fallback = fallback(&db);
             assert_eq!(turn.reply.as_ref(), Ok(&fallback), "{wire:?}");
             assert_eq!((shown.concat(), spoken.concat()), (format!("\n{fallback}"), format!("\n{fallback}")), "{wire:?}");
@@ -3889,6 +3883,26 @@ mod resend_counts {
                     // when it succeeds.
                     let stored = if matches!(wire, W::Local) { 0 } else { 2 };
                     assert_eq!(rows(&db).len(), stored, "{wire:?}, {form}");
+                });
+            }
+        }
+    }
+
+    /// A blank reply on the first round is an empty reply even when that
+    /// round is also the last (max_tool_rounds 1): no tool round ran, so
+    /// the fallback's "I looked in a few places" would be untrue. Sent once
+    /// more, then the card, as on any first round.
+    #[test]
+    fn a_blank_first_round_that_is_also_the_last_is_an_empty_reply() {
+        let replies = [("no call, nothing said", nothing_said as fn(W) -> Reply), ("no call, only whitespace", only_whitespace)];
+        for (form, reply) in replies {
+            for wire in [W::OpenAi, W::Compatible, W::Claude, W::Gemini, W::Bedrock, W::Local] {
+                bedrock_wire::with_credentials(|db| async move {
+                    let _one_round = crate::ai::registry::test_override::with(|r| r.providers.iter_mut().for_each(|p| p.limits.max_tool_rounds = Some(1)));
+                    let (requests, answer) = chat_turn_through_run_chosen(wire, &db, reply).await;
+                    let error = answer.expect_err(&format!("{wire:?}, {form}: the fallback is not the answer"));
+                    let card = crate::ai::failure::parse(&error).unwrap_or_else(|| panic!("{wire:?}, {form}: not a card: {error}"));
+                    assert_eq!((requests, card["code"].clone()), (2, json!("empty_reply")), "{wire:?}, {form}: {card}");
                 });
             }
         }
