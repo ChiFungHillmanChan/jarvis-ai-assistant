@@ -771,6 +771,23 @@ mod openai_wire {
         assert!(!logged.iter().any(|line| line.contains("dentist")), "{logged:?}");
         assert_eq!(rows(&db), vec![priced_row("openai", "chat", &model, &[(0, 0, 0, 0)])]);
     }
+
+    /// A call that takes no arguments may stream no argument text: it runs.
+    #[tokio::test]
+    async fn a_call_with_no_argument_text_runs() {
+        let server = serve(vec![
+            Reply::openai_sse(&[json!({"choices": [{"delta": {"tool_calls": [{"index": 0, "id": "call_1", "type": "function", "function": {"name": "list_tasks", "arguments": ""}}]}, "finish_reason": "tool_calls"}]})]),
+            Reply::openai_sse(&[json!({"choices": [{"delta": {"content": "No tasks."}, "finish_reason": "stop"}]})]),
+        ])
+        .await;
+        let _base = point_at(&format!("{}/v1", server.base));
+        let db = crate::db::test_database();
+        let turn = run_turn(&router(), official(), &[("user", "What are my tasks?")], &db, Workload::Tools, true).await;
+        assert_eq!(turn.reply.as_deref(), Ok("No tasks."));
+        let seen = server.seen();
+        assert_eq!(seen.len(), 2);
+        assert_eq!(seen[1].body["messages"].as_array().unwrap().iter().filter(|m| m["role"] == "tool" && m["tool_call_id"] == "call_1").count(), 1);
+    }
 }
 
 // ---------------------------------------------------------------------------
