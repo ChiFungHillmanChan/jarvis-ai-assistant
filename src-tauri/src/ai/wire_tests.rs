@@ -2190,6 +2190,63 @@ mod local_wire {
         assert_eq!(seen[1].body["messages"][2]["tool_calls"], json!([{"id": "call_a", "type": "function", "function": {"name": "remember", "arguments": REMEMBER_ARGS}}]));
     }
 
+    /// The three shapes of the R5 ruling, for pieces that carry neither an
+    /// index nor an id. A call whose arguments arrive over several chunks is
+    /// one call. Two whole calls in one chunk are two calls, and the
+    /// approval card is asked once for each: declined, each gets its own
+    /// refusal and nothing is saved; allowed, each runs once. Before P07 a
+    /// local server's pieces all went to the first call, so the two calls
+    /// became one whose arguments are not JSON.
+    #[tokio::test]
+    async fn pieces_with_neither_an_index_nor_an_id() {
+        let two_calls = || {
+            Reply::openai_sse(&[json!({"choices": [{"delta": {"tool_calls": [
+                {"type": "function", "function": {"name": "remember", "arguments": "{\"content\":\"First fact\"}"}},
+                {"type": "function", "function": {"name": "remember", "arguments": "{\"content\":\"Second fact\"}"}}
+            ]}, "finish_reason": "tool_calls"}]})])
+        };
+        let server = serve(vec![
+            Reply::openai_sse(&[
+                json!({"choices": [{"delta": {"tool_calls": [{"type": "function", "function": {"name": "remember", "arguments": "{\"content\":"}}]}}]}),
+                json!({"choices": [{"delta": {"tool_calls": [{"function": {"arguments": "\"Kenny is my"}}]}}]}),
+                json!({"choices": [{"delta": {"tool_calls": [{"function": {"arguments": " accountant\"}"}}]}, "finish_reason": "tool_calls"}]}),
+            ]),
+            text_reply("Saved.", None),
+            two_calls(),
+            text_reply("Not saved.", None),
+            two_calls(),
+            text_reply("Saved both.", None),
+        ])
+        .await;
+        let db = crate::db::test_database();
+        let router = router(&server.base, BackendType::Ollama);
+        let tool_messages = |body: &Value| body["messages"].as_array().unwrap().iter().filter(|m| m["role"] == "tool").map(|m| m["content"].as_str().unwrap().to_string()).collect::<Vec<_>>();
+        let whole = |content: &str| json!({"id": "", "type": "function", "function": {"name": "remember", "arguments": json!({"content": content}).to_string()}});
+
+        let turn = run_turn(&router, row("qwen3:8b"), &[("user", "Remember Kenny is my accountant")], &db, Workload::Tools, true).await;
+        assert_eq!(turn.reply.as_deref(), Ok("Saved."));
+        assert_eq!(turn.ledger.count(), 1);
+        assert_eq!(memories(&db), vec!["Kenny is my accountant"]);
+        assert_eq!(server.seen()[1].body["messages"][2]["tool_calls"], json!([whole("Kenny is my accountant")]));
+
+        let turn = run_turn(&router, row("qwen3:8b"), &[("user", "Remember two facts")], &db, Workload::Tools, false).await;
+        assert_eq!(turn.reply.as_deref(), Ok("Not saved."));
+        assert_eq!(turn.ledger.count(), 2, "asked once for each call");
+        let seen = server.seen();
+        assert_eq!(seen[3].body["messages"][2]["tool_calls"], json!([whole("First fact"), whole("Second fact")]));
+        let refused = "The user did not allow remember, so nothing was changed. Do not try again unless the user asks.".to_string();
+        assert_eq!(tool_messages(&seen[3].body), vec![refused.clone(), refused]);
+        assert_eq!(memories(&db), vec!["Kenny is my accountant"]);
+
+        let turn = run_turn(&router, row("qwen3:8b"), &[("user", "Remember two facts")], &db, Workload::Tools, true).await;
+        assert_eq!(turn.reply.as_deref(), Ok("Saved both."));
+        assert_eq!(turn.ledger.count(), 2);
+        let mut saved = memories(&db);
+        saved.sort();
+        assert_eq!(saved, vec!["First fact", "Kenny is my accountant", "Second fact"], "each call ran once");
+        assert_eq!(tool_messages(&server.seen()[5].body).len(), 2);
+    }
+
     /// A turn a local model ran without tools is noted for the chat window:
     /// by the user's "chat only" setting, by a context too small for the
     /// tools, or by a model detected as chat only. A model with tools,
