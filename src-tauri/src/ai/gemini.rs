@@ -209,7 +209,12 @@ impl Wire for GeminiWire {
     }
 
     async fn start(&self, request: ChatRequest) -> Result<Conversation, String> {
-        let client = Client::builder().read_timeout(std::time::Duration::from_secs(90)).build().map_err(|e| e.to_string())?;
+        let client = Client::builder()
+            .read_timeout(std::time::Duration::from_secs(90))
+            // A redirect would carry the key (x-goog-api-key) and the conversation elsewhere.
+            .redirect(reqwest::redirect::Policy::none())
+            .build()
+            .map_err(|e| e.to_string())?;
         Ok(Conversation {
             client,
             contents: history_contents(request.messages),

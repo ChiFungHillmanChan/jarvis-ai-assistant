@@ -1047,6 +1047,22 @@ mod claude_wire {
         assert_eq!(turn.ledger.count(), 1);
         assert_eq!(server.seen().len(), 1, "no request after the calls");
     }
+
+    /// A redirect is not followed: it would carry the key and the
+    /// conversation to another address. The 307 is the error.
+    #[tokio::test]
+    async fn a_redirect_is_not_followed() {
+        let mut events = vec![start(10, 0, 0), text_block(0), text(0, "Hi."), stop(0)];
+        events.extend(end("end_turn", 2));
+        // Followed, the redirect would reach the same server and its answer.
+        let server = serve(vec![Reply::json(307, json!({})).header("Location", "/v1/messages"), Reply::named_sse(&events)]).await;
+        let _base = point_at(&server.base);
+        let db = crate::db::test_database();
+        let turn = run_turn(&router(), row(), &[("user", "Hi")], &db, Workload::Tools, false).await;
+        let error = turn.reply.unwrap_err();
+        assert!(error.contains("307"), "{error}");
+        assert_eq!(server.seen().len(), 1, "no second request");
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -1264,6 +1280,21 @@ mod gemini_wire {
         let model = crate::ai::models::GEMINI_FLASH;
         assert!(logged.contains(&format!("[gemini] no usage figures received for a non-empty response; recording zero tokens (model={model})")), "{logged:?}");
         assert!(!logged.iter().any(|line| line.contains("dentist")), "{logged:?}");
+    }
+
+    /// A redirect is not followed: it would carry the key and the
+    /// conversation to another address. The 307 is the error.
+    #[tokio::test]
+    async fn a_redirect_is_not_followed() {
+        let answer = || Reply::sse(&[chunk(json!([{"text": "Hi."}]), Some("STOP"), None)]);
+        // Followed, the redirect would reach the same server and its answer.
+        let server = serve(vec![Reply::json(307, json!({})).header("Location", "/elsewhere"), answer()]).await;
+        let _base = point_at(&format!("{}/v1beta", server.base));
+        let db = crate::db::test_database();
+        let turn = run_turn(&router(), row(), &[("user", "Hi")], &db, Workload::Tools, false).await;
+        let error = turn.reply.unwrap_err();
+        assert!(error.contains("307"), "{error}");
+        assert_eq!(server.seen().len(), 1, "no second request");
     }
 }
 

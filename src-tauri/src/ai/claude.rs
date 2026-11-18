@@ -294,7 +294,12 @@ impl Wire for ClaudeWire {
     }
 
     async fn start(&self, request: ChatRequest) -> Result<Conversation, String> {
-        let client = Client::builder().read_timeout(std::time::Duration::from_secs(60)).build().map_err(|e| e.to_string())?;
+        let client = Client::builder()
+            .read_timeout(std::time::Duration::from_secs(60))
+            // A redirect would carry the key (x-api-key) and the conversation elsewhere.
+            .redirect(reqwest::redirect::Policy::none())
+            .build()
+            .map_err(|e| e.to_string())?;
         let limits = crate::ai::models::limits("claude");
         let requests = TurnRequests::new(
             self.model.clone(),
