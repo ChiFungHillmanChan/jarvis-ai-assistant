@@ -776,6 +776,31 @@ mod openai_wire {
         assert_eq!(server.seen().len(), 1);
     }
 
+    /// A call asked for twice in one reply runs once, and the line for the
+    /// one skipped names the tool only, never its arguments (R3-m4).
+    #[tokio::test]
+    async fn a_skipped_duplicate_is_logged_without_its_arguments() {
+        let args = json!({"content": "Kenny's code is QX-7781-MARKER"}).to_string();
+        let server = serve(vec![
+            Reply::openai_sse(&[
+                json!({"choices": [{"delta": {"tool_calls": [{"index": 0, "id": "call_1", "type": "function", "function": {"name": "remember", "arguments": args}}]}}]}),
+                json!({"choices": [{"delta": {"tool_calls": [{"index": 1, "id": "call_2", "type": "function", "function": {"name": "remember", "arguments": args}}]}, "finish_reason": "tool_calls"}]}),
+            ]),
+            Reply::openai_sse(&[json!({"choices": [{"delta": {"content": "Noted."}, "finish_reason": "stop"}]})]),
+        ])
+        .await;
+        let _base = point_at(&format!("{}/v1", server.base));
+        let db = crate::db::test_database();
+        let logged = crate::test_log::capture(|| async {
+            let turn = run_turn(&router(), official(), &[("user", "Remember Kenny's code")], &db, Workload::Tools, true).await;
+            assert_eq!(turn.reply.as_deref(), Ok("Noted."));
+        })
+        .await;
+        assert_eq!(memories(&db), vec!["Kenny's code is QX-7781-MARKER".to_string()]);
+        assert!(logged.contains(&"JARVIS skipping duplicate tool call: remember".to_string()), "{logged:?}");
+        assert!(!logged.iter().any(|line| line.contains("MARKER")), "{logged:?}");
+    }
+
     /// The sentence is in the UI language (R3-m2): in 繁體書面語 when the app
     /// is shown in Chinese, whatever language the answers are asked in.
     #[tokio::test]
