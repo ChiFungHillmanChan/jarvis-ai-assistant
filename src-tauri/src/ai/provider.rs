@@ -513,6 +513,7 @@ pub(crate) async fn chat<W: Wire>(wire: &W, request: ChatRequest, turn: Turn<'_>
             let results = run_calls(&round.calls, &turn).await;
             let answers = wire.answers_after_tools(&round);
             let text = round.text();
+            let stop = round.stop.clone();
             // The results not added is a failed request: what the turn was
             // billed is stored, and the router sees the calls that ran.
             if let Err(error) = wire.add_results(&mut conversation, round, results, number + 2 == max_rounds) {
@@ -521,23 +522,33 @@ pub(crate) async fn chat<W: Wire>(wire: &W, request: ChatRequest, turn: Turn<'_>
             }
             if answers {
                 finish(wire, &turn);
+                if text.trim().is_empty() {
+                    meter.failed(turn.db, turn.workload, None, 0);
+                    return Err(nothing_said(wire, stop.as_deref()));
+                }
                 meter.succeeded(turn.db, turn.workload, !text.is_empty());
                 return Ok(text);
             }
             turn.window.send("chat-status", json!({"status": "Reviewing tool results...", "phase": "thinking"}));
             continue;
         }
-        // Whitespace is not an answer: a round that streamed only that is
-        // answered with the fallback, and logs no missing usage (main logged
+        // Whitespace is not an answer, and logs no missing usage (main logged
         // it for a non-empty response only).
         let streamed = !round.text().trim().is_empty();
+        let stop = round.stop.clone();
         let reply = wire.reply(&conversation, round, final_round, &tools::read_language_pref(turn.db));
-        if let Ok(text) = &reply {
+        match &reply {
+            // Nothing said is an empty reply on every wire (C5), a call cut
+            // off with nothing said before it included.
+            Ok(text) if text.trim().is_empty() => {
+                finish(wire, &turn);
+                meter.failed(turn.db, turn.workload, None, 0);
+                return Err(nothing_said(wire, stop.as_deref()));
+            }
             // An answer that did not stream (the fallback on an empty last
             // round) is shown and spoken in one piece.
-            if !streamed && !text.trim().is_empty() {
-                Events::new(turn.window, turn.voice.as_ref()).send(Event::Text(text.clone()));
-            }
+            Ok(text) if !streamed => Events::new(turn.window, turn.voice.as_ref()).send(Event::Text(text.clone())),
+            _ => {}
         }
         finish(wire, &turn);
         meter.succeeded(turn.db, turn.workload, streamed);
@@ -547,6 +558,16 @@ pub(crate) async fn chat<W: Wire>(wire: &W, request: ChatRequest, turn: Turn<'_>
     finish(wire, &turn);
     meter.succeeded(turn.db, turn.workload, false);
     Ok(tools::tool_limit_fallback(&tools::read_language_pref(turn.db)).into())
+}
+
+/// A turn that ended with nothing said, or only whitespace: an empty reply,
+/// which the router sends once more to the same model when no action ran,
+/// then shows on the card (`failure::code_of`, P06). Gemini's wire returns
+/// its own for a reply with neither text nor a call. Its usage is stored as
+/// a failed turn's: what was billed, and nothing for a model on this Mac.
+fn nothing_said<W: Wire>(wire: &W, stop: Option<&str>) -> String {
+    let (Metering::Turn { provider, model } | Metering::AnsweredTurn { provider, model } | Metering::Request { provider, model }) = wire.metering();
+    format!("{provider} ({model}) returned no text (stop={})", stop.unwrap_or("none"))
 }
 
 /// One request of a turn: its events shown as they come, its calls'

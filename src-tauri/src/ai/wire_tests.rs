@@ -3050,9 +3050,11 @@ mod parity {
 
     /// A last round that streamed only whitespace (n-2). Where the wire
     /// answers it with the fallback (the OpenAI format and Bedrock), the
-    /// fallback is shown and spoken after the whitespace; before this round
-    /// it was returned but neither shown nor spoken. Claude and Gemini answer
-    /// with the whitespace as it streamed, as before P07.
+    /// fallback is shown and spoken after the whitespace; before round 3b
+    /// it was returned but neither shown nor spoken. Claude and Gemini give
+    /// the whitespace as their answer, which is nothing said: an empty reply
+    /// (C5). Before round 4 the turn answered with the whitespace, as before
+    /// P07.
     #[test]
     fn a_last_round_of_only_whitespace() {
         on_each(&ALL, |wire, db| async move {
@@ -3063,7 +3065,8 @@ mod parity {
             // joined.
             let (shown, spoken) = shown_and_spoken(&turn);
             if matches!(wire, W::Claude | W::Gemini) {
-                assert_eq!(turn.reply.as_deref(), Ok("\n"), "{wire:?}");
+                let error = turn.reply.as_ref().expect_err(&format!("{wire:?}"));
+                assert_eq!(crate::ai::failure::code_of(error), crate::ai::failure::Code::EmptyReply, "{wire:?}: {error}");
                 assert_eq!((shown.concat(), spoken.concat()), ("\n".to_string(), "\n".to_string()), "{wire:?}");
                 return;
             }
@@ -3522,6 +3525,158 @@ mod resend_counts {
                 assert_eq!(chat_requests_to(wire, &db, cut_off).await, 1, "{wire:?}");
             });
         }
+    }
+
+    /// A reply whose one call is cut off, after `said`: its arguments broken
+    /// off part-way, or (`at_limit`) whole but stopped by the output limit.
+    /// Gemini sends each call whole, so its cut-off call is a chunk that does
+    /// not parse, before an output-limit stop, in both forms.
+    fn cut_call(wire: W, said: &str, at_limit: bool) -> Reply {
+        let arguments = if at_limit { r#"{"title": "Pay the invoice"}"# } else { r#"{"title": "Pay the inv"# };
+        match wire {
+            W::OpenAi | W::Compatible | W::Local => {
+                let mut events = vec![json!({"choices": [{"delta": {"role": "assistant"}}]})];
+                if !said.is_empty() {
+                    events.push(json!({"choices": [{"delta": {"content": said}}]}));
+                }
+                events.push(json!({"choices": [{"delta": {"tool_calls": [{"index": 0, "id": "call_1", "type": "function", "function": {"name": "create_task", "arguments": arguments}}]}, "finish_reason": if at_limit { "length" } else { "tool_calls" }}]}));
+                events.push(json!({"choices": [], "usage": {"prompt_tokens": 10, "completion_tokens": 10}}));
+                Reply::openai_sse(&events)
+            }
+            W::Claude => {
+                let mut events = vec![("message_start", json!({"type": "message_start", "message": {"id": "msg_1", "role": "assistant", "content": [], "usage": {"input_tokens": 10, "output_tokens": 1}}}))];
+                if !said.is_empty() {
+                    events.push(("content_block_start", json!({"type": "content_block_start", "index": 0, "content_block": {"type": "text", "text": ""}})));
+                    events.push(("content_block_delta", json!({"type": "content_block_delta", "index": 0, "delta": {"type": "text_delta", "text": said}})));
+                    events.push(("content_block_stop", json!({"type": "content_block_stop", "index": 0})));
+                }
+                events.push(("content_block_start", json!({"type": "content_block_start", "index": 1, "content_block": {"type": "tool_use", "id": "call_1", "name": "create_task", "input": {}}})));
+                events.push(("content_block_delta", json!({"type": "content_block_delta", "index": 1, "delta": {"type": "input_json_delta", "partial_json": arguments}})));
+                events.push(("content_block_stop", json!({"type": "content_block_stop", "index": 1})));
+                events.push(("message_delta", json!({"type": "message_delta", "delta": {"stop_reason": if at_limit { "max_tokens" } else { "tool_use" }}, "usage": {"output_tokens": 10}})));
+                events.push(("message_stop", json!({"type": "message_stop"})));
+                Reply::named_sse(&events)
+            }
+            W::Bedrock => {
+                let mut events = vec![("messageStart", json!({"role": "assistant"}))];
+                if !said.is_empty() {
+                    events.push(("contentBlockDelta", json!({"contentBlockIndex": 0, "delta": {"text": said}})));
+                    events.push(("contentBlockStop", json!({"contentBlockIndex": 0})));
+                }
+                events.push(("contentBlockStart", json!({"contentBlockIndex": 1, "start": {"toolUse": {"toolUseId": "call_1", "name": "create_task"}}})));
+                events.push(("contentBlockDelta", json!({"contentBlockIndex": 1, "delta": {"toolUse": {"input": arguments}}})));
+                events.push(("contentBlockStop", json!({"contentBlockIndex": 1})));
+                events.push(("messageStop", json!({"stopReason": if at_limit { "max_tokens" } else { "tool_use" }})));
+                events.push(("metadata", json!({"usage": {"inputTokens": 10, "outputTokens": 10, "totalTokens": 20}})));
+                Reply::raw(200, crate::ai::bedrock::tests::EVENT_STREAM, crate::ai::bedrock::tests::converse_stream(&events))
+            }
+            W::Gemini => {
+                let mut body = String::new();
+                if !said.is_empty() {
+                    body.push_str(&format!("data: {}\n\n", json!({"candidates": [{"content": {"role": "model", "parts": [{"text": said}]}}]})));
+                }
+                body.push_str("data: {\"candidates\": [{\"content\": {\"role\": \"model\", \"parts\": [{\"functionCall\": {\"name\": \"create_task\", \"args\": {\"title\": \"Pay the inv\n\n");
+                body.push_str(&format!("data: {}\n\n", json!({"candidates": [{"content": {"role": "model", "parts": []}, "finishReason": "MAX_TOKENS"}], "usageMetadata": {"promptTokenCount": 10, "candidatesTokenCount": 10}})));
+                Reply::raw(200, "text/event-stream", body.into_bytes())
+            }
+        }
+    }
+
+    fn cut_with_nothing_said(wire: W) -> Reply {
+        cut_call(wire, "", false)
+    }
+
+    fn stopped_at_the_limit_with_nothing_said(wire: W) -> Reply {
+        cut_call(wire, "", true)
+    }
+
+    fn cut_after_only_whitespace(wire: W) -> Reply {
+        cut_call(wire, "\n", false)
+    }
+
+    /// A reply with nothing said and no call.
+    fn nothing_said(wire: W) -> Reply {
+        match wire {
+            W::OpenAi | W::Compatible | W::Local => Reply::openai_sse(&[
+                json!({"choices": [{"delta": {"role": "assistant"}, "finish_reason": "stop"}]}),
+                json!({"choices": [], "usage": {"prompt_tokens": 10, "completion_tokens": 0}}),
+            ]),
+            W::Claude => Reply::named_sse(&[
+                ("message_start", json!({"type": "message_start", "message": {"id": "msg_1", "role": "assistant", "content": [], "usage": {"input_tokens": 10, "output_tokens": 1}}})),
+                ("message_delta", json!({"type": "message_delta", "delta": {"stop_reason": "end_turn"}, "usage": {"output_tokens": 0}})),
+                ("message_stop", json!({"type": "message_stop"})),
+            ]),
+            W::Gemini => Reply::sse(&[json!({"candidates": [{"content": {"role": "model", "parts": []}, "finishReason": "STOP"}], "usageMetadata": {"promptTokenCount": 10, "candidatesTokenCount": 0}})]),
+            W::Bedrock => Reply::raw(
+                200,
+                crate::ai::bedrock::tests::EVENT_STREAM,
+                crate::ai::bedrock::tests::converse_stream(&[
+                    ("messageStart", json!({"role": "assistant"})),
+                    ("messageStop", json!({"stopReason": "end_turn"})),
+                    ("metadata", json!({"usage": {"inputTokens": 10, "outputTokens": 0, "totalTokens": 10}})),
+                ]),
+            ),
+        }
+    }
+
+    /// A turn that ends with nothing said is an empty reply on every wire
+    /// (P06's rule, C5): no action ran, so it is sent once more to the same
+    /// model, then ends on the card for an empty reply. That holds for a call
+    /// cut off with nothing said before it, in each form, and for a reply
+    /// with no call; whitespace is nothing said. Before this round the turn
+    /// ended on an empty answer on every wire but Gemini, whose own error for
+    /// an empty reply took this path already (for whitespace, Gemini too
+    /// answered with the whitespace).
+    #[test]
+    fn a_turn_that_ends_with_nothing_said_is_an_empty_reply() {
+        let replies: [(&str, fn(W) -> Reply); 4] = [
+            ("cut off part-way", cut_with_nothing_said),
+            ("stopped at the output limit", stopped_at_the_limit_with_nothing_said),
+            ("cut off after whitespace", cut_after_only_whitespace),
+            ("no call", nothing_said),
+        ];
+        for (form, reply) in replies {
+            for wire in [W::OpenAi, W::Compatible, W::Claude, W::Gemini, W::Bedrock, W::Local] {
+                bedrock_wire::with_credentials(|db| async move {
+                    let (requests, card) = chat_turn_to(wire, &db, reply).await;
+                    let name = card["model"]["label"].as_str().unwrap_or_default().to_string();
+                    assert_eq!((requests, card["code"].clone()), (2, json!("empty_reply")), "{wire:?}, {form}: {card}");
+                    assert_eq!(card["message"], format!("{name} returned no answer. Try again, or pick another model."), "{wire:?}, {form}");
+                    assert_eq!(card["provider_reason"], Value::Null, "{wire:?}, {form}");
+                    let saved: i64 = db.conn.lock().unwrap().query_row("SELECT COUNT(*) FROM tasks", [], |r| r.get(0)).unwrap();
+                    assert_eq!(saved, 0, "{wire:?}, {form}");
+                    // Each billed attempt is stored; a turn on this Mac only
+                    // when it succeeds.
+                    let stored = if matches!(wire, W::Local) { 0 } else { 2 };
+                    assert_eq!(rows(&db).len(), stored, "{wire:?}, {form}");
+                });
+            }
+        }
+    }
+
+    /// Claude's reply that runs its call and says it is done, with only
+    /// whitespace said: the turn ends there with nothing said, an empty
+    /// reply too. The call is a lookup, so no action ran and the turn is
+    /// sent once more. Before round 4 it ended on the whitespace.
+    fn whitespace_beside_a_lookup(_: W) -> Reply {
+        Reply::named_sse(&[
+            ("message_start", json!({"type": "message_start", "message": {"id": "msg_1", "role": "assistant", "content": [], "usage": {"input_tokens": 10, "output_tokens": 1}}})),
+            ("content_block_start", json!({"type": "content_block_start", "index": 0, "content_block": {"type": "text", "text": ""}})),
+            ("content_block_delta", json!({"type": "content_block_delta", "index": 0, "delta": {"type": "text_delta", "text": "\n"}})),
+            ("content_block_stop", json!({"type": "content_block_stop", "index": 0})),
+            ("content_block_start", json!({"type": "content_block_start", "index": 1, "content_block": {"type": "tool_use", "id": "call_1", "name": "list_tasks", "input": {}}})),
+            ("content_block_stop", json!({"type": "content_block_stop", "index": 1})),
+            ("message_delta", json!({"type": "message_delta", "delta": {"stop_reason": "end_turn"}, "usage": {"output_tokens": 10}})),
+            ("message_stop", json!({"type": "message_stop"})),
+        ])
+    }
+
+    #[test]
+    fn a_claude_turn_done_after_its_call_with_nothing_said_is_an_empty_reply() {
+        bedrock_wire::with_credentials(|db| async move {
+            let (requests, card) = chat_turn_to(W::Claude, &db, whitespace_beside_a_lookup).await;
+            assert_eq!((requests, card["code"].clone(), card["actions_ran"].clone()), (2, json!("empty_reply"), json!(0)), "{card}");
+        });
     }
 }
 
