@@ -391,11 +391,13 @@ impl Wire for BedrockWire {
                 StreamedBlock::Text(text) if text.is_empty() => {}
                 StreamedBlock::Text(text) => content.push(ContentBlock::Text(text)),
                 StreamedBlock::Call { id, name, input } => {
-                    // A call with no input streams none; input cut short
-                    // runs as no arguments.
-                    let input: serde_json::Value = serde_json::from_str(&input).ok().filter(serde_json::Value::is_object).unwrap_or_else(|| json!({}));
-                    events.send(Event::ToolCall(Call { id: id.clone(), name: name.clone(), arguments: input.to_string() }));
-                    let tool_use = aws_sdk_bedrockruntime::types::ToolUseBlock::builder().tool_use_id(id).name(name).input(json_to_document(&input)).build().map_err(|e| RoundError::broken(e.to_string()))?;
+                    // A call with no input streams none: no arguments. Input
+                    // cut short goes to the loop as it came, and its call
+                    // does not run (`provider::one_request`).
+                    let parsed: Option<serde_json::Value> = if input.trim().is_empty() { Some(json!({})) } else { serde_json::from_str(&input).ok().filter(serde_json::Value::is_object) };
+                    let arguments = parsed.as_ref().map_or(input, serde_json::Value::to_string);
+                    events.send(Event::ToolCall(Call { id: id.clone(), name: name.clone(), arguments }));
+                    let tool_use = aws_sdk_bedrockruntime::types::ToolUseBlock::builder().tool_use_id(id).name(name).input(json_to_document(&parsed.unwrap_or_else(|| json!({})))).build().map_err(|e| RoundError::broken(e.to_string()))?;
                     content.push(ContentBlock::ToolUse(tool_use));
                 }
             }
@@ -407,7 +409,9 @@ impl Wire for BedrockWire {
 
     /// A reply that stopped for tools runs them even when it lists none.
     fn runs_calls(&self, _conversation: &Conversation, round: &Round) -> bool {
-        !round.calls.is_empty() || round.stop.as_deref() == Some("tool_use")
+        // A reply cut off by the output limit may hold a call half written,
+        // as OpenAI's "length".
+        round.stop.as_deref() != Some("max_tokens") && (!round.calls.is_empty() || round.stop.as_deref() == Some("tool_use"))
     }
 
     fn add_results(&self, conversation: &mut Conversation, _round: Round, results: Vec<(Call, Outcome)>, next_is_final: bool) -> Result<(), String> {

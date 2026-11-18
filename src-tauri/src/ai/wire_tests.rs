@@ -1318,6 +1318,27 @@ mod gemini_wire {
         assert!(error.contains("307"), "{error}");
         assert_eq!(server.seen().len(), 1, "no second request");
     }
+
+    /// Gemini sends each call whole, in one chunk. A chunk cut off part-way
+    /// does not parse and is skipped, so no call runs on what it held; the
+    /// text so far is the answer.
+    #[tokio::test]
+    async fn a_call_cut_off_part_way_does_not_run() {
+        let body = format!(
+            "data: {}\n\ndata: {}\n\ndata: {}\n\n",
+            chunk(json!([{"text": "I'll add that."}]), None, None),
+            r#"{"candidates": [{"content": {"role": "model", "parts": [{"functionCall": {"name": "create_task", "args": {"title": "Pay the inv"#,
+            chunk(json!([]), Some("MAX_TOKENS"), Some(json!({"promptTokenCount": 100, "candidatesTokenCount": 10})))
+        );
+        let server = serve(vec![Reply::raw(200, "text/event-stream", body.into_bytes())]).await;
+        let _base = point_at(&format!("{}/v1beta", server.base));
+        let db = crate::db::test_database();
+        let turn = run_turn(&router(), row(), &[("user", "Add a task to pay the invoice")], &db, Workload::Tools, true).await;
+        assert_eq!(turn.reply.as_deref(), Ok("I'll add that."));
+        assert_eq!(turn.ledger.count(), 0);
+        assert_eq!(db.conn.lock().unwrap().query_row("SELECT COUNT(*) FROM tasks", [], |r| r.get::<_, i64>(0)).unwrap(), 0);
+        assert_eq!(server.seen().len(), 1);
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -1610,6 +1631,31 @@ pub(crate) mod bedrock_wire {
             let lines = turn.window_lines();
             assert_eq!(&lines[lines.len() - 3..], &[status("Composing response...", "responding"), token(&fallback), token_done()]);
             assert_eq!(turn.voice.last(), Some(&format!("text: {fallback}")));
+        });
+    }
+
+    /// A call that takes no arguments streams no input: it runs with none,
+    /// and goes back as the empty object.
+    #[test]
+    fn a_call_with_no_input_runs_without_arguments() {
+        with_credentials(|db| async move {
+            let server = serve(vec![
+                stream(&[
+                    ("messageStart", json!({"role": "assistant"})),
+                    ("contentBlockStart", json!({"contentBlockIndex": 0, "start": {"toolUse": {"toolUseId": "tu_1", "name": "list_tasks"}}})),
+                    ("contentBlockStop", json!({"contentBlockIndex": 0})),
+                    ("messageStop", json!({"stopReason": "tool_use"})),
+                    ("metadata", json!({"usage": usage(100, 10)})),
+                ]),
+                converse(json!([{"text": "No tasks."}]), "end_turn", usage(150, 5)),
+            ])
+            .await;
+            let _aws = point_bedrock_at(&server.base);
+            let turn = run_turn(&AiRouter::new("gemini_primary"), row(), &[("user", "What are my tasks?")], &db, Workload::Tools, true).await;
+            assert_eq!(turn.reply.as_deref(), Ok("No tasks."));
+            let second = &server.seen()[1].body;
+            assert_eq!(second["messages"][1], json!({"role": "assistant", "content": [{"toolUse": {"toolUseId": "tu_1", "name": "list_tasks", "input": {}}}]}));
+            assert_eq!(second["messages"][2]["content"][0]["toolResult"]["toolUseId"], "tu_1");
         });
     }
 }
@@ -2193,6 +2239,41 @@ mod parity {
             }
         }
 
+        /// A reply that says `said`, then calls `name` with `arguments` as
+        /// they streamed, and stops for tools or, `at_limit`, at the output
+        /// limit. Not Gemini, which sends each call whole.
+        fn cut(self, said: &str, name: &str, arguments: &str, at_limit: bool) -> Reply {
+            match self {
+                W::OpenAi | W::Compatible | W::Local => Reply::openai_sse(&[
+                    json!({"choices": [{"delta": {"role": "assistant", "content": said}}]}),
+                    json!({"choices": [{"delta": {"tool_calls": [{"index": 0, "id": "call_1", "type": "function", "function": {"name": name, "arguments": arguments}}]}, "finish_reason": if at_limit { "length" } else { "tool_calls" }}]}),
+                    json!({"choices": [], "usage": {"prompt_tokens": 100, "completion_tokens": 10}}),
+                ]),
+                W::Claude => Reply::named_sse(&[
+                    ("message_start", json!({"type": "message_start", "message": {"id": "msg_1", "role": "assistant", "content": [], "usage": {"input_tokens": 100, "output_tokens": 1}}})),
+                    ("content_block_start", json!({"type": "content_block_start", "index": 0, "content_block": {"type": "text", "text": ""}})),
+                    ("content_block_delta", json!({"type": "content_block_delta", "index": 0, "delta": {"type": "text_delta", "text": said}})),
+                    ("content_block_stop", json!({"type": "content_block_stop", "index": 0})),
+                    ("content_block_start", json!({"type": "content_block_start", "index": 1, "content_block": {"type": "tool_use", "id": "call_1", "name": name, "input": {}}})),
+                    ("content_block_delta", json!({"type": "content_block_delta", "index": 1, "delta": {"type": "input_json_delta", "partial_json": arguments}})),
+                    ("content_block_stop", json!({"type": "content_block_stop", "index": 1})),
+                    ("message_delta", json!({"type": "message_delta", "delta": {"stop_reason": if at_limit { "max_tokens" } else { "tool_use" }}, "usage": {"output_tokens": 10}})),
+                    ("message_stop", json!({"type": "message_stop"})),
+                ]),
+                W::Bedrock => bedrock_stream(&[
+                    ("messageStart", json!({"role": "assistant"})),
+                    ("contentBlockDelta", json!({"contentBlockIndex": 0, "delta": {"text": said}})),
+                    ("contentBlockStop", json!({"contentBlockIndex": 0})),
+                    ("contentBlockStart", json!({"contentBlockIndex": 1, "start": {"toolUse": {"toolUseId": "call_1", "name": name}}})),
+                    ("contentBlockDelta", json!({"contentBlockIndex": 1, "delta": {"toolUse": {"input": arguments}}})),
+                    ("contentBlockStop", json!({"contentBlockIndex": 1})),
+                    ("messageStop", json!({"stopReason": if at_limit { "max_tokens" } else { "tool_use" }})),
+                    ("metadata", json!({"usage": {"inputTokens": 100, "outputTokens": 10, "totalTokens": 110}})),
+                ]),
+                W::Gemini => unreachable!("Gemini sends each call whole"),
+            }
+        }
+
         /// A plain completion's reply (not streamed), of 10 tokens in and 2
         /// out.
         fn completes(self, text: &str) -> Reply {
@@ -2490,6 +2571,38 @@ mod parity {
             assert!(result.contains("QX-7781-MARKER"), "{wire:?}: the result carries the marker");
             assert!(logged.contains(&format!("JARVIS tool result: list_memories ({} bytes)", result.len())), "{wire:?}: {logged:?}");
             assert!(!logged.iter().any(|line| line.contains("MARKER")), "{wire:?}: {logged:?}");
+        });
+    }
+
+    /// The wires that stream a call's arguments in pieces.
+    const IN_PIECES: [W; 5] = [W::OpenAi, W::Compatible, W::Claude, W::Bedrock, W::Local];
+
+    /// A call whose arguments were cut off part-way does not run: no task
+    /// is made from what the model never finished, nothing counts as done,
+    /// and the text so far is the answer.
+    #[test]
+    fn a_call_cut_off_part_way_does_not_run() {
+        on_each(&IN_PIECES, |wire, db| async move {
+            let on = wire.serve(vec![wire.cut("I'll add that.", "create_task", r#"{"title": "Pay the inv"#, false)], &db).await;
+            let turn = on.turn("Add a task to pay the invoice", &db, true).await;
+            assert_eq!(turn.reply.as_deref(), Ok("I'll add that."), "{wire:?}");
+            assert!(tasks(&db).is_empty(), "{wire:?}");
+            assert_eq!(turn.ledger.count(), 0, "{wire:?}");
+            assert_eq!(on.server.seen().len(), 1, "{wire:?}");
+        });
+    }
+
+    /// A reply stopped by the output limit runs no call, even one whose
+    /// arguments parse: the model was cut off.
+    #[test]
+    fn a_reply_stopped_by_the_output_limit_runs_no_call() {
+        on_each(&IN_PIECES, |wire, db| async move {
+            let on = wire.serve(vec![wire.cut("I'll add that.", "create_task", r#"{"title": "Pay the invoice"}"#, true)], &db).await;
+            let turn = on.turn("Add a task to pay the invoice", &db, true).await;
+            assert_eq!(turn.reply.as_deref(), Ok("I'll add that."), "{wire:?}");
+            assert!(tasks(&db).is_empty(), "{wire:?}");
+            assert_eq!(turn.ledger.count(), 0, "{wire:?}");
+            assert_eq!(on.server.seen().len(), 1, "{wire:?}");
         });
     }
 }

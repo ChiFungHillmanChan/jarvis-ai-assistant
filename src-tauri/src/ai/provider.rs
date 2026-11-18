@@ -564,10 +564,21 @@ async fn one_request<W: Wire>(wire: &W, conversation: &mut W::Conversation, tool
         meter.failed(turn.db, turn.workload, usage, latency_ms);
         return Err(error.message);
     }
-    // The last round runs no tool, on every wire.
-    let runs = !final_round && wire.runs_calls(conversation, &round);
-    meter.request(turn.db, turn.workload, usage, round.calls.len(), final_round, latency_ms);
+    // The last round runs no tool, on every wire; nor does a round with a
+    // call whose arguments were cut off part-way.
+    let unfinished = round.calls.iter().filter(|call| !whole(&call.arguments)).count();
+    if unfinished > 0 {
+        log::warn!("JARVIS tool calls not run: {unfinished} with arguments cut off part-way");
+    }
+    let runs = !final_round && unfinished == 0 && wire.runs_calls(conversation, &round);
+    meter.request(turn.db, turn.workload, usage, if runs { round.calls.len() } else { 0 }, final_round, latency_ms);
     Ok((round, runs))
+}
+
+/// Whether a call's arguments came whole: none at all (a call that takes
+/// none), or one JSON object. Arguments cut off part-way are neither.
+fn whole(arguments: &str) -> bool {
+    arguments.trim().is_empty() || serde_json::from_str::<Value>(arguments).is_ok_and(|arguments| arguments.is_object())
 }
 
 /// The first request of a chat turn as `chat` sends it, with its usage

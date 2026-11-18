@@ -480,6 +480,12 @@ impl Wire for ClaudeWire {
 
     /// The reply said it was done as well as calling tools: its text is the
     /// answer once they ran.
+    /// A reply cut off by the output limit may hold a call half written, as
+    /// OpenAI's "length".
+    fn runs_calls(&self, _conversation: &Conversation, round: &Round) -> bool {
+        !round.calls.is_empty() && round.stop.as_deref() != Some("max_tokens")
+    }
+
     fn answers_after_tools(&self, round: &Round) -> bool {
         round.stop.as_deref() == Some("end_turn") && !round.texts.is_empty()
     }
