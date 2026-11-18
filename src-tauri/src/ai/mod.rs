@@ -15,6 +15,7 @@ pub mod gemini;
 pub mod local;
 pub mod openai;
 pub mod persona;
+pub(crate) mod provider;
 pub mod registry;
 pub mod routing;
 pub mod tools;
@@ -127,6 +128,11 @@ fn resolve_key_with(env_var: &str, fallback: impl FnOnce() -> Option<String>) ->
         Ok(v) if !v.trim().is_empty() => Some(v),
         _ => fallback().filter(|v| !v.trim().is_empty()),
     }
+}
+
+/// A chat turn's request, the same for every provider.
+fn chat_request(db: &crate::db::Database, messages: Vec<(String, String)>, deeper: Option<capability::Deeper>) -> provider::ChatRequest {
+    provider::ChatRequest { system: provider::SystemPrompt::for_request(db), messages, tools: tools::get_tool_definitions(), deeper }
 }
 
 /// The address a provider's own API is reached at: `official`, except in a
@@ -1099,6 +1105,7 @@ impl AiRouter {
         // "Think harder", as far as the model takes it; nothing extra for a
         // model whose button is hidden.
         let deeper = capability::deeper_for(&entry, workload);
+        let turn = provider::Turn { db, google_auth, window: app_handle, voice: tts_tx.clone(), workload, ledger };
         match entry.provider_type.as_str() {
             "gemini" => {
                 let Some(ref key) = self.gemini_key else { return Err("No Gemini API key configured".to_string()) };
@@ -1113,15 +1120,13 @@ impl AiRouter {
             "openai" if entry.base_url.is_some() => {
                 let base = entry.base_url.clone().unwrap_or_default();
                 let Some(key) = self.compat_key(&base).await else { return Err(format!("No {} API key configured", compat::label(&base))) };
-                openai::send(&key, openai::Target { base_url: Some(&base), model: entry.model_id.as_deref(), deeper }, messages, db, google_auth, app_handle, tts_tx, workload, ledger)
-                    .await
-                    .map_err(|e| e.to_string())
+                let wire = openai::OpenAiWire::new(&key, openai::Target { base_url: Some(&base), model: entry.model_id.as_deref(), deeper })?;
+                provider::chat(&wire, chat_request(db, messages, deeper), turn).await
             }
             "openai" => {
                 let Some(ref key) = self.openai_key else { return Err("No OpenAI API key configured".to_string()) };
-                openai::send(key, openai::Target { base_url: None, model: entry.model_id.as_deref(), deeper }, messages, db, google_auth, app_handle, tts_tx, workload, ledger)
-                    .await
-                    .map_err(|e| e.to_string())
+                let wire = openai::OpenAiWire::new(key, openai::Target { base_url: None, model: entry.model_id.as_deref(), deeper })?;
+                provider::chat(&wire, chat_request(db, messages, deeper), turn).await
             }
             "bedrock" => {
                 // Load AwsCredentials directly from sqlite + keychain.  We do the
