@@ -2937,7 +2937,12 @@ mod resend_counts {
     /// Requests a chat turn sends to a busy service, through run_chosen as
     /// the router calls it.
     async fn chat_requests(wire: W, db: &crate::db::Database) -> usize {
-        let server = serve((0..8).map(|_| busy(wire)).collect()).await;
+        chat_requests_to(wire, db, busy).await
+    }
+
+    /// Requests a chat turn sends when every reply is `reply(wire)`.
+    async fn chat_requests_to(wire: W, db: &crate::db::Database, reply: fn(W) -> Reply) -> usize {
+        let server = serve((0..8).map(|_| reply(wire)).collect()).await;
         let (router, entry, _pointed) = set_up(wire, &server.base);
         let window = Window::default();
         let ledger = SideEffectLedger::new();
@@ -3042,6 +3047,39 @@ mod resend_counts {
     #[test]
     fn local() {
         check(W::Local, 2, 2);
+    }
+
+    /// A reply that breaks off part-way, after some text, as each service
+    /// streams it.
+    fn cut_off(wire: W) -> Reply {
+        match wire {
+            W::OpenAi | W::Compatible | W::Local => Reply::openai_sse(&[json!({"choices": [{"delta": {"content": "Hello"}}]})]),
+            W::Claude => Reply::named_sse(&[
+                ("message_start", json!({"type": "message_start", "message": {"id": "msg_1", "role": "assistant", "content": [], "usage": {"input_tokens": 10, "output_tokens": 1}}})),
+                ("content_block_start", json!({"type": "content_block_start", "index": 0, "content_block": {"type": "text", "text": ""}})),
+                ("content_block_delta", json!({"type": "content_block_delta", "index": 0, "delta": {"type": "text_delta", "text": "Hello"}})),
+            ]),
+            W::Gemini => Reply::sse(&[json!({"candidates": [{"content": {"role": "model", "parts": [{"text": "Hello"}]}}]})]),
+            W::Bedrock => Reply::raw(
+                200,
+                crate::ai::bedrock::tests::EVENT_STREAM,
+                crate::ai::bedrock::tests::converse_stream(&[("messageStart", json!({"role": "assistant"})), ("contentBlockDelta", json!({"contentBlockIndex": 0, "delta": {"text": "Hello"}}))]),
+            ),
+        }
+        .cut_short()
+    }
+
+    /// A reply that breaks off part-way is sent once, on every wire: a
+    /// broken stream is not a temporary failure, so the router does not
+    /// send it again. (On main the AWS SDK sent a broken Converse reply
+    /// again itself; a stream it cannot.)
+    #[test]
+    fn a_reply_cut_off_part_way_is_sent_once() {
+        for wire in [W::OpenAi, W::Compatible, W::Claude, W::Gemini, W::Bedrock, W::Local] {
+            bedrock_wire::with_credentials(|db| async move {
+                assert_eq!(chat_requests_to(wire, &db, cut_off).await, 1, "{wire:?}");
+            });
+        }
     }
 }
 
