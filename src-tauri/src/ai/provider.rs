@@ -624,7 +624,9 @@ async fn run_calls(calls: &[Call], turn: &Turn<'_>) -> Vec<(Call, Outcome)> {
         }
         turn.ledger.note(&call.name);
         let result = tools::execute_tool(&call.name, &call.arguments, turn.db, turn.google_auth, turn.ledger).await;
-        log::info!("JARVIS tool result: {}", crate::util::truncate_bytes(&result, 200));
+        // The founder's rule: the tool's name and the result's length, none of
+        // the result (it can hold mail, events or memories).
+        log::info!("JARVIS tool result: {} ({} bytes)", call.name, result.len());
         results.push((call.clone(), Outcome::Ran(result)));
     }
     results

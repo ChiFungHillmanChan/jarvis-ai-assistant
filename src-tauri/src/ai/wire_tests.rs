@@ -2472,6 +2472,26 @@ mod parity {
             assert!(!without_tools, "{wire:?}");
         });
     }
+
+    /// The log line for a tool's result names the tool and the result's
+    /// length, and carries nothing of the result (the founder's decision).
+    #[test]
+    fn a_tool_result_is_logged_by_name_and_length_only() {
+        on_each(&ALL, |wire, db| async move {
+            let auth = Arc::new(crate::auth::google::GoogleAuth::new_empty());
+            let args = json!({"content": "Kenny's code is QX-7781-MARKER"}).to_string();
+            crate::tool_approval::TEST_ANSWER.scope(true, tools::execute_tool("remember", &args, &db, &auth, &SideEffectLedger::new())).await;
+            let on = wire.serve(vec![wire.calls("list_memories", json!({})), wire.says("Noted.")], &db).await;
+            let logged = crate::test_log::capture(|| async {
+                assert_eq!(on.turn("What do you know about Kenny?", &db, false).await.reply.as_deref(), Ok("Noted."), "{wire:?}");
+            })
+            .await;
+            let result = wire.results(&on.server.seen()[1].body).remove(0);
+            assert!(result.contains("QX-7781-MARKER"), "{wire:?}: the result carries the marker");
+            assert!(logged.contains(&format!("JARVIS tool result: list_memories ({} bytes)", result.len())), "{wire:?}: {logged:?}");
+            assert!(!logged.iter().any(|line| line.contains("MARKER")), "{wire:?}: {logged:?}");
+        });
+    }
 }
 
 // ---------------------------------------------------------------------------
