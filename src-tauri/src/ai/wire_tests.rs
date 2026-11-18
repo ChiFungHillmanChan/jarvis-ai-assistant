@@ -313,6 +313,8 @@ fn fallback(db: &crate::db::Database) -> String {
 
 const SKIPPED: &str = "Skipped: already executed this tool with these arguments in this batch.";
 const REMEMBER_ARGS: &str = r#"{"content":"Kenny is my accountant"}"#;
+/// A different fact, for a call that must not run.
+const DENTIST_ARGS: &str = r#"{"content":"Kenny is my dentist"}"#;
 
 fn status(text: &str, phase: &str) -> String {
     format!("chat-status {}", json!({"status": text, "phase": phase}))
@@ -513,15 +515,13 @@ mod openai_wire {
     #[tokio::test]
     async fn the_last_round() {
         let _registry = crate::ai::registry::test_override::with(|r| r.providers.iter_mut().find(|p| p.id == "openai").unwrap().limits.max_tool_rounds = Some(2));
-        let call = |id: &str| Reply::openai_sse(&[json!({"choices": [{"delta": {"tool_calls": [{"index": 0, "id": id, "function": {"name": "remember", "arguments": REMEMBER_ARGS}}]}, "finish_reason": "tool_calls"}]})]);
-        let server = serve(vec![call("call_1"), call("call_2")]).await;
+        let call = |id: &str, args: &str| Reply::openai_sse(&[json!({"choices": [{"delta": {"tool_calls": [{"index": 0, "id": id, "function": {"name": "remember", "arguments": args}}]}, "finish_reason": "tool_calls"}]})]);
+        let server = serve(vec![call("call_1", REMEMBER_ARGS), call("call_2", DENTIST_ARGS)]).await;
         let _base = point_at(&format!("{}/v1", server.base));
         let db = crate::db::test_database();
         let turn = run_turn(&router(), official(), &[("user", "Remember Kenny is my accountant")], &db, Workload::Tools, true).await;
         assert_eq!(turn.reply, Ok(fallback(&db)));
-        assert_eq!(memories(&db).len(), 1, "the last round runs no tool");
-        // `remember` refreshes a fact it already has, so only the ledger
-        // tells whether the last round's call ran.
+        assert_eq!(memories(&db), vec!["Kenny is my accountant"], "the last round runs no tool");
         assert_eq!(turn.ledger.count(), 1, "the last round runs no tool");
         let seen = server.seen();
         assert_eq!(seen.len(), 2);
@@ -1013,18 +1013,18 @@ mod claude_wire {
     #[tokio::test]
     async fn the_last_round() {
         let _registry = crate::ai::registry::test_override::with(|r| r.providers.iter_mut().find(|p| p.id == "claude").unwrap().limits.max_tool_rounds = Some(2));
-        let call = |id: &str| {
+        let call = |id: &str, args: &str| {
             let mut events = vec![start(10, 0, 0)];
-            events.extend(tool_use(0, id, &[REMEMBER_ARGS]));
+            events.extend(tool_use(0, id, &[args]));
             events.extend(end("tool_use", 5));
             Reply::named_sse(&events)
         };
-        let server = serve(vec![call("toolu_1"), call("toolu_2")]).await;
+        let server = serve(vec![call("toolu_1", REMEMBER_ARGS), call("toolu_2", DENTIST_ARGS)]).await;
         let _base = point_at(&server.base);
         let db = crate::db::test_database();
         let turn = run_turn(&router(), row(), &[("user", "Remember Kenny is my accountant")], &db, Workload::Tools, true).await;
         assert_eq!(turn.reply, Ok(fallback(&db)));
-        assert_eq!(memories(&db).len(), 1);
+        assert_eq!(memories(&db), vec!["Kenny is my accountant"], "the last round runs no tool");
         assert_eq!(turn.ledger.count(), 1, "the last round runs no tool");
         let seen = server.seen();
         assert_eq!(seen[0].body.get("tool_choice"), None);
@@ -1264,13 +1264,13 @@ mod gemini_wire {
     #[tokio::test]
     async fn the_last_round() {
         let _registry = crate::ai::registry::test_override::with(|r| r.providers.iter_mut().find(|p| p.id == "gemini").unwrap().limits.max_tool_rounds = Some(2));
-        let call = || Reply::sse(&[chunk(json!([{"functionCall": {"name": "remember", "args": {"content": "Kenny is my accountant"}}}]), Some("STOP"), None)]);
-        let server = serve(vec![call(), call()]).await;
+        let call = |fact: &str| Reply::sse(&[chunk(json!([{"functionCall": {"name": "remember", "args": {"content": fact}}}]), Some("STOP"), None)]);
+        let server = serve(vec![call("Kenny is my accountant"), call("Kenny is my dentist")]).await;
         let _base = point_at(&format!("{}/v1beta", server.base));
         let db = crate::db::test_database();
         let turn = run_turn(&router(), row(), &[("user", "Remember Kenny is my accountant")], &db, Workload::Tools, true).await;
         assert_eq!(turn.reply, Ok(fallback(&db)));
-        assert_eq!(memories(&db).len(), 1);
+        assert_eq!(memories(&db), vec!["Kenny is my accountant"], "the last round runs no tool");
         assert_eq!(turn.ledger.count(), 1, "the last round runs no tool");
         let seen = server.seen();
         assert_eq!(seen[0].body.get("toolConfig"), None);
@@ -1533,12 +1533,12 @@ pub(crate) mod bedrock_wire {
     fn the_last_round() {
         with_credentials(|db| async move {
             let _registry = crate::ai::registry::test_override::with(|r| r.providers.iter_mut().find(|p| p.id == "bedrock").unwrap().limits.max_tool_rounds = Some(2));
-            let call = |id: &str| converse(json!([{"toolUse": {"toolUseId": id, "name": "remember", "input": {"content": "Kenny is my accountant"}}}]), "tool_use", usage(10, 1));
-            let server = serve(vec![call("tu_1"), call("tu_2")]).await;
+            let call = |id: &str, fact: &str| converse(json!([{"toolUse": {"toolUseId": id, "name": "remember", "input": {"content": fact}}}]), "tool_use", usage(10, 1));
+            let server = serve(vec![call("tu_1", "Kenny is my accountant"), call("tu_2", "Kenny is my dentist")]).await;
             let _aws = point_bedrock_at(&server.base);
             let turn = run_turn(&AiRouter::new("gemini_primary"), row(), &[("user", "Remember Kenny is my accountant")], &db, Workload::Tools, true).await;
             assert_eq!(turn.reply, Ok(fallback(&db)));
-            assert_eq!(memories(&db).len(), 1);
+            assert_eq!(memories(&db), vec!["Kenny is my accountant"], "the last round runs no tool");
             assert_eq!(turn.ledger.count(), 1, "the last round runs no tool");
             let seen = server.seen();
             let results = &seen[1].body["messages"][2]["content"];
@@ -1887,11 +1887,12 @@ mod local_wire {
     #[tokio::test]
     async fn the_last_round() {
         let _registry = crate::ai::registry::test_override::with(|r| r.providers.iter_mut().find(|p| p.id == "ollama").unwrap().limits.max_tool_rounds = Some(2));
-        let call = |id: &str| Reply::openai_sse(&[json!({"choices": [{"delta": {"tool_calls": [{"index": 0, "id": id, "type": "function", "function": {"name": "remember", "arguments": REMEMBER_ARGS}}]}, "finish_reason": "tool_calls"}]})]);
-        let server = serve(vec![call("call_1"), call("call_2")]).await;
+        let call = |id: &str, args: &str| Reply::openai_sse(&[json!({"choices": [{"delta": {"tool_calls": [{"index": 0, "id": id, "type": "function", "function": {"name": "remember", "arguments": args}}]}, "finish_reason": "tool_calls"}]})]);
+        let server = serve(vec![call("call_1", REMEMBER_ARGS), call("call_2", DENTIST_ARGS)]).await;
         let db = crate::db::test_database();
         let turn = run_turn(&router(&server.base, BackendType::Vllm), row("my-model"), &[("user", "Remember Kenny is my accountant")], &db, Workload::Tools, true).await;
         assert_eq!(turn.reply, Ok(fallback(&db)));
+        assert_eq!(memories(&db), vec!["Kenny is my accountant"], "the last round runs no tool");
         assert_eq!(turn.ledger.count(), 1, "the last round runs no tool");
         let seen = server.seen();
         assert_eq!(seen.len(), 2);
