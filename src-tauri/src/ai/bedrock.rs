@@ -877,10 +877,12 @@ pub(crate) mod tests {
     }
 
     /// `aws_loopback` serves one request and then points nothing: a second
-    /// client built in the same test is refused before it is sent, and
-    /// cannot reach AWS (the harness note in the round-3 re-review).
+    /// client built in the same test, on the same thread, is refused before
+    /// it is sent, and cannot reach AWS (the harness note in the round-3
+    /// re-review).
     #[tokio::test]
     async fn after_the_loopback_answers_once_a_second_client_is_refused() {
+        use futures_util::FutureExt;
         let server = aws_loopback(400, Some("ValidationException"), json!({"message": "fixture"})).await;
         let db = crate::ai::cost::tests::temp_metrics_db("");
         let wire = BedrockWire::new(fixture_creds("ap-southeast-1"), "global.anthropic.claude-sonnet-4-6");
@@ -888,15 +890,8 @@ pub(crate) mod tests {
         server.await.unwrap();
         assert_eq!(LOOPBACK.with(|endpoint| endpoint.borrow().clone()), None);
         let creds = fixture_creds("ap-southeast-1");
-        let refused = std::thread::spawn(move || {
-            // The loopback is per thread: the second client is built where
-            // the first one was, with nothing pointed.
-            let runtime = tokio::runtime::Builder::new_current_thread().enable_all().build().unwrap();
-            std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| runtime.block_on(super::client_for(&creds)))).map(|_| ()).expect_err("refused")
-        })
-        .join()
-        .unwrap();
-        assert!(refused.downcast_ref::<String>().is_some_and(|message| message.starts_with("Bedrock: a test request to bedrock-runtime.ap-southeast-1.amazonaws.com was refused")));
+        let refused = std::panic::AssertUnwindSafe(super::client_for(&creds)).catch_unwind().await.map(|_| ()).expect_err("refused");
+        assert!(refused.downcast_ref::<String>().is_some_and(|message| message.starts_with("Bedrock: a test request to bedrock-runtime.ap-southeast-1.amazonaws.com was refused")), "{:?}", refused.downcast_ref::<String>());
     }
 
     /// A chat request AWS refuses stores nothing: there is no usage to store.
