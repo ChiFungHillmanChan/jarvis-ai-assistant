@@ -3235,6 +3235,12 @@ mod resend_counts {
 
     /// Requests a chat turn sends when every reply is `reply(wire)`.
     async fn chat_requests_to(wire: W, db: &crate::db::Database, reply: fn(W) -> Reply) -> usize {
+        chat_turn_to(wire, db, reply).await.0
+    }
+
+    /// A chat turn through run_chosen when every reply is `reply(wire)`:
+    /// the requests it sent and the card it ended with.
+    async fn chat_turn_to(wire: W, db: &crate::db::Database, reply: fn(W) -> Reply) -> (usize, Value) {
         let server = serve((0..8).map(|_| reply(wire)).collect()).await;
         let (router, entry, _pointed) = set_up(wire, &server.base);
         let window = Window::default();
@@ -3260,13 +3266,42 @@ mod resend_counts {
             ),
         )
         .await;
-        assert!(reply.is_err(), "{wire:?}: {reply:?}");
-        server.seen().len()
+        let error = reply.expect_err(&format!("{wire:?}"));
+        (server.seen().len(), crate::ai::failure::parse(&error).unwrap_or_else(|| panic!("{wire:?}: not a card: {error}")))
     }
 
-    /// Requests a completion sends to a busy service. The rule does not
-    /// depend on the feature: one that carries no mail is used, so that the
-    /// compatible service, which is sent no mail, is measured too.
+    /// A 307 to another address, as a service that moved would send it. The
+    /// address is a closed port on this Mac: a client that follows it
+    /// reaches nothing.
+    fn moved(_: W) -> Reply {
+        Reply::json(307, json!({})).header("location", "http://127.0.0.1:9/v1/chat/completions")
+    }
+
+    /// A redirect is not followed and is not sent again: one request on
+    /// each cloud wire, and the card shows a plain failure with nothing of
+    /// the reply (n-4). Before this round the router took a 3xx for a
+    /// server error: the card said the service "could not answer just now
+    /// (307)", and Claude and Gemini sent it twice. The local wire follows
+    /// a redirect, as before P07, so the turn ends where the redirect
+    /// points: here nothing answers, which is sent once more as any
+    /// unreachable server is.
+    #[test]
+    fn a_redirect_is_sent_once_and_shown_as_a_failure() {
+        for wire in [W::OpenAi, W::Compatible, W::Claude, W::Gemini, W::Bedrock] {
+            bedrock_wire::with_credentials(|db| async move {
+                let (requests, card) = chat_turn_to(wire, &db, moved).await;
+                let name = card["model"]["label"].as_str().unwrap_or_default().to_string();
+                assert_eq!((requests, card["code"].clone()), (1, json!("failed")), "{wire:?}: {card}");
+                assert_eq!(card["message"], format!("{name} could not complete this request. Try again, or pick another model."), "{wire:?}");
+                assert_eq!(card["provider_reason"], Value::Null, "{wire:?}");
+            });
+        }
+        bedrock_wire::with_credentials(|db| async move {
+            let (requests, card) = chat_turn_to(W::Local, &db, moved).await;
+            assert_eq!((requests, card["code"].clone()), (2, json!("unreachable")), "{card}");
+        });
+    }
+
     async fn completion_requests(wire: W, db: &crate::db::Database) -> usize {
         let server = serve((0..8).map(|_| busy(wire)).collect()).await;
         let (router, _entry, _pointed) = set_up(wire, &server.base);
