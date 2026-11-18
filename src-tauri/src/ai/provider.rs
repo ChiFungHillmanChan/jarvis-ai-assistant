@@ -188,7 +188,9 @@ pub(crate) trait Wire: Send + Sync {
 
     /// Add the round's reply and the outcome of each of its calls, for the
     /// next request. `next_is_final` is true when the next request is the
-    /// last one allowed.
+    /// last one allowed. Most wires replay the native copy of the reply
+    /// they kept in the conversation; `round` serves a reply with no native
+    /// form (the OpenAI wire's described-tools mode sends its text back).
     fn add_results(&self, conversation: &mut Self::Conversation, round: Round, results: Vec<(Call, Outcome)>, next_is_final: bool) -> Result<(), String>;
 
     /// Whether the turn ends with the round's text right after its calls ran
