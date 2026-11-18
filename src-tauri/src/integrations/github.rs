@@ -538,7 +538,10 @@ mod sync_tests {
         let start = shipped.find("\"[github] review-requested search failed:").expect("the log line");
         let call = &shipped[start..];
         let call = &call[..call.find(");").expect("the end of the log call")];
-        assert!(call.contains("body.len()"), "{call}");
-        assert!(!call.replace("body.len()", "").contains("body"), "{call}");
+        let call = call.split_whitespace().collect::<Vec<_>>().join(" ");
+        assert_eq!(
+            call,
+            r#""[github] review-requested search failed: {} (x-ratelimit-remaining={}, retry-after={}, reply of {} bytes)", status, remaining.as_deref().unwrap_or("unknown"), retry_after.as_deref().unwrap_or("none"), body.len()"#
+        );
     }
 }

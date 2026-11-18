@@ -1112,6 +1112,6 @@ mod tests {
     fn a_failed_sentence_is_logged_by_length_only() {
         let shipped = include_str!("tts.rs").split("\n#[cfg(test)]\nmod tests {").next().unwrap();
         let line = shipped.lines().find(|line| line.contains("\"TTS sentence failed")).expect("the log line");
-        assert!(line.contains("clean.len()") && !line.replace("clean.len()", "").contains("clean"), "{line}");
+        assert_eq!(line.trim(), r#"log::warn!("TTS sentence failed ({} bytes)", clean.len());"#);
     }
 }

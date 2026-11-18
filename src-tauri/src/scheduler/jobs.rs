@@ -234,8 +234,8 @@ async fn run_deadline_monitor(db: &Arc<Database>) -> Result<String, String> {
         rows.collect::<Result<Vec<_>, _>>().map_err(|e| e.to_string())?
     };
     if warnings.is_empty() { return Ok("No upcoming deadlines".to_string()); }
-    for (id, _, deadline) in &warnings {
-        log::warn!("Deadline approaching: task id={} due {}", id, deadline);
+    for (id, _, _) in &warnings {
+        log::warn!("Deadline approaching: task id={}", id);
     }
     Ok(format!("{} tasks with deadlines within 3 days", warnings.len()))
 }
@@ -1200,12 +1200,19 @@ mod tests {
     }
 
 
-    /// The deadline monitor's log line gives a task's id and date, not its
-    /// title.
-    #[test]
-    fn the_deadline_log_line_gives_no_task_title() {
-        let shipped = include_str!("jobs.rs").split("\n#[cfg(test)]\nmod tests {").next().unwrap();
-        let line = shipped.lines().find(|line| line.contains("\"Deadline approaching:")).expect("the log line");
-        assert!(line.contains("id, deadline") && !line.contains("title"), "{line}");
+    /// The deadline monitor logs a task by its id alone: neither its title
+    /// nor its date is written to the log. What the job returns is unchanged.
+    #[tokio::test]
+    async fn the_deadline_monitor_logs_a_task_by_its_id_only() {
+        let db = Arc::new(crate::db::test_database());
+        let id = {
+            let conn = db.conn.lock().unwrap();
+            conn.execute("INSERT INTO tasks (title, deadline, status) VALUES ('Pay MARKER-7Q invoice', date('now', 'localtime'), 'pending')", []).unwrap();
+            conn.last_insert_rowid()
+        };
+        let mut returned = None;
+        let logged = crate::test_log::capture(|| async { returned = Some(run_deadline_monitor(&db).await) }).await;
+        assert_eq!(returned.unwrap().unwrap(), "1 tasks with deadlines within 3 days");
+        assert_eq!(logged, vec![format!("Deadline approaching: task id={id}")]);
     }
 }
