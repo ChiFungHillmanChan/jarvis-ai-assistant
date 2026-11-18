@@ -3629,8 +3629,8 @@ mod resend_counts {
     /// answered with the whitespace).
     #[test]
     fn a_turn_that_ends_with_nothing_said_is_an_empty_reply() {
-        let replies: [(&str, fn(W) -> Reply); 4] = [
-            ("cut off part-way", cut_with_nothing_said),
+        let replies = [
+            ("cut off part-way", cut_with_nothing_said as fn(W) -> Reply),
             ("stopped at the output limit", stopped_at_the_limit_with_nothing_said),
             ("cut off after whitespace", cut_after_only_whitespace),
             ("no call", nothing_said),
