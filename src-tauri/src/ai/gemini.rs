@@ -213,7 +213,7 @@ impl Wire for GeminiWire {
         Ok(Conversation {
             client,
             contents: history_contents(request.messages),
-            tools: tools::to_gemini_format(&request.tools),
+            tools: declarations(&request.tools, self.schema_rules()),
             system_instruction: json!({"parts": [{"text": request.system.joined()}]}),
             round: ModelRound::default(),
             events: 0,
@@ -444,7 +444,16 @@ const JSON_TEXT_NOTE: &str = "Give this value as one JSON object written as a st
 /// way to say "any object".
 pub(crate) const GEMINI_SCHEMA: SchemaRules = SchemaRules { fields: Some(SCHEMA_FIELDS), json_text_note: Some(JSON_TEXT_NOTE) };
 
+/// The tools as Gemini's function declarations, their parameters under
+/// `rules`: the wire's own (`schema_rules`), the same rules that turn the
+/// arguments back before a tool runs.
+fn declarations(tools: &[tools::Tool], rules: &SchemaRules) -> Vec<serde_json::Value> {
+    let declarations: Vec<serde_json::Value> = tools.iter().map(|t| json!({"name": t.name, "description": t.description, "parameters": rules.sanitize(&t.parameters)})).collect();
+    vec![json!({ "functionDeclarations": declarations })]
+}
+
 /// A tool's parameters in a shape Gemini accepts.
+#[cfg(test)]
 pub(crate) fn sanitize_schema(schema: &serde_json::Value) -> serde_json::Value {
     GEMINI_SCHEMA.sanitize(schema)
 }
@@ -648,7 +657,7 @@ mod tests {
                 check(items, false, &format!("{path}[]"));
             }
         }
-        let tools = crate::ai::tools::to_gemini_format(&crate::ai::tools::get_tool_definitions());
+        let tools = declarations(&crate::ai::tools::get_tool_definitions(), &GEMINI_SCHEMA);
         for declaration in tools[0]["functionDeclarations"].as_array().unwrap() {
             check(&declaration["parameters"], true, declaration["name"].as_str().unwrap());
         }
