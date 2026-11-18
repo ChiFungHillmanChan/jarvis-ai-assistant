@@ -1,6 +1,6 @@
 {
-  "version": 3,
-  "issued_at": "2026-11-17T17:03:55Z",
+  "version": 4,
+  "issued_at": "2026-11-18T12:00:59Z",
   "min_app_version": "0.5.11",
   "providers": [
     {
@@ -452,7 +452,7 @@
       "replacement": null,
       "managed": false,
       "prices": {
-        "input": 0.11,
+        "input": 0.1,
         "output": 0.5,
         "cache_read": 0.01,
         "cache_write": 0.125,
@@ -701,8 +701,8 @@
       "provider": "claude",
       "kind": "model",
       "display_name": {
-        "en": "Claude Sonnet 4.6 QA",
-        "zh-HK": "Claude Sonnet 4.6 QA"
+        "en": "Claude Sonnet 4.6",
+        "zh-HK": "Claude Sonnet 4.6"
       },
       "status": "active",
       "replacement": null,
