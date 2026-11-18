@@ -2336,6 +2336,27 @@ mod parity {
             }
         }
 
+        /// A reply that ends with nothing said and no call.
+        fn empty(self) -> Reply {
+            match self {
+                W::OpenAi | W::Compatible | W::Local => Reply::openai_sse(&[
+                    json!({"choices": [{"delta": {"role": "assistant"}, "finish_reason": "stop"}]}),
+                    json!({"choices": [], "usage": {"prompt_tokens": 100, "completion_tokens": 0}}),
+                ]),
+                W::Claude => Reply::named_sse(&[
+                    ("message_start", json!({"type": "message_start", "message": {"id": "msg_1", "role": "assistant", "content": [], "usage": {"input_tokens": 100, "output_tokens": 1}}})),
+                    ("message_delta", json!({"type": "message_delta", "delta": {"stop_reason": "end_turn"}, "usage": {"output_tokens": 0}})),
+                    ("message_stop", json!({"type": "message_stop"})),
+                ]),
+                W::Gemini => Reply::sse(&[json!({"candidates": [{"content": {"role": "model", "parts": []}, "finishReason": "STOP"}], "usageMetadata": {"promptTokenCount": 100, "candidatesTokenCount": 0}})]),
+                W::Bedrock => bedrock_stream(&[
+                    ("messageStart", json!({"role": "assistant"})),
+                    ("messageStop", json!({"stopReason": "end_turn"})),
+                    ("metadata", json!({"usage": {"inputTokens": 100, "outputTokens": 0, "totalTokens": 100}})),
+                ]),
+            }
+        }
+
         /// A streamed reply that calls one tool and says nothing, of 100
         /// tokens in and 10 out.
         fn calls(self, name: &str, args: Value) -> Reply {
@@ -2790,6 +2811,67 @@ mod parity {
             assert!(tasks(&db).is_empty(), "{wire:?}");
             assert_eq!(turn.ledger.count(), 0, "{wire:?}");
             assert_eq!(on.server.seen().len(), 1, "{wire:?}");
+        });
+    }
+
+    /// Every provider's turn limited to two rounds.
+    fn two_rounds() -> impl Drop {
+        crate::ai::registry::test_override::with(|r| r.providers.iter_mut().for_each(|p| p.limits.max_tool_rounds = Some(2)))
+    }
+
+    /// What the window showed (the tokens, in order) and what the voice was
+    /// given (the text chunks), each as its pieces.
+    fn shown_and_spoken(turn: &Turn) -> (Vec<String>, Vec<String>) {
+        let shown = turn.window.iter().filter(|(name, payload)| name == "chat-token" && payload["done"] == false).map(|(_, payload)| payload["token"].as_str().unwrap().to_string()).collect();
+        let spoken = turn.voice.iter().filter_map(|line| line.strip_prefix("text: ").map(str::to_string)).collect();
+        (shown, spoken)
+    }
+
+    /// The tool limit reached with the model still calling: the last round
+    /// streamed nothing, so the fallback goes out once, as one token and
+    /// one voice chunk, on every wire (decision 116).
+    #[test]
+    fn the_fallback_goes_out_once() {
+        on_each(&ALL, |wire, db| async move {
+            let _rounds = two_rounds();
+            let on = wire.serve(vec![wire.calls("remember", json!({"content": "Kenny is my accountant"})), wire.calls("remember", json!({"content": "Kenny is my dentist"}))], &db).await;
+            let turn = on.turn("Remember Kenny is my accountant", &db, true).await;
+            let fallback = fallback(&db);
+            assert_eq!(turn.reply.as_ref(), Ok(&fallback), "{wire:?}");
+            assert_eq!(shown_and_spoken(&turn), (vec![fallback.clone()], vec![fallback.clone()]), "{wire:?}");
+        });
+    }
+
+    /// An empty last round: the fallback once, as one token and one voice
+    /// chunk, except on Gemini, whose empty reply is an error, as before
+    /// P07: nothing is shown or spoken.
+    #[test]
+    fn an_empty_last_round() {
+        on_each(&ALL, |wire, db| async move {
+            let _rounds = two_rounds();
+            let on = wire.serve(vec![wire.calls("remember", json!({"content": "Kenny is my accountant"})), wire.empty()], &db).await;
+            let turn = on.turn("Remember Kenny is my accountant", &db, true).await;
+            if wire == W::Gemini {
+                assert!(turn.reply.as_ref().is_err_and(|error| error.contains("returned no text")), "{wire:?}: {:?}", turn.reply);
+                assert_eq!(shown_and_spoken(&turn), (vec![], vec![]), "{wire:?}");
+                return;
+            }
+            let fallback = fallback(&db);
+            assert_eq!(turn.reply.as_ref(), Ok(&fallback), "{wire:?}");
+            assert_eq!(shown_and_spoken(&turn), (vec![fallback.clone()], vec![fallback.clone()]), "{wire:?}");
+        });
+    }
+
+    /// A last round that streamed its answer is not sent again.
+    #[test]
+    fn a_streamed_last_round_is_not_sent_again() {
+        on_each(&ALL, |wire, db| async move {
+            let _rounds = two_rounds();
+            let on = wire.serve(vec![wire.calls("remember", json!({"content": "Kenny is my accountant"})), wire.says("Saved it.")], &db).await;
+            let turn = on.turn("Remember Kenny is my accountant", &db, true).await;
+            assert_eq!(turn.reply.as_deref(), Ok("Saved it."), "{wire:?}");
+            let (shown, spoken) = shown_and_spoken(&turn);
+            assert_eq!((shown.concat(), spoken.concat()), ("Saved it.".to_string(), "Saved it.".to_string()), "{wire:?}: {shown:?} {spoken:?}");
         });
     }
 }
