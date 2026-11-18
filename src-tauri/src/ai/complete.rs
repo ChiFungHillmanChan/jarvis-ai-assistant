@@ -781,6 +781,25 @@ pub(crate) mod tests {
         );
     }
 
+    /// P07: the official OpenAI completion takes its model as chat does
+    /// (`Target::model`): a saved id that is blank goes out as the default
+    /// (before: sent blank, and refused), and one with spaces round it goes
+    /// out trimmed.
+    #[tokio::test]
+    async fn a_blank_saved_openai_model_goes_out_as_the_default() {
+        let reply = || Reply::json(200, json!({"choices": [{"message": {"content": "{}"}}], "usage": {"prompt_tokens": 1, "completion_tokens": 1}}));
+        let server = serve(vec![reply(), reply()]).await;
+        let _base = point_at(&format!("{}/v1", server.base));
+        let mut router = AiRouter::new("gemini_primary");
+        router.set_openai_key("sk-fixture-openai-not-real");
+        let db = crate::db::test_database();
+        complete_one(&router, &db, &row("openai", Some("  "), None, None), &sort()).await.unwrap();
+        complete_one(&router, &db, &row("openai", Some(" gpt-fixture-1 "), None, None), &sort()).await.unwrap();
+        let seen = server.seen();
+        assert_eq!(seen[0].body["model"], crate::ai::models::openai_default());
+        assert_eq!(seen[1].body["model"], "gpt-fixture-1");
+    }
+
     #[tokio::test]
     async fn a_claude_plain_request() {
         let server = serve(vec![Reply::json(200, json!({"content": [{"type": "text", "text": "{\"a\":1}"}], "usage": {"input_tokens": 10, "output_tokens": 2, "cache_read_input_tokens": 0}}))]).await;
