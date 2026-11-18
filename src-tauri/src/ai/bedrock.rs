@@ -39,7 +39,10 @@ async fn client_for(creds: &AwsCredentials) -> aws_sdk_bedrockruntime::Client {
     #[cfg(test)]
     let loader = match tests::LOOPBACK.with(|endpoint| endpoint.borrow().clone()) {
         Some(endpoint) => loader.endpoint_url(endpoint),
-        None => loader,
+        None => {
+            crate::ai::wire_tests::refuse_outside("Bedrock", &format!("bedrock-runtime.{}.amazonaws.com", creds.region));
+            loader
+        }
     };
     let cfg = loader.load().await;
     aws_sdk_bedrockruntime::Client::new(&cfg)
@@ -671,6 +674,12 @@ pub(crate) mod tests {
         /// Tokio tests run on one thread, so the client built inside the
         /// test reads the value set by `aws_loopback`.
         pub(crate) static LOOPBACK: std::cell::RefCell<Option<String>> = const { std::cell::RefCell::new(None) };
+    }
+
+    /// A Bedrock client as a request builds it, for the test build's
+    /// refusal (`wire_tests::refuse_outside`).
+    pub(crate) async fn client(creds: &AwsCredentials) -> aws_sdk_bedrockruntime::Client {
+        super::client_for(creds).await
     }
 
     /// The request a loopback server received: its request line and body.

@@ -14,6 +14,83 @@ thread_local! {
     /// Where [`api_base`] sends this thread's requests instead of the
     /// provider's own address.
     pub(super) static API_BASE: RefCell<Option<String>> = const { RefCell::new(None) };
+    /// Whether this thread's requests may reach a provider's own address:
+    /// only while a live test holds an [`Outside`].
+    static OUTSIDE: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
+
+/// The test build's last line: a request a test would send to a provider's
+/// own address is refused before any socket is opened (`api_base` for
+/// OpenAI, Claude and Gemini; `bedrock::client_for` for Bedrock). Tests
+/// point requests at a loopback server; only a live test that holds its
+/// provider's key may reach the provider.
+pub(crate) fn refuse_outside(wire: &str, address: &str) {
+    if !OUTSIDE.with(std::cell::Cell::get) {
+        panic!("{wire}: a test request to {address} was refused before it was sent; point it at a loopback server (wire_tests::point_at, point_bedrock_at)");
+    }
+}
+
+/// Lets this thread's requests reach the providers' own addresses until
+/// dropped; the drop puts back what was there before. Made only in `live`,
+/// by [`live_key`], for a test that holds a JARVIS_LIVE_<PROVIDER>_KEY value.
+struct Outside {
+    before: bool,
+}
+
+impl Drop for Outside {
+    fn drop(&mut self) {
+        OUTSIDE.with(|allowed| allowed.set(self.before));
+    }
+}
+
+/// The value of `name` (a JARVIS_LIVE_<PROVIDER>_KEY variable) and, when it
+/// is set, the opt-in that lets this thread reach the providers.
+fn live_key(name: &str) -> Option<(String, Outside)> {
+    assert!(name.starts_with("JARVIS_LIVE_") && name.ends_with("_KEY"), "only a live key opts in: {name}");
+    let key = std::env::var(name).ok().map(|value| value.trim().to_string()).filter(|value| !value.is_empty())?;
+    let before = OUTSIDE.with(|allowed| allowed.replace(true));
+    Some((key, Outside { before }))
+}
+
+/// Without a redirect, each provider's own address is refused before any
+/// request; inside a redirect the loopback server is used; a redirect
+/// dropped inside another leaves the outer one in force; and the live
+/// opt-in ends with its guard.
+#[test]
+fn a_test_request_to_a_provider_is_refused_unless_redirected() {
+    let refused = |reach: &dyn Fn()| {
+        let panic = std::panic::catch_unwind(std::panic::AssertUnwindSafe(reach)).expect_err("refused");
+        panic.downcast_ref::<String>().cloned().unwrap_or_default()
+    };
+    for (wire, official) in [("OpenAI", "https://api.openai.com/v1"), ("Claude", "https://api.anthropic.com"), ("Gemini", crate::ai::gemini::API_BASE)] {
+        assert!(refused(&|| { api_base(official); }).starts_with(&format!("{wire}: a test request to {official} was refused")), "{wire}");
+        let outer = point_at("http://127.0.0.1:1/v1");
+        {
+            let _inner = point_at("http://127.0.0.1:2/v1beta");
+            assert_eq!(api_base(official), "http://127.0.0.1:2/v1beta");
+        }
+        assert_eq!(api_base(official), "http://127.0.0.1:1/v1", "{wire}: the outer redirect after the inner one dropped");
+        drop(outer);
+        assert!(refused(&|| { api_base(official); }).contains("was refused"), "{wire}: after every redirect dropped");
+    }
+    let runtime = tokio::runtime::Builder::new_current_thread().enable_all().build().unwrap();
+    let creds = crate::aws::credentials::AwsCredentials { access_key_id: "AKIAFIXTURE".into(), secret_access_key: "fixture".into(), region: "us-east-1".into(), inference_profile: "us".into() };
+    let bedrock = || runtime.block_on(crate::ai::bedrock::tests::client(&creds));
+    assert!(refused(&|| { bedrock(); }).starts_with("Bedrock: a test request to"), "Bedrock");
+    {
+        let _loopback = point_bedrock_at("http://127.0.0.1:3");
+        bedrock();
+    }
+    assert!(refused(&|| { bedrock(); }).contains("was refused"), "Bedrock: after the redirect dropped");
+    // The live opt-in, made by hand here with what `live_key` sets: in force
+    // while held, gone with its guard.
+    {
+        let _live = Outside { before: OUTSIDE.with(|allowed| allowed.replace(true)) };
+        assert_eq!(api_base("https://api.openai.com/v1"), "https://api.openai.com/v1");
+    }
+    assert!(refused(&|| { api_base("https://api.openai.com/v1"); }).contains("was refused"), "the opt-in ends with its guard");
+    assert!(std::env::var("JARVIS_LIVE_NOT_A_PROVIDER_KEY").is_err() && live_key("JARVIS_LIVE_NOT_A_PROVIDER_KEY").is_none(), "no value, no opt-in");
+    assert!(!OUTSIDE.with(std::cell::Cell::get));
 }
 
 /// Points this thread's provider requests at `base` until dropped. A drop
@@ -40,20 +117,6 @@ pub(crate) fn point_at(base: &str) -> PointedAt {
     let before = pointed();
     API_BASE.with(|slot| *slot.borrow_mut() = Some(base.to_string()));
     before
-}
-
-/// A redirect dropped inside another's scope leaves the outer one in force.
-#[test]
-fn a_redirect_dropped_inside_another_leaves_the_outer_one() {
-    let official = "https://api.example.invalid/v1";
-    let outer = point_at("http://127.0.0.1:1/v1");
-    {
-        let _inner = point_at("http://127.0.0.1:2/v1beta");
-        assert_eq!(api_base(official), "http://127.0.0.1:2/v1beta");
-    }
-    assert_eq!(api_base(official), "http://127.0.0.1:1/v1");
-    drop(outer);
-    assert_eq!(api_base(official), official);
 }
 
 /// Points this thread's Bedrock clients at `base` until dropped.
@@ -2887,6 +2950,9 @@ mod parity {
 // the requests only: it is not printed, logged or saved.
 // ---------------------------------------------------------------------------
 
+/// Only these tests reach a provider, and only with its key set: OpenAI,
+/// Claude, Gemini and Bedrock hold the opt-in from `live_key` while they
+/// run; the compatible and local ones go to the address in their row.
 mod live {
     use super::*;
     use crate::ai::complete::{complete, Request};
@@ -2932,7 +2998,7 @@ mod live {
     #[tokio::test]
     #[ignore]
     async fn live_openai() {
-        let Some(key) = var("JARVIS_LIVE_OPENAI_KEY") else { return skipped("JARVIS_LIVE_OPENAI_KEY") };
+        let Some((key, _outside)) = live_key("JARVIS_LIVE_OPENAI_KEY") else { return skipped("JARVIS_LIVE_OPENAI_KEY") };
         let mut router = AiRouter::new("gemini_primary");
         router.set_openai_key(&key);
         smoke("openai", router, entry("openai", None, None, None), &crate::db::test_database(), true).await;
@@ -2941,7 +3007,7 @@ mod live {
     #[tokio::test]
     #[ignore]
     async fn live_claude() {
-        let Some(key) = var("JARVIS_LIVE_CLAUDE_KEY") else { return skipped("JARVIS_LIVE_CLAUDE_KEY") };
+        let Some((key, _outside)) = live_key("JARVIS_LIVE_CLAUDE_KEY") else { return skipped("JARVIS_LIVE_CLAUDE_KEY") };
         let mut router = AiRouter::new("gemini_primary");
         router.set_claude_key(&key);
         smoke("claude", router, entry("claude", None, None, None), &crate::db::test_database(), true).await;
@@ -2950,7 +3016,7 @@ mod live {
     #[tokio::test]
     #[ignore]
     async fn live_gemini() {
-        let Some(key) = var("JARVIS_LIVE_GEMINI_KEY") else { return skipped("JARVIS_LIVE_GEMINI_KEY") };
+        let Some((key, _outside)) = live_key("JARVIS_LIVE_GEMINI_KEY") else { return skipped("JARVIS_LIVE_GEMINI_KEY") };
         let mut router = AiRouter::new("gemini_primary");
         router.set_gemini_key(&key);
         smoke("gemini", router, entry("gemini", None, None, None), &crate::db::test_database(), true).await;
@@ -2974,7 +3040,7 @@ mod live {
     #[test]
     #[ignore]
     fn live_bedrock() {
-        let (Some(key), Some(secret)) = (var("JARVIS_LIVE_BEDROCK_KEY"), var("JARVIS_LIVE_BEDROCK_SECRET")) else {
+        let (Some((key, _outside)), Some(secret)) = (live_key("JARVIS_LIVE_BEDROCK_KEY"), var("JARVIS_LIVE_BEDROCK_SECRET")) else {
             return skipped("JARVIS_LIVE_BEDROCK_KEY and JARVIS_LIVE_BEDROCK_SECRET");
         };
         let region = var("JARVIS_LIVE_BEDROCK_REGION").unwrap_or_else(|| "us-east-1".into());

@@ -136,11 +136,16 @@ fn chat_request(db: &crate::db::Database, messages: Vec<(String, String)>, deepe
 }
 
 /// The address a provider's own API is reached at: `official`, except in a
-/// test that points it at a loopback server (`wire_tests::serve`).
+/// test, which points it at a loopback server (`wire_tests::serve`) and is
+/// refused the provider's own address (`wire_tests::refuse_outside`).
 pub(crate) fn api_base(official: &str) -> String {
     #[cfg(test)]
-    if let Some(base) = wire_tests::API_BASE.with(|base| base.borrow().clone()) {
-        return base;
+    {
+        if let Some(base) = wire_tests::API_BASE.with(|base| base.borrow().clone()) {
+            return base;
+        }
+        let wire = if official.contains("openai.com") { "OpenAI" } else if official.contains("anthropic.com") { "Claude" } else if official.contains("googleapis.com") { "Gemini" } else { "A provider" };
+        wire_tests::refuse_outside(wire, official);
     }
     official.to_string()
 }
