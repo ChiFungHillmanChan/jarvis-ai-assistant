@@ -649,6 +649,91 @@ mod openai_wire {
         assert_eq!(turn.reply, Err(format!("{} API error 400 Bad Request: {}", compat::label(&base), json!({"error": {"message": "bad model"}}))));
         assert!(rows(&db).is_empty());
     }
+
+    /// Calls in a reply cut off by the length limit may be half written:
+    /// they do not run, and the text so far is the answer.
+    #[tokio::test]
+    async fn calls_cut_off_by_the_length_limit_do_not_run() {
+        let server = serve(vec![Reply::openai_sse(&[
+            json!({"choices": [{"delta": {"content": "Let me save that."}}]}),
+            json!({"choices": [{"delta": {"tool_calls": [{"index": 0, "id": "call_1", "type": "function", "function": {"name": "remember", "arguments": REMEMBER_ARGS}}]}, "finish_reason": "length"}]}),
+        ])])
+        .await;
+        let _base = point_at(&format!("{}/v1", server.base));
+        let db = crate::db::test_database();
+        let turn = run_turn(&router(), official(), &[("user", "Remember Kenny is my accountant")], &db, Workload::Tools, true).await;
+        assert_eq!(turn.reply.as_deref(), Ok("Let me save that."));
+        assert_eq!(turn.ledger.count(), 0);
+        assert!(memories(&db).is_empty());
+        assert_eq!(server.seen().len(), 1);
+    }
+
+    /// The text a tool round streamed goes back with its calls.
+    #[tokio::test]
+    async fn the_text_of_a_tool_round_goes_back_with_its_calls() {
+        let server = serve(vec![
+            Reply::openai_sse(&[
+                json!({"choices": [{"delta": {"content": "Let me save that."}}]}),
+                json!({"choices": [{"delta": {"tool_calls": [{"index": 0, "id": "call_1", "type": "function", "function": {"name": "remember", "arguments": REMEMBER_ARGS}}]}, "finish_reason": "tool_calls"}]}),
+            ]),
+            Reply::openai_sse(&[json!({"choices": [{"delta": {"content": "Saved."}, "finish_reason": "stop"}]})]),
+        ])
+        .await;
+        let _base = point_at(&format!("{}/v1", server.base));
+        let db = crate::db::test_database();
+        let turn = run_turn(&router(), official(), &[("user", "Remember Kenny is my accountant")], &db, Workload::Tools, true).await;
+        assert_eq!(turn.reply.as_deref(), Ok("Saved."));
+        let seen = server.seen();
+        assert_eq!(seen.len(), 2);
+        assert_eq!(
+            seen[1].body["messages"][2],
+            json!({"role": "assistant", "content": "Let me save that.", "tool_calls": [{"id": "call_1", "type": "function", "function": {"name": "remember", "arguments": REMEMBER_ARGS}}]})
+        );
+    }
+
+    /// A turn that fails after a tool round stores what the earlier round
+    /// was billed, as one row under tools.
+    #[tokio::test]
+    async fn a_failure_after_a_tool_round_stores_the_earlier_round() {
+        let server = serve(vec![
+            Reply::openai_sse(&[
+                json!({"choices": [{"delta": {"tool_calls": [{"index": 0, "id": "call_1", "type": "function", "function": {"name": "remember", "arguments": REMEMBER_ARGS}}]}, "finish_reason": "tool_calls"}]}),
+                json!({"choices": [], "usage": {"prompt_tokens": 100, "completion_tokens": 10}}),
+            ]),
+            Reply::json(400, json!({"error": {"message": "Invalid request", "code": "invalid_request_error"}})),
+        ])
+        .await;
+        let _base = point_at(&format!("{}/v1", server.base));
+        let db = crate::db::test_database();
+        let turn = run_turn(&router(), official(), &[("user", "Remember Kenny is my accountant")], &db, Workload::Tools, true).await;
+        assert!(turn.reply.is_err(), "{:?}", turn.reply);
+        assert_eq!(turn.ledger.count(), 1);
+        let model = crate::ai::models::openai_default();
+        assert_eq!(rows(&db), vec![priced_row("openai", "tools", &model, &[(100, 10, 0, 0)])]);
+    }
+
+    /// Two different calls in one round both run, and the voice says what
+    /// it is doing once.
+    #[tokio::test]
+    async fn one_narration_per_round() {
+        let other = r#"{"content":"Mary is my dentist"}"#;
+        let server = serve(vec![
+            Reply::openai_sse(&[
+                json!({"choices": [{"delta": {"tool_calls": [{"index": 0, "id": "call_1", "type": "function", "function": {"name": "remember", "arguments": REMEMBER_ARGS}}]}}]}),
+                json!({"choices": [{"delta": {"tool_calls": [{"index": 1, "id": "call_2", "type": "function", "function": {"name": "remember", "arguments": other}}]}, "finish_reason": "tool_calls"}]}),
+            ]),
+            Reply::openai_sse(&[json!({"choices": [{"delta": {"content": "Saved."}, "finish_reason": "stop"}]})]),
+        ])
+        .await;
+        let _base = point_at(&format!("{}/v1", server.base));
+        let db = crate::db::test_database();
+        let turn = run_turn(&router(), official(), &[("user", "Remember Kenny and Mary")], &db, Workload::Tools, true).await;
+        assert_eq!(turn.reply.as_deref(), Ok("Saved."));
+        assert_eq!(memories(&db).len(), 2);
+        assert_eq!(turn.ledger.count(), 2);
+        let narration = tools::tool_voice_narration("remember", &tools::read_language_pref(&db));
+        assert_eq!(turn.voice, vec![format!("narrate: {narration}"), "text: Saved.".into()]);
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -907,6 +992,23 @@ mod claude_wire {
         assert_eq!(turn.window_lines(), vec![format!("chat-state {}", json!({"state": "idle"}))]);
         let model = crate::ai::models::claude_default();
         assert_eq!(rows(&db), vec![priced_row("claude", "chat", &model, &[(30, 0, 0, 0)])], "what was billed before the error is stored");
+    }
+
+    /// A reply that has calls and text and says it is done (end_turn) is the
+    /// answer once its calls ran: no further request.
+    #[tokio::test]
+    async fn an_end_turn_reply_with_calls_is_the_answer() {
+        let mut events = vec![start(50, 0, 0), text_block(0), text(0, "Saved it."), stop(0)];
+        events.extend(tool_use(1, "toolu_1", &[REMEMBER_ARGS]));
+        events.extend(end("end_turn", 20));
+        let server = serve(vec![Reply::named_sse(&events)]).await;
+        let _base = point_at(&server.base);
+        let db = crate::db::test_database();
+        let turn = run_turn(&router(), row(), &[("user", "Remember Kenny is my accountant")], &db, Workload::Tools, true).await;
+        assert_eq!(turn.reply.as_deref(), Ok("Saved it."));
+        assert_eq!(memories(&db), vec!["Kenny is my accountant"]);
+        assert_eq!(turn.ledger.count(), 1);
+        assert_eq!(server.seen().len(), 1, "no request after the calls");
     }
 }
 
