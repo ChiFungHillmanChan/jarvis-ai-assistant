@@ -1209,8 +1209,8 @@ mod tests {
         assert!(size < 16 * 1024, "send_message's future is {size} bytes");
     }
 
-    /// The turn itself stays small too: both reply paths box the request
-    /// they hand to `answered`, which used to hold it inline four times.
+    /// The turn itself stays small too: `answered` boxes the request each
+    /// reply path hands it, which it used to hold inline four times.
     #[test]
     fn a_turn_holds_a_small_future() {
         let size = future_size(|app: &'static tauri::AppHandle, db: &'static Arc<Database>, router: &'static Mutex<AiRouter>, auth: &'static Arc<crate::auth::google::GoogleAuth>, engine: &'static Arc<VoiceEngine>| {
