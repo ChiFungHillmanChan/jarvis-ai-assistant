@@ -172,9 +172,10 @@ pub(crate) trait Wire: Send + Sync {
     /// Send the next request and report its reply.
     async fn round(&self, conversation: &mut Self::Conversation, final_round: bool, events: &mut Events<'_>) -> Result<(), RoundError>;
 
-    /// Whether the round's calls run. The last round runs none.
-    fn runs_calls(&self, _conversation: &Self::Conversation, round: &Round, final_round: bool) -> bool {
-        !round.calls.is_empty() && !final_round
+    /// Whether the round's calls run, before the last round: the loop runs
+    /// none on the last round, whatever the wire says.
+    fn runs_calls(&self, _conversation: &Self::Conversation, round: &Round) -> bool {
+        !round.calls.is_empty()
     }
 
     /// Add the round's reply and the outcome of each of its calls, for the
@@ -533,7 +534,8 @@ async fn one_request<W: Wire>(wire: &W, conversation: &mut W::Conversation, tool
         meter.failed(turn.db, turn.workload, usage, latency_ms);
         return Err(error.message);
     }
-    let runs = wire.runs_calls(conversation, &round, final_round);
+    // The last round runs no tool, on every wire.
+    let runs = !final_round && wire.runs_calls(conversation, &round);
     meter.request(turn.db, turn.workload, usage, round.calls.len(), final_round, latency_ms);
     Ok((round, runs))
 }

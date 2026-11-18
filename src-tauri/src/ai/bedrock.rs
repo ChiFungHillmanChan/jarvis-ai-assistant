@@ -406,9 +406,8 @@ impl Wire for BedrockWire {
     }
 
     /// A reply that stopped for tools runs them even when it lists none.
-    /// The last round runs no tools.
-    fn runs_calls(&self, _conversation: &Conversation, round: &Round, final_round: bool) -> bool {
-        (!round.calls.is_empty() || round.stop.as_deref() == Some("tool_use")) && !final_round
+    fn runs_calls(&self, _conversation: &Conversation, round: &Round) -> bool {
+        !round.calls.is_empty() || round.stop.as_deref() == Some("tool_use")
     }
 
     fn add_results(&self, conversation: &mut Conversation, _round: Round, results: Vec<(Call, Outcome)>, next_is_final: bool) -> Result<(), String> {

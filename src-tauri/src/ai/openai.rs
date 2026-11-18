@@ -451,10 +451,10 @@ impl Wire for OpenAiWire {
     /// complete call counts; a reply cut off by the length limit may carry
     /// half-written arguments. A local server's calls run only on
     /// "tool_calls"; calls written in the text of a model the tools are
-    /// described to always run. The last round runs no tools: a service
-    /// that ignores tool_choice gets the fallback.
-    fn runs_calls(&self, conversation: &Conversation, round: &Round, final_round: bool) -> bool {
-        if round.calls.is_empty() || final_round {
+    /// described to always run. (The loop runs none on the last round: a
+    /// service that ignores tool_choice gets the fallback.)
+    fn runs_calls(&self, conversation: &Conversation, round: &Round) -> bool {
+        if round.calls.is_empty() {
             return false;
         }
         match (&self.local, &conversation.reply) {

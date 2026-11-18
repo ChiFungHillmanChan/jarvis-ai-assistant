@@ -520,6 +520,9 @@ mod openai_wire {
         let turn = run_turn(&router(), official(), &[("user", "Remember Kenny is my accountant")], &db, Workload::Tools, true).await;
         assert_eq!(turn.reply, Ok(fallback(&db)));
         assert_eq!(memories(&db).len(), 1, "the last round runs no tool");
+        // `remember` refreshes a fact it already has, so only the ledger
+        // tells whether the last round's call ran.
+        assert_eq!(turn.ledger.count(), 1, "the last round runs no tool");
         let seen = server.seen();
         assert_eq!(seen.len(), 2);
         assert_eq!(seen[0].body.get("tool_choice"), None);
@@ -883,6 +886,7 @@ mod claude_wire {
         let turn = run_turn(&router(), row(), &[("user", "Remember Kenny is my accountant")], &db, Workload::Tools, true).await;
         assert_eq!(turn.reply, Ok(fallback(&db)));
         assert_eq!(memories(&db).len(), 1);
+        assert_eq!(turn.ledger.count(), 1, "the last round runs no tool");
         let seen = server.seen();
         assert_eq!(seen[0].body.get("tool_choice"), None);
         assert_eq!(seen[1].body["tool_choice"], json!({"type": "none"}));
@@ -1073,6 +1077,7 @@ mod gemini_wire {
         let turn = run_turn(&router(), row(), &[("user", "Remember Kenny is my accountant")], &db, Workload::Tools, true).await;
         assert_eq!(turn.reply, Ok(fallback(&db)));
         assert_eq!(memories(&db).len(), 1);
+        assert_eq!(turn.ledger.count(), 1, "the last round runs no tool");
         let seen = server.seen();
         assert_eq!(seen[0].body.get("toolConfig"), None);
         assert_eq!(seen[1].body["toolConfig"], json!({"functionCallingConfig": {"mode": "NONE"}}));
@@ -1282,6 +1287,7 @@ pub(crate) mod bedrock_wire {
             let turn = run_turn(&AiRouter::new("gemini_primary"), row(), &[("user", "Remember Kenny is my accountant")], &db, Workload::Tools, true).await;
             assert_eq!(turn.reply, Ok(fallback(&db)));
             assert_eq!(memories(&db).len(), 1);
+            assert_eq!(turn.ledger.count(), 1, "the last round runs no tool");
             let seen = server.seen();
             let results = &seen[1].body["messages"][2]["content"];
             assert_eq!(results[1], json!({"text": "Tool limit reached. Do not call any more tools: answer the user now from the results above, and say briefly what you could not check."}));
@@ -1519,6 +1525,23 @@ mod local_wire {
             ]
         );
         assert_eq!(rows(&db), vec![local_row("tools", "qwen3:8b", 250, 15)]);
+    }
+
+    /// The last allowed round sends tool_choice none, and a call the model
+    /// still asks for there is not run.
+    #[tokio::test]
+    async fn the_last_round() {
+        let _registry = crate::ai::registry::test_override::with(|r| r.providers.iter_mut().find(|p| p.id == "ollama").unwrap().limits.max_tool_rounds = Some(2));
+        let call = |id: &str| Reply::openai_sse(&[json!({"choices": [{"delta": {"tool_calls": [{"index": 0, "id": id, "type": "function", "function": {"name": "remember", "arguments": REMEMBER_ARGS}}]}, "finish_reason": "tool_calls"}]})]);
+        let server = serve(vec![call("call_1"), call("call_2")]).await;
+        let db = crate::db::test_database();
+        let turn = run_turn(&router(&server.base, BackendType::Vllm), row("my-model"), &[("user", "Remember Kenny is my accountant")], &db, Workload::Tools, true).await;
+        assert_eq!(turn.reply, Ok(fallback(&db)));
+        assert_eq!(turn.ledger.count(), 1, "the last round runs no tool");
+        let seen = server.seen();
+        assert_eq!(seen.len(), 2);
+        assert_eq!(seen[0].body.get("tool_choice"), None);
+        assert_eq!(seen[1].body["tool_choice"], "none");
     }
 
     /// A model that calls tools itself runs its calls only when it stops to
