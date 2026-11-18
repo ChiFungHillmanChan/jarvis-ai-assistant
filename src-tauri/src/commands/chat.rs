@@ -145,6 +145,19 @@ fn answer(conn: &rusqlite::Connection, reply: String, session_id: &str, without_
     Ok(ChatMessage { id: None, role: "assistant".to_string(), content: reply, created_at: None, has_recording: false, note: without_tools.then(|| crate::ai::local::no_tools_answer_note(language)) })
 }
 
+/// Runs a chat turn's request and returns its answer: the reply saved, with
+/// the note when a local model ran the turn without tools. A request that
+/// failed is returned as it is, with nothing saved. The UI language is read
+/// before the database lock is taken, because `UiLanguage::read` takes the
+/// same lock and a std mutex locked twice on one thread never returns.
+async fn answered(db: &Database, session_id: &str, turn: impl std::future::Future<Output = Result<String, String>>) -> Result<ChatMessage, String> {
+    let (sent, without_tools) = crate::ai::local::noting_no_tools(turn).await;
+    let reply = sent?;
+    let language = crate::ai::bedrock::UiLanguage::read(db);
+    let conn = db.conn.lock().map_err(|e| e.to_string())?;
+    answer(&conn, reply, session_id, without_tools, language)
+}
+
 async fn send_scoped(
     app_handle: &tauri::AppHandle,
     db: &Arc<Database>,
@@ -232,19 +245,14 @@ async fn send_scoped(
                         "phase": "thinking"
                     }),
                 );
-                let (sent, without_tools) = crate::ai::local::noting_no_tools(router.send_with_untrusted_context(search_messages, &db, &google_auth, &app_handle, None, Workload::Volume, Feature::Chat)).await;
-                let search_response = match sent {
-                    Ok(r) => r,
-                    Err(e) => {
+                let done = answered(db, &session_id, async {
+                    let sent = router.send_with_untrusted_context(search_messages, &db, &google_auth, &app_handle, None, Workload::Volume, Feature::Chat).await;
+                    if sent.is_err() {
                         let _ = app_handle.emit("chat-state", json!({"state": "idle"}));
-                        return Err(e);
                     }
-                };
-
-                let done = {
-                    let conn3 = db.conn.lock().map_err(|e| e.to_string())?;
-                    answer(&conn3, search_response, &session_id, without_tools, crate::ai::bedrock::UiLanguage::read(db))?
-                };
+                    sent
+                })
+                .await?;
 
                 {
                     let tts = engine.tts.lock().map_err(|e| e.to_string())?.clone();
@@ -344,31 +352,24 @@ async fn send_scoped(
     };
     let tts_tx = Some(streaming_tts.sender());
 
-    let (sent, without_tools) = crate::ai::local::noting_no_tools(async {
-        if untrusted_context {
+    let done = answered(db, &session_id, async {
+        let sent = if untrusted_context {
             router.send_with_untrusted_context(messages, &db, &google_auth, &app_handle, tts_tx, selected_workload, Feature::Chat).await
         } else {
             router.send(messages, &db, &google_auth, &app_handle, tts_tx, selected_workload, Feature::Chat).await
+        };
+        // Join the task-owned consumer before releasing the foreground gate on
+        // every path, including provider and persistence errors.
+        if sent.is_err() {
+            if let Ok(tts) = engine.tts.lock() { tts.cancel(); }
         }
-    })
-    .await;
-    // Join the task-owned consumer before releasing the foreground gate on
-    // every path, including provider and persistence errors.
-    if sent.is_err() {
-        if let Ok(tts) = engine.tts.lock() { tts.cancel(); }
-    }
-    streaming_tts.finish().await;
-    let response_text = match sent {
-        Ok(r) => r,
-        Err(e) => {
+        streaming_tts.finish().await;
+        if sent.is_err() {
             let _ = app_handle.emit("chat-state", json!({"state": "idle"}));
-            return Err(e);
         }
-    };
-    let done = {
-        let conn = db.conn.lock().map_err(|e| e.to_string())?;
-        answer(&conn, response_text, &session_id, without_tools, crate::ai::bedrock::UiLanguage::read(db))?
-    };
+        sent
+    })
+    .await?;
 
     // Unconditional: the HUD must return to idle here regardless of whether
     // the streaming consumer's own "idle" emit ran.
@@ -1094,6 +1095,46 @@ mod tests {
         drop(conn);
         let (_, history) = save_turn(&db, "s1", "And tomorrow?").unwrap();
         assert_eq!(contents(history), ["What is on my calendar?", "Hi.", "你好。", "Hello.", "And tomorrow?"]);
+    }
+
+    /// What both chat paths run once the request returns (`answered`): the
+    /// answer comes back, the reply is saved, the note shows in the saved UI
+    /// language when the local model ran without tools, and a failed request
+    /// saves nothing. Run on its own thread with a time limit: round 2 read
+    /// the language while holding the database lock, which it takes again,
+    /// and the turn never returned.
+    #[test]
+    fn a_turn_is_answered_without_taking_the_database_lock_twice() {
+        use crate::ai::local::backend::{BackendType, LocalEndpoint};
+        let db = Arc::new(crate::db::test_database());
+        save_turn(&db, "s1", "What is on my calendar?").unwrap();
+        db.conn.lock().unwrap().execute("INSERT OR REPLACE INTO user_preferences (key, value) VALUES ('ui_locale', 'zh-HK')", []).unwrap();
+        let chat_only = crate::ai::local::LocalChat::plain(LocalEndpoint { id: "lm".into(), name: "Local".into(), url: "http://127.0.0.1:9".into(), backend_type: BackendType::Ollama, api_key: None, use_tls: false, connection_timeout_ms: 5000, keep_alive_minutes: 30, is_active: true, last_health_check: None, last_health_status: None });
+        let (sender, received) = std::sync::mpsc::channel();
+        let on_thread = db.clone();
+        std::thread::spawn(move || {
+            let runtime = tokio::runtime::Builder::new_current_thread().build().unwrap();
+            let answers = runtime.block_on(async {
+                let with_tools = answered(&on_thread, "s1", async { Ok("Hi.".to_string()) }).await;
+                let without_tools = answered(&on_thread, "s1", async {
+                    let _ = chat_only.prepare(String::new(), Vec::new(), &[]);
+                    Ok("你好。".to_string())
+                })
+                .await;
+                let failed = answered(&on_thread, "s1", async { Err("The provider refused the request.".to_string()) }).await;
+                (with_tools, without_tools, failed)
+            });
+            let _ = sender.send(answers);
+        });
+        let (with_tools, without_tools, failed) = received.recv_timeout(std::time::Duration::from_secs(5)).expect("no answer within 5 s: the database lock was taken twice");
+        let with_tools = with_tools.unwrap();
+        assert_eq!((with_tools.content.as_str(), with_tools.note), ("Hi.", None));
+        let without_tools = without_tools.unwrap();
+        assert_eq!(without_tools.content, "你好。");
+        assert_eq!(without_tools.note.as_deref(), Some("此模型不能使用工具，這個回覆沒有查看你的郵件、日曆、工作或 App。可在設定中選擇支援工具的模型。"));
+        assert_eq!(failed.err().as_deref(), Some("The provider refused the request."));
+        let (_, history) = save_turn(&db, "s1", "And tomorrow?").unwrap();
+        assert_eq!(contents(history), ["What is on my calendar?", "Hi.", "你好。", "And tomorrow?"]);
     }
 
     /// When P06's note under a picked answer applies too, both show, one per
