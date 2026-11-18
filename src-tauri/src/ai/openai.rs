@@ -278,9 +278,9 @@ impl Wire for OpenAiWire {
     /// a failed request does not inflate the turn count.
     fn metering(&self) -> Metering {
         if self.local.is_some() {
-            return Metering::PerTurnOnSuccess { provider: "local".into(), model: self.model.clone() };
+            return Metering::AnsweredTurn { provider: "local".into(), model: self.model.clone() };
         }
-        Metering::PerTurn { provider: self.target().provider(), model: self.model.clone() }
+        Metering::Turn { provider: self.target().provider(), model: self.model.clone() }
     }
 
     async fn start(&self, request: ChatRequest) -> Result<Conversation, String> {

@@ -121,13 +121,13 @@ pub(crate) enum Metering {
     /// One row per turn, each request priced on its own; on failure, what
     /// earlier requests were billed (OpenAI, compatible services, Claude,
     /// Gemini).
-    PerTurn { provider: String, model: String },
+    Turn { provider: String, model: String },
     /// One row per turn, only when the turn succeeds (a model on this Mac:
     /// free, but each turn counts).
-    PerTurnOnSuccess { provider: String, model: String },
+    AnsweredTurn { provider: String, model: String },
     /// One row per request, as soon as it is answered, against the model id
     /// it was sent with (Bedrock, the founder's P02 rule).
-    PerRequest { provider: String, model: String },
+    Request { provider: String, model: String },
 }
 
 /// The outcome of one call the model asked for.
@@ -408,8 +408,8 @@ struct Meter {
 impl Meter {
     fn new(metering: Metering) -> Self {
         let turn = match &metering {
-            Metering::PerTurn { provider, model } | Metering::PerTurnOnSuccess { provider, model } => Some(super::cost::TurnUsage::new(provider, model)),
-            Metering::PerRequest { .. } => None,
+            Metering::Turn { provider, model } | Metering::AnsweredTurn { provider, model } => Some(super::cost::TurnUsage::new(provider, model)),
+            Metering::Request { .. } => None,
         };
         Meter { metering, turn, started_at: std::time::Instant::now() }
     }
@@ -427,7 +427,7 @@ impl Meter {
             turn.add_request(usage.input, usage.output, usage.cache_read, usage.cache_write);
             return;
         }
-        let Metering::PerRequest { provider, model } = &self.metering else { return };
+        let Metering::Request { provider, model } = &self.metering else { return };
         note_tools_to_run(calls, final_round);
         match usage {
             Some(usage) => record_request(db, provider, workload, model, usage, latency_ms),
@@ -442,13 +442,13 @@ impl Meter {
     fn failed(&mut self, db: &crate::db::Database, workload: Workload, usage: Option<Usage>, latency_ms: i64) {
         let turn_latency = self.elapsed();
         match (&self.metering, self.turn.take()) {
-            (Metering::PerTurn { .. }, Some(mut turn)) => {
+            (Metering::Turn { .. }, Some(mut turn)) => {
                 if let Some(usage) = usage {
                     turn.add_request(usage.input, usage.output, usage.cache_read, usage.cache_write);
                 }
                 turn.record_if_billed(db, workload, turn_latency);
             }
-            (Metering::PerRequest { provider, model }, _) => {
+            (Metering::Request { provider, model }, _) => {
                 if let Some(usage) = usage {
                     record_request(db, provider, workload, model, usage, latency_ms);
                 }

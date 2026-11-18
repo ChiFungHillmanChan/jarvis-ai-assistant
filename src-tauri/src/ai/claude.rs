@@ -275,8 +275,11 @@ pub(crate) struct Conversation {
     requests: TurnRequests,
     /// The round in progress, as it streamed: sent back with the results of
     /// its calls.
-    reply: Option<(Replay, Vec<String>, Vec<(String, String, serde_json::Value)>)>,
+    reply: Option<RoundSent>,
 }
+
+/// A round's replay, its text parts and its tool calls (id, name, input).
+type RoundSent = (Replay, Vec<String>, Vec<(String, String, serde_json::Value)>);
 
 #[async_trait::async_trait]
 impl Wire for ClaudeWire {
@@ -287,7 +290,7 @@ impl Wire for ClaudeWire {
     }
 
     fn metering(&self) -> Metering {
-        Metering::PerTurn { provider: "claude".into(), model: self.model.clone() }
+        Metering::Turn { provider: "claude".into(), model: self.model.clone() }
     }
 
     async fn start(&self, request: ChatRequest) -> Result<Conversation, String> {

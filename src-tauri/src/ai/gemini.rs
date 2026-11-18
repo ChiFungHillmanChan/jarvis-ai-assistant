@@ -201,7 +201,7 @@ impl Wire for GeminiWire {
     }
 
     fn metering(&self) -> Metering {
-        Metering::PerTurn { provider: "gemini".into(), model: self.model.clone() }
+        Metering::Turn { provider: "gemini".into(), model: self.model.clone() }
     }
 
     fn schema_rules(&self) -> &'static SchemaRules {

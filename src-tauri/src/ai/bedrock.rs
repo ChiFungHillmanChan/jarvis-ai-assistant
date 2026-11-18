@@ -306,7 +306,7 @@ impl Wire for BedrockWire {
     /// against the model id it was sent with. A reply asking for a tool that
     /// will run is stored as tools.
     fn metering(&self) -> Metering {
-        Metering::PerRequest { provider: "bedrock".into(), model: self.model.clone() }
+        Metering::Request { provider: "bedrock".into(), model: self.model.clone() }
     }
 
     async fn start(&self, request: ChatRequest) -> Result<Conversation, String> {
