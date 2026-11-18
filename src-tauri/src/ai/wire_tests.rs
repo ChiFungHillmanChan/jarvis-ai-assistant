@@ -3394,6 +3394,26 @@ mod resend_counts {
         });
     }
 
+    /// A completion that gets a redirect is sent once too, with the same
+    /// card, on every wire but Bedrock. Before this round each was sent twice
+    /// ("could not answer just now (307)"). Bedrock's plain request reads an
+    /// unmodelled 307 as a service error with a code, which is a server
+    /// error, so the router still sends it once more: listed, not changed.
+    #[test]
+    fn a_redirected_completion_is_sent_once() {
+        for wire in [W::OpenAi, W::Compatible, W::Claude, W::Gemini, W::Bedrock, W::Local] {
+            bedrock_wire::with_credentials(|db| async move {
+                let server = serve((0..8).map(|_| moved(wire)).collect()).await;
+                let (router, _entry, _pointed) = set_up(wire, &server.base);
+                let request = Request { system: "", user: "Reply with the single word OK.", json: false, max_tokens: 300, feature: cost::Feature::Other };
+                let error = complete(&router, &db, request).await.expect_err("redirected");
+                let card = crate::ai::failure::parse(&error).unwrap_or_else(|| panic!("{wire:?}: not a card"));
+                let expected = if matches!(wire, W::Bedrock) { (2, json!("server_error")) } else { (1, json!("failed")) };
+                assert_eq!((server.seen().len(), card["code"].clone()), expected, "{wire:?}: {card}");
+            });
+        }
+    }
+
     async fn completion_requests(wire: W, db: &crate::db::Database) -> usize {
         let server = serve((0..8).map(|_| busy(wire)).collect()).await;
         let (router, _entry, _pointed) = set_up(wire, &server.base);
