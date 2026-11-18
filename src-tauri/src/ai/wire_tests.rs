@@ -2411,3 +2411,169 @@ mod live {
         smoke("local", router, entry("local", Some(model), None, Some("live")), &crate::db::test_database(), false).await;
     }
 }
+
+// ---------------------------------------------------------------------------
+// How many requests a temporarily unavailable service (503) is sent, on each
+// wire, through the router's one resend (run_chosen): a chat turn as chat
+// sends it, and a completion as mail analysis sends it.
+// ---------------------------------------------------------------------------
+
+mod resend_counts {
+    use super::*;
+    use crate::ai::complete::{complete, Request};
+    use crate::ai::local::backend::{BackendType, LocalEndpoint};
+
+    const KEY: &str = "sk-fixture-resend-not-real";
+
+    #[derive(Clone, Copy, Debug)]
+    enum W {
+        OpenAi,
+        Compatible,
+        Claude,
+        Gemini,
+        Bedrock,
+        Local,
+    }
+
+    /// A 503 as each service sends it: AWS names the error in a header.
+    fn busy(wire: W) -> Reply {
+        match wire {
+            W::Bedrock => Reply::json(503, json!({"message": "The service is busy."})).header("x-amzn-ErrorType", "ServiceUnavailableException"),
+            _ => Reply::json(503, json!({"error": {"message": "The service is busy."}})),
+        }
+    }
+
+    /// The router and its one saved row for `wire`, pointed at `base`.
+    fn set_up(wire: W, base: &str) -> (AiRouter, ProviderChainEntry, Option<PointedAt>) {
+        let mut router = AiRouter::new("gemini_primary");
+        let row = |provider_type: &str, model: Option<&str>, base_url: Option<String>, endpoint_id: Option<&str>| ProviderChainEntry {
+            position: 0,
+            provider_type: provider_type.into(),
+            endpoint_id: endpoint_id.map(Into::into),
+            model_id: model.map(Into::into),
+            enabled: true,
+            base_url,
+        };
+        let (entry, pointed) = match wire {
+            W::OpenAi => {
+                router.set_openai_key(KEY);
+                (row("openai", None, None, None), Some(point_at(&format!("{base}/v1"))))
+            }
+            W::Compatible => {
+                let url = format!("{base}/v1");
+                router.set_compat_key(&url, KEY);
+                (row("openai", Some("unlisted-chat-1"), Some(url), None), None)
+            }
+            W::Claude => {
+                router.set_claude_key(KEY);
+                (row("claude", None, None, None), Some(point_at(base)))
+            }
+            W::Gemini => {
+                router.set_gemini_key(KEY);
+                (row("gemini", Some(crate::ai::models::GEMINI_FLASH), None, None), Some(point_at(&format!("{base}/v1beta"))))
+            }
+            W::Bedrock => (row("bedrock", Some(bedrock_wire::MODEL), None, None), Some(point_bedrock_at(base))),
+            W::Local => {
+                router.set_local_endpoints(vec![LocalEndpoint {
+                    id: "lm".into(),
+                    name: "Local".into(),
+                    url: base.into(),
+                    backend_type: BackendType::Vllm,
+                    api_key: None,
+                    use_tls: false,
+                    connection_timeout_ms: 5000,
+                    keep_alive_minutes: 30,
+                    is_active: true,
+                    last_health_check: None,
+                    last_health_status: None,
+                }]);
+                (row("local", Some("my-model"), None, Some("lm")), None)
+            }
+        };
+        router.set_provider_chain(vec![entry.clone()]);
+        (router, entry, pointed)
+    }
+
+    /// Requests a chat turn sends to a busy service, through run_chosen as
+    /// the router calls it.
+    async fn chat_requests(wire: W, db: &crate::db::Database) -> usize {
+        let server = serve((0..8).map(|_| busy(wire)).collect()).await;
+        let (router, entry, _pointed) = set_up(wire, &server.base);
+        let window = Window::default();
+        let ledger = SideEffectLedger::new();
+        let auth = Arc::new(crate::auth::google::GoogleAuth::new_empty());
+        let configured = vec![entry.clone()];
+        let messages: Vec<(String, String)> = vec![("user".into(), "Hi".into())];
+        let (messages, window_ref, auth_ref, ledger_ref, router_ref) = (&messages, &window, &auth, &ledger, &router);
+        let reply = cost::with_feature(
+            cost::Feature::Chat,
+            crate::ai::run_chosen(
+                Some(entry),
+                None,
+                &configured,
+                cost::Feature::Chat,
+                Workload::Tools,
+                &ledger,
+                crate::ai::bedrock::UiLanguage::En,
+                true,
+                &|_| true,
+                |_, _| {},
+                move |row| router_ref.send_one(row, messages.clone(), db, auth_ref, window_ref, None, Workload::Tools, ledger_ref),
+            ),
+        )
+        .await;
+        assert!(reply.is_err(), "{wire:?}: {reply:?}");
+        server.seen().len()
+    }
+
+    /// Requests a completion sends to a busy service.
+    async fn completion_requests(wire: W, db: &crate::db::Database) -> usize {
+        let server = serve((0..8).map(|_| busy(wire)).collect()).await;
+        let (router, _entry, _pointed) = set_up(wire, &server.base);
+        let request = Request { system: "", user: "From: kenny@example.com\nSubject: Invoice\n\nPlease pay by Friday.", json: false, max_tokens: 300, feature: cost::Feature::MailAnalysis };
+        let done = complete(&router, db, request).await;
+        assert!(done.is_err(), "{wire:?}");
+        server.seen().len()
+    }
+
+    fn check(wire: W, chat: usize, completion: usize) {
+        bedrock_wire::with_credentials(|db| async move {
+            assert_eq!(chat_requests(wire, &db).await, chat, "{wire:?}: chat");
+            assert_eq!(completion_requests(wire, &db).await, completion, "{wire:?}: completion");
+        });
+    }
+
+    /// The chat wire sends a 503 once more itself, so the router does not;
+    /// a completion is sent once by the wire and once more by the router.
+    #[test]
+    fn openai() {
+        check(W::OpenAi, 2, 2);
+    }
+
+    #[test]
+    fn compatible() {
+        check(W::Compatible, 2, 2);
+    }
+
+    #[test]
+    fn claude() {
+        check(W::Claude, 2, 2);
+    }
+
+    #[test]
+    fn gemini() {
+        check(W::Gemini, 2, 2);
+    }
+
+    /// The AWS SDK makes three attempts itself (its standard retry), and
+    /// the router sends the request once more: six, as before P07.
+    #[test]
+    fn bedrock() {
+        check(W::Bedrock, 6, 6);
+    }
+
+    #[test]
+    fn local() {
+        check(W::Local, 2, 2);
+    }
+}
