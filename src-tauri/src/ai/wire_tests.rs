@@ -400,6 +400,11 @@ fn fallback(db: &crate::db::Database) -> String {
     tools::tool_limit_fallback(&tools::read_language_pref(db)).to_string()
 }
 
+/// The sentence a turn ends with when a round's calls were refused.
+fn refusal_sentence(db: &crate::db::Database) -> String {
+    crate::ai::provider::refused_sentence(crate::ai::bedrock::UiLanguage::read(db))
+}
+
 const SKIPPED: &str = "Skipped: already executed this tool with these arguments in this batch.";
 const REMEMBER_ARGS: &str = r#"{"content":"Kenny is my accountant"}"#;
 /// A different fact, for a call that must not run.
@@ -740,7 +745,8 @@ mod openai_wire {
     }
 
     /// Calls in a reply cut off by the length limit may be half written:
-    /// they do not run, and the text so far is the answer.
+    /// they do not run, and the text so far is the answer, with the
+    /// sentence that nothing was done (R3-m2).
     #[tokio::test]
     async fn calls_cut_off_by_the_length_limit_do_not_run() {
         let server = serve(vec![Reply::openai_sse(&[
@@ -751,10 +757,26 @@ mod openai_wire {
         let _base = point_at(&format!("{}/v1", server.base));
         let db = crate::db::test_database();
         let turn = run_turn(&router(), official(), &[("user", "Remember Kenny is my accountant")], &db, Workload::Tools, true).await;
-        assert_eq!(turn.reply.as_deref(), Ok("Let me save that."));
+        assert_eq!(turn.reply, Ok(format!("Let me save that.\n\n{}", refusal_sentence(&db))));
         assert_eq!(turn.ledger.count(), 0);
         assert!(memories(&db).is_empty());
         assert_eq!(server.seen().len(), 1);
+    }
+
+    /// The sentence is in the UI language (R3-m2): in 繁體書面語 when the app
+    /// is shown in Chinese, whatever language the answers are asked in.
+    #[tokio::test]
+    async fn the_sentence_is_in_the_ui_language() {
+        let server = serve(vec![Reply::openai_sse(&[
+            json!({"choices": [{"delta": {"content": "Let me save that."}}]}),
+            json!({"choices": [{"delta": {"tool_calls": [{"index": 0, "id": "call_1", "type": "function", "function": {"name": "remember", "arguments": REMEMBER_ARGS}}]}, "finish_reason": "length"}]}),
+        ])])
+        .await;
+        let _base = point_at(&format!("{}/v1", server.base));
+        let db = crate::db::test_database();
+        db.conn.lock().unwrap().execute("INSERT OR REPLACE INTO user_preferences (key, value) VALUES ('ui_locale', 'zh-HK'), ('language', 'en')", []).unwrap();
+        let turn = run_turn(&router(), official(), &[("user", "Remember Kenny is my accountant")], &db, Workload::Tools, true).await;
+        assert_eq!(turn.reply.as_deref(), Ok("Let me save that.\n\n模型提出的操作要求被截斷或不完整，所以沒有執行該項操作。請再試一次，或把要求分開提出。"));
     }
 
     /// The text a tool round streamed goes back with its calls.
@@ -2054,6 +2076,47 @@ mod local_wire {
         assert_eq!(rows(&db), vec![local_row("tools", "qwen3:8b", 250, 15)]);
     }
 
+    /// A described call with `"arguments": null` takes no arguments and
+    /// runs, as on main (R3-m3).
+    #[tokio::test]
+    async fn a_described_call_with_null_arguments_runs() {
+        let server = serve(vec![
+            Reply::openai_sse(&[json!({"choices": [{"delta": {"content": r#"{"tool_calls":[{"name":"list_tasks","arguments":null}]}"#}, "finish_reason": "stop"}]})]),
+            Reply::openai_sse(&[json!({"choices": [{"delta": {"content": "{\"response\":\"No tasks.\"}"}, "finish_reason": "stop"}]})]),
+        ])
+        .await;
+        let db = crate::db::test_database();
+        let turn = run_turn(&router(&server.base, BackendType::Generic), row("my-model"), &[("user", "What are my tasks?")], &db, Workload::Tools, true).await;
+        assert_eq!(turn.reply.as_deref(), Ok("No tasks."));
+        let seen = server.seen();
+        assert_eq!(seen.len(), 2);
+        let returned = seen[1].body["messages"].as_array().unwrap().last().unwrap()["content"].as_str().unwrap().to_string();
+        assert!(returned.starts_with("Tool 'list_tasks' returned: "), "{returned}");
+    }
+
+    /// A described call that is refused (its arguments are not an object,
+    /// or the reply was stopped by the length limit) is never the answer:
+    /// the turn ends with the sentence, not the tool-call JSON, and nothing
+    /// runs (R3-m3). The parser keeps no other text from a reply that holds
+    /// calls (a "response" beside them is dropped, as when they run), so the
+    /// sentence is the whole answer.
+    #[tokio::test]
+    async fn a_refused_described_call_ends_with_the_sentence() {
+        for (call, stop) in [
+            (r#"{"tool_calls":[{"name":"remember","arguments":"Kenny is my accountant"}]}"#, "stop"),
+            (r#"{"tool_calls":[{"name":"remember","arguments":["Kenny"]}],"response":"Saving it."}"#, "stop"),
+            (r#"{"tool_calls":[{"name":"remember","arguments":{"content":"Kenny is my accountant"}}]}"#, "length"),
+        ] {
+            let server = serve(vec![Reply::openai_sse(&[json!({"choices": [{"delta": {"content": call}, "finish_reason": stop}]})])]).await;
+            let db = crate::db::test_database();
+            let turn = run_turn(&router(&server.base, BackendType::Generic), row("my-model"), &[("user", "Remember Kenny is my accountant")], &db, Workload::Tools, true).await;
+            assert_eq!(turn.reply.as_ref(), Ok(&refusal_sentence(&db)), "{call}");
+            assert!(memories(&db).is_empty(), "{call}");
+            assert_eq!(turn.ledger.count(), 0, "{call}");
+            assert_eq!(server.seen().len(), 1, "{call}");
+        }
+    }
+
     /// A model that cannot call tools itself (any server JARVIS cannot ask):
     /// the tools are described in the system prompt, the reply is asked for
     /// as JSON, a call in it runs, and its result goes back in words. A
@@ -2578,7 +2641,8 @@ mod parity {
 
         /// A reply that says `said`, then calls `name` with `arguments` as
         /// they streamed, and stops for tools or, `at_limit`, at the output
-        /// limit. Not Gemini, which sends each call whole.
+        /// limit. Gemini sends each call whole, so only at the limit: its
+        /// call cut part-way is a chunk that does not parse (`gemini_wire`).
         fn cut(self, said: &str, name: &str, arguments: &str, at_limit: bool) -> Reply {
             match self {
                 W::OpenAi | W::Compatible | W::Local => Reply::openai_sse(&[
@@ -2605,6 +2669,50 @@ mod parity {
                     ("contentBlockDelta", json!({"contentBlockIndex": 1, "delta": {"toolUse": {"input": arguments}}})),
                     ("contentBlockStop", json!({"contentBlockIndex": 1})),
                     ("messageStop", json!({"stopReason": if at_limit { "max_tokens" } else { "tool_use" }})),
+                    ("metadata", json!({"usage": {"inputTokens": 100, "outputTokens": 10, "totalTokens": 110}})),
+                ]),
+                W::Gemini => {
+                    assert!(at_limit, "Gemini sends each call whole");
+                    let mut parts = vec![json!({"functionCall": {"name": name, "args": serde_json::from_str::<Value>(arguments).unwrap()}})];
+                    if !said.is_empty() {
+                        parts.insert(0, json!({"text": said}));
+                    }
+                    Reply::sse(&[json!({"candidates": [{"content": {"role": "model", "parts": parts}, "finishReason": "MAX_TOKENS"}], "usageMetadata": {"promptTokenCount": 100, "candidatesTokenCount": 10}})])
+                }
+            }
+        }
+
+        /// A reply with a whole `create_task` call and a `remember` call cut
+        /// off part-way, stopped for tools as a finished reply is.
+        fn whole_and_cut(self) -> Reply {
+            let whole = r#"{"title": "Pay the invoice"}"#;
+            let cut = r#"{"content": "Kenny is my acc"#;
+            match self {
+                W::OpenAi | W::Compatible | W::Local => Reply::openai_sse(&[
+                    json!({"choices": [{"delta": {"tool_calls": [{"index": 0, "id": "call_1", "type": "function", "function": {"name": "create_task", "arguments": whole}}]}}]}),
+                    json!({"choices": [{"delta": {"tool_calls": [{"index": 1, "id": "call_2", "type": "function", "function": {"name": "remember", "arguments": cut}}]}, "finish_reason": "tool_calls"}]}),
+                    json!({"choices": [], "usage": {"prompt_tokens": 100, "completion_tokens": 10}}),
+                ]),
+                W::Claude => Reply::named_sse(&[
+                    ("message_start", json!({"type": "message_start", "message": {"id": "msg_1", "role": "assistant", "content": [], "usage": {"input_tokens": 100, "output_tokens": 1}}})),
+                    ("content_block_start", json!({"type": "content_block_start", "index": 0, "content_block": {"type": "tool_use", "id": "call_1", "name": "create_task", "input": {}}})),
+                    ("content_block_delta", json!({"type": "content_block_delta", "index": 0, "delta": {"type": "input_json_delta", "partial_json": whole}})),
+                    ("content_block_stop", json!({"type": "content_block_stop", "index": 0})),
+                    ("content_block_start", json!({"type": "content_block_start", "index": 1, "content_block": {"type": "tool_use", "id": "call_2", "name": "remember", "input": {}}})),
+                    ("content_block_delta", json!({"type": "content_block_delta", "index": 1, "delta": {"type": "input_json_delta", "partial_json": cut}})),
+                    ("content_block_stop", json!({"type": "content_block_stop", "index": 1})),
+                    ("message_delta", json!({"type": "message_delta", "delta": {"stop_reason": "tool_use"}, "usage": {"output_tokens": 10}})),
+                    ("message_stop", json!({"type": "message_stop"})),
+                ]),
+                W::Bedrock => bedrock_stream(&[
+                    ("messageStart", json!({"role": "assistant"})),
+                    ("contentBlockStart", json!({"contentBlockIndex": 0, "start": {"toolUse": {"toolUseId": "call_1", "name": "create_task"}}})),
+                    ("contentBlockDelta", json!({"contentBlockIndex": 0, "delta": {"toolUse": {"input": whole}}})),
+                    ("contentBlockStop", json!({"contentBlockIndex": 0})),
+                    ("contentBlockStart", json!({"contentBlockIndex": 1, "start": {"toolUse": {"toolUseId": "call_2", "name": "remember"}}})),
+                    ("contentBlockDelta", json!({"contentBlockIndex": 1, "delta": {"toolUse": {"input": cut}}})),
+                    ("contentBlockStop", json!({"contentBlockIndex": 1})),
+                    ("messageStop", json!({"stopReason": "tool_use"})),
                     ("metadata", json!({"usage": {"inputTokens": 100, "outputTokens": 10, "totalTokens": 110}})),
                 ]),
                 W::Gemini => unreachable!("Gemini sends each call whole"),
@@ -2953,16 +3061,18 @@ mod parity {
     #[test]
     fn a_tool_result_is_logged_by_name_and_length_only() {
         on_each(&ALL, |wire, db| async move {
-            let auth = Arc::new(crate::auth::google::GoogleAuth::new_empty());
-            let args = json!({"content": "Kenny's code is QX-7781-MARKER"}).to_string();
-            crate::tool_approval::TEST_ANSWER.scope(true, tools::execute_tool("remember", &args, &db, &auth, &SideEffectLedger::new())).await;
-            let on = wire.serve(vec![wire.calls("list_memories", json!({})), wire.says("Noted.")], &db).await;
+            // The marker is in the first call's arguments, and so in the
+            // second call's result (R3-m4).
+            let args = json!({"content": "Kenny's code is QX-7781-MARKER"});
+            let on = wire.serve(vec![wire.calls("remember", args.clone()), wire.calls("list_memories", json!({})), wire.says("Noted.")], &db).await;
             let logged = crate::test_log::capture(|| async {
-                assert_eq!(on.turn("What do you know about Kenny?", &db, false).await.reply.as_deref(), Ok("Noted."), "{wire:?}");
+                assert_eq!(on.turn("Remember Kenny's code and tell me what you know", &db, true).await.reply.as_deref(), Ok("Noted."), "{wire:?}");
             })
             .await;
-            let result = wire.results(&on.server.seen()[1].body).remove(0);
+            assert_eq!(memories(&db), vec!["Kenny's code is QX-7781-MARKER".to_string()], "{wire:?}: the call ran with the marker in its arguments");
+            let result = wire.results(&on.server.seen()[2].body).pop().unwrap();
             assert!(result.contains("QX-7781-MARKER"), "{wire:?}: the result carries the marker");
+            assert!(logged.contains(&format!("JARVIS tool call: remember ({} bytes of arguments)", args.to_string().len())), "{wire:?}: {logged:?}");
             assert!(logged.contains(&format!("JARVIS tool result: list_memories ({} bytes)", result.len())), "{wire:?}: {logged:?}");
             assert!(!logged.iter().any(|line| line.contains("MARKER")), "{wire:?}: {logged:?}");
         });
@@ -2971,32 +3081,87 @@ mod parity {
     /// The wires that stream a call's arguments in pieces.
     const IN_PIECES: [W; 5] = [W::OpenAi, W::Compatible, W::Claude, W::Bedrock, W::Local];
 
+    /// A refused round's answer: what the model said, then the sentence
+    /// that nothing was done, shown and spoken once, in one piece after
+    /// the text (R3-m2). The answer returned is the one saved.
+    fn ends_with_the_refusal(wire: W, turn: &Turn, said: &str, db: &crate::db::Database) {
+        let sentence = refusal_sentence(db);
+        let (answer, piece) = if said.is_empty() { (sentence.clone(), sentence.clone()) } else { (format!("{said}\n\n{sentence}"), format!("\n\n{sentence}")) };
+        assert_eq!(turn.reply.as_ref(), Ok(&answer), "{wire:?}");
+        let (shown, spoken) = shown_and_spoken(turn);
+        assert_eq!((shown.concat(), spoken.concat()), (answer.clone(), answer.clone()), "{wire:?}");
+        assert_eq!((shown.last(), spoken.last()), (Some(&piece), Some(&piece)), "{wire:?}: the sentence once, in one piece");
+    }
+
     /// A call whose arguments were cut off part-way does not run: no task
     /// is made from what the model never finished, nothing counts as done,
-    /// and the text so far is the answer.
+    /// and the turn ends with the text so far and the sentence that nothing
+    /// was done (R3-m2).
     #[test]
     fn a_call_cut_off_part_way_does_not_run() {
+        for said in ["I'll add that.", ""] {
+            on_each(&IN_PIECES, |wire, db| async move {
+                let on = wire.serve(vec![wire.cut(said, "create_task", r#"{"title": "Pay the inv"#, false)], &db).await;
+                let turn = on.turn("Add a task to pay the invoice", &db, true).await;
+                ends_with_the_refusal(wire, &turn, said, &db);
+                assert!(tasks(&db).is_empty(), "{wire:?}");
+                assert_eq!(turn.ledger.count(), 0, "{wire:?}");
+                assert_eq!(on.server.seen().len(), 1, "{wire:?}");
+                // Stored as a chat request, not a tool one: Bedrock's row is
+                // the request's own (R3-m5).
+                assert_eq!(rows(&db), on.rows("chat", &wire.model_sent(&on.server.seen()[0]), &[(100, 10)]), "{wire:?}");
+            });
+        }
+    }
+
+    /// A reply stopped by the output limit runs no call, even one whose
+    /// arguments parse, on every wire (R3-m1: Gemini's `MAX_TOKENS` too);
+    /// the turn ends with the sentence.
+    #[test]
+    fn a_reply_stopped_by_the_output_limit_runs_no_call() {
+        for said in ["I'll add that.", ""] {
+            on_each(&ALL, |wire, db| async move {
+                let on = wire.serve(vec![wire.cut(said, "create_task", r#"{"title": "Pay the invoice"}"#, true)], &db).await;
+                let turn = on.turn("Add a task to pay the invoice", &db, true).await;
+                ends_with_the_refusal(wire, &turn, said, &db);
+                assert!(tasks(&db).is_empty(), "{wire:?}");
+                assert_eq!(turn.ledger.count(), 0, "{wire:?}");
+                assert_eq!(on.server.seen().len(), 1, "{wire:?}");
+                // Stored as a chat request, not a tool one: Bedrock's row is
+                // the request's own (R3-m5).
+                assert_eq!(rows(&db), on.rows("chat", &wire.model_sent(&on.server.seen()[0]), &[(100, 10)]), "{wire:?}");
+            });
+        }
+    }
+
+    /// A whole call beside one cut off part-way, with a finished reply's
+    /// stop: neither runs, and the sentence ends the turn. The round is
+    /// refused as a whole, since its calls may depend on each other.
+    #[test]
+    fn a_whole_call_beside_a_cut_one_does_not_run_either() {
         on_each(&IN_PIECES, |wire, db| async move {
-            let on = wire.serve(vec![wire.cut("I'll add that.", "create_task", r#"{"title": "Pay the inv"#, false)], &db).await;
-            let turn = on.turn("Add a task to pay the invoice", &db, true).await;
-            assert_eq!(turn.reply.as_deref(), Ok("I'll add that."), "{wire:?}");
+            let on = wire.serve(vec![wire.whole_and_cut()], &db).await;
+            let turn = on.turn("Add a task to pay the invoice and remember Kenny", &db, true).await;
+            ends_with_the_refusal(wire, &turn, "", &db);
             assert!(tasks(&db).is_empty(), "{wire:?}");
+            assert!(memories(&db).is_empty(), "{wire:?}");
             assert_eq!(turn.ledger.count(), 0, "{wire:?}");
             assert_eq!(on.server.seen().len(), 1, "{wire:?}");
         });
     }
 
-    /// A reply stopped by the output limit runs no call, even one whose
-    /// arguments parse: the model was cut off.
+    /// An action from an earlier round of the turn stands when a later
+    /// round is refused: it is not undone, and it still counts.
     #[test]
-    fn a_reply_stopped_by_the_output_limit_runs_no_call() {
-        on_each(&IN_PIECES, |wire, db| async move {
-            let on = wire.serve(vec![wire.cut("I'll add that.", "create_task", r#"{"title": "Pay the invoice"}"#, true)], &db).await;
-            let turn = on.turn("Add a task to pay the invoice", &db, true).await;
-            assert_eq!(turn.reply.as_deref(), Ok("I'll add that."), "{wire:?}");
+    fn an_earlier_action_stands_when_a_later_round_is_refused() {
+        on_each(&ALL, |wire, db| async move {
+            let on = wire.serve(vec![wire.calls("remember", json!({"content": "Kenny is my accountant"})), wire.cut("", "create_task", r#"{"title": "Pay the invoice"}"#, true)], &db).await;
+            let turn = on.turn("Remember Kenny is my accountant and add a task", &db, true).await;
+            ends_with_the_refusal(wire, &turn, "", &db);
+            assert_eq!(memories(&db), vec!["Kenny is my accountant".to_string()], "{wire:?}");
             assert!(tasks(&db).is_empty(), "{wire:?}");
-            assert_eq!(turn.ledger.count(), 0, "{wire:?}");
-            assert_eq!(on.server.seen().len(), 1, "{wire:?}");
+            assert_eq!(turn.ledger.count(), 1, "{wire:?}");
+            assert_eq!(on.server.seen().len(), 2, "{wire:?}");
         });
     }
 
@@ -3333,6 +3498,14 @@ mod resend_counts {
     /// A chat turn through run_chosen when every reply is `reply(wire)`:
     /// the requests it sent and the card it ended with.
     async fn chat_turn_to(wire: W, db: &crate::db::Database, reply: fn(W) -> Reply) -> (usize, Value) {
+        let (requests, reply) = chat_turn_through_run_chosen(wire, db, reply).await;
+        let error = reply.expect_err(&format!("{wire:?}"));
+        (requests, crate::ai::failure::parse(&error).unwrap_or_else(|| panic!("{wire:?}: not a card: {error}")))
+    }
+
+    /// A chat turn through run_chosen when every reply is `reply(wire)`:
+    /// the requests it sent and what it returned.
+    async fn chat_turn_through_run_chosen(wire: W, db: &crate::db::Database, reply: fn(W) -> Reply) -> (usize, Result<String, String>) {
         let server = serve((0..8).map(|_| reply(wire)).collect()).await;
         let (router, entry, _pointed) = set_up(wire, &server.base);
         let window = Window::default();
@@ -3358,8 +3531,7 @@ mod resend_counts {
             ),
         )
         .await;
-        let error = reply.expect_err(&format!("{wire:?}"));
-        (server.seen().len(), crate::ai::failure::parse(&error).unwrap_or_else(|| panic!("{wire:?}: not a card: {error}")))
+        (server.seen().len(), reply)
     }
 
     /// A 307 to another address, as a service that moved would send it. The
@@ -3523,6 +3695,49 @@ mod resend_counts {
             });
         }
     }
+
+    /// A reply with nothing said and no call.
+    fn nothing_said(wire: W) -> Reply {
+        match wire {
+            W::OpenAi | W::Compatible | W::Local => Reply::openai_sse(&[
+                json!({"choices": [{"delta": {"role": "assistant"}, "finish_reason": "stop"}]}),
+                json!({"choices": [], "usage": {"prompt_tokens": 10, "completion_tokens": 0}}),
+            ]),
+            W::Claude => Reply::named_sse(&[
+                ("message_start", json!({"type": "message_start", "message": {"id": "msg_1", "role": "assistant", "content": [], "usage": {"input_tokens": 10, "output_tokens": 1}}})),
+                ("message_delta", json!({"type": "message_delta", "delta": {"stop_reason": "end_turn"}, "usage": {"output_tokens": 0}})),
+                ("message_stop", json!({"type": "message_stop"})),
+            ]),
+            W::Gemini => Reply::sse(&[json!({"candidates": [{"content": {"role": "model", "parts": []}, "finishReason": "STOP"}], "usageMetadata": {"promptTokenCount": 10, "candidatesTokenCount": 0}})]),
+            W::Bedrock => Reply::raw(
+                200,
+                crate::ai::bedrock::tests::EVENT_STREAM,
+                crate::ai::bedrock::tests::converse_stream(&[
+                    ("messageStart", json!({"role": "assistant"})),
+                    ("messageStop", json!({"stopReason": "end_turn"})),
+                    ("metadata", json!({"usage": {"inputTokens": 10, "outputTokens": 0, "totalTokens": 10}})),
+                ]),
+            ),
+        }
+    }
+
+    /// What run_chosen does with an empty reply, which no refusal made
+    /// (your ruling on C5, kept as a pin only): it returns it as the wire
+    /// gave it, once. The chat command saves no blank reply. Gemini's wire
+    /// makes it its own error, which is sent once more, then ends on the
+    /// card, as on main.
+    #[test]
+    fn an_empty_reply_comes_back_from_run_chosen_as_the_wire_gave_it() {
+        for wire in [W::OpenAi, W::Compatible, W::Claude, W::Bedrock, W::Local] {
+            bedrock_wire::with_credentials(|db| async move {
+                assert_eq!(chat_turn_through_run_chosen(wire, &db, nothing_said).await, (1, Ok(String::new())), "{wire:?}");
+            });
+        }
+        bedrock_wire::with_credentials(|db| async move {
+            let (requests, card) = chat_turn_to(W::Gemini, &db, nothing_said).await;
+            assert_eq!((requests, card["code"].clone()), (2, json!("empty_reply")), "{card}");
+        });
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -3558,6 +3773,10 @@ mod shared_loop {
             events.send(Event::Usage(Usage { input: 100, output: 10, cache_read: 0, cache_write: 0 }));
             events.send(Event::Done { stop: Some("tool_calls".into()) });
             Ok(())
+        }
+
+        fn stopped_at_limit(&self, _round: &Round) -> bool {
+            false
         }
 
         fn add_results(&self, _conversation: &mut (), _round: Round, _results: Vec<(Call, Outcome)>, _next_is_final: bool) -> Result<(), String> {

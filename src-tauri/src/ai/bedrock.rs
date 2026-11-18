@@ -433,9 +433,13 @@ impl Wire for BedrockWire {
 
     /// A reply that stopped for tools runs them even when it lists none.
     fn runs_calls(&self, _conversation: &Conversation, round: &Round) -> bool {
-        // A reply cut off by the output limit may hold a call half written,
-        // as OpenAI's "length".
-        round.stop.as_deref() != Some("max_tokens") && (!round.calls.is_empty() || round.stop.as_deref() == Some("tool_use"))
+        !round.calls.is_empty() || round.stop.as_deref() == Some("tool_use")
+    }
+
+    /// A reply cut off by the output limit may hold a call half written,
+    /// as OpenAI's "length".
+    fn stopped_at_limit(&self, round: &Round) -> bool {
+        round.stop.as_deref() == Some("max_tokens")
     }
 
     fn add_results(&self, conversation: &mut Conversation, _round: Round, results: Vec<(Call, Outcome)>, next_is_final: bool) -> Result<(), String> {

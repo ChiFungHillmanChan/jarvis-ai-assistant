@@ -204,6 +204,10 @@ impl Wire for GeminiWire {
         Metering::Turn { provider: "gemini".into(), model: self.model.clone() }
     }
 
+    fn stopped_at_limit(&self, round: &Round) -> bool {
+        round.stop.as_deref() == Some("MAX_TOKENS")
+    }
+
     fn schema_rules(&self) -> &'static SchemaRules {
         &GEMINI_SCHEMA
     }
@@ -344,13 +348,14 @@ impl Wire for GeminiWire {
     }
 
     /// A reply with neither text nor a call is an error the router sends
-    /// once more on; the last round's calls end with the fallback.
+    /// once more on. The last round's calls end with the fallback; calls
+    /// the loop refused earlier, with its sentence after nothing said.
     fn reply(&self, conversation: &Conversation, round: Round, final_round: bool, language: &str) -> Result<String, String> {
         if !round.texts.is_empty() {
             return Ok(round.text());
         }
-        if final_round && !round.calls.is_empty() {
-            return Ok(tools::tool_limit_fallback(language).into());
+        if !round.calls.is_empty() {
+            return Ok(if final_round { tools::tool_limit_fallback(language).into() } else { String::new() });
         }
         log::warn!(
             "[gemini] empty response: model={} finish_reason={:?} function_calls={} events={} bytes={}",

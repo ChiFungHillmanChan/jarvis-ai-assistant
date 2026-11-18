@@ -438,7 +438,8 @@ impl Wire for OpenAiWire {
         if tool_calls.is_empty() && self.injects_tools() {
             // Shown as it streamed; not announced before it runs.
             for call in super::local::parse_tool_calls_from_response(&text).0.into_iter().flatten() {
-                let arguments = serde_json::to_string(&call.arguments).unwrap_or_else(|_| "{}".into());
+                // `null` is a call with no arguments, as on main (R3-m3).
+                let arguments = if call.arguments.is_null() { "{}".into() } else { serde_json::to_string(&call.arguments).unwrap_or_else(|_| "{}".into()) };
                 events.send(Event::ToolCall(Call { id: String::new(), name: call.name, arguments }));
             }
         }
@@ -453,20 +454,25 @@ impl Wire for OpenAiWire {
     }
 
     /// Some compatible services finish a tool-call reply with "stop", so any
-    /// complete call counts; a reply cut off by the length limit may carry
-    /// half-written arguments. A local server's calls run only on
+    /// complete call counts. A local server's calls run only on
     /// "tool_calls"; calls written in the text of a model the tools are
-    /// described to always run. (The loop runs none on the last round: a
-    /// service that ignores tool_choice gets the fallback.)
+    /// described to always run. (The loop runs none on the last round, where
+    /// a service that ignores tool_choice gets the fallback, nor on a
+    /// "length" stop.)
     fn runs_calls(&self, conversation: &Conversation, round: &Round) -> bool {
         if round.calls.is_empty() {
             return false;
         }
         match (&self.local, &conversation.reply) {
-            (None, _) => round.stop.as_deref() != Some("length"),
+            (None, _) => true,
             (Some(_), Some(_)) => round.stop.as_deref() == Some("tool_calls"),
             (Some(_), None) => true,
         }
+    }
+
+    /// A reply cut off by the length limit may carry half-written arguments.
+    fn stopped_at_limit(&self, round: &Round) -> bool {
+        round.stop.as_deref() == Some("length")
     }
 
     fn add_results(&self, conversation: &mut Conversation, round: Round, results: Vec<(Call, Outcome)>, _next_is_final: bool) -> Result<(), String> {
@@ -511,8 +517,10 @@ impl Wire for OpenAiWire {
                     return Ok(reply);
                 }
             }
-            let (_, response) = super::local::parse_tool_calls_from_response(&text);
-            if !response.is_empty() {
+            let (calls, response) = super::local::parse_tool_calls_from_response(&text);
+            // A call written in the text is never the answer: a round whose
+            // calls did not run answers with what else it said (R3-m3).
+            if !response.is_empty() || calls.is_some_and(|calls| !calls.is_empty()) {
                 return Ok(response);
             }
         }

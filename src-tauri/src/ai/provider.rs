@@ -181,10 +181,15 @@ pub(crate) trait Wire: Send + Sync {
     }
 
     /// Whether the round's calls run, before the last round: the loop runs
-    /// none on the last round, whatever the wire says.
+    /// none on the last round, nor in a round whose calls it refused (cut
+    /// off, or stopped by the output limit), whatever the wire says.
     fn runs_calls(&self, _conversation: &Self::Conversation, round: &Round) -> bool {
         !round.calls.is_empty()
     }
+
+    /// Whether the round's reply was stopped by the output limit, in the
+    /// provider's own words. Its calls do not run, on every wire.
+    fn stopped_at_limit(&self, round: &Round) -> bool;
 
     /// Add the round's reply and the outcome of each of its calls, for the
     /// next request. `next_is_final` is true when the next request is the
@@ -508,7 +513,7 @@ pub(crate) async fn chat<W: Wire>(wire: &W, request: ChatRequest, turn: Turn<'_>
     let max_rounds = wire.max_rounds();
     for number in 0..max_rounds {
         let final_round = number + 1 == max_rounds;
-        let (round, runs) = one_request(wire, &mut conversation, &tools, final_round, &turn, &mut meter).await?;
+        let (round, runs, refused) = one_request(wire, &mut conversation, &tools, final_round, &turn, &mut meter).await?;
         if runs {
             let results = run_calls(&round.calls, &turn).await;
             let answers = wire.answers_after_tools(&round);
@@ -531,14 +536,27 @@ pub(crate) async fn chat<W: Wire>(wire: &W, request: ChatRequest, turn: Turn<'_>
         // answered with the fallback, and logs no missing usage (main logged
         // it for a non-empty response only).
         let streamed = !round.text().trim().is_empty();
-        let reply = wire.reply(&conversation, round, final_round, &tools::read_language_pref(turn.db));
-        if let Ok(text) = &reply {
-            // An answer that did not stream (the fallback on an empty last
-            // round) is shown and spoken in one piece.
-            if !streamed && !text.trim().is_empty() {
-                Events::new(turn.window, turn.voice.as_ref()).send(Event::Text(text.clone()));
+        let reply = match wire.reply(&conversation, round, final_round, &tools::read_language_pref(turn.db)) {
+            // A round whose calls were refused ends with what the model said
+            // and the sentence that nothing was done (R3-m2): shown and
+            // spoken once, and part of the answer saved.
+            Ok(said) if refused => {
+                let sentence = refused_sentence(super::bedrock::UiLanguage::read(turn.db));
+                let (piece, answer) = if said.trim().is_empty() { (sentence.clone(), sentence) } else { (format!("\n\n{sentence}"), format!("{said}\n\n{sentence}")) };
+                Events::new(turn.window, turn.voice.as_ref()).send(Event::Text(piece));
+                Ok(answer)
             }
-        }
+            reply => {
+                if let Ok(text) = &reply {
+                    // An answer that did not stream (the fallback on an empty
+                    // last round) is shown and spoken in one piece.
+                    if !streamed && !text.trim().is_empty() {
+                        Events::new(turn.window, turn.voice.as_ref()).send(Event::Text(text.clone()));
+                    }
+                }
+                reply
+            }
+        };
         finish(wire, &turn);
         meter.succeeded(turn.db, turn.workload, streamed);
         return reply;
@@ -549,10 +567,22 @@ pub(crate) async fn chat<W: Wire>(wire: &W, request: ChatRequest, turn: Turn<'_>
     Ok(tools::tool_limit_fallback(&tools::read_language_pref(turn.db)).into())
 }
 
+/// The end of a turn whose last request's calls were refused: in the UI
+/// language, the lead's wording (R3-m2).
+pub(crate) fn refused_sentence(language: super::bedrock::UiLanguage) -> String {
+    language.pick(
+        "The model's request for an action was cut off or incomplete, so that action was not carried out. Please ask again, or ask for less at once.",
+        "模型提出的操作要求被截斷或不完整，所以沒有執行該項操作。請再試一次，或把要求分開提出。",
+    )
+}
+
 /// One request of a turn: its events shown as they come, its calls'
 /// arguments as the tools take them, and its usage stored as the wire's
-/// metering says. Returns the round and whether its calls run.
-async fn one_request<W: Wire>(wire: &W, conversation: &mut W::Conversation, tools: &[tools::Tool], final_round: bool, turn: &Turn<'_>, meter: &mut Meter) -> Result<(Round, bool), String> {
+/// metering says. Returns the round, whether its calls run, and whether
+/// they were refused: a call cut off part-way, or a reply stopped by the
+/// output limit, before the last round. A refused round runs none of its
+/// calls, so no action is noted for it.
+async fn one_request<W: Wire>(wire: &W, conversation: &mut W::Conversation, tools: &[tools::Tool], final_round: bool, turn: &Turn<'_>, meter: &mut Meter) -> Result<(Round, bool, bool), String> {
     let sent_at = std::time::Instant::now();
     let mut events = Events::new(turn.window, turn.voice.as_ref());
     let result = wire.round(conversation, final_round, &mut events).await;
@@ -568,14 +598,20 @@ async fn one_request<W: Wire>(wire: &W, conversation: &mut W::Conversation, tool
         return Err(error.message);
     }
     // The last round runs no tool, on every wire; nor does a round with a
-    // call whose arguments were cut off part-way.
+    // call whose arguments were cut off part-way, or one stopped by the
+    // output limit.
     let unfinished = round.calls.iter().filter(|call| !whole(&call.arguments)).count();
     if unfinished > 0 {
         log::warn!("JARVIS tool calls not run: {unfinished} with arguments cut off part-way");
     }
-    let runs = !final_round && unfinished == 0 && wire.runs_calls(conversation, &round);
+    let at_limit = !final_round && !round.calls.is_empty() && wire.stopped_at_limit(&round);
+    if at_limit {
+        log::warn!("JARVIS tool calls not run: {} in a reply stopped by the output limit", round.calls.len());
+    }
+    let refused = at_limit || (!final_round && unfinished > 0);
+    let runs = !final_round && !refused && wire.runs_calls(conversation, &round);
     meter.request(turn.db, turn.workload, usage, if runs { round.calls.len() } else { 0 }, final_round, latency_ms);
-    Ok((round, runs))
+    Ok((round, runs, refused))
 }
 
 /// Whether a call's arguments came whole: none at all (a call that takes
@@ -594,7 +630,7 @@ pub(crate) async fn first_request<W: Wire>(wire: &W, chat_request: ChatRequest, 
     let mut meter = Meter::new(wire.metering());
     let tools = chat_request.tools.clone();
     let mut conversation = wire.start(chat_request).await?;
-    one_request(wire, &mut conversation, &tools, false, &turn, &mut meter).await.map(|(round, _)| round)
+    one_request(wire, &mut conversation, &tools, false, &turn, &mut meter).await.map(|(round, _, _)| round)
 }
 
 /// The chat window is told the answer is complete.
