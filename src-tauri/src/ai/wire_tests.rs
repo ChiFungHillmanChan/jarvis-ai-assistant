@@ -1970,6 +1970,39 @@ mod local_wire {
         let seen = server.seen();
         assert_eq!(seen[1].body["messages"][2]["tool_calls"], json!([{"id": "call_a", "type": "function", "function": {"name": "remember", "arguments": REMEMBER_ARGS}}]));
     }
+
+    /// A turn a local model ran without tools is noted for the chat window:
+    /// by the user's "chat only" setting, by a context too small for the
+    /// tools, or by a model detected as chat only. A model with tools,
+    /// native or described, is not. The sentence is in neither the reply
+    /// nor the voice.
+    #[tokio::test]
+    async fn a_turn_without_tools_is_noted() {
+        let server = serve((0..4).map(|_| text_reply("Hi.", None)).collect()).await;
+        let db = crate::db::test_database();
+        overrides(&db, &server.base, "my-model", None, "chat_only");
+        overrides(&db, &server.base, "small-model", Some(2048), "auto");
+        overrides(&db, &server.base, "json-model", None, "prompt_injected");
+        let router = router(&server.base, BackendType::Vllm);
+        let notes = [crate::ai::local::no_tools_answer_note(crate::ai::bedrock::UiLanguage::En), crate::ai::local::no_tools_answer_note(crate::ai::bedrock::UiLanguage::ZhHk)];
+        for (model, noted) in [("my-model", true), ("small-model", true), ("json-model", false), ("qwen3:8b", false)] {
+            let (turn, without_tools) = crate::ai::local::noting_no_tools(run_turn(&router, row(model), &[("user", "What is on my calendar?")], &db, Workload::Tools, false)).await;
+            assert_eq!(without_tools, noted, "{model}");
+            assert_eq!(turn.reply.as_deref(), Ok("Hi."), "{model}");
+            assert!(!turn.voice.iter().chain(turn.window_lines().iter()).any(|line| notes.iter().any(|note| line.contains(note.as_str()))), "{model}");
+        }
+        // Detected as chat only. No server reports it today (Ollama: native
+        // or described; vLLM: native; others: described), so the model is
+        // made with that detection directly.
+        use crate::ai::local::backend::ToolCapability;
+        let detected = |capability: ToolCapability| crate::ai::local::LocalChat::new(endpoint(&server.base, BackendType::Vllm), capability, 8192, Some("auto"));
+        let chat_only = detected(ToolCapability::ChatOnly);
+        let ((), without_tools) = crate::ai::local::noting_no_tools(async { let _ = chat_only.prepare(String::new(), Vec::new(), &[]); }).await;
+        assert!(without_tools, "detected as chat only");
+        let native = detected(ToolCapability::Native);
+        let ((), without_tools) = crate::ai::local::noting_no_tools(async { let _ = native.prepare(String::new(), Vec::new(), &[]); }).await;
+        assert!(!without_tools, "detected as native");
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -2425,6 +2458,18 @@ mod parity {
             assert_eq!(seen[0].path, wire.plain_path(&model), "{wire:?}");
             assert!(wire.asks_for_json(&seen[0].body), "{wire:?}: {}", seen[0].body);
             assert_eq!(rows(&db), on.rows("mail_sort", &model, &[(10, 2)]), "{wire:?}");
+        });
+    }
+
+    /// No cloud wire, and no local model with tools, is noted as having
+    /// answered without tools.
+    #[test]
+    fn only_a_model_without_tools_is_noted() {
+        on_each(&ALL, |wire, db| async move {
+            let on = wire.serve(vec![wire.says("Hi.")], &db).await;
+            let (turn, without_tools) = crate::ai::local::noting_no_tools(on.turn("Hi", &db, false)).await;
+            assert_eq!(turn.reply.as_deref(), Ok("Hi."), "{wire:?}");
+            assert!(!without_tools, "{wire:?}");
         });
     }
 }

@@ -86,6 +86,34 @@ pub async fn detect_backend(url: &str) -> BackendType {
 /// model may say it checked or saved something it could not.
 pub(crate) const NO_TOOLS_NOTE: &str = "\n\nIn this conversation you have no tools: the model JARVIS is using cannot call them. The instructions above about calling tools do not apply. Never say or suggest that you checked, opened, created, saved or remembered anything. When the user asks for something that needs a tool (their mail, calendar, tasks, files, apps or your memory), say in one sentence that this model cannot use tools, so it cannot do that here, and that they can choose a model that supports tools in Settings.";
 
+tokio::task_local! {
+    /// Set while a chat turn runs when a local model takes it without tools
+    /// ([`NO_TOOLS_NOTE`]): the answer then carries [`no_tools_answer_note`].
+    static WITHOUT_TOOLS: std::cell::Cell<bool>;
+}
+
+/// `turn`, and whether a local model ran it without tools: the user's
+/// "chat only" setting, a model detected as chat only, or a context too
+/// small for the tool list.
+pub(crate) async fn noting_no_tools<T>(turn: impl std::future::Future<Output = T>) -> (T, bool) {
+    WITHOUT_TOOLS
+        .scope(std::cell::Cell::new(false), async move {
+            let output = turn.await;
+            (output, WITHOUT_TOOLS.with(std::cell::Cell::get))
+        })
+        .await
+}
+
+/// Shown under an answer from a local model that ran without tools (P07,
+/// the founder's wording). It is not part of the reply: not saved with it,
+/// not sent back to a model, not spoken.
+pub(crate) fn no_tools_answer_note(language: crate::ai::bedrock::UiLanguage) -> String {
+    language.pick(
+        "This model cannot use tools, so this answer did not check your mail, calendar, tasks or apps. You can choose a model that supports tools in Settings.",
+        "此模型不能使用工具，這個回覆沒有查看你的郵件、日曆、工作或 App。可在設定中選擇支援工具的模型。",
+    )
+}
+
 /// A chat model on a local server, which the OpenAI wire talks to: how it
 /// takes tools (natively, described in the system prompt, or not at all),
 /// its context window and where it is.
@@ -180,6 +208,7 @@ impl LocalChat {
         }
         if matches!(self.capability, ToolCapability::ChatOnly) {
             system_prompt.push_str(NO_TOOLS_NOTE);
+            let _ = WITHOUT_TOOLS.try_with(|without| without.set(true));
         }
         let ctx_manager = ContextManager::new(self.context_length, self.injects_tools());
         let system_tokens = ContextManager::count_tokens(&system_prompt);
