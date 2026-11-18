@@ -535,7 +535,7 @@ impl TextToSpeech {
         amp_handle.abort();
         let _ = app_handle.emit("tts-amplitude", json!({"amplitude": 0.0}));
         if !status.success() && !self.cancel_flag.load(Ordering::SeqCst) {
-            log::warn!("TTS sentence failed: {}", crate::util::truncate_bytes(&clean, 50));
+            log::warn!("TTS sentence failed ({} bytes)", clean.len());
         }
         let _ = app_handle.emit("tts-sentence-done", json!({"remaining": remaining}));
         Ok(())
@@ -1103,5 +1103,15 @@ mod tests {
         );
         // A spaceless Chinese sentence used to be counted as a single word.
         assert!(estimate_speech_ms("你好世界我係賈維斯") > 300);
+    }
+
+
+    /// A sentence that could not be spoken is logged by its length only: it
+    /// is part of the reply, which can quote mail or calendar content.
+    #[test]
+    fn a_failed_sentence_is_logged_by_length_only() {
+        let shipped = include_str!("tts.rs").split("\n#[cfg(test)]\nmod tests {").next().unwrap();
+        let line = shipped.lines().find(|line| line.contains("\"TTS sentence failed")).expect("the log line");
+        assert_eq!(line.trim(), r#"log::warn!("TTS sentence failed ({} bytes)", clean.len());"#);
     }
 }

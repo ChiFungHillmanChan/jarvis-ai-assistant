@@ -655,8 +655,11 @@ impl<C: Clock> Engine<C> {
         let slept = Reading { wall: now, awake }.jumped_since(run.started());
         let status = classify_outcome(outcome.is_ok(), slept, network_class(&run.action_type), self.reachability.online());
         match &outcome {
-            Ok(message) => log::info!("Job {} completed: {}", run.job_id, message),
-            Err(error) => log::warn!("Job {} ended {}: {}", run.job_id, status.as_str(), error),
+            // The text is stored with the run for the Cron page. It can quote
+            // task and meeting titles or a mailbox address, so the log gets
+            // its length only.
+            Ok(message) => log::info!("Job {} completed ({} bytes)", run.job_id, message.len()),
+            Err(error) => log::warn!("Job {} ended {} ({} bytes)", run.job_id, status.as_str(), error.len()),
         }
         let (result, error) = match (&outcome, status) {
             (Ok(message), _) => (Some(message.as_str()), None),
@@ -2236,6 +2239,25 @@ pub(super) mod tests {
         assert_eq!(sim.ran().len(), 1, "not started again inside the minute");
         sim.awake_until("2026-11-12T10:01:30+08:00").await;
         assert_eq!(sim.ran().len(), 2);
+    }
+
+    /// A run's result or error is logged by its length only: a result can
+    /// quote task and meeting titles, and an error a mailbox address.
+    #[tokio::test]
+    async fn a_run_is_logged_without_its_result_or_its_error() {
+        let result = "Alerts: Pay MARKER-7Q invoice";
+        let error = "MARKER-7Q@example.com: the mailbox refused the sign-in";
+        let sim = Sim::start("2026-11-12T09:59:00+08:00");
+        let job = sim.add_job("email_sync", EVERY_5_MIN);
+        sim.jobs.next_run_will(move || Ok(result.to_string()));
+        sim.jobs.next_run_will(move || Err(error.to_string()));
+
+        let logged = crate::test_log::capture(|| sim.awake_until("2026-11-12T10:05:30+08:00")).await;
+
+        assert_eq!(sim.history(job), ["completed scheduled 2026-11-12T10:00:00+08:00", "failed scheduled 2026-11-12T10:05:00+08:00"]);
+        assert!(logged.contains(&format!("Job {job} completed ({} bytes)", result.len())), "{logged:?}");
+        assert!(logged.contains(&format!("Job {job} ended failed ({} bytes)", error.len())), "{logged:?}");
+        assert!(logged.iter().all(|line| !line.contains("MARKER-7Q")), "{logged:?}");
     }
 
     #[test]
