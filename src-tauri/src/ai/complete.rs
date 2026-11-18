@@ -782,6 +782,28 @@ pub(crate) mod tests {
         );
     }
 
+    /// A service that takes OpenAI's format at its own address: its own
+    /// key, `max_tokens` (not OpenAI's `max_completion_tokens`), the JSON
+    /// switch, and the answer and usage read back. A service the app does
+    /// not know is named by its host.
+    #[tokio::test]
+    async fn a_compatible_plain_request() {
+        let server = serve(vec![Reply::json(200, json!({"choices": [{"message": {"content": "{\"a\":1}"}}], "usage": {"prompt_tokens": 10, "completion_tokens": 2, "prompt_tokens_details": {"cached_tokens": 4}}}))]).await;
+        let url = format!("{}/v1", server.base);
+        let mut router = AiRouter::new("gemini_primary");
+        router.set_compat_key(&url, "sk-fixture-compat-not-real");
+        let db = crate::db::test_database();
+        let done = complete_one(&router, &db, &row("openai", Some("unlisted-chat-1"), Some(&url), None), &sort()).await.unwrap();
+        assert_eq!(figures(&done), ("{\"a\":1}", "127.0.0.1", "unlisted-chat-1", 10, 2, 4, 0));
+        let seen = server.seen();
+        assert_eq!((seen.len(), seen[0].method.as_str(), seen[0].path.as_str()), (1, "POST", "/v1/chat/completions"));
+        assert_eq!(seen[0].header("authorization"), Some("Bearer sk-fixture-compat-not-real"));
+        assert_eq!(
+            seen[0].body,
+            json!({"model": "unlisted-chat-1", "messages": [{"role": "system", "content": "Sort this."}, {"role": "user", "content": "From: a@example.com"}], "max_tokens": 300, "response_format": {"type": "json_object"}})
+        );
+    }
+
     /// P07: the official OpenAI completion takes its model as chat does
     /// (`Target::model`): a saved id that is blank goes out as the default
     /// (before: sent blank, and refused), and one with spaces round it goes

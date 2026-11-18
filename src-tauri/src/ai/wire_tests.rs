@@ -2416,6 +2416,33 @@ mod parity {
             }
         }
 
+        /// The tools a request offered, by name.
+        fn offered(self, body: &Value) -> Vec<String> {
+            let names = |list: &Value, name: &str| list.as_array().cloned().unwrap_or_default().iter().filter_map(|tool| tool.pointer(name).and_then(Value::as_str).map(str::to_string)).collect();
+            match self {
+                W::OpenAi | W::Compatible | W::Local => names(&body["tools"], "/function/name"),
+                W::Claude => names(&body["tools"], "/name"),
+                W::Gemini => names(&body["tools"][0]["functionDeclarations"], "/name"),
+                W::Bedrock => names(&body["toolConfig"]["tools"], "/toolSpec/name"),
+            }
+        }
+
+        /// The calls a request sent back as the model made them: name and
+        /// arguments.
+        fn replayed(self, body: &Value) -> Vec<(String, Value)> {
+            let items = |list: &Value| list.as_array().cloned().unwrap_or_default();
+            match self {
+                W::OpenAi | W::Compatible | W::Local => items(&body["messages"])
+                    .iter()
+                    .flat_map(|m| items(&m["tool_calls"]))
+                    .map(|call| (call["function"]["name"].as_str().unwrap().to_string(), serde_json::from_str(call["function"]["arguments"].as_str().unwrap()).unwrap()))
+                    .collect(),
+                W::Claude => items(&body["messages"]).iter().flat_map(|m| items(&m["content"])).filter(|block| block["type"] == "tool_use").map(|block| (block["name"].as_str().unwrap().to_string(), block["input"].clone())).collect(),
+                W::Gemini => items(&body["contents"]).iter().flat_map(|c| items(&c["parts"])).filter(|part| part["functionCall"].is_object()).map(|part| (part["functionCall"]["name"].as_str().unwrap().to_string(), part["functionCall"]["args"].clone())).collect(),
+                W::Bedrock => items(&body["messages"]).iter().flat_map(|m| items(&m["content"])).filter(|block| block["toolUse"].is_object()).map(|block| (block["toolUse"]["name"].as_str().unwrap().to_string(), block["toolUse"]["input"].clone())).collect(),
+            }
+        }
+
         /// The model a request named.
         fn model_sent(self, seen: &Seen) -> String {
             match self {
@@ -2525,10 +2552,12 @@ mod parity {
         });
     }
 
-    /// Calendar tools: the call reaches the calendar with its arguments
-    /// whole (the status line shows the title it carried). With no Google
-    /// account in a test the calendar answers without a request to Google,
-    /// and that answer goes back to the model. Deleting an event asks first.
+    /// Calendar tools: each wire offers the four calendar tools, the
+    /// recorded call reaches the calendar with its arguments whole (the
+    /// status line shows the title it carried) and goes back to the model
+    /// as it came, with the calendar's answer. With no Google account in a
+    /// test the calendar answers without a request to Google. Deleting an
+    /// event asks first.
     #[test]
     fn calendar_tools() {
         on_each(&ALL, |wire, db| async move {
@@ -2537,7 +2566,15 @@ mod parity {
             let turn = on.turn("Add the dentist on 1 December at 10", &db, true).await;
             assert_eq!(turn.reply.as_deref(), Ok("I could not add it."), "{wire:?}");
             assert!(running_line(&turn, "create_event", &event), "{wire:?}: {:?}", turn.window_lines());
-            assert_eq!(wire.results(&on.server.seen()[1].body), vec!["Google account not connected. Please connect in Settings to use Calendar tools."], "{wire:?}");
+            let seen = on.server.seen();
+            assert_eq!(seen.len(), 2, "{wire:?}");
+            let offered = wire.offered(&seen[0].body);
+            for name in ["list_events", "create_event", "update_event", "delete_event"] {
+                assert!(offered.iter().any(|offered| offered == name), "{wire:?}: {name} not in {offered:?}");
+            }
+            assert_eq!(wire.offered(&seen[1].body), offered, "{wire:?}: the same tools in each round");
+            assert_eq!(wire.replayed(&seen[1].body), vec![("create_event".to_string(), event.clone())], "{wire:?}");
+            assert_eq!(wire.results(&seen[1].body), vec!["Google account not connected. Please connect in Settings to use Calendar tools."], "{wire:?}");
             drop(on);
 
             let on = wire.serve(vec![wire.calls("delete_event", json!({"event_id": "evt_1"})), wire.says("Kept it.")], &db).await;
