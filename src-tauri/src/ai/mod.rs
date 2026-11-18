@@ -1110,7 +1110,7 @@ impl AiRouter {
             "gemini" => {
                 let Some(ref key) = self.gemini_key else { return Err("No Gemini API key configured".to_string()) };
                 let model = gemini_model_for(entry.model_id.as_deref(), workload);
-                gemini::send(key, &model, messages, db, google_auth, app_handle, tts_tx, workload, deeper, ledger).await.map_err(|e| e.to_string())
+                provider::chat(&gemini::GeminiWire::new(key, &model, deeper), chat_request(db, messages, deeper), turn).await
             }
             "claude" => {
                 let Some(ref key) = self.claude_key else { return Err("No Claude API key configured".to_string()) };

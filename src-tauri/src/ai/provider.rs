@@ -203,6 +203,121 @@ pub(crate) trait Wire: Send + Sync {
     fn shows_thinking(&self) -> bool {
         false
     }
+
+    /// What this provider accepts in a tool's parameters.
+    fn schema_rules(&self) -> &'static SchemaRules {
+        &SchemaRules::JSON_SCHEMA
+    }
+}
+
+/// What one provider accepts in a tool's parameters: P02's Gemini
+/// sanitizer, made a rule of each wire. The tools are written in JSON
+/// Schema, which OpenAI, Anthropic and Bedrock take as written. Gemini takes
+/// an OpenAPI subset: only its fields, and no object without listed
+/// properties, so such a field is asked for as JSON text and turned back
+/// into the object before the tool runs.
+pub(crate) struct SchemaRules {
+    /// The schema fields the provider takes; None takes every field.
+    pub fields: Option<&'static [&'static str]>,
+    /// Added to the description of a field asked for as JSON text; None
+    /// declares an open object as it is.
+    pub json_text_note: Option<&'static str>,
+}
+
+impl SchemaRules {
+    /// JSON Schema, as the tools are written.
+    pub(crate) const JSON_SCHEMA: SchemaRules = SchemaRules { fields: None, json_text_note: None };
+
+    /// A tool's parameters as the provider accepts them. The top level is
+    /// left an object: system_info and list_memories take no arguments and
+    /// have shipped with empty properties.
+    pub(crate) fn sanitize(&self, schema: &Value) -> Value {
+        if self.fields.is_none() && self.json_text_note.is_none() {
+            return schema.clone();
+        }
+        self.sanitize_node(schema, true)
+    }
+
+    fn sanitize_node(&self, schema: &Value, top_level: bool) -> Value {
+        let Some(fields) = schema.as_object() else { return schema.clone() };
+        if let Some(note) = self.json_text_note {
+            if !top_level && is_open_object(fields) {
+                let description = fields.get("description").and_then(Value::as_str).unwrap_or_default();
+                return json!({"type": "string", "description": format!("{description} {note}").trim()});
+            }
+        }
+        let mut out = serde_json::Map::new();
+        for (key, value) in fields.iter().filter(|(key, _)| self.fields.is_none_or(|kept| kept.contains(&key.as_str()))) {
+            let value = match key.as_str() {
+                "properties" => Value::Object(value.as_object().map(|p| p.iter().map(|(name, field)| (name.clone(), self.sanitize_node(field, false))).collect()).unwrap_or_default()),
+                "items" => self.sanitize_node(value, false),
+                "anyOf" => Value::Array(value.as_array().map(|options| options.iter().map(|option| self.sanitize_node(option, false)).collect()).unwrap_or_default()),
+                _ => value.clone(),
+            };
+            out.insert(key.clone(), value);
+        }
+        // A required name that is not a property is another 400.
+        if let Some(Value::Array(required)) = out.get("required") {
+            let listed = out.get("properties").and_then(Value::as_object);
+            let kept: Vec<Value> = required.iter().filter(|name| name.as_str().is_some_and(|n| listed.is_some_and(|p| p.contains_key(n)))).cloned().collect();
+            out.insert("required".into(), Value::Array(kept));
+        }
+        Value::Object(out)
+    }
+
+    /// Undo [`SchemaRules::sanitize`] on a call's arguments: a field asked
+    /// for as JSON text goes back to the object the tool expects. A field
+    /// sent as an object anyway, or text that is not a JSON object, is left
+    /// as it is.
+    pub(crate) fn restore(&self, schema: &Value, value: &mut Value) {
+        if self.json_text_note.is_some() {
+            restore_json_text(schema, value);
+        }
+    }
+
+    /// A call's arguments as the tool takes them. Unchanged, byte for byte,
+    /// under rules that ask for no JSON text.
+    fn arguments(&self, tools: &[tools::Tool], call: Call) -> Call {
+        if self.json_text_note.is_none() {
+            return call;
+        }
+        let Some(tool) = tools.iter().find(|t| t.name == call.name) else { return call };
+        let Ok(mut args) = serde_json::from_str::<Value>(&call.arguments) else { return call };
+        self.restore(&tool.parameters, &mut args);
+        Call { arguments: serde_json::to_string(&args).unwrap_or_default(), ..call }
+    }
+}
+
+/// An object with no listed properties: JSON Schema's "any object".
+fn is_open_object(schema: &serde_json::Map<String, Value>) -> bool {
+    schema.get("type").and_then(Value::as_str) == Some("object") && schema.get("properties").and_then(Value::as_object).is_none_or(|p| p.is_empty())
+}
+
+fn restore_json_text(schema: &Value, value: &mut Value) {
+    let Some(fields) = schema.as_object() else { return };
+    if is_open_object(fields) {
+        if let Some(Ok(parsed @ Value::Object(_))) = value.as_str().map(serde_json::from_str::<Value>) {
+            *value = parsed;
+        }
+        return;
+    }
+    match value {
+        Value::Object(args) => {
+            if let Some(properties) = fields.get("properties").and_then(Value::as_object) {
+                for (name, arg) in args.iter_mut() {
+                    if let Some(field) = properties.get(name) {
+                        restore_json_text(field, arg);
+                    }
+                }
+            }
+        }
+        Value::Array(items) => {
+            if let Some(item) = fields.get("items") {
+                items.iter_mut().for_each(|value| restore_json_text(item, value));
+            }
+        }
+        _ => {}
+    }
 }
 
 /// The chat window, behind one object-safe call.
@@ -341,6 +456,7 @@ impl Meter {
 /// model answers or the last round is reached.
 pub(crate) async fn chat<W: Wire>(wire: &W, request: ChatRequest, turn: Turn<'_>) -> Result<String, String> {
     let mut meter = Meter::new(wire.metering());
+    let tools = request.tools.clone();
     let mut conversation = wire.start(request).await?;
     let max_rounds = wire.max_rounds();
     for number in 0..max_rounds {
@@ -348,7 +464,9 @@ pub(crate) async fn chat<W: Wire>(wire: &W, request: ChatRequest, turn: Turn<'_>
         let sent_at = std::time::Instant::now();
         let mut events = Events::new(turn.window, turn.voice.as_ref());
         let result = wire.round(&mut conversation, final_round, &mut events).await;
-        let (round, usage) = events.finish();
+        let (mut round, usage) = events.finish();
+        let rules = wire.schema_rules();
+        round.calls = round.calls.into_iter().map(|call| rules.arguments(&tools, call)).collect();
         if let Err(error) = result {
             if error.idle {
                 turn.window.send("chat-state", json!({"state": "idle"}));

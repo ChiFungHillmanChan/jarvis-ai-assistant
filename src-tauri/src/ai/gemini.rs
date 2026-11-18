@@ -1,11 +1,9 @@
 use super::tools;
-use crate::voice::tts::TtsCommand;
 use futures_util::StreamExt;
 use reqwest::Client;
 use serde::{Deserialize, Serialize};
 use serde_json::json;
-use std::collections::HashSet;
-use crate::chat_session::ScopedEmitter;
+use super::provider::{Call, ChatRequest, Event, Events, Metering, Outcome, Round, RoundError, SchemaRules, Wire, SKIPPED};
 
 pub const API_BASE: &str = "https://generativelanguage.googleapis.com/v1beta";
 
@@ -76,15 +74,22 @@ struct UsageMetadata {
 }
 
 impl UsageMetadata {
-    /// Fold one request into the turn. promptTokenCount already includes
-    /// the cached tokens.
+    /// One request's figures. promptTokenCount already includes the cached
+    /// tokens; thinking is billed as output.
+    fn figures(&self) -> super::provider::Usage {
+        super::provider::Usage {
+            input: self.prompt_token_count.unwrap_or(0),
+            output: self.candidates_token_count.unwrap_or(0) + self.thoughts_token_count.unwrap_or(0),
+            cache_read: self.cached_content_token_count.unwrap_or(0),
+            cache_write: 0,
+        }
+    }
+
+    /// Fold this request into a turn, as the usage path does.
+    #[cfg(test)]
     fn add_to(&self, turn: &mut crate::ai::cost::TurnUsage) {
-        turn.add_request(
-            self.prompt_token_count.unwrap_or(0),
-            self.candidates_token_count.unwrap_or(0) + self.thoughts_token_count.unwrap_or(0),
-            self.cached_content_token_count.unwrap_or(0),
-            0,
-        );
+        let figures = self.figures();
+        turn.add_request(figures.input, figures.output, figures.cache_read, figures.cache_write);
     }
 }
 
@@ -158,82 +163,95 @@ impl ModelRound {
     }
 }
 
-pub async fn send(
-    api_key: &str,
-    model: &str,
-    messages: Vec<(String, String)>,
-    db: &crate::db::Database,
-    google_auth: &std::sync::Arc<crate::auth::google::GoogleAuth>,
-    app_handle: &(impl ScopedEmitter + Sync),
-    tts_tx: Option<tokio::sync::mpsc::Sender<TtsCommand>>,
-    workload: crate::ai::Workload,
+/// Google's Gemini API on the provider interface.
+pub(crate) struct GeminiWire {
+    key: String,
+    model: String,
     deeper: Option<crate::ai::capability::Deeper>,
-    ledger: &crate::ai::SideEffectLedger,
-) -> Result<String, Box<dyn std::error::Error + Send + Sync>> {
-    let started_at = std::time::Instant::now();
-    let mut turn = crate::ai::cost::TurnUsage::new("gemini", model);
-    let client = Client::builder()
-        .read_timeout(std::time::Duration::from_secs(90))
-        .build()?;
-    let tool_defs = tools::get_tool_definitions();
-    let gemini_tools = tools::to_gemini_format(&tool_defs);
+}
 
-    let mut contents = history_contents(messages);
+impl GeminiWire {
+    pub(crate) fn new(key: &str, model: &str, deeper: Option<crate::ai::capability::Deeper>) -> Self {
+        GeminiWire { key: key.to_string(), model: model.to_string(), deeper }
+    }
+}
 
-    let system_prompt = tools::build_system_prompt(db);
-    let system_instruction = json!({
-        "parts": [{"text": system_prompt}]
-    });
+/// One chat turn's requests to Gemini.
+pub(crate) struct Conversation {
+    client: Client,
+    contents: Vec<GeminiContent>,
+    tools: Vec<serde_json::Value>,
+    system_instruction: serde_json::Value,
+    /// The round in progress, sent back as it came before the results of
+    /// its calls.
+    round: ModelRound,
+    /// What the last reply held, for the log of an empty one.
+    events: usize,
+    bytes: usize,
+}
 
-    let max_iterations = crate::ai::models::max_tool_rounds("gemini");
-    for round in 0..max_iterations {
-        let final_round = round + 1 == max_iterations;
-        // Per-round usage: Gemini reports usageMetadata cumulatively within one
-        // request, so overwrite within a round and fold into the turn when it ends.
-        let mut usage = UsageMetadata::default();
-        let url = format!(
-            "{}/models/{}:streamGenerateContent?alt=sse",
-            super::api_base(API_BASE), model
-        );
+#[async_trait::async_trait]
+impl Wire for GeminiWire {
+    type Conversation = Conversation;
 
+    fn max_rounds(&self) -> usize {
+        crate::ai::models::max_tool_rounds("gemini")
+    }
+
+    fn metering(&self) -> Metering {
+        Metering::PerTurn { provider: "gemini".into(), model: self.model.clone() }
+    }
+
+    fn schema_rules(&self) -> &'static SchemaRules {
+        &GEMINI_SCHEMA
+    }
+
+    async fn start(&self, request: ChatRequest) -> Result<Conversation, String> {
+        let client = Client::builder().read_timeout(std::time::Duration::from_secs(90)).build().map_err(|e| e.to_string())?;
+        Ok(Conversation {
+            client,
+            contents: history_contents(request.messages),
+            tools: tools::to_gemini_format(&request.tools),
+            system_instruction: json!({"parts": [{"text": request.system.joined()}]}),
+            round: ModelRound::default(),
+            events: 0,
+            bytes: 0,
+        })
+    }
+
+    async fn round(&self, conversation: &mut Conversation, final_round: bool, events: &mut Events<'_>) -> Result<(), RoundError> {
+        let url = format!("{}/models/{}:streamGenerateContent?alt=sse", super::api_base(API_BASE), self.model);
         let mut request_body = json!({
-            "contents": contents,
-            "tools": gemini_tools,
-            "systemInstruction": system_instruction,
-            "generationConfig": generation_config(output_cap(model), deeper)
+            "contents": conversation.contents,
+            "tools": conversation.tools,
+            "systemInstruction": conversation.system_instruction,
+            "generationConfig": generation_config(output_cap(&self.model), self.deeper)
         });
         if final_round {
             // The last allowed round answers from what earlier rounds gathered.
             request_body["toolConfig"] = json!({"functionCallingConfig": {"mode": "NONE"}});
         }
-
-        let response = client
+        let response = conversation
+            .client
             .post(&url)
-            .header("x-goog-api-key", api_key)
+            .header("x-goog-api-key", &self.key)
             .header("Content-Type", "application/json")
             .json(&request_body)
             .send()
-            .await;
-        let response = match response {
-            Ok(response) => response,
-            Err(e) => {
-                turn.record_if_billed(db, workload, started_at.elapsed().as_millis() as i64);
-                return Err(e.into());
-            }
-        };
+            .await
+            .map_err(|e| RoundError::refused(e.to_string()))?;
 
         if !response.status().is_success() {
             let status = response.status();
             let body = response.text().await.unwrap_or_default();
-            turn.record_if_billed(db, workload, started_at.elapsed().as_millis() as i64);
-            return Err(format!("Gemini API error {}: {}", status, body).into());
+            return Err(RoundError::refused(format!("Gemini API error {}: {}", status, body)));
         }
 
+        // usageMetadata is cumulative within one request: the last one stands.
+        let mut usage = UsageMetadata::default();
         let mut stream = response.bytes_stream();
         let mut buffer = super::SseByteBuffer::new();
         let mut round = ModelRound::default();
-        let mut announced_tools: HashSet<String> = HashSet::new();
-        let mut response_started = false;
         let mut finish_reason: Option<String> = None;
         let mut event_count: usize = 0;
         let mut total_bytes: usize = 0;
@@ -242,13 +260,10 @@ pub async fn send(
             let chunk = match chunk_result {
                 Ok(bytes) => bytes,
                 Err(e) => {
-                    let _ = app_handle.emit("chat-state", json!({"state": "idle"}));
-                    usage.add_to(&mut turn);
-                    turn.record_if_billed(db, workload, started_at.elapsed().as_millis() as i64);
-                    return Err(format!("Stream error: {}", e).into());
+                    events.send(Event::Usage(usage.figures()));
+                    return Err(RoundError::broken(format!("Stream error: {}", e)));
                 }
             };
-
             total_bytes += chunk.len();
             buffer.extend(&chunk);
 
@@ -262,12 +277,10 @@ pub async fn send(
                         data_str = rest.to_string();
                     }
                 }
-
                 if data_str.is_empty() {
                     continue;
                 }
                 event_count += 1;
-
                 let sse: StreamChunk = match serde_json::from_str(&data_str) {
                     Ok(c) => c,
                     Err(e) => {
@@ -275,175 +288,73 @@ pub async fn send(
                         continue;
                     }
                 };
-
                 if let Some(u) = sse.usage_metadata {
                     usage = u;
                 }
-
-                if let Some(candidates) = sse.candidates {
-                    for candidate in &candidates {
-                        if let Some(ref fr) = candidate.finish_reason {
-                            finish_reason = Some(fr.clone());
+                for candidate in sse.candidates.iter().flatten() {
+                    if let Some(ref fr) = candidate.finish_reason {
+                        finish_reason = Some(fr.clone());
+                    }
+                    for part in candidate.content.iter().flat_map(|c| c.parts.iter().flatten()) {
+                        if let Some(ref text) = part.text {
+                            events.send(Event::Text(text.clone()));
                         }
-
-                        if let Some(ref content) = candidate.content {
-                            if let Some(ref parts) = content.parts {
-                                for part in parts {
-                                    if let Some(ref text) = part.text {
-                                        if !response_started {
-                                            response_started = true;
-                                            let _ = app_handle.emit(
-                                                "chat-status",
-                                                json!({
-                                                    "status": "Composing response...",
-                                                    "phase": "responding"
-                                                }),
-                                            );
-                                        }
-                                        let _ = app_handle.emit(
-                                            "chat-token",
-                                            json!({"token": text, "done": false}),
-                                        );
-                                        if let Some(ref tx) = tts_tx {
-                                            let _ =
-                                                tx.try_send(TtsCommand::TextChunk(text.clone()));
-                                        }
-                                    }
-
-                                    if let Some(ref fc) = part.function_call {
-                                        let label = tools::tool_status_label(&fc.name);
-                                        let _ = app_handle.emit(
-                                            "chat-status",
-                                            json!({
-                                                "status": format!("Planning: {}", label),
-                                                "phase": "planning"
-                                            }),
-                                        );
-                                        if announced_tools.insert(fc.name.clone()) {
-                                            let _ = app_handle.emit(
-                                                "chat-tool-call",
-                                                json!({"tool_name": &fc.name}),
-                                            );
-                                        }
-                                    }
-                                    round.take(part);
-                                }
-                            }
+                        if let Some(ref fc) = part.function_call {
+                            // Each tool is announced once, by name.
+                            events.send(Event::ToolStarted { key: fc.name.clone(), name: fc.name.clone() });
                         }
+                        round.take(part);
                     }
                 }
             }
         }
+        events.send(Event::Usage(usage.figures()));
+        for fc in round.calls.iter().filter_map(|part| part.function_call.as_ref()) {
+            events.send(Event::ToolCall(Call { id: fc.id.clone().unwrap_or_default(), name: fc.name.clone(), arguments: serde_json::to_string(&fc.args).unwrap_or_default() }));
+        }
+        conversation.round = round;
+        conversation.events = event_count;
+        conversation.bytes = total_bytes;
+        events.send(Event::Done { stop: finish_reason });
+        Ok(())
+    }
 
-        usage.add_to(&mut turn);
-
-        if !round.calls.is_empty() && !final_round {
-            contents.push(GeminiContent {
-                role: "model".into(),
-                parts: round.parts(),
-            });
-
-            let mut response_parts: Vec<GeminiPart> = Vec::new();
-            let mut executed_tools: HashSet<String> = HashSet::new();
-            let mut narrated = false;
-            for fc_part in &round.calls {
-                let fc = match fc_part.function_call.as_ref() {
-                    Some(fc) => fc,
-                    None => continue,
+    fn add_results(&self, conversation: &mut Conversation, _round: Round, results: Vec<(Call, Outcome)>, _next_is_final: bool) -> Result<(), String> {
+        let round = std::mem::take(&mut conversation.round);
+        conversation.contents.push(GeminiContent { role: "model".into(), parts: round.parts() });
+        let parts = results
+            .into_iter()
+            .map(|(call, outcome)| {
+                let result = match outcome {
+                    Outcome::Ran(result) => result,
+                    Outcome::Duplicate => SKIPPED.to_string(),
                 };
-                let mut args = fc.args.clone();
-                if let Some(tool) = tool_defs.iter().find(|t| t.name == fc.name) {
-                    restore_json_text(&tool.parameters, &mut args);
-                }
-                let args_str = serde_json::to_string(&args).unwrap_or_default();
-                let call_key = crate::ai::tool_call_key(&fc.name, &args_str);
-                let is_duplicate = executed_tools.contains(&call_key);
-                if is_duplicate {
-                    log::info!("JARVIS skipping duplicate tool call: {}", fc.name);
-                    response_parts.push(GeminiPart {
-                        function_response: Some(FunctionResponseData {
-                            name: fc.name.clone(),
-                            response: json!({"result": "Skipped: already executed this tool with these arguments in this batch."}),
-                        }),
-                        ..Default::default()
-                    });
-                    continue;
-                }
-                executed_tools.insert(call_key);
-                log::info!("JARVIS tool call: {} ({} bytes of arguments)", fc.name, args_str.len());
-                let label = tools::tool_status_label(&fc.name);
-                let _ = app_handle.emit(
-                    "chat-status",
-                    json!({
-                        "status": format!("Running: {}", label),
-                        "detail": tools::tool_status_detail(&fc.name, &args_str),
-                        "phase": "acting"
-                    }),
-                );
-                if !narrated {
-                    if let Some(ref tx) = tts_tx {
-                        let narration = tools::tool_voice_narration(&fc.name, &tools::read_language_pref(db));
-                        let _ = tx.try_send(TtsCommand::Narrate(narration.to_string()));
-                        narrated = true;
-                    }
-                }
-                ledger.note(&fc.name);
-                let result = tools::execute_tool(&fc.name, &args_str, db, google_auth, ledger).await;
-                log::info!("JARVIS tool result: {}", crate::util::truncate_bytes(&result, 200));
-                response_parts.push(GeminiPart {
-                    function_response: Some(FunctionResponseData {
-                        name: fc.name.clone(),
-                        response: json!({"result": result}),
-                    }),
-                    ..Default::default()
-                });
-            }
-            contents.push(GeminiContent {
-                role: "user".into(),
-                parts: response_parts,
-            });
+                GeminiPart { function_response: Some(FunctionResponseData { name: call.name, response: json!({"result": result}) }), ..Default::default() }
+            })
+            .collect();
+        conversation.contents.push(GeminiContent { role: "user".into(), parts });
+        Ok(())
+    }
 
-            let _ = app_handle.emit(
-                "chat-status",
-                json!({
-                    "status": "Reviewing tool results...",
-                    "phase": "thinking"
-                }),
-            );
-            continue;
-        }
-
-        let _ = app_handle.emit("chat-token", json!({"token": "", "done": true}));
+    /// A reply with neither text nor a call is an error the router sends
+    /// once more on; the last round's calls end with the fallback.
+    fn reply(&self, conversation: &Conversation, round: Round, final_round: bool, language: &str) -> Result<String, String> {
         if !round.texts.is_empty() {
-            if turn.is_empty() {
-                log::warn!(
-                    "[gemini] no usageMetadata received for non-empty response; recording zero tokens (model={})",
-                    model
-                );
-            }
-            turn.record(db, workload, started_at.elapsed().as_millis() as i64);
-            return Ok(round.texts.join(""));
+            return Ok(round.text());
         }
         if final_round && !round.calls.is_empty() {
-            turn.record(db, workload, started_at.elapsed().as_millis() as i64);
-            return Ok(tools::tool_limit_fallback(&tools::read_language_pref(db)).into());
+            return Ok(tools::tool_limit_fallback(language).into());
         }
         log::warn!(
             "[gemini] empty response: model={} finish_reason={:?} function_calls={} events={} bytes={}",
-            model,
-            finish_reason,
+            self.model,
+            round.stop,
             round.calls.len(),
-            event_count,
-            total_bytes
+            conversation.events,
+            conversation.bytes
         );
-        turn.record(db, workload, started_at.elapsed().as_millis() as i64);
-        return Err(empty_reply_error(model, finish_reason.as_deref()).into());
+        Err(empty_reply_error(&self.model, round.stop.as_deref()))
     }
-
-    let _ = app_handle.emit("chat-token", json!({"token": "", "done": true}));
-    turn.record(db, workload, started_at.elapsed().as_millis() as i64);
-    // The last round always returns above.
-    Ok(tools::tool_limit_fallback(&tools::read_language_pref(db)).into())
 }
 
 /// Map persisted `(role, content)` rows to Gemini contents. Rows whose content
@@ -494,77 +405,21 @@ const SCHEMA_FIELDS: &[&str] = &[
 /// Added to the description of a field Gemini is asked to send as JSON text.
 const JSON_TEXT_NOTE: &str = "Give this value as one JSON object written as a string.";
 
-/// An object with no listed properties: JSON Schema's "any object".
-fn is_open_object(schema: &serde_json::Map<String, serde_json::Value>) -> bool {
-    schema.get("type").and_then(serde_json::Value::as_str) == Some("object")
-        && schema.get("properties").and_then(serde_json::Value::as_object).is_none_or(|p| p.is_empty())
-}
+/// Gemini's rules for tool parameters (P02): the Schema fields above, and
+/// an object field with no properties asked for as JSON text. Gemini
+/// refuses such a field ("should be non-empty for OBJECT type") and has no
+/// way to say "any object".
+pub(crate) const GEMINI_SCHEMA: SchemaRules = SchemaRules { fields: Some(SCHEMA_FIELDS), json_text_note: Some(JSON_TEXT_NOTE) };
 
-/// A tool's parameters in a shape Gemini accepts. Gemini refuses an object
-/// field with no properties ("should be non-empty for OBJECT type") and has
-/// no way to say "any object", so such a field is asked for as JSON text and
-/// `restore_json_text` turns it back into the object before the tool runs.
-/// The top level is left an object: system_info and list_memories take no
-/// arguments and have shipped with empty properties.
+/// A tool's parameters in a shape Gemini accepts.
 pub(crate) fn sanitize_schema(schema: &serde_json::Value) -> serde_json::Value {
-    sanitize_node(schema, true)
+    GEMINI_SCHEMA.sanitize(schema)
 }
 
-fn sanitize_node(schema: &serde_json::Value, top_level: bool) -> serde_json::Value {
-    use serde_json::Value;
-    let Some(fields) = schema.as_object() else { return schema.clone() };
-    if !top_level && is_open_object(fields) {
-        let description = fields.get("description").and_then(Value::as_str).unwrap_or_default();
-        return json!({"type": "string", "description": format!("{description} {JSON_TEXT_NOTE}").trim()});
-    }
-    let mut out = serde_json::Map::new();
-    for (key, value) in fields.iter().filter(|(key, _)| SCHEMA_FIELDS.contains(&key.as_str())) {
-        let value = match key.as_str() {
-            "properties" => Value::Object(value.as_object().map(|p| p.iter().map(|(name, field)| (name.clone(), sanitize_node(field, false))).collect()).unwrap_or_default()),
-            "items" => sanitize_node(value, false),
-            "anyOf" => Value::Array(value.as_array().map(|options| options.iter().map(|option| sanitize_node(option, false)).collect()).unwrap_or_default()),
-            _ => value.clone(),
-        };
-        out.insert(key.clone(), value);
-    }
-    // A required name that is not a property is another 400.
-    if let Some(Value::Array(required)) = out.get("required") {
-        let listed = out.get("properties").and_then(Value::as_object);
-        let kept: Vec<Value> = required.iter().filter(|name| name.as_str().is_some_and(|n| listed.is_some_and(|p| p.contains_key(n)))).cloned().collect();
-        out.insert("required".into(), Value::Array(kept));
-    }
-    Value::Object(out)
-}
-
-/// Undo `sanitize_schema` on the arguments Gemini sent: a field asked for as
-/// JSON text goes back to the object the tool expects. A field Gemini sent
-/// as an object anyway, or text that is not a JSON object, is left as it is.
+/// Undo `sanitize_schema` on the arguments Gemini sent.
+#[cfg(test)]
 pub(crate) fn restore_json_text(schema: &serde_json::Value, value: &mut serde_json::Value) {
-    use serde_json::Value;
-    let Some(fields) = schema.as_object() else { return };
-    if is_open_object(fields) {
-        if let Some(Ok(parsed @ Value::Object(_))) = value.as_str().map(serde_json::from_str::<Value>) {
-            *value = parsed;
-        }
-        return;
-    }
-    match value {
-        Value::Object(args) => {
-            if let Some(properties) = fields.get("properties").and_then(Value::as_object) {
-                for (name, arg) in args.iter_mut() {
-                    if let Some(field) = properties.get(name) {
-                        restore_json_text(field, arg);
-                    }
-                }
-            }
-        }
-        Value::Array(items) => {
-            if let Some(item) = fields.get("items") {
-                items.iter_mut().for_each(|value| restore_json_text(item, value));
-            }
-        }
-        _ => {}
-    }
+    GEMINI_SCHEMA.restore(schema, value);
 }
 
 #[cfg(test)]

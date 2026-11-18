@@ -1025,12 +1025,22 @@ mod gemini_wire {
         assert_eq!(rows(&db), vec![priced_row("gemini", "tools", crate::ai::models::GEMINI_FLASH, &[(100, 10, 0, 0), (150, 5, 0, 0)])]);
     }
 
-    /// A tool argument the schema asks for as JSON text comes back as the
-    /// object before the tool runs.
-    #[test]
-    fn json_text_arguments_are_restored() {
-        let tool = tools::get_tool_definitions().into_iter().find(|t| crate::ai::gemini::sanitize_schema(&t.parameters).to_string().contains("JSON object written as a string"));
-        assert!(tool.is_some(), "a tool with an open object field exists for this pin");
+    /// A field Gemini is asked to send as JSON text (render_chart's open
+    /// `data` object) is an object again when the tool runs; the call goes
+    /// back to Gemini as it came.
+    #[tokio::test]
+    async fn json_text_arguments_are_restored_before_the_tool_runs() {
+        let data = r#"{"segments":[{"label":"Mail","value":3}]}"#;
+        let call = json!({"functionCall": {"name": "render_chart", "args": {"chart_type": "pie", "data": data}}});
+        let server = serve(vec![Reply::sse(&[chunk(json!([call.clone()]), Some("STOP"), None)]), Reply::sse(&[chunk(json!([{"text": "Here."}]), Some("STOP"), None)])]).await;
+        let _base = point_at(&format!("{}/v1beta", server.base));
+        let db = crate::db::test_database();
+        let turn = run_turn(&router(), row(), &[("user", "Chart my mail")], &db, Workload::Tools, false).await;
+        assert_eq!(turn.reply.as_deref(), Ok("Here."));
+        let seen = server.seen();
+        assert_eq!(seen[1].body["contents"][1]["parts"][0], call, "sent back unchanged");
+        let result = &seen[1].body["contents"][2]["parts"][0]["functionResponse"]["response"]["result"];
+        assert_eq!(result.as_str(), Some(format!("[CHART:pie|{data}]").as_str()), "the tool got the object, not the text");
     }
 
     /// A reply without text or a call is an error naming the model and why
