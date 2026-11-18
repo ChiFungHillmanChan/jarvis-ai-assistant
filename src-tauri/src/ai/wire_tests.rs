@@ -2755,8 +2755,13 @@ mod live {
         println!("{name}: answer of {} characters, {saved} memory saved, JSON completion ok, {} usage rows", reply.chars().count(), rows(db).len());
     }
 
+    /// Written straight to stderr, which the test harness does not hold
+    /// back as it holds back a passing test's `println!`: a run with
+    /// `--ignored` and no variables set does not pass in silence.
     fn skipped(names: &str) {
-        println!("skipped: set {names} to run this live test");
+        use std::io::Write;
+        let test = std::thread::current().name().unwrap_or("live test").to_string();
+        let _ = writeln!(std::io::stderr(), "{test}: SKIPPED, nothing was sent: set {names} to run it");
     }
 
     #[tokio::test]
