@@ -3276,6 +3276,20 @@ mod parity {
         });
     }
 
+    /// A round of only whitespace after a tool round, before the last, is
+    /// an empty reply on every wire, not the fallback: the turn had rounds
+    /// left (C5, kept). The fallback is for a last round only.
+    #[test]
+    fn a_blank_round_with_rounds_left_is_an_empty_reply() {
+        on_each(&ALL, |wire, db| async move {
+            let on = wire.serve(vec![wire.calls("list_tasks", json!({})), wire.says("\n")], &db).await;
+            let turn = on.turn("What are my tasks?", &db, true).await;
+            let error = turn.reply.as_ref().expect_err(&format!("{wire:?}"));
+            assert_eq!(crate::ai::failure::code_of(error), crate::ai::failure::Code::EmptyReply, "{wire:?}: {error}");
+            assert_eq!(on.server.seen().len(), 2, "{wire:?}");
+        });
+    }
+
     /// A last round that streamed its answer is not sent again.
     #[test]
     fn a_streamed_last_round_is_not_sent_again() {
