@@ -944,7 +944,7 @@ export default function Settings() {
                       <div key={m.id} style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginTop: 2 }}>
                         <span style={{ color: "var(--text-secondary)", fontSize: 12, fontFamily: "var(--font-mono)" }}>{m.id}</span>
                         <div style={{ display: "flex", gap: 4, alignItems: "center" }}>
-                          <span style={{ color: "var(--text-muted)", fontSize: 12 }}>{m.supports_tools === "native" ? text("tools", "工具") : m.supports_tools === "prompt_injected" ? text("prompt-tools", "提示工具") : text("chat", "對話")}</span>
+                          <span style={{ color: "var(--text-muted)", fontSize: 12 }}>{m.supports_tools === "native" ? text("tools", "工具") : m.supports_tools === "prompt_injected" ? text("prompt-tools", "提示工具") : text("chat only, cannot use tools", "只可對話，不能使用工具")}</span>
                           <button onClick={() => handleAddToChain("local", ep.id, m.id)} style={{ ...styles.saveBtn, fontSize: 12, padding: "2px 6px" }}>{text('Add to priority', '加入優先次序')}</button>
                         </div>
                       </div>
