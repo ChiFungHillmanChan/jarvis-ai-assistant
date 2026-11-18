@@ -858,4 +858,162 @@ pub(crate) mod tests {
         assert!(error.contains("尚未選擇 AI"), "{error}");
     }
 
+    // -----------------------------------------------------------------------
+    // Each wire's plain request pinned against a loopback stand-in (P07).
+    // -----------------------------------------------------------------------
+
+    use crate::ai::wire_tests::{point_at, serve, Reply};
+
+    fn sort() -> Request<'static> {
+        Request { system: "Sort this.", user: "From: a@example.com", json: true, max_tokens: 300, feature: Feature::MailSort }
+    }
+
+    fn row(provider_type: &str, model: Option<&str>, base_url: Option<&str>, endpoint_id: Option<&str>) -> ProviderChainEntry {
+        ProviderChainEntry { position: 0, provider_type: provider_type.into(), endpoint_id: endpoint_id.map(Into::into), model_id: model.map(Into::into), enabled: true, base_url: base_url.map(Into::into) }
+    }
+
+    fn local_router(url: &str, backend_type: crate::ai::local::backend::BackendType, api_key: Option<&str>) -> AiRouter {
+        let mut router = AiRouter::new("gemini_primary");
+        router.set_local_endpoints(vec![crate::ai::local::backend::LocalEndpoint {
+            id: "lm".into(), name: "Local".into(), url: url.into(), backend_type, api_key: api_key.map(Into::into), use_tls: false,
+            connection_timeout_ms: 5000, keep_alive_minutes: 30, is_active: true, last_health_check: None, last_health_status: None,
+        }]);
+        router
+    }
+
+    fn figures(done: &Completion) -> (&str, &str, &str, i64, i64, i64, i64) {
+        (done.text.as_str(), done.provider.as_str(), done.model.as_str(), done.input_tokens, done.output_tokens, done.cached_tokens, done.cache_write_tokens)
+    }
+
+    #[tokio::test]
+    async fn an_openai_plain_request() {
+        let server = serve(vec![Reply::json(200, json!({"choices": [{"message": {"content": "{\"a\":1}"}}], "usage": {"prompt_tokens": 10, "completion_tokens": 2, "prompt_tokens_details": {"cached_tokens": 4}}}))]).await;
+        let _base = point_at(&format!("{}/v1", server.base));
+        let mut router = AiRouter::new("gemini_primary");
+        router.set_openai_key("sk-fixture-openai-not-real");
+        let db = crate::db::test_database();
+        let done = complete_one(&router, &db, &row("openai", None, None, None), &sort()).await.unwrap();
+        let model = crate::ai::models::openai_default();
+        assert_eq!(figures(&done), ("{\"a\":1}", "OpenAI", model.as_str(), 10, 2, 4, 0));
+        let seen = server.seen();
+        assert_eq!((seen[0].method.as_str(), seen[0].path.as_str()), ("POST", "/v1/chat/completions"));
+        assert_eq!(seen[0].header("authorization"), Some("Bearer sk-fixture-openai-not-real"));
+        assert_eq!(
+            seen[0].body,
+            json!({"model": model, "messages": [{"role": "system", "content": "Sort this."}, {"role": "user", "content": "From: a@example.com"}], "max_completion_tokens": 300, "response_format": {"type": "json_object"}})
+        );
+    }
+
+    #[tokio::test]
+    async fn a_claude_plain_request() {
+        let server = serve(vec![Reply::json(200, json!({"content": [{"type": "text", "text": "{\"a\":1}"}], "usage": {"input_tokens": 10, "output_tokens": 2, "cache_read_input_tokens": 0}}))]).await;
+        let _base = point_at(&server.base);
+        let mut router = AiRouter::new("gemini_primary");
+        router.set_claude_key("sk-ant-fixture-not-real");
+        let db = crate::db::test_database();
+        let done = complete_one(&router, &db, &row("claude", None, None, None), &sort()).await.unwrap();
+        let model = crate::ai::models::claude_default();
+        assert_eq!(figures(&done), ("{\"a\":1}", "Claude", model.as_str(), 10, 2, 0, 0));
+        let seen = server.seen();
+        assert_eq!(seen[0].path, "/v1/messages");
+        assert_eq!(seen[0].header("x-api-key"), Some("sk-ant-fixture-not-real"));
+        assert_eq!(seen[0].header("anthropic-version"), Some(crate::ai::models::anthropic_version().as_str()));
+        assert_eq!(
+            seen[0].body,
+            json!({"model": model, "max_tokens": 300, "messages": [{"role": "user", "content": "From: a@example.com"}], "system": format!("Sort this.\n\n{}", crate::ai::bedrock::JSON_INSTRUCTION)})
+        );
+    }
+
+    #[tokio::test]
+    async fn a_gemini_plain_request() {
+        let reply = json!({
+            "candidates": [{"content": {"parts": [{"text": "Weighing it.", "thought": true}, {"text": "{\"a\":1}"}]}}],
+            "usageMetadata": {"promptTokenCount": 10, "candidatesTokenCount": 2, "thoughtsTokenCount": 3, "cachedContentTokenCount": 4}
+        });
+        let server = serve(vec![Reply::json(200, reply)]).await;
+        let _base = point_at(&format!("{}/v1beta", server.base));
+        let mut router = AiRouter::new("gemini_primary");
+        router.set_gemini_key("AIza-fixture-not-real");
+        let db = crate::db::test_database();
+        let done = complete_one(&router, &db, &row("gemini", None, None, None), &sort()).await.unwrap();
+        let model = crate::ai::models::gemini_flash();
+        // The thought is not the answer, and is billed as output.
+        assert_eq!(figures(&done), ("{\"a\":1}", "Gemini", model.as_str(), 10, 5, 4, 0));
+        let seen = server.seen();
+        assert_eq!(seen[0].path, format!("/v1beta/models/{model}:generateContent"));
+        assert_eq!(seen[0].header("x-goog-api-key"), Some("AIza-fixture-not-real"));
+        assert_eq!(
+            seen[0].body,
+            json!({
+                "contents": [{"role": "user", "parts": [{"text": "From: a@example.com"}]}],
+                "generationConfig": {"maxOutputTokens": 300, "responseMimeType": "application/json"},
+                "systemInstruction": {"parts": [{"text": "Sort this."}]}
+            })
+        );
+    }
+
+    /// Ollama's own endpoint, so the context window can be set; any other
+    /// server on this Mac gets the OpenAI format, with its key if it has one.
+    #[tokio::test]
+    async fn a_local_plain_request() {
+        use crate::ai::local::backend::BackendType;
+        let server = serve(vec![
+            Reply::json(200, json!({"message": {"role": "assistant", "content": "{\"a\":1}"}, "prompt_eval_count": 10, "eval_count": 2})),
+            Reply::json(200, json!({"choices": [{"message": {"content": "{\"a\":2}"}}], "usage": {"prompt_tokens": 11, "completion_tokens": 3}})),
+        ])
+        .await;
+        let db = crate::db::test_database();
+        let entry = row("local", Some("qwen3:8b"), None, Some("lm"));
+        let done = complete_one(&local_router(&server.base, BackendType::Ollama, None), &db, &entry, &sort()).await.unwrap();
+        assert_eq!(figures(&done), ("{\"a\":1}", "Ollama", "qwen3:8b", 10, 2, 0, 0));
+        let done = complete_one(&local_router(&server.base, BackendType::Vllm, Some("local-fixture-key")), &db, &entry, &sort()).await.unwrap();
+        assert_eq!(figures(&done), ("{\"a\":2}", "本機 AI", "qwen3:8b", 11, 3, 0, 0));
+        let seen = server.seen();
+        assert_eq!(seen[0].path, "/api/chat");
+        let context = crate::ai::models::limits("ollama").completion_context_tokens.unwrap();
+        assert_eq!(
+            seen[0].body,
+            json!({"model": "qwen3:8b", "messages": [{"role": "system", "content": "Sort this."}, {"role": "user", "content": "From: a@example.com"}], "stream": false, "options": {"num_ctx": context, "num_predict": 300}, "format": "json"})
+        );
+        assert_eq!(seen[1].path, "/v1/chat/completions");
+        assert_eq!(seen[1].header("authorization"), Some("Bearer local-fixture-key"));
+        assert_eq!(
+            seen[1].body,
+            json!({"model": "qwen3:8b", "messages": [{"role": "system", "content": "Sort this."}, {"role": "user", "content": "From: a@example.com"}], "max_tokens": 300, "response_format": {"type": "json_object"}})
+        );
+    }
+
+    /// A refusal names the service and the status, in the user's terms, and
+    /// never the body (it can echo the mail); an empty answer is an error.
+    #[tokio::test]
+    async fn refused_and_empty_plain_requests() {
+        let canary = json!({"error": {"message": "PRIVATE-MAIL-CANARY"}});
+        let server = serve(vec![
+            Reply::json(401, canary.clone()),
+            Reply::json(429, canary.clone()),
+            Reply::json(400, json!({"error": {"message": "API key not valid. PRIVATE-MAIL-CANARY"}})),
+            Reply::json(500, canary.clone()),
+            Reply::json(200, json!({"choices": [{"message": {"content": "  "}}]})),
+        ])
+        .await;
+        let _base = point_at(&server.base);
+        let mut router = local_router(&server.base, crate::ai::local::backend::BackendType::Vllm, None);
+        router.set_claude_key("sk-ant-fixture-not-real");
+        router.set_openai_key("sk-fixture-openai-not-real");
+        router.set_gemini_key("AIza-fixture-not-real");
+        let db = crate::db::test_database();
+        let claude = complete_one(&router, &db, &row("claude", None, None, None), &sort()).await.unwrap_err();
+        assert_eq!(claude, "Claude 拒絕了 API 密鑰（401），請檢查後重試。");
+        let openai = complete_one(&router, &db, &row("openai", None, None, None), &sort()).await.unwrap_err();
+        assert_eq!(openai, "OpenAI 暫時限速或額度不足（429），請稍後重試。");
+        let gemini = complete_one(&router, &db, &row("gemini", None, None, None), &sort()).await.unwrap_err();
+        assert_eq!(gemini, "Gemini 拒絕了 API 密鑰，請檢查是否完整複製。");
+        let local = complete_one(&router, &db, &row("local", Some("my-model"), None, Some("lm")), &sort()).await.unwrap_err();
+        assert_eq!(local, "本機 AI 暫時未能回覆（500），請稍後重試。");
+        let empty = complete_one(&router, &db, &row("local", Some("my-model"), None, Some("lm")), &sort()).await.unwrap_err();
+        assert_eq!(empty, "本機 AI 沒有回覆內容。");
+        for error in [claude, openai, gemini, local] {
+            assert!(!error.contains("CANARY"), "{error}");
+        }
+    }
 }
