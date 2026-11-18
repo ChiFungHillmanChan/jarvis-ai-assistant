@@ -133,11 +133,11 @@ pub async fn fetch_assigned_items_detailed(token: &str) -> Result<AssignedItemsF
             .map(String::from);
         let body = resp.text().await.unwrap_or_default();
         log::warn!(
-            "[github] review-requested search failed: {} (x-ratelimit-remaining={}, retry-after={}) {}",
+            "[github] review-requested search failed: {} (x-ratelimit-remaining={}, retry-after={}, reply of {} bytes)",
             status,
             remaining.as_deref().unwrap_or("unknown"),
             retry_after.as_deref().unwrap_or("none"),
-            body
+            body.len()
         );
         let warning = search_failure_warning(
             status.as_u16(),
@@ -169,8 +169,8 @@ pub async fn fetch_assigned_items_detailed(token: &str) -> Result<AssignedItemsF
     Ok(AssignedItemsFetch { items, warning: None })
 }
 
-/// The user-facing half of a review-search failure. The full status, headers and
-/// body go to the log; this string is what a sync surfaces, so it has to name
+/// The user-facing half of a review-search failure. The status, the two headers
+/// and the reply's length go to the log; this string is what a sync surfaces, so it has to name
 /// what is missing as well as why, and it has to keep a rate limit ("wait")
 /// distinct from a permission or credential failure ("waiting will not help").
 fn search_failure_warning(
@@ -526,5 +526,19 @@ mod sync_tests {
         assert!(stored(&db).is_empty(), "an empty fetch clears the mirror");
         save_to_db(&db, &complete(vec![item(1, "issue")])).unwrap();
         assert_eq!(stored(&db), vec![(1, "issue".to_string())]);
+    }
+
+    /// The log line for a failed review search gives the status, the two
+    /// rate-limit headers and the reply's length. GitHub's reply itself is
+    /// not written to the log. The request needs GitHub, so this reads the
+    /// source.
+    #[test]
+    fn a_failed_review_search_logs_no_reply_text() {
+        let shipped = include_str!("github.rs").split("\n#[cfg(test)]\nmod tests {").next().unwrap();
+        let start = shipped.find("\"[github] review-requested search failed:").expect("the log line");
+        let call = &shipped[start..];
+        let call = &call[..call.find(");").expect("the end of the log call")];
+        assert!(call.contains("body.len()"), "{call}");
+        assert!(!call.replace("body.len()", "").contains("body"), "{call}");
     }
 }

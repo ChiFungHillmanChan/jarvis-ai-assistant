@@ -234,8 +234,8 @@ async fn run_deadline_monitor(db: &Arc<Database>) -> Result<String, String> {
         rows.collect::<Result<Vec<_>, _>>().map_err(|e| e.to_string())?
     };
     if warnings.is_empty() { return Ok("No upcoming deadlines".to_string()); }
-    for (id, title, deadline) in &warnings {
-        log::warn!("Deadline approaching: '{}' (id={}) due {}", title, id, deadline);
+    for (id, _, deadline) in &warnings {
+        log::warn!("Deadline approaching: task id={} due {}", id, deadline);
     }
     Ok(format!("{} tasks with deadlines within 3 days", warnings.len()))
 }
@@ -1197,5 +1197,15 @@ mod tests {
         assert_eq!(oldest_kept, 51, "the runs kept must be the most recent ones");
         let other: i64 = conn.query_row("SELECT COUNT(*) FROM cron_runs WHERE job_id = 2", [], |r| r.get(0)).unwrap();
         assert_eq!(other, 5, "other jobs must not be pruned");
+    }
+
+
+    /// The deadline monitor's log line gives a task's id and date, not its
+    /// title.
+    #[test]
+    fn the_deadline_log_line_gives_no_task_title() {
+        let shipped = include_str!("jobs.rs").split("\n#[cfg(test)]\nmod tests {").next().unwrap();
+        let line = shipped.lines().find(|line| line.contains("\"Deadline approaching:")).expect("the log line");
+        assert!(line.contains("id, deadline") && !line.contains("title"), "{line}");
     }
 }
