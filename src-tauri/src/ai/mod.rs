@@ -14,6 +14,7 @@ pub mod usage;
 pub mod gemini;
 pub mod local;
 pub mod openai;
+pub(crate) mod openai_responses;
 pub mod persona;
 pub(crate) mod provider;
 pub mod registry;

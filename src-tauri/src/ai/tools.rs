@@ -433,6 +433,13 @@ pub fn to_openai_format(tools: &[Tool]) -> Vec<serde_json::Value> {
         .collect()
 }
 
+/// Format tools for OpenAI's Responses API: flat function tools.
+/// `strict: false` keeps the best-effort calls Chat Completions made; left
+/// out, Responses would try strict mode.
+pub fn to_responses_format(tools: &[Tool]) -> Vec<serde_json::Value> {
+    tools.iter().map(|t| json!({"type": "function", "name": t.name, "description": t.description, "parameters": t.parameters, "strict": false})).collect()
+}
+
 /// Format tools for Claude API format
 pub fn to_claude_format(tools: &[Tool]) -> Vec<serde_json::Value> {
     tools

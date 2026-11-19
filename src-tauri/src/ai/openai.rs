@@ -594,7 +594,7 @@ fn tool_slot(slots: &ToolSlots, index: Option<usize>, id: Option<&str>, position
 
 /// Send once more after a transient failure (429 or 5xx): with "Choose one
 /// AI" there is no other provider to fall back to, and a resend usually works.
-async fn send_retrying(build: impl Fn() -> reqwest::RequestBuilder) -> Result<reqwest::Response, reqwest::Error> {
+pub(super) async fn send_retrying(build: impl Fn() -> reqwest::RequestBuilder) -> Result<reqwest::Response, reqwest::Error> {
     let response = build().send().await?;
     let retry_after = response.headers().get(reqwest::header::RETRY_AFTER).and_then(|v| v.to_str().ok());
     match retry_delay(response.status().as_u16(), retry_after) {
