@@ -1,0 +1,7 @@
+# Read by the "Large futures guard" step in .github/workflows/ci.yml.
+# 32768 bytes: on 2026-11-19 the largest awaited future was 24,992 bytes
+# (commands/mail.rs) and most hits were the 22,336-byte router future; the
+# futures that crashed a debug build (PR #50) were 249,880 and 456,120 bytes.
+# About 10 KB of growth in the router future trips about 22 sites at once;
+# one `Box::pin` on it clears them.
+future-size-threshold = 32768

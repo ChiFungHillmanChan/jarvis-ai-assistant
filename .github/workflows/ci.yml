@@ -1,8 +1,8 @@
 name: CI
 
 # Only a push or merge to main runs CI. Branch pushes and pull requests do
-# not: run `npm test`, `npm run build` and `npm run test:frontend` locally
-# before merging. Private-repo macOS minutes count ten-fold against the plan.
+# not: run `npm test`, `npm run build`, `npm run test:frontend` and the
+# "Large futures guard" command below locally before merging. Private-repo macOS minutes count ten-fold against the plan.
 on:
   push:
     branches: [main]
@@ -71,3 +71,19 @@ jobs:
       - name: Clippy (advisory)
         continue-on-error: true
         run: cargo clippy --manifest-path src-tauri/Cargo.toml --all-targets
+
+      # Blocking, unlike the clippy step above, and limited to one lint.
+      # PR #50 fixed a stack overflow: the future of `send_message` had grown
+      # to 456 KB, and in a debug build every typed chat message aborted the
+      # app. Nothing failed before the app ran, so this fails the job when a
+      # future awaited in the crate's own code reaches `future-size-threshold`
+      # (see src-tauri/clippy.toml). It does not see a tauri command's own
+      # future (tauri awaits it in generated code; the size tests in
+      # commands/chat.rs cover `send_message`), nor awaits inside
+      # `tokio::select!` or `join!`. Fix a hit by moving the large value to the
+      # heap (`Box::pin`), not by raising the threshold. `-D unknown-lints`
+      # makes a renamed or removed lint fail here instead of passing silently;
+      # it must come first, because a lint flag is checked against the level
+      # set by the flags before it.
+      - name: Large futures guard
+        run: cargo clippy --manifest-path src-tauri/Cargo.toml -- -D unknown-lints -A clippy::all -D clippy::large_futures
