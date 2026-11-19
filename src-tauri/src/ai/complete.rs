@@ -962,12 +962,15 @@ pub(crate) mod tests {
     /// (`complete`), asks for the low thinking level on a model the registry
     /// marks as thinking. Mail analysis on the same model, and sorting on a
     /// model the registry does not mark or does not describe, send no
-    /// thinking parameter: Google's default for the model.
+    /// thinking parameter: Google's default for the model. A pinned
+    /// gemini-2.5-flash-lite counts as gemini-2.5-flash, which the registry
+    /// marks as thinking, so it gets LOW too (see `thinking_config` on
+    /// gemini-2.5).
     #[tokio::test]
     async fn gemini_sorting_asks_for_the_low_thinking_level_only_on_a_thinking_model() {
         use crate::ai::mail_policy::test_support::agree_to_gemini;
         let reply = || Reply::json(200, json!({"candidates": [{"content": {"parts": [{"text": "{\"a\":1}"}]}}], "usageMetadata": {"promptTokenCount": 10, "candidatesTokenCount": 2}}));
-        let server = serve((0..4).map(|_| reply()).collect()).await;
+        let server = serve((0..5).map(|_| reply()).collect()).await;
         let _base = point_at(&format!("{}/v1beta", server.base));
         let mut router = AiRouter::new("gemini_primary");
         router.set_gemini_key("AIza-fixture-not-real");
@@ -985,16 +988,20 @@ pub(crate) mod tests {
         }
         router.set_provider_chain(vec![row("gemini", Some("gemini-unlisted"), None, None)]);
         complete(&router, &db, sort()).await.unwrap();
+        router.set_provider_chain(vec![row("gemini", Some("gemini-2.5-flash-lite"), None, None)]);
+        complete(&router, &db, sort()).await.unwrap();
 
         let seen = server.seen();
         let thinking = |i: usize| seen[i].body["generationConfig"].get("thinkingConfig").cloned();
-        assert_eq!(seen.len(), 4);
+        assert_eq!(seen.len(), 5);
         assert_eq!(seen[0].path, format!("/v1beta/models/{flash}:generateContent"));
         assert_eq!(thinking(0), Some(json!({"thinkingLevel": "LOW"})), "sorting on a thinking model");
         assert_eq!(thinking(1), None, "mail analysis");
         assert_eq!(thinking(2), None, "sorting on a model the registry does not mark as thinking");
         assert_eq!(seen[3].path, "/v1beta/models/gemini-unlisted:generateContent");
         assert_eq!(thinking(3), None, "sorting on a model the registry does not describe");
+        assert_eq!(seen[4].path, "/v1beta/models/gemini-2.5-flash-lite:generateContent");
+        assert_eq!(thinking(4), Some(json!({"thinkingLevel": "LOW"})), "gemini-2.5-flash-lite counts as gemini-2.5-flash, marked as thinking");
     }
 
     /// Ollama's own endpoint, so the context window can be set; any other

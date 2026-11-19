@@ -134,19 +134,41 @@ enum Thinking {
 /// - A "Think harder" turn on a model the registry marks as thinking asks
 ///   for the high level, and only that: never minimal or xhigh.
 /// - Mail sorting on a model the registry marks as thinking asks for the
-///   low level (X4, founder's decision of 2026-11-19): the lowest level
-///   every Gemini model JARVIS can sort with accepts in Google's
-///   documentation. `minimal` is not one: Google documents it as refused
-///   on gemini-3.7-flash (the default) and gemini-3.8-flash, and does not
-///   list it for gemini-3.1-pro-preview.
+///   low level (X4, founder's decisions of 2026-11-19). By Google's pages
+///   every Gemini 3.x model in the registry accepts LOW (the thinking
+///   guide's table, the gemini-3.7-flash model page, and for
+///   gemini-3.5-flash the Gemini 3.5 what's-new page,
+///   aistudio.google.com/docs/whats-new-gemini-3.5), and not all accept
+///   `minimal`: the gemini-3.7-flash model page (the default;
+///   aistudio.google.com/docs/models/gemini-3.7-flash) says "`minimal` is
+///   not supported and returns an error", and the thinking guide
+///   (aistudio.google.com/docs/thinking) says `minimal` is "Not supported
+///   on Gemini 4 models or `gemini-3.8-flash`" and lists
+///   gemini-3.1-pro-preview as "low, medium, high". The same guide gives
+///   gemini-3.1-flash-lite and gemini-3.5-flash-lite a default of
+///   "On (minimal)", so on those two LOW is more thinking than Google's
+///   default; the founder chose LOW on every thinking Gemini model all the
+///   same.
 /// - Any other request keeps Google's default for the model.
 ///
-/// Google's generateContent guide says gemini-2.5 models take
-/// `thinkingBudget`, not `thinkingLevel`; Google answered 404 for them in
-/// the native-qa sitting (2026-11-18). If Google refuses the parameter, the
-/// request fails as any refused request does (a chat turn ends on the error
-/// card with Google's reason; a sorting run leaves the message unsorted and
-/// records why), and nothing is switched or sent again without it.
+/// gemini-2.5 models reject `thinkingLevel` by Google's generateContent
+/// pages: the API reference (aistudio.google.com/api-reference/generate-content)
+/// says it is "Recommended for Gemini 3 or later models. Use with earlier
+/// models results in an error.", and the thinking guide's generateContent
+/// version (aistudio.google.com/docs/thinking?generate-content=true) says
+/// "Gemini 2.5 series models don't support `thinkingLevel`; use
+/// `thinkingBudget` instead." (The guide's default, Interactions API,
+/// version lists low, medium and high for them.) The registry still marks
+/// them as thinking, so sorting and Think harder on them send the
+/// parameter; the registry update to the current models is to deal with
+/// that, not this function.
+///
+/// If Google refuses the parameter, the request fails as any refused
+/// request does, and nothing is switched or sent again without it: a chat
+/// turn ends on the error card with Google's reason; a sorting run leaves
+/// the message unsorted for the next run and records only JARVIS's
+/// sentence for the status (for a 400, that the model did not accept the
+/// request), not Google's reason, with one notice per launch.
 fn thinking_config(thinking: Thinking) -> Option<serde_json::Value> {
     match thinking {
         Thinking::Chat(deeper) => deeper.is_some_and(|d| d.thinking).then(|| json!({"thinkingLevel": "HIGH"})),
@@ -539,16 +561,40 @@ mod tests {
     #[test]
     fn only_sorting_on_a_thinking_model_asks_for_the_low_thinking_level() {
         use crate::ai::cost::Feature;
+        // The expected value is a match with no wildcard arm: a new Feature
+        // does not compile here until it is given one, next to this list.
+        let expected = |feature: Feature| match feature {
+            Feature::MailSort => Some(json!({"thinkingLevel": "LOW"})),
+            Feature::Chat | Feature::Tools | Feature::MailAnalysis | Feature::Briefing | Feature::Stt | Feature::Tts | Feature::Memory | Feature::Other => None,
+        };
         let every = [Feature::Chat, Feature::Tools, Feature::MailAnalysis, Feature::MailSort, Feature::Briefing, Feature::Stt, Feature::Tts, Feature::Memory, Feature::Other];
         for feature in every {
-            let expected = (feature == Feature::MailSort).then(|| json!({"thinkingLevel": "LOW"}));
-            assert_eq!(thinking_config(Thinking::Plain { feature, thinks: true }), expected, "{feature:?}");
+            assert_eq!(thinking_config(Thinking::Plain { feature, thinks: true }), expected(feature), "{feature:?}");
             assert_eq!(thinking_config(Thinking::Plain { feature, thinks: false }), None, "{feature:?} on a model not marked as thinking");
         }
         assert_eq!(
             generation_config(2_048, Thinking::Plain { feature: Feature::MailSort, thinks: true }),
             json!({"maxOutputTokens": 2_048, "thinkingConfig": {"thinkingLevel": "LOW"}})
         );
+    }
+
+    /// gemini-2.5 as the bundled registry (registry/registry.json) marks it
+    /// today: thinking, and a pinned gemini-2.5-flash-lite counts as
+    /// gemini-2.5-flash (the longest registry id it contains). So sorting on
+    /// any of them asks for LOW, which Google's generateContent reference
+    /// says models before Gemini 3 refuse (see `thinking_config`). This test
+    /// reads the bundled copy, not the frozen fixture the other tests use,
+    /// so that the registry update meant to deal with gemini-2.5 changes it
+    /// on purpose.
+    #[test]
+    fn sorting_on_gemini_2_5_asks_for_the_low_level_with_the_bundled_registry_of_today() {
+        use crate::ai::cost::Feature;
+        let _bundled = crate::ai::registry::test_override::set((*crate::ai::registry::bundled()).clone());
+        for model in ["gemini-2.5-pro", "gemini-2.5-flash", "gemini-2.5-flash-lite"] {
+            let thinks = crate::ai::capability::thinks("gemini", model);
+            assert!(thinks, "{model} counts as thinking");
+            assert_eq!(thinking_config(Thinking::Plain { feature: Feature::MailSort, thinks }), Some(json!({"thinkingLevel": "LOW"})), "{model}");
+        }
     }
 
     /// A round streamed with thought signatures (canned SSE chunks): the
