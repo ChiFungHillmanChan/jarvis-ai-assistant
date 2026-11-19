@@ -3,6 +3,7 @@
 //! one-row provider chain (so no other provider is tried behind the user's
 //! back) and points mail analysis at the same AI.
 //! docs/superpowers/plans/2026-09-26-choose-one-ai.md
+use crate::ai::bedrock::UiLanguage;
 use crate::ai::{compat, complete, AiRouter, ProviderChainEntry, KEY_SERVICE};
 use crate::db::Database;
 use crate::security::keychain::KeychainStore;
@@ -223,8 +224,13 @@ fn chat_models(provider: &str, ids: Vec<String>) -> Vec<String> {
     models
 }
 
+/// The model list has no key to ask with, in the interface language.
+fn key_needed(name: &str, language: UiLanguage) -> String {
+    language.pick(format!("Paste your {name} API key first."), format!("請先輸入 {name} API 密鑰。"))
+}
+
 /// The pasted key, or the one saved for this provider.
-async fn provider_key(account: &'static str, pasted: Option<&str>, name: &str) -> Result<String, String> {
+async fn provider_key(account: &'static str, pasted: Option<&str>, name: &str, language: UiLanguage) -> Result<String, String> {
     if let Some(key) = clean_key(pasted) {
         return Ok(key);
     }
@@ -232,15 +238,15 @@ async fn provider_key(account: &'static str, pasted: Option<&str>, name: &str) -
         .await
         .ok()
         .flatten()
-        .ok_or_else(|| format!("請先輸入 {name} API 密鑰。"))
+        .ok_or_else(|| key_needed(name, language))
 }
 
 /// GET a provider's model list and pull the ids out of `list`/`field`.
-async fn fetch_models(name: &str, request: reqwest::RequestBuilder, list: &str, field: &str) -> Result<Vec<String>, String> {
+async fn fetch_models(name: &str, request: reqwest::RequestBuilder, list: &str, field: &str, language: UiLanguage) -> Result<Vec<String>, String> {
     let response = request.send().await.map_err(|_| format!("未能連接 {name}，請檢查網絡。"))?;
     match response.status().as_u16() {
         200 => {}
-        400 | 401 | 403 => return Err(format!("{name} 拒絕了這個 API 密鑰，請檢查後重試。")),
+        400 | 401 | 403 => return Err(language.pick(format!("{name} rejected this API key. Check it and try again."), format!("{name} 拒絕了這個 API 密鑰，請檢查後重試。"))),
         status => return Err(format!("{name} 暫時未能列出模型（{status}）。")),
     }
     let body: serde_json::Value = response.json().await.map_err(|_| format!("{name} 回覆的模型清單格式無效。"))?;
@@ -257,23 +263,24 @@ async fn fetch_models(name: &str, request: reqwest::RequestBuilder, list: &str, 
 /// models appear without an app update: OpenAI, Gemini, Claude, an
 /// OpenAI-compatible service, or the models installed in Ollama.
 #[tauri::command]
-pub async fn list_ai_models(provider: String, base_url: Option<String>, api_key: Option<String>) -> Result<Vec<String>, String> {
+pub async fn list_ai_models(db: State<'_, Arc<Database>>, provider: String, base_url: Option<String>, api_key: Option<String>) -> Result<Vec<String>, String> {
+    let language = UiLanguage::read(&db);
     match provider.as_str() {
         "openai" => {
-            let key = provider_key("openai_api_key", api_key.as_deref(), "OpenAI").await?;
-            let ids = fetch_models("OpenAI", compat::client()?.get("https://api.openai.com/v1/models").bearer_auth(key), "data", "id").await?;
+            let key = provider_key("openai_api_key", api_key.as_deref(), "OpenAI", language).await?;
+            let ids = fetch_models("OpenAI", compat::client()?.get("https://api.openai.com/v1/models").bearer_auth(key), "data", "id", language).await?;
             Ok(chat_models("openai", ids))
         }
         "gemini" => {
-            let key = provider_key("gemini_api_key", api_key.as_deref(), "Gemini").await?;
+            let key = provider_key("gemini_api_key", api_key.as_deref(), "Gemini", language).await?;
             let request = compat::client()?.get(format!("{}/models?pageSize=1000", crate::ai::gemini::API_BASE)).header("x-goog-api-key", key);
-            let ids = fetch_models("Gemini", request, "models", "name").await?;
+            let ids = fetch_models("Gemini", request, "models", "name", language).await?;
             Ok(chat_models("gemini", ids))
         }
         "claude" => {
-            let key = provider_key("claude_api_key", api_key.as_deref(), "Claude").await?;
+            let key = provider_key("claude_api_key", api_key.as_deref(), "Claude", language).await?;
             let request = compat::client()?.get("https://api.anthropic.com/v1/models?limit=1000").header("x-api-key", key).header("anthropic-version", crate::ai::models::anthropic_version());
-            let ids = fetch_models("Claude", request, "data", "id").await?;
+            let ids = fetch_models("Claude", request, "data", "id", language).await?;
             Ok(chat_models("claude", ids))
         }
         "compatible" => {
@@ -286,7 +293,7 @@ pub async fn list_ai_models(provider: String, base_url: Option<String>, api_key:
                         .await
                         .ok()
                         .flatten()
-                        .ok_or_else(|| format!("請先輸入 {} API 密鑰。", compat::label(&base)))?
+                        .ok_or_else(|| key_needed(&compat::label(&base), language))?
                 }
             };
             compat::list_models(&base, &key).await
@@ -372,6 +379,26 @@ mod tests {
             ["gemini-3.7-flash", "gemini-3.1-pro-preview"]
         );
         assert_eq!(chat_models("claude", ids(&["claude-sonnet-5-5", "claude-opus-5-5", "claude-3-5-sonnet-20241022"])), ["claude-sonnet-5-5", "claude-opus-5-5"]);
+    }
+
+    /// X5: "Choose a model" in Settings → Your AI says a refused key, and a
+    /// missing one, in the interface language like the rest of the panel.
+    /// Before, both were in Chinese whatever the language. The reply's
+    /// body is not shown.
+    #[tokio::test]
+    async fn the_model_list_messages_follow_the_interface_language() {
+        use crate::ai::wire_tests::{serve, Reply};
+        let refused = serde_json::json!({"type": "error", "error": {"type": "invalid_request_error", "message": "This API key is not scoped to a workspace PRIVATE-CANARY"}});
+        let server = serve(vec![Reply::json(400, refused.clone()), Reply::json(400, refused)]).await;
+        let mut said = Vec::new();
+        for language in [UiLanguage::En, UiLanguage::ZhHk] {
+            let request = compat::client().unwrap().get(format!("{}/v1/models?limit=1000", server.base));
+            said.push(fetch_models("Claude", request, "data", "id", language).await.unwrap_err());
+        }
+        assert_eq!(said, ["Claude rejected this API key. Check it and try again.", "Claude 拒絕了這個 API 密鑰，請檢查後重試。"]);
+        assert_eq!(key_needed("api.deepseek.com", UiLanguage::En), "Paste your api.deepseek.com API key first.");
+        assert_eq!(key_needed("api.deepseek.com", UiLanguage::ZhHk), "請先輸入 api.deepseek.com API 密鑰。");
+        assert_eq!(provider_key("claude_api_key", Some(" sk-ant-pasted "), "Claude", UiLanguage::En).await.as_deref(), Ok("sk-ant-pasted"));
     }
 
     /// The filter is the registry's: a copy that changes it changes the lists.
