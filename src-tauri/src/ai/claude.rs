@@ -101,8 +101,9 @@ fn think_fields(deeper: Option<Deeper>) -> (Option<serde_json::Value>, Option<se
 
 /// The system prompt in two text blocks, split as Bedrock splits it
 /// (`bedrock::build_system_blocks`): the static rules, then the part written
-/// for this request (the user's name, the time, the style settings, the
-/// memories). The one cache breakpoint is on the static rules. Anthropic
+/// for this request (the user's name, the time, the reply language, the
+/// style settings, the memories). The one cache breakpoint is on the static
+/// rules. Anthropic
 /// renders the tools before the system prompt, so the breakpoint caches the
 /// tools and the rules together, and later requests within five minutes
 /// (the default lifetime) read them from the cache; the request's own part

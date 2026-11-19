@@ -987,7 +987,8 @@ mod claude_wire {
         let system = body["system"].as_array().unwrap().clone();
         assert_eq!(system.len(), 2, "static prompt with the breakpoint, per-request part");
         assert_eq!(system[0], json!({"type": "text", "text": tools::build_cacheable_system_prompt(), "cache_control": {"type": "ephemeral"}}));
-        assert_eq!(system[1].as_object().unwrap().keys().collect::<Vec<_>>(), ["text", "type"], "no breakpoint on the per-request part");
+        assert!(system[1].get("cache_control").is_none(), "no breakpoint on the per-request part");
+        assert_eq!(system[1].as_object().unwrap().len(), 2, "type and text only");
         assert_eq!(system[1]["type"], "text");
         assert!(system[1]["text"].as_str().unwrap().contains("Current local time: "), "the per-request part");
         assert_eq!(body.to_string().matches("cache_control").count(), 1, "one breakpoint");
