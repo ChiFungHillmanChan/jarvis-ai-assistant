@@ -1,6 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { cloudModelFor, formatRate, mailSetupModels, registrySourceLabel, serviceFor, serviceLabel, setupOptions } from '../src/lib/ai-catalog.ts';
+import { readFileSync } from 'node:fs';
+import { addModelLabel, cloudModelFor, formatRate, mailSetupModels, registrySourceLabel, serviceFor, serviceLabel, setupOptions } from '../src/lib/ai-catalog.ts';
 import type { AiModelCatalog, CloudModel, LocalModel } from '../src/lib/ai-models.ts';
 
 const price = (input: number) => ({ input_per_million: input, output_per_million: input * 4, cache_read_per_million: 0, cache_write_per_million: 0 });
@@ -40,6 +41,29 @@ test('a model id is priced by the longest catalog id it contains, as ai/models.r
   assert.equal(cloudModelFor(catalog, 'some-new-model'), null);
   assert.equal(cloudModelFor(catalog, ''), null);
   assert.equal(cloudModelFor(null, 'gpt-6-luna'), null);
+});
+
+test('a Settings button that adds a model names it as ai/registry/lookup.rs label_for does', () => {
+  const named = (id: string, label: string, family = false): CloudModel => ({ ...cloud(id, 1), provider: 'gemini', label, family });
+  const gemini = { ...catalog, cloud: [named('gemini-test', 'gemini-test', true), named('gemini-test-pro', 'Gemini Test Pro')] };
+  assert.equal(addModelLabel(gemini, 'gemini-test-pro'), '+ Gemini Test Pro');
+  // An id that reaches its entry by containment takes that entry's name.
+  assert.equal(addModelLabel(gemini, 'gemini-test-pro-preview'), '+ Gemini Test Pro');
+  // A family is a price pattern, not a model's name; an id with no entry is shown as itself.
+  assert.equal(addModelLabel(gemini, 'gemini-test-lite'), '+ gemini-test-lite');
+  assert.equal(addModelLabel(gemini, 'other-model'), '+ other-model');
+});
+
+test("on the frozen registry fixture, the button for the Gemini premium default shows that model's registry name", () => {
+  const fixture = JSON.parse(readFileSync(new URL('../src-tauri/src/ai/registry/fixture.json', import.meta.url), 'utf8'));
+  // The catalog as ai/models.rs cloud_models builds it: unmanaged priced entries, a family labelled with its id.
+  const fromFixture: AiModelCatalog = {
+    ...catalog,
+    defaults: { ...catalog.defaults, gemini_pro: fixture.features.premium.gemini },
+    cloud: fixture.models.filter((m: any) => !m.managed && m.prices).map((m: any) => ({ ...cloud(m.id, m.prices.input), provider: m.provider, label: m.kind === 'family' ? m.id : m.display_name.en, family: m.kind === 'family' })),
+  };
+  // Version 1's premium default, gemini-3.1-pro-preview, reaches the gemini-3.1-pro entry.
+  assert.equal(addModelLabel(fromFixture, fromFixture.defaults.gemini_pro), '+ Gemini 3.1 Pro');
 });
 
 test('rates read as prices: two decimals unless the rate has more', () => {

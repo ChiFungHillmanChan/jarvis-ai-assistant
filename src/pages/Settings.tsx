@@ -62,7 +62,7 @@ import ChooseAi from "../components/ChooseAi";
 import AiConsents from "../components/AiConsents";
 import { useAiModels } from "../lib/ai-models";
 import { currentAi, type CurrentAi } from "../lib/ai-choice";
-import { localized, serviceLabel } from "../lib/ai-catalog";
+import { addModelLabel, localized, serviceLabel } from "../lib/ai-catalog";
 import RegistryAbout from "../components/RegistryAbout";
 import AccountPanel from "../components/AccountPanel";
 import CostPanel from "../components/CostPanel";
@@ -887,7 +887,7 @@ export default function Settings() {
             )}
 
             <div style={{ display: "flex", gap: 6, marginTop: 8, flexWrap: "wrap" }}>
-              <button disabled={!models} onClick={() => models && handleAddToChain("gemini", undefined, models.defaults.gemini_pro)} style={styles.saveBtn}>+ Gemini Pro</button>
+              <button disabled={!models} onClick={() => models && handleAddToChain("gemini", undefined, models.defaults.gemini_pro)} style={styles.saveBtn}>{models ? addModelLabel(models, models.defaults.gemini_pro) : "+ …"}</button>
               <button disabled={!models} onClick={() => models && handleAddToChain("gemini", undefined, models.defaults.gemini_flash)} style={styles.saveBtn}>+ Gemini</button>
               <button onClick={() => handleAddToChain("claude")} style={styles.saveBtn}>+ Claude</button>
               <button onClick={() => handleAddToChain("openai")} style={styles.saveBtn}>+ OpenAI</button>
