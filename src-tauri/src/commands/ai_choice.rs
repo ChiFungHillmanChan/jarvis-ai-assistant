@@ -264,8 +264,13 @@ async fn fetch_models(name: &str, request: reqwest::RequestBuilder, list: &str, 
 /// OpenAI-compatible service, or the models installed in Ollama.
 #[tauri::command]
 pub async fn list_ai_models(db: State<'_, Arc<Database>>, provider: String, base_url: Option<String>, api_key: Option<String>) -> Result<Vec<String>, String> {
-    let language = UiLanguage::read(&db);
-    match provider.as_str() {
+    list_models(&db, &provider, base_url, api_key).await
+}
+
+/// [`list_ai_models`], with its messages in the saved interface language.
+async fn list_models(db: &Database, provider: &str, base_url: Option<String>, api_key: Option<String>) -> Result<Vec<String>, String> {
+    let language = UiLanguage::read(db);
+    match provider {
         "openai" => {
             let key = provider_key("openai_api_key", api_key.as_deref(), "OpenAI", language).await?;
             let ids = fetch_models("OpenAI", compat::client()?.get("https://api.openai.com/v1/models").bearer_auth(key), "data", "id", language).await?;
@@ -399,6 +404,26 @@ mod tests {
         assert_eq!(key_needed("api.deepseek.com", UiLanguage::En), "Paste your api.deepseek.com API key first.");
         assert_eq!(key_needed("api.deepseek.com", UiLanguage::ZhHk), "請先輸入 api.deepseek.com API 密鑰。");
         assert_eq!(provider_key("claude_api_key", Some(" sk-ant-pasted "), "Claude", UiLanguage::En).await.as_deref(), Ok("sk-ant-pasted"));
+    }
+
+    /// X5 review, finding 3: the command reads the language from settings
+    /// and passes it on, and so does a provider whose key is missing. The
+    /// command runs on an OpenAI-compatible service with no key: nothing is
+    /// sent, and the service is on this Mac (127.0.0.1), whose key no test
+    /// saves.
+    #[tokio::test]
+    async fn the_model_list_command_uses_the_saved_language() {
+        let db = crate::db::test_database();
+        let said = list_models(&db, "compatible", Some("http://127.0.0.1:9/v1".into()), None).await;
+        assert_eq!(said, Err("Paste your 127.0.0.1 API key first.".into()));
+        db.conn.lock().unwrap().execute("INSERT OR REPLACE INTO user_preferences (key, value) VALUES ('ui_locale', 'zh-HK')", []).unwrap();
+        let said = list_models(&db, "compatible", Some("http://127.0.0.1:9/v1".into()), None).await;
+        assert_eq!(said, Err("請先輸入 127.0.0.1 API 密鑰。".into()));
+        // OpenAI, Gemini and Claude: a key that is neither pasted nor saved.
+        // An account no test saves, so nothing is found and nothing is sent.
+        for (language, said) in [(UiLanguage::En, "Paste your Claude API key first."), (UiLanguage::ZhHk, "請先輸入 Claude API 密鑰。")] {
+            assert_eq!(provider_key("language_test_no_such_key", None, "Claude", language).await, Err(said.to_string()));
+        }
     }
 
     /// The filter is the registry's: a copy that changes it changes the lists.
