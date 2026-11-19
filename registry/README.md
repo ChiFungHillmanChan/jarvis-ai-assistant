@@ -52,7 +52,8 @@ PR 檢查只讀取，沒有 environment、secret 或 AWS 權限。除了 `regist
 
 - 雲端服務商回報的模型 id，以「包含於該 id 之內的最長 entry id」比對（不分大小寫；長度相同時取較後的 entry），範圍只限 `prices` 不為 `null` 且 `managed` 為 `false` 的 entry。這組 entry 即 `models.rs` 的 `CLOUD_MODELS`，次序亦相同。
 - `kind: "family"` 是一系列模型的價格樣式（例如 `gemini-flash`），不是可選擇的模型。
-- 功能預設、preset 及 `replacement` 先以完全相同的 id 比對，找不到才用上述規則（例如 `gemini-3.1-pro-preview` 對應 `gemini-3.1-pro`）。
+- 功能預設、preset 及 `replacement` 先以完全相同的 id 比對，找不到才用上述規則（例如 `gemini-2.5-flash-lite-preview-09-2025` 對應 `gemini-2.5-flash-lite`）。
+- 模型的 `status` 亦按上述規則決定：沒有自己 entry 的 id 沿用包含於其中的最長同一服務商 entry 的 `status`，family 亦然。例如 family `gpt-5` 亦對應 `gpt-5-mini`、`gpt-5-nano`、`gpt-5.1`、別名 `gpt-5.6`、`gpt-5.6-sol` 及 `gpt-5.6-terra`（只有 `gpt-5.6-luna` 有自己的 entry）。`deprecated` 只作提示，不會停止任何請求；但若在 OpenAI 於 2026-12-11 停止 `gpt-5` 時把這一列設為 `disabled`，上述仍在服務的模型亦會一併停止：使用它們的請求停止，直至使用者確認改用替代模型。安全的做法：先為這些 id 加入各自的 entry（價格及狀態按官方資料），或不把 family 一列設為 `disabled`（維持 `active` 或 `deprecated`）。
 - 比對到的 entry 必須屬於同一服務商，而且不可完全等於 `kind: "family"` 的 entry；只包含 family id 的 id 則可以（例如 `jev-latest` 對應 `jev`）。`bedrock` 例外：它的 id 是經 AWS 使用的其他廠商模型，價格記在該廠商的 entry 之下。
 - 仍包含真實 id 的錯字（例如 `gpt-6-luna-x` 會對應 `gpt-6-luna`）目前驗證器無法發現，要堵住須另設明確的別名清單。
 - `managed: true` 的 entry 屬 JARVIS AI 自家代理，只以完全相同的 id 比對，永不用於 App 的價格查詢。
@@ -110,7 +111,7 @@ App 的 `Registry::check`（`src-tauri/src/ai/registry/doc.rs`）拒絕任何一
 
 模型 id（`models[].id`、`replacement`、`built_in_models`、`features` 的預設及 `presets` 的模型）只可包含英文字母、數字及 `.`、`_`、`:`、`/`、`-`，而且不可包含 `..`；`schema.json` 另要求 `models[].id` 為小寫（App 以不分大小寫的方式比對）。各功能的預設模型及 preset 所用的模型必須為 `active`；App 建議的替代模型亦只會是 `active` 的模型。
 
-有價格的 Claude 模型（`provider` 為 `claude`，或 `provider` 為 `bedrock` 而 id 含 `claude`）的 `cache_read` 及 `cache_write` 都不可為 `null`，每個價格級距亦然：Claude 的請求會讀取及寫入 Anthropic 的 prompt cache，而 App 把缺少的快取價格當作 0 計算。這一項不在 `schema.json`，由驗證器（`registry/validate.ts`）在簽署前拒絕。
+有價格的 Claude 模型（`provider` 為 `claude`，或 `provider` 為 `bedrock` 而 id 含 `claude`）的 `cache_read` 及 `cache_write` 都不可為 `null`，每個價格級距亦然：Claude 的請求會讀取及寫入 Anthropic 的 prompt cache，而 App 把缺少的快取價格當作 0 計算。這一項不在 `schema.json`：驗證器（`registry/validate.ts`）在簽署前拒絕，App 的 `Registry::check`（`lacks_a_claude_cache_rate`）亦會拒絕整份副本，使用中的副本不變。
 
 設定導引的本機模型清單（`provider` 為 `ollama` 而且有 `local.setup` 的 entry）的模型名稱會照原樣傳給 Ollama 下載及執行；App 不會另行核對這份清單，經簽署的註冊表即是依據。
 
