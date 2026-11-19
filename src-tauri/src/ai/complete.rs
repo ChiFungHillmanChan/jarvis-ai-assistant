@@ -1091,4 +1091,39 @@ pub(crate) mod tests {
             }
         }
     }
+
+    /// X5 review, finding 1: mail sorting is a background job, so a refused
+    /// request ends in the sentence its run records and one notice, never a
+    /// card. Both are JARVIS's sentence; the provider's reason, which the
+    /// failure now carries for a foreground card, is in neither.
+    #[test]
+    fn a_background_refusal_leaves_the_services_reason_out() {
+        use crate::ai::bedrock::UiLanguage;
+        const REASON: &str = "Invalid value for messages PRIVATE-REASON";
+        async fn refused_in_background(language: UiLanguage) {
+            let server = serve(vec![Reply::json(400, json!({"error": {"message": REASON, "type": "invalid_request_error", "code": null}}))]).await;
+            let _base = point_at(&format!("{}/v1", server.base));
+            let mut router = AiRouter::new("gemini_primary");
+            router.set_openai_key("sk-fixture-openai-not-real");
+            router.set_provider_chain(vec![row("openai", None, None, None)]);
+            let db = crate::db::test_database();
+            if language == UiLanguage::ZhHk {
+                db.conn.lock().unwrap().execute("INSERT OR REPLACE INTO user_preferences (key, value) VALUES ('ui_locale', 'zh-HK')", []).unwrap();
+            }
+            let sentence = complete(&router, &db, sort()).await.unwrap_err();
+            assert_eq!(server.seen().len(), 1, "{language:?}: sent once");
+            assert!(crate::ai::failure::parse(&sentence).is_none(), "{language:?}: no card for a background job: {sentence}");
+            let said = language.pick(" did not accept this request (400). Check the chosen model, or pick another one.", " 不接受這個請求（400），請檢查所選模型，或改用其他模型。");
+            assert!(sentence.ends_with(&said) && !sentence.contains("PRIVATE-REASON"), "{language:?}: {sentence}");
+            let notices: Vec<_> = crate::ai::notify::emitted().into_iter().filter(|(event, _)| event == "ai-needs-model").map(|(_, notice)| notice).collect();
+            assert_eq!(notices.len(), 1, "{language:?}: one notice: {notices:?}");
+            assert_eq!(notices[0]["message"], json!(sentence), "{language:?}");
+            assert!(!notices[0].to_string().contains("PRIVATE-REASON"), "{language:?}: {}", notices[0]);
+        }
+        for language in [UiLanguage::En, UiLanguage::ZhHk] {
+            // Each language on its own thread: a test thread is one launch,
+            // and a notice is raised once per launch (notify::first_time).
+            std::thread::spawn(move || tokio::runtime::Builder::new_current_thread().enable_all().build().unwrap().block_on(refused_in_background(language))).join().unwrap();
+        }
+    }
 }

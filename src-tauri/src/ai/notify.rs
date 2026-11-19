@@ -13,14 +13,29 @@ pub fn init(app: tauri::AppHandle) {
     let _ = APP.set(app);
 }
 
-/// Emit to the window. Nothing happens before setup (and in the tests).
+/// Emit to the window. Nothing happens before setup; the tests record what
+/// was emitted (`emitted`).
 /// An event whose name starts with "chat-" is scoped to the chat run in
 /// progress, as every chat event is (chat_session::ScopedEmitter).
 pub fn emit<S: Serialize + Clone>(event: &str, payload: S) {
+    #[cfg(test)]
+    EMITTED.with(|emitted| emitted.borrow_mut().push((event.to_string(), serde_json::to_value(&payload).unwrap_or_default())));
     if let Some(app) = APP.get() {
         use crate::chat_session::ScopedEmitter;
         let _ = app.emit(event, payload);
     }
+}
+
+#[cfg(test)]
+thread_local! {
+    /// What this test thread emitted, so a test can read a notice's text.
+    static EMITTED: std::cell::RefCell<Vec<(String, serde_json::Value)>> = const { std::cell::RefCell::new(Vec::new()) };
+}
+
+/// The events this test thread emitted, in order.
+#[cfg(test)]
+pub fn emitted() -> Vec<(String, serde_json::Value)> {
+    EMITTED.with(|emitted| emitted.borrow().clone())
 }
 
 /// True the first time `key` is seen this launch, so a background job that

@@ -9,9 +9,14 @@
 //! records a plain sentence and one notice is raised per launch
 //! ([`Failure::surface`]).
 //!
-//! The reason is always JARVIS's own wording for the provider's error code.
-//! A provider's error body is never shown or stored: it can quote the
-//! request, and the request can be mail.
+//! The reason is JARVIS's own wording for the provider's error code. Of a
+//! provider's error body, only its `error.message` may be shown on screen:
+//! on one line, at most 300 characters, for a foreground request the
+//! provider refused (`Code::BadRequest` or `Code::NotFound`), as
+//! `provider_reason` in the card's data.
+//! A background run's sentence and notice leave it out. Nothing of the body
+//! is ever logged or stored: it can quote the request, and the request can
+//! be mail.
 
 use super::bedrock::UiLanguage;
 use super::capability::{Alternative, Reason, Target};
