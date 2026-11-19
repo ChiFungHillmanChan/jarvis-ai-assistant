@@ -1161,6 +1161,96 @@ mod openai_wire {
         assert_eq!(seen.len(), 2);
         assert_eq!(items_of(&seen[1].body, "function_call_output").iter().filter(|item| item["call_id"] == "call_1").count(), 1);
     }
+
+    /// The text of every row of every table, for a search.
+    fn database_text(db: &crate::db::Database) -> String {
+        let conn = db.conn.lock().unwrap();
+        let tables: Vec<String> = conn.prepare("SELECT name FROM sqlite_master WHERE type = 'table'").unwrap().query_map([], |r| r.get(0)).unwrap().map(Result::unwrap).collect();
+        let mut text = String::new();
+        for table in tables {
+            let mut statement = conn.prepare(&format!("SELECT * FROM \"{table}\"")).unwrap();
+            let columns = statement.column_count();
+            let mut rows = statement.query([]).unwrap();
+            while let Some(row) = rows.next().unwrap() {
+                for column in 0..columns {
+                    if let rusqlite::types::ValueRef::Text(bytes) | rusqlite::types::ValueRef::Blob(bytes) = row.get_ref(column).unwrap() {
+                        text.push_str(&String::from_utf8_lossy(bytes));
+                        text.push('\n');
+                    }
+                }
+            }
+        }
+        text
+    }
+
+    /// Nothing of a reply reaches the log or the database: not its
+    /// encrypted reasoning, its response, item and call ids, an error's
+    /// message, nor an event that does not parse. The reasoning goes back
+    /// to OpenAI only, in the turn's next request.
+    #[tokio::test]
+    async fn no_reply_content_reaches_the_log_or_the_database() {
+        let reasoning = json!({"type": "reasoning", "id": "rs_CANARY", "summary": [], "encrypted_content": "ENC-CANARY"});
+        let call = json!({"type": "function_call", "id": "fc_CANARY", "call_id": "call_CANARY", "name": "list_tasks", "arguments": "{}", "status": "completed"});
+        let created = json!({"type": "response.created", "response": {"id": "resp_CANARY", "status": "in_progress"}});
+        let done = json!({"type": "response.completed", "response": {"id": "resp_CANARY", "status": "completed", "output": [reasoning, call], "usage": usage(100, 10, 40, 20)}});
+        let mut first = format!("event: response.created\ndata: {created}\n\n");
+        first.push_str("event: response.output_text.delta\ndata: {\"type\": \"response.output_text.delta\", \"delta\": \"MAIL-CANARY\n\n");
+        for event in [item_done(0, reasoning.clone()), item_done(1, call.clone()), done] {
+            first.push_str(&format!("event: {}\ndata: {event}\n\n", event["type"].as_str().unwrap()));
+        }
+        let failed = json!({"type": "response.failed", "response": {"id": "resp_CANARY", "status": "failed", "error": {"code": "server_error", "message": "MAIL-CANARY"}, "usage": usage(150, 5, 0, 0)}});
+        let server = serve(vec![Reply::raw(200, "text/event-stream", first.into_bytes()), Reply::responses_sse(&[failed])]).await;
+        let _base = point_at(&format!("{}/v1", server.base));
+        let db = crate::db::test_database();
+        let logged = crate::test_log::capture(|| async {
+            let turn = run_turn(&router(), official(), &[("user", "What are my tasks?")], &db, Workload::Tools, true).await;
+            assert!(turn.reply.as_ref().is_err_and(|error| error.starts_with("OpenAI stream error: ")), "{:?}", turn.reply);
+        })
+        .await;
+        let seen = server.seen();
+        assert_eq!(seen.len(), 2);
+        assert_eq!(seen[1].body["input"][2], reasoning, "the reasoning goes back as it came");
+        assert!(logged.iter().any(|line| line.contains("did not parse")), "{logged:?}");
+        assert!(logged.contains(&"OpenAI stream error: server_error".to_string()), "{logged:?}");
+        assert!(!logged.iter().any(|line| line.contains("CANARY")), "{logged:?}");
+        let model = crate::ai::models::openai_default();
+        assert_eq!(rows(&db), vec![priced_row("openai", "tools", &model, &[(100, 10, 40, 20), (150, 5, 0, 0)])]);
+        let stored = database_text(&db);
+        assert!(stored.contains(&model), "the search reads the usage row");
+        assert!(!stored.contains("CANARY"), "{stored}");
+    }
+
+    /// `store: false` on every request, chat and plain, and nothing else
+    /// than these fields: none that keeps state at OpenAI or hands it more
+    /// than the request needs (previous_response_id, conversation,
+    /// background, include, instructions, prompt_cache_key,
+    /// safety_identifier, user, metadata, service_tier, truncation,
+    /// parallel_tool_calls, stream_options). Every tool is a function the
+    /// app runs itself.
+    #[tokio::test]
+    async fn every_request_keeps_nothing_at_openai() {
+        let plain = Reply::json(200, json!({"output": [message_item(0, "{}")], "usage": usage(10, 2, 0, 0)}));
+        let server = serve(vec![responses(vec![call(0, "call_1", "list_tasks", "{}")], completed(Value::Null)), responses(vec![says(0, &["None."])], completed(Value::Null)), plain]).await;
+        let _base = point_at(&format!("{}/v1", server.base));
+        let db = crate::db::test_database();
+        let mut router = router();
+        router.set_provider_chain(vec![official()]);
+        let turn = run_turn(&router, official(), &[("user", "What are my tasks?")], &db, Workload::Tools, true).await;
+        assert_eq!(turn.reply.as_deref(), Ok("None."));
+        let request = crate::ai::complete::Request { system: "Sort this.", user: "From: a@example.com", json: true, max_tokens: 100, feature: cost::Feature::Other };
+        crate::ai::complete::complete(&router, &db, request).await.unwrap();
+        let seen = server.seen();
+        assert_eq!(seen.len(), 3);
+        let chat = ["model", "input", "tools", "tool_choice", "max_output_tokens", "reasoning", "store", "stream"];
+        let plain = ["model", "input", "max_output_tokens", "store", "text"];
+        for (seen, allowed) in [(&seen[0], &chat[..]), (&seen[1], &chat[..]), (&seen[2], &plain[..])] {
+            assert_eq!(seen.path, "/v1/responses");
+            assert_eq!(seen.body["store"], json!(false), "{}", seen.body);
+            let fields: Vec<&String> = seen.body.as_object().unwrap().keys().collect();
+            assert!(fields.iter().all(|field| allowed.contains(&field.as_str())), "{fields:?}");
+            assert!(seen.body["tools"].as_array().is_none_or(|tools| tools.iter().all(|tool| tool["type"] == "function")), "{}", seen.body);
+        }
+    }
 }
 
 // ---------------------------------------------------------------------------
