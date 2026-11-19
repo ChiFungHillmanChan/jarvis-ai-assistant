@@ -947,14 +947,54 @@ pub(crate) mod tests {
         let seen = server.seen();
         assert_eq!(seen[0].path, format!("/v1beta/models/{model}:generateContent"));
         assert_eq!(seen[0].header("x-goog-api-key"), Some("AIza-fixture-not-real"));
+        // Sorting on a model the registry marks as thinking: the low level (X4).
         assert_eq!(
             seen[0].body,
             json!({
                 "contents": [{"role": "user", "parts": [{"text": "From: a@example.com"}]}],
-                "generationConfig": {"maxOutputTokens": 300, "responseMimeType": "application/json"},
+                "generationConfig": {"maxOutputTokens": 300, "responseMimeType": "application/json", "thinkingConfig": {"thinkingLevel": "LOW"}},
                 "systemInstruction": {"parts": [{"text": "Sort this."}]}
             })
         );
+    }
+
+    /// X4: mail sorting on Gemini, sent the way a sorting run sends it
+    /// (`complete`), asks for the low thinking level on a model the registry
+    /// marks as thinking. Mail analysis on the same model, and sorting on a
+    /// model the registry does not mark or does not describe, send no
+    /// thinking parameter: Google's default for the model.
+    #[tokio::test]
+    async fn gemini_sorting_asks_for_the_low_thinking_level_only_on_a_thinking_model() {
+        use crate::ai::mail_policy::test_support::agree_to_gemini;
+        let reply = || Reply::json(200, json!({"candidates": [{"content": {"parts": [{"text": "{\"a\":1}"}]}}], "usageMetadata": {"promptTokenCount": 10, "candidatesTokenCount": 2}}));
+        let server = serve((0..4).map(|_| reply()).collect()).await;
+        let _base = point_at(&format!("{}/v1beta", server.base));
+        let mut router = AiRouter::new("gemini_primary");
+        router.set_gemini_key("AIza-fixture-not-real");
+        let db = crate::db::test_database();
+        agree_to_gemini(&db);
+        let flash = crate::ai::models::gemini_flash();
+        assert!(crate::ai::capability::thinks("gemini", &flash), "the test registry marks the default Gemini model as thinking");
+
+        router.set_provider_chain(vec![row("gemini", None, None, None)]);
+        complete(&router, &db, sort()).await.unwrap();
+        complete(&router, &db, Request { json: false, feature: Feature::MailAnalysis, ..sort() }).await.unwrap();
+        {
+            let _registry = crate::ai::registry::test_override::with(|r| r.models.iter_mut().filter(|m| m.provider == "gemini").for_each(|m| m.capabilities.thinking = false));
+            complete(&router, &db, sort()).await.unwrap();
+        }
+        router.set_provider_chain(vec![row("gemini", Some("gemini-unlisted"), None, None)]);
+        complete(&router, &db, sort()).await.unwrap();
+
+        let seen = server.seen();
+        let thinking = |i: usize| seen[i].body["generationConfig"].get("thinkingConfig").cloned();
+        assert_eq!(seen.len(), 4);
+        assert_eq!(seen[0].path, format!("/v1beta/models/{flash}:generateContent"));
+        assert_eq!(thinking(0), Some(json!({"thinkingLevel": "LOW"})), "sorting on a thinking model");
+        assert_eq!(thinking(1), None, "mail analysis");
+        assert_eq!(thinking(2), None, "sorting on a model the registry does not mark as thinking");
+        assert_eq!(seen[3].path, "/v1beta/models/gemini-unlisted:generateContent");
+        assert_eq!(thinking(3), None, "sorting on a model the registry does not describe");
     }
 
     /// Ollama's own endpoint, so the context window can be set; any other

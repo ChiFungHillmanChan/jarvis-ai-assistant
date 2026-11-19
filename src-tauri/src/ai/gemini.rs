@@ -108,24 +108,51 @@ struct CandidateContent {
 }
 
 /// The request's generationConfig.
-fn generation_config(max_output_tokens: u32, deeper: Option<crate::ai::capability::Deeper>) -> serde_json::Value {
+fn generation_config(max_output_tokens: u32, thinking: Thinking) -> serde_json::Value {
     let mut config = json!({"maxOutputTokens": max_output_tokens});
-    if let Some(thinking) = thinking_config(deeper) {
+    if let Some(thinking) = thinking_config(thinking) {
         config["thinkingConfig"] = thinking;
     }
     config
 }
 
-/// The thinking parameter a request carries (P06), the one place that
-/// decides it. A "Think harder" turn on a model the registry marks as
-/// thinking asks for the high thinking level, and only that: never minimal
-/// or xhigh, and no model id or version is read here. Any other turn keeps
-/// Google's default for the model. Whether gemini-2.5 models accept
-/// `thinkingLevel` is not settled (DECISIONS.md, P06 rows of 2026-11-17); if
-/// Google refuses it, the request ends on the error card with Google's
-/// reason, and nothing is switched.
-fn thinking_config(deeper: Option<crate::ai::capability::Deeper>) -> Option<serde_json::Value> {
-    deeper.is_some_and(|d| d.thinking).then(|| json!({"thinkingLevel": "HIGH"}))
+/// What a request is, for [`thinking_config`].
+#[derive(Clone, Copy, Debug)]
+enum Thinking {
+    /// A chat turn: `Some` on a turn the user marked "Think harder", set
+    /// only when the registry marks the model as thinking or reasoning.
+    Chat(Option<crate::ai::capability::Deeper>),
+    /// A plain request (`Wire::complete`) for `feature`; `thinks` is the
+    /// registry's `capabilities.thinking` for the model it is sent to.
+    Plain { feature: super::cost::Feature, thinks: bool },
+}
+
+/// The thinking parameter a request carries (P06, X4), the one place that
+/// decides it, from what the request is for and the registry's flags; no
+/// model id or version is read here.
+///
+/// - A "Think harder" turn on a model the registry marks as thinking asks
+///   for the high level, and only that: never minimal or xhigh.
+/// - Mail sorting on a model the registry marks as thinking asks for the
+///   low level (X4, founder's decision of 2026-11-19): the lowest level
+///   every Gemini model JARVIS can sort with accepts in Google's
+///   documentation. `minimal` is not one: Google documents it as refused
+///   on gemini-3.7-flash (the default) and gemini-3.8-flash, and does not
+///   list it for gemini-3.1-pro-preview.
+/// - Any other request keeps Google's default for the model.
+///
+/// Google's generateContent guide says gemini-2.5 models take
+/// `thinkingBudget`, not `thinkingLevel`; Google answered 404 for them in
+/// the native-qa sitting (2026-11-18). If Google refuses the parameter, the
+/// request fails as any refused request does (a chat turn ends on the error
+/// card with Google's reason; a sorting run leaves the message unsorted and
+/// records why), and nothing is switched or sent again without it.
+fn thinking_config(thinking: Thinking) -> Option<serde_json::Value> {
+    match thinking {
+        Thinking::Chat(deeper) => deeper.is_some_and(|d| d.thinking).then(|| json!({"thinkingLevel": "HIGH"})),
+        Thinking::Plain { feature: super::cost::Feature::MailSort, thinks: true } => Some(json!({"thinkingLevel": "LOW"})),
+        Thinking::Plain { .. } => None,
+    }
 }
 
 /// What the model sent in one round, kept so the next request can send it
@@ -236,7 +263,7 @@ impl Wire for GeminiWire {
             "contents": conversation.contents,
             "tools": conversation.tools,
             "systemInstruction": conversation.system_instruction,
-            "generationConfig": generation_config(output_cap(&self.model), self.deeper)
+            "generationConfig": generation_config(output_cap(&self.model), Thinking::Chat(self.deeper))
         });
         if final_round {
             // The last allowed round answers from what earlier rounds gathered.
@@ -373,9 +400,10 @@ impl Wire for GeminiWire {
 
     async fn complete(&self, request: &PlainRequest<'_>, _language: UiLanguage) -> Result<Completion, String> {
         let client = super::compat::client()?;
+        let thinking = Thinking::Plain { feature: request.feature, thinks: crate::ai::capability::thinks("gemini", &self.model) };
         let mut body = json!({
             "contents": [{"role": "user", "parts": [{"text": request.user}]}],
-            "generationConfig": {"maxOutputTokens": request.max_tokens},
+            "generationConfig": generation_config(request.max_tokens, thinking),
         });
         if !request.system.is_empty() {
             body["systemInstruction"] = json!({"parts": [{"text": request.system}]});
@@ -487,21 +515,40 @@ mod tests {
     #[test]
     fn think_harder_asks_for_the_high_thinking_level() {
         use crate::ai::capability::Deeper;
-        let deeper = generation_config(100, Some(Deeper { thinking: true, effort: false }));
+        let deeper = generation_config(100, Thinking::Chat(Some(Deeper { thinking: true, effort: false })));
         assert_eq!(deeper, json!({"maxOutputTokens": 100, "thinkingConfig": {"thinkingLevel": "HIGH"}}));
-        assert_eq!(generation_config(100, None), json!({"maxOutputTokens": 100}));
-        assert_eq!(generation_config(100, Some(Deeper { thinking: false, effort: true })), json!({"maxOutputTokens": 100}));
+        assert_eq!(generation_config(100, Thinking::Chat(None)), json!({"maxOutputTokens": 100}));
+        assert_eq!(generation_config(100, Thinking::Chat(Some(Deeper { thinking: false, effort: true }))), json!({"maxOutputTokens": 100}));
     }
 
-    /// The one place that decides the thinking parameter: HIGH on a marked
-    /// turn for a thinking model, nothing otherwise, and never another level.
+    /// The one place that decides the thinking parameter, for a chat turn:
+    /// HIGH on a marked turn for a thinking model, nothing otherwise, and
+    /// never another level.
     #[test]
     fn the_thinking_parameter_is_high_on_a_marked_turn_and_absent_otherwise() {
         use crate::ai::capability::Deeper;
-        assert_eq!(thinking_config(Some(Deeper { thinking: true, effort: false })), Some(json!({"thinkingLevel": "HIGH"})));
-        assert_eq!(thinking_config(Some(Deeper { thinking: true, effort: true })), Some(json!({"thinkingLevel": "HIGH"})));
-        assert_eq!(thinking_config(Some(Deeper { thinking: false, effort: true })), None);
-        assert_eq!(thinking_config(None), None);
+        assert_eq!(thinking_config(Thinking::Chat(Some(Deeper { thinking: true, effort: false }))), Some(json!({"thinkingLevel": "HIGH"})));
+        assert_eq!(thinking_config(Thinking::Chat(Some(Deeper { thinking: true, effort: true }))), Some(json!({"thinkingLevel": "HIGH"})));
+        assert_eq!(thinking_config(Thinking::Chat(Some(Deeper { thinking: false, effort: true }))), None);
+        assert_eq!(thinking_config(Thinking::Chat(None)), None);
+    }
+
+    /// For a plain request (X4): mail sorting on a model the registry marks
+    /// as thinking asks for the low level; every other feature, and sorting
+    /// on a model the registry does not mark, keeps Google's default.
+    #[test]
+    fn only_sorting_on_a_thinking_model_asks_for_the_low_thinking_level() {
+        use crate::ai::cost::Feature;
+        let every = [Feature::Chat, Feature::Tools, Feature::MailAnalysis, Feature::MailSort, Feature::Briefing, Feature::Stt, Feature::Tts, Feature::Memory, Feature::Other];
+        for feature in every {
+            let expected = (feature == Feature::MailSort).then(|| json!({"thinkingLevel": "LOW"}));
+            assert_eq!(thinking_config(Thinking::Plain { feature, thinks: true }), expected, "{feature:?}");
+            assert_eq!(thinking_config(Thinking::Plain { feature, thinks: false }), None, "{feature:?} on a model not marked as thinking");
+        }
+        assert_eq!(
+            generation_config(2_048, Thinking::Plain { feature: Feature::MailSort, thinks: true }),
+            json!({"maxOutputTokens": 2_048, "thinkingConfig": {"thinkingLevel": "LOW"}})
+        );
     }
 
     /// A round streamed with thought signatures (canned SSE chunks): the
