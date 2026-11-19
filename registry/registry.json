@@ -1,6 +1,6 @@
 {
   "version": 5,
-  "issued_at": "2026-11-19T15:52:25Z",
+  "issued_at": "2026-11-19T15:59:06Z",
   "min_app_version": "0.5.11",
   "providers": [
     {
@@ -2115,7 +2115,7 @@
     "premium": {
       "openai": "gpt-6-luna",
       "claude": "claude-sonnet-5-5",
-      "gemini": "gemini-3.1-pro-preview",
+      "gemini": "gemini-4-neon",
       "bedrock": "global.anthropic.claude-sonnet-4-6"
     },
     "mail_analysis": {
@@ -2189,8 +2189,8 @@
     "chains": {
       "gemini_primary": {
         "label": {
-          "en": "Gemini 4 Hydrogen (routine) + Gemini 3.1 Pro (fallback)",
-          "zh-HK": "Gemini 4 Hydrogen（日常）＋Gemini 3.1 Pro（後備）"
+          "en": "Gemini 4 Hydrogen, with Gemini 3.1 Pro to pick if it fails",
+          "zh-HK": "Gemini 4 Hydrogen；失敗時可改用 Gemini 3.1 Pro"
         },
         "entries": [
           {
@@ -2205,8 +2205,8 @@
       },
       "gemini_flash": {
         "label": {
-          "en": "Gemini Flash (primary) + Pro (fallback)",
-          "zh-HK": "Gemini Flash（主要）＋Pro（後備）"
+          "en": "Gemini 3.8 Flash, with Gemini 3.1 Pro to pick if it fails",
+          "zh-HK": "Gemini 3.8 Flash；失敗時可改用 Gemini 3.1 Pro"
         },
         "entries": [
           {
