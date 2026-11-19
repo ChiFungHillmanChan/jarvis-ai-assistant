@@ -1141,7 +1141,7 @@ impl AiRouter {
             }
             "openai" => {
                 let Some(ref key) = self.openai_key else { return Err("No OpenAI API key configured".to_string()) };
-                let wire = openai::OpenAiWire::new(key, openai::Target { base_url: None, model: entry.model_id.as_deref(), deeper })?;
+                let wire = openai_responses::ResponsesWire::new(key, entry.model_id.as_deref(), deeper);
                 provider::chat(&wire, chat_request(db, messages, deeper), turn).await
             }
             "bedrock" => {

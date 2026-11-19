@@ -167,12 +167,7 @@ impl Reply {
         let index = event["output_index"].as_u64().unwrap_or_default();
         let text = |field: &str| event[field].as_str().unwrap_or_default().to_string();
         match event["type"].as_str().unwrap_or_default() {
-            "response.output_text.delta" => {
-                let delta = text("delta");
-                if !delta.is_empty() {
-                    events.send(Event::Text(delta));
-                }
-            }
+            "response.output_text.delta" => events.send(Event::Text(text("delta"))),
             "response.output_item.added" if event["item"]["type"] == "function_call" => {
                 let slot = self.calls.entry(index).or_default();
                 slot.take(&event["item"]);

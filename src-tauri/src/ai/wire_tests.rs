@@ -169,6 +169,13 @@ impl Reply {
         Reply::raw(200, "text/event-stream", body.into_bytes())
     }
 
+    /// OpenAI's Responses format: every event is named by its type, and
+    /// the stream ends with its last event, not `[DONE]`.
+    pub(crate) fn responses_sse(events: &[Value]) -> Self {
+        let body: String = events.iter().map(|event| format!("event: {}\ndata: {event}\n\n", event["type"].as_str().unwrap())).collect();
+        Reply::raw(200, "text/event-stream", body.into_bytes())
+    }
+
     /// Anthropic's format: every event is named.
     pub(crate) fn named_sse(events: &[(&str, Value)]) -> Self {
         let body: String = events.iter().map(|(name, event)| format!("event: {name}\ndata: {event}\n\n")).collect();
@@ -487,20 +494,113 @@ mod openai_wire {
         body
     }
 
+    /// A Responses body with the developer message and the tool list
+    /// checked and replaced by markers.
+    fn marked_input(body: &Value) -> Value {
+        let mut body = body.clone();
+        let developer = &body["input"][0];
+        assert_eq!(developer["role"], "developer");
+        assert_app_system_prompt(developer["content"].as_str().unwrap());
+        body["input"][0]["content"] = json!("<system>");
+        assert_eq!(body["tools"], json!(responses_tools()), "every tool, in the Responses function format");
+        body["tools"] = json!("<tools>");
+        body
+    }
+
     pub(crate) fn openai_tools() -> Vec<Value> {
         tools::get_tool_definitions().iter().map(|t| json!({"type": "function", "function": {"name": t.name, "description": t.description, "parameters": t.parameters}})).collect()
     }
 
+    pub(crate) fn responses_tools() -> Vec<Value> {
+        tools::get_tool_definitions().iter().map(|t| json!({"type": "function", "name": t.name, "description": t.description, "parameters": t.parameters, "strict": false})).collect()
+    }
+
+    // The Responses stream, as OpenAI's streaming reference shows it.
+
+    /// A piece of the text of the message at `index`.
+    pub(crate) fn delta(index: u64, text: &str) -> Value {
+        json!({"type": "response.output_text.delta", "item_id": format!("msg_{index}"), "output_index": index, "content_index": 0, "delta": text})
+    }
+
+    pub(crate) fn message_item(index: u64, text: &str) -> Value {
+        json!({"type": "message", "id": format!("msg_{index}"), "role": "assistant", "status": "completed", "content": [{"type": "output_text", "text": text, "annotations": []}]})
+    }
+
+    /// The finished item at `index`.
+    pub(crate) fn item_done(index: u64, item: Value) -> Value {
+        json!({"type": "response.output_item.done", "output_index": index, "item": item})
+    }
+
+    /// A message at `index`: its text in `pieces`, then the finished item.
+    pub(crate) fn says(index: u64, pieces: &[&str]) -> Vec<Value> {
+        let mut events: Vec<Value> = pieces.iter().map(|piece| delta(index, piece)).collect();
+        events.push(item_done(index, message_item(index, &pieces.concat())));
+        events
+    }
+
+    pub(crate) fn call_item(index: u64, call_id: &str, name: &str, arguments: &str) -> Value {
+        json!({"type": "function_call", "id": format!("fc_{index}"), "call_id": call_id, "name": name, "arguments": arguments, "status": "completed"})
+    }
+
+    /// A call at `index` as it streams, before its item is finished: added,
+    /// its arguments in `pieces`, and the arguments done.
+    pub(crate) fn call_streams(index: u64, call_id: &str, name: &str, pieces: &[&str]) -> Vec<Value> {
+        let id = format!("fc_{index}");
+        let mut events = vec![json!({"type": "response.output_item.added", "output_index": index, "item": {"type": "function_call", "id": id, "call_id": call_id, "name": name, "arguments": "", "status": "in_progress"}})];
+        events.extend(pieces.iter().map(|piece| json!({"type": "response.function_call_arguments.delta", "item_id": id, "output_index": index, "delta": piece})));
+        events.push(json!({"type": "response.function_call_arguments.done", "item_id": id, "output_index": index, "arguments": pieces.concat()}));
+        events
+    }
+
+    /// A whole call at `index`, its arguments in `pieces`.
+    pub(crate) fn call_in_pieces(index: u64, call_id: &str, name: &str, pieces: &[&str]) -> Vec<Value> {
+        let mut events = call_streams(index, call_id, name, pieces);
+        events.push(item_done(index, call_item(index, call_id, name, &pieces.concat())));
+        events
+    }
+
+    pub(crate) fn call(index: u64, call_id: &str, name: &str, arguments: &str) -> Vec<Value> {
+        call_in_pieces(index, call_id, name, &[arguments])
+    }
+
+    pub(crate) fn usage(input: i64, output: i64, cached: i64, written: i64) -> Value {
+        json!({
+            "input_tokens": input,
+            "input_tokens_details": {"cached_tokens": cached, "cache_write_tokens": written, "cache_write_tokens_details": {"ttl_30m_tokens": written, "ttl_12h_tokens": 0}},
+            "output_tokens": output,
+            "output_tokens_details": {"reasoning_tokens": 0},
+            "total_tokens": input + output
+        })
+    }
+
+    /// The last event of a finished reply.
+    pub(crate) fn completed(usage: Value) -> Value {
+        json!({"type": "response.completed", "response": {"id": "resp_1", "object": "response", "status": "completed", "usage": usage}})
+    }
+
+    /// The last event of a reply cut short for `reason`.
+    pub(crate) fn incomplete(reason: &str, usage: Value) -> Value {
+        json!({"type": "response.incomplete", "response": {"id": "resp_1", "object": "response", "status": "incomplete", "incomplete_details": {"reason": reason}, "usage": usage}})
+    }
+
+    /// One streamed reply: the events of `parts` in order, then `last`.
+    pub(crate) fn responses(parts: Vec<Vec<Value>>, last: Value) -> Reply {
+        let mut events: Vec<Value> = parts.into_iter().flatten().collect();
+        events.push(last);
+        Reply::responses_sse(&events)
+    }
+
     fn text_reply() -> Reply {
-        Reply::openai_sse(&[
-            json!({"choices": [{"delta": {"role": "assistant", "content": "Hel"}}]}),
-            json!({"choices": [{"delta": {"content": "lo."}, "finish_reason": "stop"}]}),
-            json!({"choices": [], "usage": {"prompt_tokens": 1200, "completion_tokens": 30, "prompt_tokens_details": {"cached_tokens": 1000}}}),
-        ])
+        responses(vec![says(0, &["Hel", "lo."])], completed(usage(1200, 30, 1000, 150)))
+    }
+
+    /// The items of a request's input of one type.
+    fn items_of<'a>(body: &'a Value, kind: &str) -> Vec<&'a Value> {
+        body["input"].as_array().unwrap().iter().filter(|item| item["type"] == kind).collect()
     }
 
     /// A plain answer: the request, the streamed tokens, the voice, one
-    /// priced row with the cached tokens.
+    /// priced row with the cache reads and writes.
     #[tokio::test]
     async fn a_text_turn() {
         let server = serve(vec![text_reply()]).await;
@@ -511,45 +611,37 @@ mod openai_wire {
 
         let seen = server.seen();
         assert_eq!(seen.len(), 1);
-        assert_eq!((seen[0].method.as_str(), seen[0].path.as_str()), ("POST", "/v1/chat/completions"));
+        assert_eq!((seen[0].method.as_str(), seen[0].path.as_str()), ("POST", "/v1/responses"));
         assert_eq!(seen[0].header("authorization"), Some("Bearer sk-fixture-openai-not-real"));
         assert_eq!(seen[0].header("content-type"), Some("application/json"));
         let model = crate::ai::models::openai_default();
         assert_eq!(
-            marked(&seen[0].body, true),
+            marked_input(&seen[0].body),
             json!({
                 "model": model,
-                "messages": [{"role": "system", "content": "<system>"}, {"role": "user", "content": "Hi"}, {"role": "user", "content": "What is on today?"}],
+                "input": [{"role": "developer", "content": "<system>"}, {"role": "user", "content": "Hi"}, {"role": "user", "content": "What is on today?"}],
                 "tools": "<tools>",
-                "max_completion_tokens": 4096,
-                "reasoning_effort": "none",
-                "stream": true,
-                "stream_options": {"include_usage": true}
+                "max_output_tokens": 4096,
+                "reasoning": {"effort": "none"},
+                "store": false,
+                "stream": true
             })
         );
         assert_eq!(turn.window_lines(), vec![status("Composing response...", "responding"), token("Hel"), token("lo."), token_done()]);
         assert_eq!(turn.voice, vec!["text: Hel", "text: lo."]);
-        assert_eq!(rows(&db), vec![priced_row("openai", "chat", &model, &[(1200, 30, 1000, 0)])]);
+        assert_eq!(rows(&db), vec![priced_row("openai", "chat", &model, &[(1200, 30, 1000, 150)])]);
         assert_eq!(turn.ledger.count(), 0);
     }
 
     /// A tool round: the call streams in pieces, the same call twice runs
-    /// once, the approval card is answered, the results go back with their
-    /// ids, and the turn is one row under tools.
+    /// once, the approval card is answered, the round's items and the
+    /// results go back after the first request's input, unchanged, and the
+    /// turn is one row under tools.
     #[tokio::test]
     async fn a_tool_turn() {
         let server = serve(vec![
-            Reply::openai_sse(&[
-                json!({"choices": [{"delta": {"tool_calls": [{"index": 0, "id": "call_1", "type": "function", "function": {"name": "remember", "arguments": ""}}]}}]}),
-                json!({"choices": [{"delta": {"tool_calls": [{"index": 0, "function": {"arguments": "{\"content\":"}}]}}]}),
-                json!({"choices": [{"delta": {"tool_calls": [{"index": 0, "function": {"arguments": "\"Kenny is my accountant\"}"}}]}}]}),
-                json!({"choices": [{"delta": {"tool_calls": [{"index": 1, "id": "call_2", "type": "function", "function": {"name": "remember", "arguments": REMEMBER_ARGS}}]}, "finish_reason": "tool_calls"}]}),
-                json!({"choices": [], "usage": {"prompt_tokens": 100, "completion_tokens": 10}}),
-            ]),
-            Reply::openai_sse(&[
-                json!({"choices": [{"delta": {"content": "Saved."}, "finish_reason": "stop"}]}),
-                json!({"choices": [], "usage": {"prompt_tokens": 150, "completion_tokens": 5}}),
-            ]),
+            responses(vec![call_in_pieces(0, "call_1", "remember", &["{\"content\":", "\"Kenny is my accountant\"}"]), call(1, "call_2", "remember", REMEMBER_ARGS)], completed(usage(100, 10, 0, 0))),
+            responses(vec![says(0, &["Saved."])], completed(usage(150, 5, 0, 0))),
         ])
         .await;
         let _base = point_at(&format!("{}/v1", server.base));
@@ -562,21 +654,21 @@ mod openai_wire {
         let seen = server.seen();
         assert_eq!(seen.len(), 2);
         let result = remembered("Kenny is my accountant").await;
-        let second = marked(&seen[1].body, true);
+        let second = marked_input(&seen[1].body);
         assert_eq!(second["tool_choice"], Value::Null, "not the last round");
         assert_eq!(
-            second["messages"],
+            second["input"],
             json!([
-                {"role": "system", "content": "<system>"},
+                {"role": "developer", "content": "<system>"},
                 {"role": "user", "content": "Remember Kenny is my accountant"},
-                {"role": "assistant", "tool_calls": [
-                    {"id": "call_1", "type": "function", "function": {"name": "remember", "arguments": REMEMBER_ARGS}},
-                    {"id": "call_2", "type": "function", "function": {"name": "remember", "arguments": REMEMBER_ARGS}}
-                ]},
-                {"role": "tool", "content": result, "tool_call_id": "call_1"},
-                {"role": "tool", "content": SKIPPED, "tool_call_id": "call_2"}
+                call_item(0, "call_1", "remember", REMEMBER_ARGS),
+                call_item(1, "call_2", "remember", REMEMBER_ARGS),
+                {"type": "function_call_output", "call_id": "call_1", "output": result},
+                {"type": "function_call_output", "call_id": "call_2", "output": SKIPPED}
             ])
         );
+        let first = seen[0].body["input"].as_array().unwrap();
+        assert_eq!(&seen[1].body["input"].as_array().unwrap()[..first.len()], &first[..], "the first request's input, unchanged");
         assert_eq!(
             turn.window_lines(),
             vec![
@@ -600,8 +692,8 @@ mod openai_wire {
     #[tokio::test]
     async fn a_declined_tool() {
         let server = serve(vec![
-            Reply::openai_sse(&[json!({"choices": [{"delta": {"tool_calls": [{"index": 0, "id": "call_1", "function": {"name": "remember", "arguments": REMEMBER_ARGS}}]}, "finish_reason": "tool_calls"}]})]),
-            Reply::openai_sse(&[json!({"choices": [{"delta": {"content": "Not saved."}, "finish_reason": "stop"}]})]),
+            responses(vec![call(0, "call_1", "remember", REMEMBER_ARGS)], completed(Value::Null)),
+            responses(vec![says(0, &["Not saved."])], completed(Value::Null)),
         ])
         .await;
         let _base = point_at(&format!("{}/v1", server.base));
@@ -610,7 +702,10 @@ mod openai_wire {
         assert_eq!(turn.reply.as_deref(), Ok("Not saved."));
         assert!(memories(&db).is_empty());
         let seen = server.seen();
-        let refusal = seen[1].body["messages"][3]["content"].as_str().unwrap().to_string();
+        let outputs = items_of(&seen[1].body, "function_call_output");
+        assert_eq!(outputs.len(), 1);
+        assert_eq!(outputs[0]["call_id"], "call_1");
+        let refusal = outputs[0]["output"].as_str().unwrap();
         assert!(refusal.starts_with("The user did not allow remember"), "{refusal}");
         // A reply without usage figures is stored as a row of zeros.
         let model = crate::ai::models::openai_default();
@@ -622,8 +717,8 @@ mod openai_wire {
     #[tokio::test]
     async fn the_last_round() {
         let _registry = crate::ai::registry::test_override::with(|r| r.providers.iter_mut().find(|p| p.id == "openai").unwrap().limits.max_tool_rounds = Some(2));
-        let call = |id: &str, args: &str| Reply::openai_sse(&[json!({"choices": [{"delta": {"tool_calls": [{"index": 0, "id": id, "function": {"name": "remember", "arguments": args}}]}, "finish_reason": "tool_calls"}]})]);
-        let server = serve(vec![call("call_1", REMEMBER_ARGS), call("call_2", DENTIST_ARGS)]).await;
+        let asks = |id: &str, args: &str| responses(vec![call(0, id, "remember", args)], completed(Value::Null));
+        let server = serve(vec![asks("call_1", REMEMBER_ARGS), asks("call_2", DENTIST_ARGS)]).await;
         let _base = point_at(&format!("{}/v1", server.base));
         let db = crate::db::test_database();
         let turn = run_turn(&router(), official(), &[("user", "Remember Kenny is my accountant")], &db, Workload::Tools, true).await;
@@ -674,20 +769,67 @@ mod openai_wire {
         assert_eq!(turn.reply.as_deref(), Ok("Hello."));
     }
 
-    /// A stream that breaks off: the window goes idle, what was billed is
-    /// stored, and the error names a stream error.
+    /// A stream that breaks off: the window goes idle and the error names a
+    /// stream error. Responses reports usage only in its last event, so a
+    /// stream cut before it has nothing to store.
     #[tokio::test]
     async fn a_broken_stream() {
-        let body = "data: {\"choices\":[],\"usage\":{\"prompt_tokens\":40,\"completion_tokens\":2}}\n\ndata: {\"choices\":[{\"delta\":{\"content\":\"Hel\"}}]}\n\n";
-        let server = serve(vec![Reply::raw(200, "text/event-stream", body.as_bytes().to_vec()).cut_short()]).await;
+        let body = format!("event: response.output_text.delta\ndata: {}\n\n", delta(0, "Hel"));
+        let server = serve(vec![Reply::raw(200, "text/event-stream", body.into_bytes()).cut_short()]).await;
         let _base = point_at(&format!("{}/v1", server.base));
         let db = crate::db::test_database();
         let turn = run_turn(&router(), official(), &[("user", "Hi")], &db, Workload::Tools, false).await;
         let error = turn.reply.clone().unwrap_err();
         assert!(error.starts_with("Stream error: "), "{error}");
         assert_eq!(turn.window_lines().last().unwrap(), &format!("chat-state {}", json!({"state": "idle"})));
-        let model = crate::ai::models::openai_default();
-        assert_eq!(rows(&db), vec![priced_row("openai", "chat", &model, &[(40, 2, 0, 0)])]);
+        assert!(rows(&db).is_empty());
+    }
+
+    /// A stream that ends without its last event broke off, though the
+    /// connection closed cleanly (D2); a `[DONE]` line is skipped.
+    #[tokio::test]
+    async fn a_stream_without_its_last_event_broke_off() {
+        let server = serve(vec![Reply::openai_sse(&says(0, &["Hel"]))]).await;
+        let _base = point_at(&format!("{}/v1", server.base));
+        let db = crate::db::test_database();
+        let logged = crate::test_log::capture(|| async {
+            let turn = run_turn(&router(), official(), &[("user", "Hi")], &db, Workload::Tools, false).await;
+            assert_eq!(turn.reply, Err("Stream error: the reply ended before it finished".to_string()));
+            assert_eq!(turn.window_lines().last().unwrap(), &format!("chat-state {}", json!({"state": "idle"})));
+        })
+        .await;
+        assert!(!logged.iter().any(|line| line.contains("did not parse")), "[DONE] is skipped, not an event that did not parse: {logged:?}");
+
+        let mut events = says(0, &["Hello."]);
+        events.push(completed(Value::Null));
+        let server = serve(vec![Reply::openai_sse(&events)]).await;
+        let _base = point_at(&format!("{}/v1", server.base));
+        let turn = run_turn(&router(), official(), &[("user", "Hi")], &db, Workload::Tools, false).await;
+        assert_eq!(turn.reply.as_deref(), Ok("Hello."), "a [DONE] after the last event is skipped");
+    }
+
+    /// An error in the stream ends the turn with the event, idle, and what
+    /// it billed; the log carries the error's code only.
+    #[tokio::test]
+    async fn an_error_in_the_stream_ends_the_turn() {
+        let failed = json!({"type": "response.failed", "response": {"id": "resp_1", "status": "failed", "error": {"code": "server_error", "message": "The model failed on Kenny's invoice"}, "usage": usage(40, 2, 0, 0)}});
+        let error = json!({"type": "error", "code": "rate_limit_exceeded", "message": "Slow down on Kenny's invoice", "param": null});
+        for (event, code, figures) in [(failed, "server_error", Some((40, 2, 0, 0))), (error, "rate_limit_exceeded", None)] {
+            let server = serve(vec![responses(vec![says(0, &["Hel"])], event.clone())]).await;
+            let _base = point_at(&format!("{}/v1", server.base));
+            let db = crate::db::test_database();
+            let logged = crate::test_log::capture(|| async {
+                let turn = run_turn(&router(), official(), &[("user", "Hi")], &db, Workload::Tools, false).await;
+                assert_eq!(turn.reply, Err(format!("OpenAI stream error: {event}")));
+                assert_eq!(turn.window_lines().last().unwrap(), &format!("chat-state {}", json!({"state": "idle"})));
+            })
+            .await;
+            assert!(logged.contains(&format!("OpenAI stream error: {code}")), "{logged:?}");
+            assert!(!logged.iter().any(|line| line.contains("Kenny")), "{logged:?}");
+            let model = crate::ai::models::openai_default();
+            let stored: Vec<Row> = figures.map(|figures| priced_row("openai", "chat", &model, &[figures])).into_iter().collect();
+            assert_eq!(rows(&db), stored);
+        }
     }
 
     fn compat(base: &str, model: Option<&str>) -> ProviderChainEntry {
@@ -762,11 +904,7 @@ mod openai_wire {
     /// sentence that nothing was done (R3-m2).
     #[tokio::test]
     async fn calls_cut_off_by_the_length_limit_do_not_run() {
-        let server = serve(vec![Reply::openai_sse(&[
-            json!({"choices": [{"delta": {"content": "Let me save that."}}]}),
-            json!({"choices": [{"delta": {"tool_calls": [{"index": 0, "id": "call_1", "type": "function", "function": {"name": "remember", "arguments": REMEMBER_ARGS}}]}, "finish_reason": "length"}]}),
-        ])])
-        .await;
+        let server = serve(vec![responses(vec![says(0, &["Let me save that."]), call(1, "call_1", "remember", REMEMBER_ARGS)], incomplete("max_output_tokens", usage(100, 10, 0, 0)))]).await;
         let _base = point_at(&format!("{}/v1", server.base));
         let db = crate::db::test_database();
         let turn = run_turn(&router(), official(), &[("user", "Remember Kenny is my accountant")], &db, Workload::Tools, true).await;
@@ -776,17 +914,34 @@ mod openai_wire {
         assert_eq!(server.seen().len(), 1);
     }
 
+    /// A reply cut short for another reason keeps OpenAI's reason: with
+    /// nothing said it is an empty reply that names it. A reply that only
+    /// refuses says nothing either: its refusal is not shown (D5).
+    #[tokio::test]
+    async fn a_filtered_or_refusing_reply_is_an_empty_reply() {
+        let refusal = vec![
+            json!({"type": "response.refusal.delta", "item_id": "msg_0", "output_index": 0, "content_index": 0, "delta": "I can't help with that."}),
+            item_done(0, json!({"type": "message", "id": "msg_0", "role": "assistant", "status": "completed", "content": [{"type": "refusal", "refusal": "I can't help with that."}]})),
+        ];
+        let server = serve(vec![responses(vec![], incomplete("content_filter", Value::Null)), responses(vec![refusal], completed(Value::Null))]).await;
+        let _base = point_at(&format!("{}/v1", server.base));
+        let db = crate::db::test_database();
+        let model = crate::ai::models::openai_default();
+        for stop in ["content_filter", "stop"] {
+            let turn = run_turn(&router(), official(), &[("user", "Hi")], &db, Workload::Tools, false).await;
+            assert_eq!(turn.reply, Err(format!("openai ({model}) returned no text (stop={stop})")));
+            assert!(!turn.window_lines().iter().any(|line| line.contains("help with")), "{:?}", turn.window_lines());
+        }
+    }
+
     /// A call asked for twice in one reply runs once, and the line for the
     /// one skipped names the tool only, never its arguments (R3-m4).
     #[tokio::test]
     async fn a_skipped_duplicate_is_logged_without_its_arguments() {
         let args = json!({"content": "Kenny's code is QX-7781-MARKER"}).to_string();
         let server = serve(vec![
-            Reply::openai_sse(&[
-                json!({"choices": [{"delta": {"tool_calls": [{"index": 0, "id": "call_1", "type": "function", "function": {"name": "remember", "arguments": args}}]}}]}),
-                json!({"choices": [{"delta": {"tool_calls": [{"index": 1, "id": "call_2", "type": "function", "function": {"name": "remember", "arguments": args}}]}, "finish_reason": "tool_calls"}]}),
-            ]),
-            Reply::openai_sse(&[json!({"choices": [{"delta": {"content": "Noted."}, "finish_reason": "stop"}]})]),
+            responses(vec![call(0, "call_1", "remember", &args), call(1, "call_2", "remember", &args)], completed(Value::Null)),
+            responses(vec![says(0, &["Noted."])], completed(Value::Null)),
         ])
         .await;
         let _base = point_at(&format!("{}/v1", server.base));
@@ -805,11 +960,7 @@ mod openai_wire {
     /// is shown in Chinese, whatever language the answers are asked in.
     #[tokio::test]
     async fn the_sentence_is_in_the_ui_language() {
-        let server = serve(vec![Reply::openai_sse(&[
-            json!({"choices": [{"delta": {"content": "Let me save that."}}]}),
-            json!({"choices": [{"delta": {"tool_calls": [{"index": 0, "id": "call_1", "type": "function", "function": {"name": "remember", "arguments": REMEMBER_ARGS}}]}, "finish_reason": "length"}]}),
-        ])])
-        .await;
+        let server = serve(vec![responses(vec![says(0, &["Let me save that."]), call(1, "call_1", "remember", REMEMBER_ARGS)], incomplete("max_output_tokens", Value::Null))]).await;
         let _base = point_at(&format!("{}/v1", server.base));
         let db = crate::db::test_database();
         db.conn.lock().unwrap().execute("INSERT OR REPLACE INTO user_preferences (key, value) VALUES ('ui_locale', 'zh-HK'), ('language', 'en')", []).unwrap();
@@ -817,15 +968,13 @@ mod openai_wire {
         assert_eq!(turn.reply.as_deref(), Ok("Let me save that.\n\n模型提出的操作要求被截斷或不完整，所以沒有執行該項操作。請再試一次，或把要求分開提出。"));
     }
 
-    /// The text a tool round streamed goes back with its calls.
+    /// The text a tool round streamed goes back with its calls, as the
+    /// items they came in.
     #[tokio::test]
     async fn the_text_of_a_tool_round_goes_back_with_its_calls() {
         let server = serve(vec![
-            Reply::openai_sse(&[
-                json!({"choices": [{"delta": {"content": "Let me save that."}}]}),
-                json!({"choices": [{"delta": {"tool_calls": [{"index": 0, "id": "call_1", "type": "function", "function": {"name": "remember", "arguments": REMEMBER_ARGS}}]}, "finish_reason": "tool_calls"}]}),
-            ]),
-            Reply::openai_sse(&[json!({"choices": [{"delta": {"content": "Saved."}, "finish_reason": "stop"}]})]),
+            responses(vec![says(0, &["Let me save that."]), call(1, "call_1", "remember", REMEMBER_ARGS)], completed(Value::Null)),
+            responses(vec![says(0, &["Saved."])], completed(Value::Null)),
         ])
         .await;
         let _base = point_at(&format!("{}/v1", server.base));
@@ -834,9 +983,80 @@ mod openai_wire {
         assert_eq!(turn.reply.as_deref(), Ok("Saved."));
         let seen = server.seen();
         assert_eq!(seen.len(), 2);
+        assert_eq!(seen[1].body["input"][2], message_item(0, "Let me save that."));
+        assert_eq!(seen[1].body["input"][3], call_item(1, "call_1", "remember", REMEMBER_ARGS));
+    }
+
+    /// Reasoning and every other item go back exactly as they came, in
+    /// their output order whatever order they finished in, with each
+    /// call's result by its call id. Each request's input begins with the
+    /// one before it, unchanged: on GPT-6.2 an edit before a reasoning item
+    /// drops that reasoning.
+    #[tokio::test]
+    async fn every_item_goes_back_as_it_came_in_output_order() {
+        let reasoning = |n: u64| json!({"type": "reasoning", "id": format!("rs_{n}"), "summary": [], "encrypted_content": format!("ENC-{n}"), "status": null});
+        let other = r#"{"content":"Mary is my dentist"}"#;
+        let first_round = [
+            call_streams(1, "call_a", "remember", &[REMEMBER_ARGS]),
+            call_streams(2, "call_b", "remember", &[other]),
+            vec![item_done(2, call_item(2, "call_b", "remember", other)), item_done(1, call_item(1, "call_a", "remember", REMEMBER_ARGS)), item_done(0, reasoning(0))],
+        ];
+        let server = serve(vec![
+            responses(first_round.to_vec(), completed(Value::Null)),
+            responses(vec![vec![item_done(0, reasoning(1))], call(1, "call_c", "list_tasks", "{}")], completed(Value::Null)),
+            responses(vec![vec![item_done(0, reasoning(2))], says(1, &["Done."])], completed(Value::Null)),
+        ])
+        .await;
+        let _base = point_at(&format!("{}/v1", server.base));
+        let db = crate::db::test_database();
+        let turn = run_turn(&router(), official(), &[("user", "Remember Kenny and Mary, then list my tasks")], &db, Workload::Tools, true).await;
+        assert_eq!(turn.reply.as_deref(), Ok("Done."));
+        let seen = server.seen();
+        assert_eq!(seen.len(), 3);
+        let input = |n: usize| seen[n].body["input"].as_array().unwrap().clone();
+        for n in 1..3 {
+            assert_eq!(input(n)[..input(n - 1).len()], input(n - 1)[..], "request {n} begins with request {}", n - 1);
+        }
+        let added: Vec<Value> = input(1)[2..].to_vec();
+        assert_eq!(added[..3], [reasoning(0), call_item(1, "call_a", "remember", REMEMBER_ARGS), call_item(2, "call_b", "remember", other)]);
+        assert_eq!(added[3..].iter().map(|item| (item["type"].clone(), item["call_id"].clone())).collect::<Vec<_>>(), [(json!("function_call_output"), json!("call_a")), (json!("function_call_output"), json!("call_b"))]);
+        assert_eq!(input(2)[input(1).len()..input(1).len() + 2], [reasoning(1), call_item(1, "call_c", "list_tasks", "{}")]);
+        assert_eq!(memories(&db).len(), 2);
+    }
+
+    /// Two calls whose arguments stream interleaved are kept apart by their
+    /// position; each call's finished arguments stand over its pieces, and
+    /// a call whose item never finished goes back as it streamed.
+    #[tokio::test]
+    async fn interleaved_calls_are_kept_apart() {
+        let other = r#"{"content":"Mary is my dentist"}"#;
+        let events = vec![
+            json!({"type": "response.output_item.added", "output_index": 0, "item": {"type": "function_call", "id": "fc_0", "call_id": "call_a", "name": "remember", "arguments": "", "status": "in_progress"}}),
+            json!({"type": "response.output_item.added", "output_index": 1, "item": {"type": "function_call", "id": "fc_1", "call_id": "call_b", "name": "remember", "arguments": "", "status": "in_progress"}}),
+            json!({"type": "response.function_call_arguments.delta", "output_index": 0, "delta": "{\"content\":"}),
+            json!({"type": "response.function_call_arguments.delta", "output_index": 1, "delta": "{\"content\":"}),
+            json!({"type": "response.function_call_arguments.delta", "output_index": 1, "delta": "\"Mary is my dentist\"}"}),
+            json!({"type": "response.function_call_arguments.delta", "output_index": 0, "delta": "\"Kenny is my accountant\"}"}),
+            json!({"type": "response.function_call_arguments.done", "output_index": 0, "arguments": "{\"content\": \"Kenny is my accountant\"}"}),
+            json!({"type": "response.function_call_arguments.done", "output_index": 1, "arguments": other}),
+        ];
+        let server = serve(vec![responses(vec![events], completed(Value::Null)), responses(vec![says(0, &["Saved."])], completed(Value::Null))]).await;
+        let _base = point_at(&format!("{}/v1", server.base));
+        let db = crate::db::test_database();
+        let turn = run_turn(&router(), official(), &[("user", "Remember Kenny and Mary")], &db, Workload::Tools, true).await;
+        assert_eq!(turn.reply.as_deref(), Ok("Saved."));
+        let mut saved = memories(&db);
+        saved.sort();
+        assert_eq!(saved, vec!["Kenny is my accountant", "Mary is my dentist"]);
+        assert_eq!(turn.window_lines().iter().filter(|line| **line == tool_call("remember")).count(), 2, "each call announced once");
+        let seen = server.seen();
+        let calls = items_of(&seen[1].body, "function_call");
         assert_eq!(
-            seen[1].body["messages"][2],
-            json!({"role": "assistant", "content": "Let me save that.", "tool_calls": [{"id": "call_1", "type": "function", "function": {"name": "remember", "arguments": REMEMBER_ARGS}}]})
+            calls,
+            [
+                &json!({"type": "function_call", "call_id": "call_a", "name": "remember", "arguments": "{\"content\": \"Kenny is my accountant\"}"}),
+                &json!({"type": "function_call", "call_id": "call_b", "name": "remember", "arguments": other})
+            ]
         );
     }
 
@@ -845,10 +1065,7 @@ mod openai_wire {
     #[tokio::test]
     async fn a_failure_after_a_tool_round_stores_the_earlier_round() {
         let server = serve(vec![
-            Reply::openai_sse(&[
-                json!({"choices": [{"delta": {"tool_calls": [{"index": 0, "id": "call_1", "type": "function", "function": {"name": "remember", "arguments": REMEMBER_ARGS}}]}, "finish_reason": "tool_calls"}]}),
-                json!({"choices": [], "usage": {"prompt_tokens": 100, "completion_tokens": 10}}),
-            ]),
+            responses(vec![call(0, "call_1", "remember", REMEMBER_ARGS)], completed(usage(100, 10, 0, 0))),
             Reply::json(400, json!({"error": {"message": "Invalid request", "code": "invalid_request_error"}})),
         ])
         .await;
@@ -867,11 +1084,8 @@ mod openai_wire {
     async fn one_narration_per_round() {
         let other = r#"{"content":"Mary is my dentist"}"#;
         let server = serve(vec![
-            Reply::openai_sse(&[
-                json!({"choices": [{"delta": {"tool_calls": [{"index": 0, "id": "call_1", "type": "function", "function": {"name": "remember", "arguments": REMEMBER_ARGS}}]}}]}),
-                json!({"choices": [{"delta": {"tool_calls": [{"index": 1, "id": "call_2", "type": "function", "function": {"name": "remember", "arguments": other}}]}, "finish_reason": "tool_calls"}]}),
-            ]),
-            Reply::openai_sse(&[json!({"choices": [{"delta": {"content": "Saved."}, "finish_reason": "stop"}]})]),
+            responses(vec![call(0, "call_1", "remember", REMEMBER_ARGS), call(1, "call_2", "remember", other)], completed(Value::Null)),
+            responses(vec![says(0, &["Saved."])], completed(Value::Null)),
         ])
         .await;
         let _base = point_at(&format!("{}/v1", server.base));
@@ -889,11 +1103,7 @@ mod openai_wire {
     #[tokio::test]
     async fn the_fallback_is_shown_and_spoken() {
         let _registry = crate::ai::registry::test_override::with(|r| r.providers.iter_mut().find(|p| p.id == "openai").unwrap().limits.max_tool_rounds = Some(2));
-        let server = serve(vec![
-            Reply::openai_sse(&[json!({"choices": [{"delta": {"tool_calls": [{"index": 0, "id": "call_1", "function": {"name": "remember", "arguments": REMEMBER_ARGS}}]}, "finish_reason": "tool_calls"}]})]),
-            Reply::openai_sse(&[json!({"choices": [{"delta": {}, "finish_reason": "stop"}]})]),
-        ])
-        .await;
+        let server = serve(vec![responses(vec![call(0, "call_1", "remember", REMEMBER_ARGS)], completed(Value::Null)), responses(vec![], completed(Value::Null))]).await;
         let _base = point_at(&format!("{}/v1", server.base));
         let db = crate::db::test_database();
         let turn = run_turn(&router(), official(), &[("user", "Remember Kenny is my accountant")], &db, Workload::Tools, true).await;
@@ -908,7 +1118,7 @@ mod openai_wire {
     /// so, with none of the reply.
     #[tokio::test]
     async fn a_reply_without_usage_figures_is_logged() {
-        let server = serve(vec![Reply::openai_sse(&[json!({"choices": [{"delta": {"content": "Your dentist is Mary."}, "finish_reason": "stop"}]})])]).await;
+        let server = serve(vec![responses(vec![says(0, &["Your dentist is Mary."])], completed(Value::Null))]).await;
         let _base = point_at(&format!("{}/v1", server.base));
         let db = crate::db::test_database();
         let logged = crate::test_log::capture(|| async {
@@ -926,11 +1136,7 @@ mod openai_wire {
     /// main (N05).
     #[tokio::test]
     async fn an_empty_reply_without_usage_figures_logs_nothing() {
-        let server = serve(vec![
-            Reply::openai_sse(&[json!({"choices": [{"delta": {}, "finish_reason": "stop"}]})]),
-            Reply::openai_sse(&[json!({"choices": [{"delta": {"role": "assistant", "content": ""}, "finish_reason": "stop"}]})]),
-        ])
-        .await;
+        let server = serve(vec![responses(vec![], completed(Value::Null)), responses(vec![vec![delta(0, "")]], completed(Value::Null))]).await;
         let _base = point_at(&format!("{}/v1", server.base));
         let db = crate::db::test_database();
         for _ in 0..2 {
@@ -946,18 +1152,14 @@ mod openai_wire {
     /// A call that takes no arguments may stream no argument text: it runs.
     #[tokio::test]
     async fn a_call_with_no_argument_text_runs() {
-        let server = serve(vec![
-            Reply::openai_sse(&[json!({"choices": [{"delta": {"tool_calls": [{"index": 0, "id": "call_1", "type": "function", "function": {"name": "list_tasks", "arguments": ""}}]}, "finish_reason": "tool_calls"}]})]),
-            Reply::openai_sse(&[json!({"choices": [{"delta": {"content": "No tasks."}, "finish_reason": "stop"}]})]),
-        ])
-        .await;
+        let server = serve(vec![responses(vec![call(0, "call_1", "list_tasks", "")], completed(Value::Null)), responses(vec![says(0, &["No tasks."])], completed(Value::Null))]).await;
         let _base = point_at(&format!("{}/v1", server.base));
         let db = crate::db::test_database();
         let turn = run_turn(&router(), official(), &[("user", "What are my tasks?")], &db, Workload::Tools, true).await;
         assert_eq!(turn.reply.as_deref(), Ok("No tasks."));
         let seen = server.seen();
         assert_eq!(seen.len(), 2);
-        assert_eq!(seen[1].body["messages"].as_array().unwrap().iter().filter(|m| m["role"] == "tool" && m["tool_call_id"] == "call_1").count(), 1);
+        assert_eq!(items_of(&seen[1].body, "function_call_output").iter().filter(|item| item["call_id"] == "call_1").count(), 1);
     }
 }
 
@@ -2625,7 +2827,8 @@ mod parity {
         fn says(self, text: &str) -> Reply {
             let (head, tail) = text.split_at(text.len() / 2);
             match self {
-                W::OpenAi | W::Compatible | W::Local => Reply::openai_sse(&[
+                W::OpenAi => openai_wire::responses(vec![openai_wire::says(0, &[head, tail])], openai_wire::completed(openai_wire::usage(100, 10, 0, 0))),
+                W::Compatible | W::Local => Reply::openai_sse(&[
                     json!({"choices": [{"delta": {"role": "assistant", "content": head}}]}),
                     json!({"choices": [{"delta": {"content": tail}, "finish_reason": "stop"}]}),
                     json!({"choices": [], "usage": {"prompt_tokens": 100, "completion_tokens": 10}}),
@@ -2657,7 +2860,8 @@ mod parity {
         /// A reply that ends with nothing said and no call.
         fn empty(self) -> Reply {
             match self {
-                W::OpenAi | W::Compatible | W::Local => Reply::openai_sse(&[
+                W::OpenAi => openai_wire::responses(vec![], openai_wire::completed(openai_wire::usage(100, 0, 0, 0))),
+                W::Compatible | W::Local => Reply::openai_sse(&[
                     json!({"choices": [{"delta": {"role": "assistant"}, "finish_reason": "stop"}]}),
                     json!({"choices": [], "usage": {"prompt_tokens": 100, "completion_tokens": 0}}),
                 ]),
@@ -2680,7 +2884,8 @@ mod parity {
         fn calls(self, name: &str, args: Value) -> Reply {
             let text = args.to_string();
             match self {
-                W::OpenAi | W::Compatible | W::Local => Reply::openai_sse(&[
+                W::OpenAi => openai_wire::responses(vec![openai_wire::call_in_pieces(0, "call_1", name, &["", &text])], openai_wire::completed(openai_wire::usage(100, 10, 0, 0))),
+                W::Compatible | W::Local => Reply::openai_sse(&[
                     json!({"choices": [{"delta": {"tool_calls": [{"index": 0, "id": "call_1", "type": "function", "function": {"name": name, "arguments": ""}}]}}]}),
                     json!({"choices": [{"delta": {"tool_calls": [{"index": 0, "function": {"arguments": text}}]}, "finish_reason": "tool_calls"}]}),
                     json!({"choices": [], "usage": {"prompt_tokens": 100, "completion_tokens": 10}}),
@@ -2714,7 +2919,13 @@ mod parity {
         /// call cut part-way is a chunk that does not parse (`gemini_wire`).
         fn cut(self, said: &str, name: &str, arguments: &str, at_limit: bool) -> Reply {
             match self {
-                W::OpenAi | W::Compatible | W::Local => Reply::openai_sse(&[
+                W::OpenAi => {
+                    let usage = openai_wire::usage(100, 10, 0, 0);
+                    let last = if at_limit { openai_wire::incomplete("max_output_tokens", usage) } else { openai_wire::completed(usage) };
+                    let message = if said.is_empty() { Vec::new() } else { openai_wire::says(0, &[said]) };
+                    openai_wire::responses(vec![message, openai_wire::call(1, "call_1", name, arguments)], last)
+                }
+                W::Compatible | W::Local => Reply::openai_sse(&[
                     json!({"choices": [{"delta": {"role": "assistant", "content": said}}]}),
                     json!({"choices": [{"delta": {"tool_calls": [{"index": 0, "id": "call_1", "type": "function", "function": {"name": name, "arguments": arguments}}]}, "finish_reason": if at_limit { "length" } else { "tool_calls" }}]}),
                     json!({"choices": [], "usage": {"prompt_tokens": 100, "completion_tokens": 10}}),
@@ -2757,7 +2968,11 @@ mod parity {
             let whole = r#"{"title": "Pay the invoice"}"#;
             let cut = r#"{"content": "Kenny is my acc"#;
             match self {
-                W::OpenAi | W::Compatible | W::Local => Reply::openai_sse(&[
+                W::OpenAi => openai_wire::responses(
+                    vec![openai_wire::call(0, "call_1", "create_task", whole), openai_wire::call(1, "call_2", "remember", cut)],
+                    openai_wire::completed(openai_wire::usage(100, 10, 0, 0)),
+                ),
+                W::Compatible | W::Local => Reply::openai_sse(&[
                     json!({"choices": [{"delta": {"tool_calls": [{"index": 0, "id": "call_1", "type": "function", "function": {"name": "create_task", "arguments": whole}}]}}]}),
                     json!({"choices": [{"delta": {"tool_calls": [{"index": 1, "id": "call_2", "type": "function", "function": {"name": "remember", "arguments": cut}}]}, "finish_reason": "tool_calls"}]}),
                     json!({"choices": [], "usage": {"prompt_tokens": 100, "completion_tokens": 10}}),
@@ -2806,7 +3021,8 @@ mod parity {
         fn results(self, body: &Value) -> Vec<String> {
             let items = |list: &Value| list.as_array().cloned().unwrap_or_default();
             match self {
-                W::OpenAi | W::Compatible | W::Local => items(&body["messages"]).iter().filter(|m| m["role"] == "tool").map(|m| m["content"].as_str().unwrap().to_string()).collect(),
+                W::OpenAi => items(&body["input"]).iter().filter(|item| item["type"] == "function_call_output").map(|item| item["output"].as_str().unwrap().to_string()).collect(),
+                W::Compatible | W::Local => items(&body["messages"]).iter().filter(|m| m["role"] == "tool").map(|m| m["content"].as_str().unwrap().to_string()).collect(),
                 W::Claude => items(&body["messages"])
                     .iter()
                     .flat_map(|m| items(&m["content"]))
@@ -2830,7 +3046,8 @@ mod parity {
         fn offered(self, body: &Value) -> Vec<String> {
             let names = |list: &Value, name: &str| list.as_array().cloned().unwrap_or_default().iter().filter_map(|tool| tool.pointer(name).and_then(Value::as_str).map(str::to_string)).collect();
             match self {
-                W::OpenAi | W::Compatible | W::Local => names(&body["tools"], "/function/name"),
+                W::OpenAi => names(&body["tools"], "/name"),
+                W::Compatible | W::Local => names(&body["tools"], "/function/name"),
                 W::Claude => names(&body["tools"], "/name"),
                 W::Gemini => names(&body["tools"][0]["functionDeclarations"], "/name"),
                 W::Bedrock => names(&body["toolConfig"]["tools"], "/toolSpec/name"),
@@ -2842,7 +3059,12 @@ mod parity {
         fn replayed(self, body: &Value) -> Vec<(String, Value)> {
             let items = |list: &Value| list.as_array().cloned().unwrap_or_default();
             match self {
-                W::OpenAi | W::Compatible | W::Local => items(&body["messages"])
+                W::OpenAi => items(&body["input"])
+                    .iter()
+                    .filter(|item| item["type"] == "function_call")
+                    .map(|call| (call["name"].as_str().unwrap().to_string(), serde_json::from_str(call["arguments"].as_str().unwrap()).unwrap()))
+                    .collect(),
+                W::Compatible | W::Local => items(&body["messages"])
                     .iter()
                     .flat_map(|m| items(&m["tool_calls"]))
                     .map(|call| (call["function"]["name"].as_str().unwrap().to_string(), serde_json::from_str(call["function"]["arguments"].as_str().unwrap()).unwrap()))
@@ -3717,7 +3939,7 @@ mod resend_counts {
         use crate::ai::provider::Wire;
         let row = |provider_type: &str, base_url: Option<&str>| ProviderChainEntry { position: 0, provider_type: provider_type.into(), endpoint_id: None, model_id: Some("m".into()), enabled: true, base_url: base_url.map(Into::into) };
         let endpoint = LocalEndpoint { id: "lm".into(), name: "Local".into(), url: "http://127.0.0.1:9".into(), backend_type: BackendType::Vllm, api_key: None, use_tls: false, connection_timeout_ms: 5000, keep_alive_minutes: 30, is_active: true, last_health_check: None, last_health_status: None };
-        let official = crate::ai::openai::OpenAiWire::new(KEY, crate::ai::openai::Target { base_url: None, model: Some("m"), deeper: None }).unwrap();
+        let official = crate::ai::openai_responses::ResponsesWire::new(KEY, Some("m"), None);
         let compatible = crate::ai::openai::OpenAiWire::new(KEY, crate::ai::openai::Target { base_url: Some("http://127.0.0.1:9/v1"), model: Some("m"), deeper: None }).unwrap();
         let local = crate::ai::openai::OpenAiWire::local(crate::ai::local::LocalChat::plain(endpoint), "m");
         let claude = crate::ai::claude::ClaudeWire::new(KEY, "m");
@@ -3753,7 +3975,8 @@ mod resend_counts {
     /// streams it.
     fn cut_off(wire: W) -> Reply {
         match wire {
-            W::OpenAi | W::Compatible | W::Local => Reply::openai_sse(&[json!({"choices": [{"delta": {"content": "Hello"}}]})]),
+            W::OpenAi => Reply::responses_sse(&[openai_wire::delta(0, "Hello")]),
+            W::Compatible | W::Local => Reply::openai_sse(&[json!({"choices": [{"delta": {"content": "Hello"}}]})]),
             W::Claude => Reply::named_sse(&[
                 ("message_start", json!({"type": "message_start", "message": {"id": "msg_1", "role": "assistant", "content": [], "usage": {"input_tokens": 10, "output_tokens": 1}}})),
                 ("content_block_start", json!({"type": "content_block_start", "index": 0, "content_block": {"type": "text", "text": ""}})),
@@ -3789,7 +4012,13 @@ mod resend_counts {
     fn cut_call(wire: W, said: &str, at_limit: bool) -> Reply {
         let arguments = if at_limit { r#"{"title": "Pay the invoice"}"# } else { r#"{"title": "Pay the inv"# };
         match wire {
-            W::OpenAi | W::Compatible | W::Local => {
+            W::OpenAi => {
+                let said = if said.is_empty() { Vec::new() } else { openai_wire::says(0, &[said]) };
+                let usage = openai_wire::usage(10, 10, 0, 0);
+                let last = if at_limit { openai_wire::incomplete("max_output_tokens", usage) } else { openai_wire::completed(usage) };
+                openai_wire::responses(vec![said, openai_wire::call(1, "call_1", "create_task", arguments)], last)
+            }
+            W::Compatible | W::Local => {
                 let mut events = vec![json!({"choices": [{"delta": {"role": "assistant"}}]})];
                 if !said.is_empty() {
                     events.push(json!({"choices": [{"delta": {"content": said}}]}));
@@ -3856,7 +4085,8 @@ mod resend_counts {
     /// A reply with nothing said and no call.
     fn nothing_said(wire: W) -> Reply {
         match wire {
-            W::OpenAi | W::Compatible | W::Local => Reply::openai_sse(&[
+            W::OpenAi => openai_wire::responses(vec![], openai_wire::completed(openai_wire::usage(10, 0, 0, 0))),
+            W::Compatible | W::Local => Reply::openai_sse(&[
                 json!({"choices": [{"delta": {"role": "assistant"}, "finish_reason": "stop"}]}),
                 json!({"choices": [], "usage": {"prompt_tokens": 10, "completion_tokens": 0}}),
             ]),
@@ -3881,7 +4111,8 @@ mod resend_counts {
     /// A reply with only whitespace said and no call.
     fn only_whitespace(wire: W) -> Reply {
         match wire {
-            W::OpenAi | W::Compatible | W::Local => Reply::openai_sse(&[
+            W::OpenAi => openai_wire::responses(vec![openai_wire::says(0, &["\n"])], openai_wire::completed(openai_wire::usage(10, 1, 0, 0))),
+            W::Compatible | W::Local => Reply::openai_sse(&[
                 json!({"choices": [{"delta": {"role": "assistant"}}]}),
                 json!({"choices": [{"delta": {"content": "\n"}, "finish_reason": "stop"}]}),
                 json!({"choices": [], "usage": {"prompt_tokens": 10, "completion_tokens": 1}}),
