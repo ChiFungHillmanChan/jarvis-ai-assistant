@@ -4,7 +4,7 @@ use reqwest::Client;
 use serde::{Deserialize, Serialize};
 use serde_json::json;
 use std::collections::BTreeMap;
-use super::provider::{Call, ChatRequest, Event, Events, Metering, Outcome, Round, RoundError, Wire, SKIPPED};
+use super::provider::{Call, ChatRequest, Event, Events, Metering, Outcome, Round, RoundError, SystemPrompt, Wire, SKIPPED};
 use super::complete::{Completion, Request as PlainRequest};
 use super::bedrock::UiLanguage;
 use super::capability::Deeper;
@@ -13,7 +13,8 @@ use super::capability::Deeper;
 struct ClaudeRequest {
     model: String,
     max_tokens: u32,
-    system: String,
+    /// Text blocks ([`system_blocks`]), the first one cached.
+    system: Vec<serde_json::Value>,
     tools: Vec<serde_json::Value>,
     /// {"type":"none"} on the last allowed round, so the model answers from
     /// what the earlier rounds gathered instead of asking for another tool.
@@ -38,7 +39,7 @@ struct ClaudeRequest {
 struct TurnRequests {
     model: String,
     max_tokens: u32,
-    system: String,
+    system: Vec<serde_json::Value>,
     tools: Vec<serde_json::Value>,
     messages: Vec<ClaudeMessage>,
     thinking: Option<serde_json::Value>,
@@ -46,14 +47,14 @@ struct TurnRequests {
 }
 
 impl TurnRequests {
-    fn new(model: String, max_tokens: u32, system: String, tools: Vec<serde_json::Value>, messages: Vec<(String, String)>, deeper: Option<Deeper>) -> Self {
+    fn new(model: String, max_tokens: u32, system: SystemPrompt, tools: Vec<serde_json::Value>, messages: Vec<(String, String)>, deeper: Option<Deeper>) -> Self {
         let (thinking, output_config) = think_fields(deeper);
         let messages = messages
             .into_iter()
             .filter(|(_, content)| !content.trim().is_empty())
             .map(|(role, content)| ClaudeMessage { role, content: ClaudeContent::Text(content) })
             .collect();
-        TurnRequests { model, max_tokens, system, tools, messages, thinking, output_config }
+        TurnRequests { model, max_tokens, system: system_blocks(system), tools, messages, thinking, output_config }
     }
 
     fn request(&self, final_round: bool) -> ClaudeRequest {
@@ -96,6 +97,22 @@ impl TurnRequests {
 fn think_fields(deeper: Option<Deeper>) -> (Option<serde_json::Value>, Option<serde_json::Value>) {
     let Some(deeper) = deeper else { return (None, None) };
     (deeper.thinking.then(|| json!({"type": "adaptive"})), deeper.effort.then(|| json!({"effort": "high"})))
+}
+
+/// The system prompt in two text blocks, split as Bedrock splits it
+/// (`bedrock::build_system_blocks`): the static rules, then the part written
+/// for this request (the user's name, the time, the style settings, the
+/// memories). The one cache breakpoint is on the static rules. Anthropic
+/// renders the tools before the system prompt, so the breakpoint caches the
+/// tools and the rules together, and later requests within five minutes
+/// (the default lifetime) read them from the cache; the request's own part
+/// comes after it and is read in full every time. The conversation is not
+/// cached.
+fn system_blocks(system: SystemPrompt) -> Vec<serde_json::Value> {
+    vec![
+        json!({"type": "text", "text": system.cacheable, "cache_control": {"type": "ephemeral"}}),
+        json!({"type": "text", "text": system.dynamic}),
+    ]
 }
 
 #[derive(Serialize, Deserialize, Clone, Debug)]
@@ -304,7 +321,7 @@ impl Wire for ClaudeWire {
         let requests = TurnRequests::new(
             self.model.clone(),
             limits.chat_max_output_tokens.unwrap_or_default(),
-            request.system.joined(),
+            request.system,
             tools::to_claude_format(&request.tools),
             request.messages,
             request.deeper,
@@ -521,6 +538,10 @@ impl Wire for ClaudeWire {
 /// `tool_choice` and no prefilled reply: Claude's current models refuse a
 /// forced tool choice and a prefill with a 400 (P06 fix round 4, which
 /// replaced P02's forced tool call).
+/// No cache breakpoint either, unlike a chat turn: of the plain requests
+/// only mail sorting sends a system prompt, and its second line holds the
+/// email's dates (`mail::triage::luna_instructions`), so a cache entry would
+/// be written, at a higher price, for every email and read for none.
 pub(crate) fn claude_body(model: &str, request: &PlainRequest<'_>) -> serde_json::Value {
     let mut body = json!({
         "model": model,
@@ -568,7 +589,7 @@ mod tests {
     #[test]
     fn only_the_last_round_turns_tools_off() {
         let request = |tool_choice| {
-            serde_json::to_value(ClaudeRequest { model: "m".into(), max_tokens: 1, system: String::new(), tools: Vec::new(), tool_choice, messages: Vec::new(), stream: true, thinking: None, output_config: None }).unwrap()
+            serde_json::to_value(ClaudeRequest { model: "m".into(), max_tokens: 1, system: Vec::new(), tools: Vec::new(), tool_choice, messages: Vec::new(), stream: true, thinking: None, output_config: None }).unwrap()
         };
         assert_eq!(request(Some(json!({"type": "none"})))["tool_choice"]["type"], "none");
         assert!(request(None).get("tool_choice").is_none());
@@ -581,7 +602,7 @@ mod tests {
     fn think_harder_asks_for_adaptive_thinking_and_a_higher_effort() {
         let body = |deeper| {
             let (thinking, output_config) = think_fields(deeper);
-            serde_json::to_value(ClaudeRequest { model: "m".into(), max_tokens: 1, system: String::new(), tools: Vec::new(), tool_choice: None, messages: Vec::new(), stream: true, thinking, output_config }).unwrap()
+            serde_json::to_value(ClaudeRequest { model: "m".into(), max_tokens: 1, system: Vec::new(), tools: Vec::new(), tool_choice: None, messages: Vec::new(), stream: true, thinking, output_config }).unwrap()
         };
         let both = body(Some(Deeper { thinking: true, effort: true }));
         assert_eq!(both["thinking"], json!({"type": "adaptive"}));
@@ -618,8 +639,150 @@ mod tests {
         ])
     }
 
+    fn prompt(dynamic: &str) -> SystemPrompt {
+        SystemPrompt { cacheable: "You are JARVIS.".into(), dynamic: dynamic.into() }
+    }
+
     fn turn_requests(deeper: Option<Deeper>) -> TurnRequests {
-        TurnRequests::new("m".into(), 1_024, "You are JARVIS.".into(), vec![json!({"name": "list_events", "input_schema": {"type": "object"}})], vec![("user".into(), "What is on this week?".into())], deeper)
+        TurnRequests::new("m".into(), 1_024, prompt("Current user: Ada"), vec![json!({"name": "list_events", "input_schema": {"type": "object"}})], vec![("user".into(), "What is on this week?".into())], deeper)
+    }
+
+    /// The prefix a request's breakpoint caches, in the order Anthropic
+    /// renders it: the tools, then the system blocks up to the last one with
+    /// a breakpoint. With the model, and the thinking and effort settings,
+    /// which some models render ahead of the tools.
+    fn cached_prefix(body: &serde_json::Value) -> String {
+        let system = body["system"].as_array().unwrap();
+        let last = system.iter().rposition(|block| block.get("cache_control").is_some()).expect("a breakpoint");
+        serde_json::to_string(&json!([body["model"], body["thinking"], body["output_config"], body["tools"], system[..=last]])).unwrap()
+    }
+
+    /// A chat turn's request, Think harder or not and on its last round too:
+    /// the system prompt goes as the static rules with the one breakpoint
+    /// (five minutes, the default), then the request's own part, the two
+    /// texts Bedrock sends either side of its cache point. Every other field
+    /// is what went before caching, when the system prompt was one string,
+    /// the two parts joined by a blank line.
+    #[test]
+    fn a_chat_turn_caches_the_tools_and_the_static_rules_and_nothing_after() {
+        let tools = vec![json!({"name": "list_events", "description": "List events.", "input_schema": {"type": "object"}})];
+        let dynamic = "Current user: Ada\nCurrent local time: 2026-11-19T09:00:00+00:00";
+        for deeper in [None, Some(Deeper { thinking: true, effort: true }), Some(Deeper { thinking: false, effort: true })] {
+            let turn = TurnRequests::new("claude-sonnet-5-5".into(), 4_096, prompt(dynamic), tools.clone(), vec![("user".into(), "What is on today?".into())], deeper);
+            for final_round in [false, true] {
+                let body = serde_json::to_value(turn.request(final_round)).unwrap();
+                let case = format!("{deeper:?}, last round {final_round}");
+                assert_eq!(
+                    body["system"],
+                    json!([
+                        {"type": "text", "text": "You are JARVIS.", "cache_control": {"type": "ephemeral"}},
+                        {"type": "text", "text": dynamic},
+                    ]),
+                    "{case}"
+                );
+                let text = body.to_string();
+                assert_eq!(text.matches("cache_control").count(), 1, "one breakpoint (at most 4 are allowed): {case}");
+                assert!(!text.contains("ttl"), "the default lifetime, not the hour: {case}");
+                assert!(cached_prefix(&body).contains("You are JARVIS.") && !cached_prefix(&body).contains("Current user"), "the request's own part is after the breakpoint: {case}");
+
+                let mut before = json!({
+                    "model": "claude-sonnet-5-5",
+                    "max_tokens": 4096,
+                    "system": format!("You are JARVIS.\n\n{dynamic}"),
+                    "tools": [{"name": "list_events", "description": "List events.", "input_schema": {"type": "object"}}],
+                    "messages": [{"role": "user", "content": "What is on today?"}],
+                    "stream": true,
+                });
+                if final_round {
+                    before["tool_choice"] = json!({"type": "none"});
+                }
+                if deeper.is_some_and(|d| d.thinking) {
+                    before["thinking"] = json!({"type": "adaptive"});
+                }
+                if deeper.is_some_and(|d| d.effort) {
+                    before["output_config"] = json!({"effort": "high"});
+                }
+                let mut as_before = body.clone();
+                let blocks: Vec<&str> = body["system"].as_array().unwrap().iter().map(|block| block["text"].as_str().unwrap()).collect();
+                as_before["system"] = json!(blocks.join("\n\n"));
+                assert_eq!(as_before, before, "{case}");
+            }
+        }
+    }
+
+    /// Two turns of one conversation, a minute and a new memory apart, and
+    /// two Think harder turns the same way: the prefix up to the breakpoint
+    /// is byte for byte the same, so the second request reads what the first
+    /// wrote. Only the request's own part and the messages differ.
+    #[test]
+    fn the_prefix_up_to_the_breakpoint_stays_the_same_when_the_time_and_the_memories_change() {
+        use chrono::TimeZone;
+        let db = crate::db::test_database();
+        let tools = crate::ai::tools::to_claude_format(&crate::ai::tools::get_tool_definitions());
+        let system = |minute| SystemPrompt {
+            cacheable: crate::ai::tools::build_cacheable_system_prompt(),
+            dynamic: crate::ai::tools::build_dynamic_suffix("Ada", chrono::Local.with_ymd_and_hms(2026, 11, 19, 9, minute, 0).unwrap(), "en", &db),
+        };
+        let first_turn = vec![("user".to_string(), "What is on today?".to_string())];
+        let mut second_turn = first_turn.clone();
+        second_turn.extend([("assistant".to_string(), "Nothing today.".to_string()), ("user".to_string(), "Remember Kenny is my accountant.".to_string())]);
+        for deeper in [None, Some(Deeper { thinking: true, effort: true })] {
+            db.conn.lock().unwrap().execute("DELETE FROM user_memory", []).unwrap();
+            let first = serde_json::to_value(TurnRequests::new("claude-sonnet-5-5".into(), 4_096, system(0), tools.clone(), first_turn.clone(), deeper).request(false)).unwrap();
+            db.conn.lock().unwrap().execute("INSERT INTO user_memory (category, content) VALUES ('fact', 'Kenny is my accountant')", []).unwrap();
+            let second = serde_json::to_value(TurnRequests::new("claude-sonnet-5-5".into(), 4_096, system(1), tools.clone(), second_turn.clone(), deeper).request(false)).unwrap();
+            assert_eq!(cached_prefix(&second), cached_prefix(&first), "{deeper:?}");
+            let own_part = |body: &serde_json::Value| body["system"][1]["text"].as_str().unwrap().to_string();
+            assert!(own_part(&first).contains("09:00:00") && !own_part(&first).contains("Kenny"), "{deeper:?}");
+            assert!(own_part(&second).contains("09:01:00") && own_part(&second).contains("Kenny is my accountant"), "{deeper:?}");
+        }
+    }
+
+    /// A plain request goes as before, with no breakpoint: mail sorting's
+    /// system prompt changes from its second line for every email, and the
+    /// Settings test and mail analysis send none.
+    #[test]
+    fn a_plain_request_is_not_cached() {
+        let request = |system, json| PlainRequest { system, user: "<email>", json, max_tokens: 2_048, feature: crate::ai::cost::Feature::MailSort };
+        assert_eq!(
+            claude_body("claude-sonnet-5-5", &request("Sort this email.", true)),
+            json!({
+                "model": "claude-sonnet-5-5",
+                "max_tokens": 2048,
+                "system": format!("Sort this email.\n\n{}", crate::ai::bedrock::JSON_INSTRUCTION),
+                "messages": [{"role": "user", "content": "<email>"}],
+            })
+        );
+        assert_eq!(
+            claude_body("claude-sonnet-5-5", &request("", false)),
+            json!({"model": "claude-sonnet-5-5", "max_tokens": 2048, "messages": [{"role": "user", "content": "<email>"}]})
+        );
+    }
+
+    /// A request that wrote and read the cache: 120 tokens in at the full
+    /// rate, 6,400 read, 1,500 written and 300 out on Sonnet 4.6 (registry
+    /// version 1: US$3 in, $15 out, $0.30 cache read and $3.75 cache write
+    /// per 1M) is 360 + 4,500 + 1,920 + 5,625 = 12,405 micro-USD. The row
+    /// holds the input with the cache in it, as every provider's row does;
+    /// the one-time step for old rows leaves it as stored (rule 4 never
+    /// changes a Claude row), and the usage page's input without the cache
+    /// is the 120.
+    #[test]
+    fn a_reply_that_wrote_and_read_the_cache_is_stored_and_priced() {
+        let db = crate::db::test_database();
+        let mut turn = crate::ai::cost::TurnUsage::new("claude", "claude-sonnet-4-6");
+        RoundUsage { input: 120, output: 300, cache_read: 6_400, cache_write: 1_500 }.add_to(&mut turn);
+        turn.record(&db, crate::ai::Workload::Tools, 1);
+        let conn = db.conn.lock().unwrap();
+        let stored = |conn: &rusqlite::Connection| -> (i64, i64, i64, i64, Option<i64>, bool) {
+            conn.query_row("SELECT input_tokens, output_tokens, cache_read_tokens, cache_write_tokens, usd_cost_micro, price_unknown FROM inference_metrics", [], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?, r.get(5)?))).unwrap()
+        };
+        assert_eq!(stored(&conn), (8_020, 300, 6_400, 1_500, Some(12_405), false));
+        assert_eq!(crate::ai::cost::correct_old_rows(&conn).unwrap(), crate::ai::cost::Corrected::default());
+        assert_eq!(stored(&conn), (8_020, 300, 6_400, 1_500, Some(12_405), false));
+        let period = crate::ai::usage::Period::last(30, chrono::Utc::now().timestamp()).unwrap();
+        let sums = crate::ai::usage::totals(&conn, period).unwrap().sums;
+        assert_eq!((sums.input_tokens, sums.input_without_cache, sums.cache_read_tokens, sums.cache_write_tokens, sums.known_cost_micro), (8_020, 120, 6_400, 1_500, 12_405));
     }
 
     fn last_reply(turn: &TurnRequests) -> serde_json::Value {

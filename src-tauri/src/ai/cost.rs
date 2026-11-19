@@ -339,9 +339,11 @@ pub struct Corrected {
 ///    stored one Bedrock row per request, so the price, a long-context tier
 ///    included, applies to one request, as it does to a new row.
 ///    A Claude row is never changed by this rule, whatever it holds. No
-///    release asked Anthropic to cache (`cache_control` is in no release's
-///    ai/claude.rs), so the Claude rows releases stored hold no cache
-///    figures and their costs were right.
+///    release up to v0.5.12 asked Anthropic to cache, so the Claude rows
+///    those releases stored hold no cache figures and their costs were
+///    right. Chat turns ask from the build that added ai/claude.rs
+///    `system_blocks` on, and those rows hold the cache in their input, as
+///    every new row does (`RoundUsage::figures`).
 ///
 /// Rules 1 to 3 decide the cost on the tokens as stored, which is what the
 /// old guess was worked out on; rule 4 then corrects the input. A row that
@@ -968,7 +970,8 @@ pub(crate) mod tests {
         let conn = db.conn.lock().unwrap();
         // A Claude row with cache figures, input below its cache and an old
         // date: what rule 4 would take for proven old on Bedrock. No release
-        // stored one (no release asked Anthropic to cache), and rule 4 never
+        // stored one (none up to v0.5.12 asked Anthropic to cache, and the
+        // builds that do store the cache in the input), and rule 4 never
         // changes a Claude row.
         let sonnet = crate::ai::models::cost_micro_at(crate::ai::models::price_for("claude-sonnet-4-6").unwrap(), 2_750, 770, 24_300, 120);
         insert(&conn, &[
