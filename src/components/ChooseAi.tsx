@@ -4,7 +4,7 @@ import { chooseAi, currentAi, listAiModels, type AiProvider, type CurrentAi } fr
 import { invoke } from '@tauri-apps/api/core';
 import { listen } from '@tauri-apps/api/event';
 import { openUrl } from '../lib/commands';
-import type { ConsentRequest } from '../lib/ai-error';
+import { errorLine, type ConsentRequest } from '../lib/ai-error';
 import ConsentCard from './ConsentCard';
 import { aiModels, useAiModels, type AiModelCatalog } from '../lib/ai-models';
 import { localized, serviceFor, serviceLabel, setupOptions, type SetupOption } from '../lib/ai-catalog';
@@ -103,7 +103,9 @@ export default function ChooseAi({ onChosen, onBusyChange }: { onChosen?: (ai: C
   async function run(label: string, action: () => Promise<void>) {
     if (busy) return;
     setBusy(label); setError(''); setNotice('');
-    try { await action(); } catch (e) { if (mounted.current) setError(String(e)); } finally { if (mounted.current) setBusy(''); }
+    // A failed test comes as the error card's data (ai/failure.rs); this
+    // panel has no card, so it shows the card's sentence.
+    try { await action(); } catch (e) { if (mounted.current) setError(errorLine(e, text)); } finally { if (mounted.current) setBusy(''); }
   }
   function loadModels(kind: AiProvider) {
     return run(text('Loading models', '載入模型'), async () => {

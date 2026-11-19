@@ -1,6 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { addNotice, consentCopy, consentStatus, noticeHeading, offeredModels, offersPlainResend, parseAiError, pickAction, pickerText, problemText, GEMINI_BILLING_PAGE, type ConsentRequest, type Failure, type GivenConsent } from '../src/lib/ai-error.ts';
+import { readFileSync } from 'node:fs';
+import { addNotice, consentCopy, consentStatus, errorLine, noticeHeading, offeredModels, offersPlainResend, parseAiError, pickAction, pickerText, problemText, serviceSaid, GEMINI_BILLING_PAGE, type ConsentRequest, type Failure, type GivenConsent } from '../src/lib/ai-error.ts';
 import { chatStatusText } from '../src/lib/chat-status.ts';
 
 // P06: a request that fails, or email held back by a provider's data
@@ -117,4 +118,44 @@ test('a background notice for content not sent says so in its heading', () => {
   assert.equal(noticeHeading('google_content', zh), 'Gmail 及日曆內容未有傳送');
   assert.equal(noticeHeading('unsupported', en), 'A job could not run on your AI');
   assert.equal(noticeHeading(undefined, zh), '一項背景工作未能使用你的 AI 執行');
+});
+
+// F2 (native-qa, 2026-11-19): "Test and use this AI" in Settings → Your AI
+// and in the setup guide showed the failure card's raw data
+// ({"jarvis_ai":{"failure":...). The panel has no card, so the line is the
+// card's sentence, then the service's own reason as the card gives it.
+test("a failed test shows the card's sentence and the service's reason, never its data", () => {
+  const scoped = 'This API key is not scoped to a workspace, so this request must include the anthropic-workspace-id header';
+  const refused = (message: string) => JSON.stringify({ jarvis_ai: { kind: 'failure', failure: failure({ message, provider_reason: scoped }) } });
+  assert.equal(
+    errorLine(refused('Claude Sonnet 5.5 (Anthropic Claude) did not accept this request (400). Check the chosen model, or pick another one.'), en),
+    `Claude Sonnet 5.5 (Anthropic Claude) did not accept this request (400). Check the chosen model, or pick another one. The service said: ${scoped}`,
+  );
+  assert.equal(
+    errorLine(refused('Claude Sonnet 5.5 (Anthropic Claude) 不接受這個請求（400），請檢查所選模型，或改用其他模型。'), zh),
+    `Claude Sonnet 5.5 (Anthropic Claude) 不接受這個請求（400），請檢查所選模型，或改用其他模型。服務回覆：${scoped}`,
+  );
+  // As seen in the window: a 404 with no reason of the service's own.
+  const notFound = 'Gemini 2.5 Flash (Google Gemini) could not find the chosen model or address (404).';
+  const seen = JSON.stringify({ jarvis_ai: { kind: 'failure', failure: failure({ code: 'not_found', message: notFound, provider_reason: null }) } });
+  assert.equal(errorLine(seen, en), notFound);
+  assert.equal(errorLine(new Error(seen), en), notFound);
+  // The test path cannot hold email back for consent (Feature::Other), but a
+  // consent card would be a sentence too.
+  assert.equal(errorLine(JSON.stringify({ jarvis_ai: { kind: 'consent', consent: kimi } }), zh), '電郵及日曆內容須待你同意 Kimi 的資料條款後才會傳送。');
+  for (const shown of [errorLine(refused('x'), en), errorLine(seen, zh)]) assert.ok(!shown.includes('{') && !shown.includes('jarvis_ai'), shown);
+  // Any other error, such as the model list's own, is shown as it is.
+  assert.equal(errorLine('Claude rejected this API key. Check it and try again.', en), 'Claude rejected this API key. Check it and try again.');
+  assert.equal(serviceSaid(scoped, zh), `服務回覆：${scoped}`);
+});
+
+test('Settings → Your AI and the setup guide show the error through that line', () => {
+  const source = (path: string) => readFileSync(new URL(path, import.meta.url), 'utf8');
+  const chooseAi = source('../src/components/ChooseAi.tsx');
+  assert.match(chooseAi, /catch \(e\) \{ if \(mounted\.current\) setError\(errorLine\(e, text\)\); \}/);
+  assert.doesNotMatch(chooseAi, /setError\(String\(/);
+  // The setup guide's AI step is this panel, so it shows the same line.
+  assert.match(source('../src/pages/QuickSetup.tsx'), /<ChooseAi /);
+  // The card and the line say "The service said" with the same words.
+  assert.match(source('../src/components/ModelErrorCard.tsx'), /\{serviceSaid\(failure\.provider_reason, text\)\}/);
 });
