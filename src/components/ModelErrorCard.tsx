@@ -1,7 +1,7 @@
 import { useState } from 'react';
 import { invoke } from '@tauri-apps/api/core';
 import { useUiLocale } from '../i18n';
-import { offeredModels, offersPlainResend, pickAction, pickerText, type Alternative, type Failure, type Pick } from '../lib/ai-error';
+import { offeredModels, offersPlainResend, pickAction, pickerText, serviceSaid, type Alternative, type Failure, type Pick } from '../lib/ai-error';
 
 /**
  * A request that did not get an answer (P06): the model, why, and the
@@ -44,7 +44,7 @@ export default function ModelErrorCard({ failure, onRetry, onPlainResend }: { fa
   return <div className="ai-card is-error" role="alert">
     <p><strong>{failure.model.label}</strong></p>
     <p>{failure.message}</p>
-    {failure.provider_reason && <p><small>{text('The service said: ', '服務回覆：')}{failure.provider_reason}</small></p>}
+    {failure.provider_reason && <p><small>{serviceSaid(failure.provider_reason, text)}</small></p>}
     {onPlainResend && offersPlainResend(failure) && <div className="tool-approval-actions"><button type="button" className="update-toast-action" disabled={busy} onClick={() => void plain()}>{text('Send again without Think harder', '不使用深入思考再次傳送')}</button></div>}
     {failure.actions_ran > 0
       ? <p>{text('Actions already carried out are kept. JARVIS does not send this request again, so nothing is done twice. Check the result before asking again.', '已完成的操作會保留。為免重複執行，JARVIS 不會再次傳送這個請求。請先檢查結果，再重新提出要求。')}</p>

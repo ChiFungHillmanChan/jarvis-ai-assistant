@@ -311,6 +311,33 @@ fn synthetic_facts_present(text: &str) -> bool {
         && facts.citation == "[郵件 #1]"
 }
 
+/// The hint for a mail check that failed, from JARVIS's own text only. A
+/// failure card's `provider_reason` is the provider's words (ai/failure.rs),
+/// so it is left out and cannot change the hint.
+fn probe_error_code(error: &str) -> &'static str {
+    let mut card = serde_json::from_str::<serde_json::Value>(error).ok();
+    let reason = card
+        .as_mut()
+        .and_then(|card| card.pointer_mut("/jarvis_ai/failure"))
+        .and_then(|failure| failure.as_object_mut())
+        .and_then(|failure| failure.remove("provider_reason"));
+    let error = match (reason, card) {
+        (Some(_), Some(card)) => card.to_string(),
+        _ => error.to_string(),
+    };
+    if error.contains("合成事實") {
+        "incorrect_facts"
+    } else if error.contains("引用") {
+        "invalid_citation"
+    } else if error.contains("未能連接") || error.contains("網絡") {
+        "connection_failed"
+    } else if error.contains("模型") {
+        "model_unavailable"
+    } else {
+        "probe_failed"
+    }
+}
+
 #[tauri::command]
 pub async fn test_mail_ai_connection(
     db: State<'_, Arc<Database>>,
@@ -386,17 +413,7 @@ pub async fn test_mail_ai_connection(
                 }
             }
             status.state = "action_required";
-            status.error_code = Some(if error.contains("合成事實") {
-                "incorrect_facts"
-            } else if error.contains("引用") {
-                "invalid_citation"
-            } else if error.contains("未能連接") || error.contains("網絡") {
-                "connection_failed"
-            } else if error.contains("模型") {
-                "model_unavailable"
-            } else {
-                "probe_failed"
-            });
+            status.error_code = Some(probe_error_code(&error));
             status.checked_at = None;
         }
     }
@@ -448,6 +465,41 @@ mod tests {
     fn verification_test_lock() -> std::sync::MutexGuard<'static, ()> {
         static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
         LOCK.get_or_init(|| Mutex::new(())).lock().unwrap()
+    }
+
+    /// X5 review, finding 2: a refused mail check's card can carry the
+    /// provider's own words (`provider_reason`). The hint comes from JARVIS's
+    /// text only, so a reason in Chinese that mentions a model, a citation
+    /// or a connection does not change it.
+    #[test]
+    fn a_providers_reason_does_not_steer_the_mail_check_hint() {
+        use crate::ai::bedrock::UiLanguage;
+        use crate::ai::capability::{Pick, Target};
+        use crate::ai::failure::{refusal, Failure};
+        let model = Target { pick: Pick { provider_type: "compatible".into(), base_url: Some("http://127.0.0.1:8080/v1".into()), endpoint_id: None, model_id: Some("qwen-local".into()) }, provider: "openai_compat".into(), model: Some("qwen-local".into()), label: "qwen-local (127.0.0.1)".into() };
+        let card = |reason: Option<&str>, language| {
+            let body = match reason {
+                Some(reason) => serde_json::json!({ "error": { "message": reason } }).to_string(),
+                None => "<html>Bad Request</html>".to_string(),
+            };
+            let error = refusal("127.0.0.1 不接受這個請求（400），請檢查所選模型。".into(), &body);
+            Failure::failed("mail_analysis", model.clone(), &error, 0, Vec::new(), language).to_error()
+        };
+        for language in [UiLanguage::En, UiLanguage::ZhHk] {
+            let without = probe_error_code(&card(None, language));
+            assert_eq!(without, language.pick("probe_failed", "model_unavailable"), "JARVIS's sentence alone");
+            for reason in ["输入内容超过模型最大长度", "请求引用了无效的参数", "未能連接上游服務", "網絡逾時", "合成事實"] {
+                let error = card(Some(reason), language);
+                assert!(error.contains(reason), "the card carries the reason: {error}");
+                assert_eq!(probe_error_code(&error), without, "{language:?}: {reason}");
+            }
+        }
+        // JARVIS's own sentences keep their hints.
+        assert_eq!(probe_error_code("合成事實檢查失敗"), "incorrect_facts");
+        assert_eq!(probe_error_code("未能連接 Gemini，請檢查網絡。"), "connection_failed");
+        assert_eq!(probe_error_code("引用格式無效"), "invalid_citation");
+        assert_eq!(probe_error_code("找不到所選模型"), "model_unavailable");
+        assert_eq!(probe_error_code("something else"), "probe_failed");
     }
 
     #[test]

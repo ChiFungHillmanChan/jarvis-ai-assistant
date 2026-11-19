@@ -9,9 +9,14 @@
 //! records a plain sentence and one notice is raised per launch
 //! ([`Failure::surface`]).
 //!
-//! The reason is always JARVIS's own wording for the provider's error code.
-//! A provider's error body is never shown or stored: it can quote the
-//! request, and the request can be mail.
+//! The reason is JARVIS's own wording for the provider's error code. Of a
+//! provider's error body, only its `error.message` may be shown on screen:
+//! on one line, at most 300 characters, for a foreground request the
+//! provider refused (`Code::BadRequest` or `Code::NotFound`), as
+//! `provider_reason` in the card's data.
+//! A background run's sentence and notice leave it out. Nothing of the body
+//! is ever logged or stored: it can quote the request, and the request can
+//! be mail.
 
 use super::bedrock::UiLanguage;
 use super::capability::{Alternative, Reason, Target};
@@ -52,9 +57,32 @@ impl Code {
     }
 }
 
+/// Between JARVIS's own sentence for a refused plain request and the
+/// provider's reason after it ([`refusal`]). The ASCII unit separator: JSON
+/// never holds it unescaped, and JARVIS's sentences never hold it.
+const REASON_MARK: char = '\u{1f}';
+
+/// JARVIS's part of an error: all of it, or a [`refusal`]'s sentence
+/// without the provider's reason. The class and the status are read from
+/// this part only, so the reason changes neither, nor the log line.
+fn own(err: &str) -> &str {
+    err.split(REASON_MARK).next().unwrap_or(err)
+}
+
+/// A plain request the provider refused (complete.rs): JARVIS's sentence,
+/// then the reply's `error.message` for the card's `provider_reason`, as a
+/// chat wire's error carries it. Nothing else of the reply is kept.
+pub(crate) fn refusal(sentence: String, body: &str) -> String {
+    match message_in(body) {
+        Some(message) => format!("{sentence}{REASON_MARK}{}", serde_json::json!({ "error": { "message": message } })),
+        None => sentence,
+    }
+}
+
 /// The HTTP status in the router's "<provider> API error <status>: <body>"
 /// strings, or in the "（<status>）" of complete.rs's own messages.
 fn status_in(err: &str) -> Option<u16> {
+    let err = own(err);
     let digits = |rest: &str| rest.split(|c: char| !c.is_ascii_digit()).next().and_then(|d| d.parse().ok());
     // "<provider> API error <status>: ..." from the chat wires, and
     // "<provider> STT error <status>: ..." from voice/transcribe.rs.
@@ -64,12 +92,22 @@ fn status_in(err: &str) -> Option<u16> {
     err.split('（').skip(1).find_map(|rest| digits(rest).filter(|s: &u16| (100..600).contains(s)))
 }
 
-/// The `error.message` of a provider's JSON error reply
-/// ("<provider> API error <status>: {...}"), on one line and capped. The
-/// rest of the reply is never read out.
+/// The `error.message` of a provider's JSON error reply, from a chat wire
+/// ("<provider> API error <status>: {...}") or a plain request's
+/// [`refusal`], on one line and capped. The rest of the reply is never
+/// read out.
 fn provider_reason(err: &str) -> Option<String> {
-    let rest = err.split(" API error ").nth(1)?;
-    let body = &rest[rest.find('{')?..];
+    let rest = match err.split_once(REASON_MARK) {
+        Some((_, reason)) => reason,
+        None => err.split(" API error ").nth(1)?,
+    };
+    message_in(rest)
+}
+
+/// The `error.message` of the first JSON object in `text`, on one line and
+/// at most 300 characters.
+fn message_in(text: &str) -> Option<String> {
+    let body = &text[text.find('{')?..];
     let value: serde_json::Value = serde_json::Deserializer::from_str(body).into_iter().next()?.ok()?;
     let message = value.pointer("/error/message")?.as_str()?.split_whitespace().collect::<Vec<_>>().join(" ");
     if message.is_empty() {
@@ -179,7 +217,7 @@ pub fn status_code(status: u16, body_lower: &str) -> Code {
 /// complete.rs carry it: JARVIS's own sentences (complete.rs, bedrock.rs),
 /// Bedrock's error codes, or "<provider> API error <status>: <body>".
 pub fn code_of(err: &str) -> Code {
-    let lower = err.to_lowercase();
+    let lower = own(err).to_lowercase();
     let any = |marks: &[&str]| marks.iter().any(|m| lower.contains(m));
     if any(&["api key configured", "credentials are not set up", "credentials not configured", "could not read your saved aws credentials", "未能讀取已儲存的 aws 憑證"]) || (lower.contains("尚未設定") && (lower.contains("密鑰") || lower.contains("憑證"))) {
         return Code::NoKey;
@@ -543,6 +581,43 @@ mod tests {
         // No message field, a server error, or a rate limit: nothing is quoted.
         assert_eq!(Failure::failed("chat", target("Gemini"), "Gemini API error 400 Bad Request: {\"error\":\"PRIVATE-MAIL-CANARY\"}", 0, vec![], UiLanguage::En).provider_reason, None);
         assert_eq!(Failure::failed("chat", target("Gemini"), "Gemini API error 503: {\"error\":{\"message\":\"overloaded\"}}", 0, vec![], UiLanguage::En).provider_reason, None);
+    }
+
+    /// X5: Anthropic states why it refused a request in its 400's
+    /// `error.message` (here a key not scoped to a workspace; a credit
+    /// balance too low is another). The card quotes it from the chat wire's
+    /// error (claude.rs) and from a plain request's refusal (complete.rs:
+    /// Settings' test, mail analysis), in either language, capped, and
+    /// nothing else of the reply. The class, the status and the log line
+    /// are JARVIS's sentence's, whatever the reason says.
+    #[test]
+    fn claudes_reason_for_a_400_reaches_the_card_on_both_paths() {
+        let scoped = "This API key is not scoped to a workspace, so this request must include the anthropic-workspace-id header";
+        let reply = format!(r#"{{"type":"error","error":{{"type":"invalid_request_error","message":"{scoped}"}},"request_id":"req_PRIVATE-MAIL-CANARY"}}"#);
+        let chat = format!("Claude API error 400 Bad Request: {reply}");
+        let plain = refusal("Claude 不接受這個請求（400），請檢查所選模型。".into(), &reply);
+        for language in [UiLanguage::En, UiLanguage::ZhHk] {
+            for error in [&chat, &plain] {
+                let failure = Failure::failed("other", target("Claude Sonnet 5.5 (Anthropic Claude)"), error, 0, vec![], language);
+                assert_eq!(failure.code, Code::BadRequest, "{error}");
+                assert_eq!(failure.message, reason_text(Code::BadRequest, "Claude Sonnet 5.5 (Anthropic Claude)", "other", Some(400), language));
+                assert_eq!(failure.provider_reason.as_deref(), Some(scoped), "{error}");
+                assert!(!failure.to_error().contains("CANARY"), "nothing else of the reply");
+            }
+        }
+        assert_eq!(log_line("Claude", &plain), "Claude failed (BadRequest): HTTP 400");
+        assert_eq!(log_line("Claude", &chat), "Claude failed (BadRequest): HTTP 400, invalid_request_error");
+
+        let credit = refusal("Claude 不接受這個請求（400），請檢查所選模型。".into(), r#"{"type":"error","error":{"type":"invalid_request_error","message":"Your credit balance is too low\nto access the Anthropic API."}}"#);
+        assert_eq!(provider_reason(&credit).as_deref(), Some("Your credit balance is too low to access the Anthropic API."));
+        // What the reason says changes neither the class nor the status.
+        let odd = refusal("Kimi 找不到所選模型或網址（404）。".into(), r#"{"error":{"message":"upstream API error 503: ThrottlingException, api key configured"}}"#);
+        assert_eq!((code_of(&odd), status_in(&odd)), (Code::NotFound, Some(404)), "{odd}");
+        assert_eq!(log_line("Kimi", &odd), "Kimi failed (NotFound): HTTP 404");
+        // No message, nothing kept; a long one is capped as on chat.
+        assert_eq!(refusal("Kimi 找不到所選模型或網址（404）。".into(), "<html>PRIVATE-MAIL-CANARY</html>"), "Kimi 找不到所選模型或網址（404）。");
+        let long = refusal("x".into(), &format!(r#"{{"error":{{"message":"{}"}}}}"#, "y".repeat(500)));
+        assert_eq!(provider_reason(&long).map(|r| r.chars().count()), Some(301));
     }
 
     /// After an action ran, the card offers nothing: no model, not even the

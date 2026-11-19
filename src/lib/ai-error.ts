@@ -117,6 +117,23 @@ export function problemText(problem: AiProblem, text: (en: string, zh: string) =
     : text(`Email and calendar content waits for your agreement to ${problem.consent.label}'s data terms.`, `電郵及日曆內容須待你同意 ${problem.consent.label} 的資料條款後才會傳送。`);
 }
 
+/** The provider's own reason for a refused request, as the error card shows it. */
+export function serviceSaid(reason: string, text: (en: string, zh: string) => string): string {
+  return text('The service said: ', '服務回覆：') + reason;
+}
+
+/**
+ * An error as one line, where no card fits (Settings → Your AI and the
+ * setup guide's AI step): a card's sentence, then the provider's own
+ * reason when it gave one; any other error as it is. Never the card's data.
+ */
+export function errorLine(error: unknown, text: (en: string, zh: string) => string): string {
+  const problem = parseAiError(error);
+  if (!problem) return String(error);
+  const reason = problem.kind === 'failure' ? problem.failure.provider_reason : null;
+  return reason ? problemText(problem, text) + text(' ', '') + serviceSaid(reason, text) : problemText(problem, text);
+}
+
 /** The heading of a background notice (ai-needs-model): content not sent at all, or a job that could not run. */
 export function noticeHeading(code: string | undefined, text: (en: string, zh: string) => string): string {
   return code === 'google_content'
