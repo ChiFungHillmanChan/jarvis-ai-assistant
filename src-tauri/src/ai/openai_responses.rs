@@ -293,7 +293,7 @@ impl Wire for ResponsesWire {
             };
             buffer.extend(&chunk);
             while let Some(block) = buffer.next_event() {
-                let data = block.lines().filter(|line| !line.starts_with(':')).filter_map(|line| line.strip_prefix("data: ")).last().unwrap_or_default();
+                let data = block.lines().filter(|line| !line.starts_with(':')).filter_map(|line| line.strip_prefix("data: ")).next_back().unwrap_or_default();
                 // OpenAI ends a Responses stream with its last event, not
                 // `[DONE]`; one is skipped all the same.
                 if data.is_empty() || data == "[DONE]" {
