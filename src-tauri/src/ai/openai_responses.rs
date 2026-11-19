@@ -5,8 +5,9 @@
 //! Every request sends `store: false` and nothing that keeps state at
 //! OpenAI: no `previous_response_id`, conversation, background mode or
 //! hosted tool. The app holds the conversation. Within one turn each
-//! round's output items go back verbatim, encrypted reasoning included, as
-//! OpenAI documents for stateless use; they live only in the turn's memory.
+//! round's output items go back with every field as it came, encrypted
+//! reasoning included, as OpenAI documents for stateless use; they live
+//! only in the turn's memory.
 
 use super::bedrock::UiLanguage;
 use super::complete::{Completion, Request as PlainRequest};
