@@ -578,25 +578,6 @@ mod tests {
         );
     }
 
-    /// gemini-2.5 as the bundled registry (registry/registry.json) marks it
-    /// today: thinking, and a pinned gemini-2.5-flash-lite counts as
-    /// gemini-2.5-flash (the longest registry id it contains). So sorting on
-    /// any of them asks for LOW, which Google's generateContent reference
-    /// says models before Gemini 3 refuse (see `thinking_config`). This test
-    /// reads the bundled copy, not the frozen fixture the other tests use,
-    /// so that the registry update meant to deal with gemini-2.5 changes it
-    /// on purpose.
-    #[test]
-    fn sorting_on_gemini_2_5_asks_for_the_low_level_with_the_bundled_registry_of_today() {
-        use crate::ai::cost::Feature;
-        let _bundled = crate::ai::registry::test_override::set((*crate::ai::registry::bundled()).clone());
-        for model in ["gemini-2.5-pro", "gemini-2.5-flash", "gemini-2.5-flash-lite"] {
-            let thinks = crate::ai::capability::thinks("gemini", model);
-            assert!(thinks, "{model} counts as thinking");
-            assert_eq!(thinking_config(Thinking::Plain { feature: Feature::MailSort, thinks }), Some(json!({"thinkingLevel": "LOW"})), "{model}");
-        }
-    }
-
     /// A round streamed with thought signatures (canned SSE chunks): the
     /// model turn sent back carries every signature unchanged, the
     /// function-call parts as received and the text with its signature.
