@@ -95,8 +95,10 @@ test('the validator rejects a missing feature default', () => {
 test('the validator rejects a disabled or deprecated model used as a default', () => {
   const disabled = errorsFor(doc => { model(doc, 'gpt-6-luna').status = 'disabled'; model(doc, 'gpt-6-luna').replacement = 'gpt-5.6-luna'; });
   assert.ok(disabled.some(e => e.includes('features.chat.openai: model "gpt-6-luna" is disabled')), disabled.join('\n'));
-  // A default that reaches its entry through the price lookup is checked the same way.
-  const viaLookup = errorsFor(doc => { model(doc, 'gemini-3.1-pro').status = 'disabled'; });
+  // A default that reaches its entry through the price lookup is checked the
+  // same way. On the frozen fixture, where gemini-3.1-pro-preview reaches the
+  // gemini-3.1-pro entry; the editable file names that model exactly.
+  const viaLookup = (() => { const doc = fixture(); model(doc, 'gemini-3.1-pro').status = 'disabled'; return validateRegistry(doc); })();
   assert.ok(viaLookup.some(e => e.includes('features.premium.gemini: model "gemini-3.1-pro-preview" is disabled')));
   assert.ok(viaLookup.some(e => e.includes('presets.chains.gemini_pro_only[0]')));
   assert.ok(errorsFor(doc => { model(doc, 'claude-sonnet-5-5').status = 'deprecated'; model(doc, 'claude-sonnet-5-5').replacement = 'claude-opus-5-5'; })

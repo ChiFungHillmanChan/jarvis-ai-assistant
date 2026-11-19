@@ -619,4 +619,16 @@ mod tests {
         });
         assert_eq!(deeper_for(&row("claude", None, None), Workload::Premium), Some(Deeper { thinking: false, effort: true }));
     }
+
+    /// A deprecated saved model still runs: the registry marks a model the
+    /// provider still serves as deprecated, and only a disabled one stops.
+    #[test]
+    fn a_deprecated_model_still_runs() {
+        let _registry = test_override::with(|r| {
+            let entry = r.models.iter_mut().find(|m| m.id == "gpt-5.6-luna").unwrap();
+            entry.status = registry::Status::Deprecated;
+            entry.replacement = Some("gpt-6-luna".into());
+        });
+        assert_eq!(ready("chat", &row("openai", Some("gpt-5.6-luna"), None)).model.as_deref(), Some("gpt-5.6-luna"));
+    }
 }
