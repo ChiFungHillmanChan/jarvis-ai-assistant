@@ -888,7 +888,7 @@ export default function Settings() {
 
             <div style={{ display: "flex", gap: 6, marginTop: 8, flexWrap: "wrap" }}>
               <button disabled={!models} onClick={() => models && handleAddToChain("gemini", undefined, models.defaults.gemini_pro)} style={styles.saveBtn}>+ Gemini Pro</button>
-              <button disabled={!models} onClick={() => models && handleAddToChain("gemini", undefined, models.defaults.gemini_flash)} style={styles.saveBtn}>+ Gemini Flash</button>
+              <button disabled={!models} onClick={() => models && handleAddToChain("gemini", undefined, models.defaults.gemini_flash)} style={styles.saveBtn}>+ Gemini</button>
               <button onClick={() => handleAddToChain("claude")} style={styles.saveBtn}>+ Claude</button>
               <button onClick={() => handleAddToChain("openai")} style={styles.saveBtn}>+ OpenAI</button>
               <button disabled={!models} onClick={() => models && handleAddToChain("bedrock", undefined, models.defaults.bedrock)} style={styles.saveBtn}>+ Bedrock</button>
