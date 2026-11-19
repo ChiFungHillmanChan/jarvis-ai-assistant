@@ -1136,7 +1136,7 @@ impl AiRouter {
             "openai" if entry.base_url.is_some() => {
                 let base = entry.base_url.clone().unwrap_or_default();
                 let Some(key) = self.compat_key(&base).await else { return Err(format!("No {} API key configured", compat::label(&base))) };
-                let wire = openai::OpenAiWire::new(&key, openai::Target { base_url: Some(&base), model: entry.model_id.as_deref(), deeper })?;
+                let wire = openai::OpenAiWire::new(&key, openai::Target { base_url: Some(&base), model: entry.model_id.as_deref() })?;
                 provider::chat(&wire, chat_request(db, messages, deeper), turn).await
             }
             "openai" => {

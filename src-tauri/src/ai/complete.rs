@@ -151,7 +151,7 @@ async fn complete_one(router: &AiRouter, db: &Database, entry: &ProviderChainEnt
             Some(base) => {
                 let key = router.compat_key(base).await.ok_or_else(|| format!("尚未設定 {} API 密鑰。", compat::label(base)))?;
                 let model = entry.model_id.clone().filter(|m| !m.trim().is_empty()).ok_or_else(|| format!("尚未為 {} 選擇模型。", compat::label(base)))?;
-                OpenAiWire::new(&key, Target { base_url: Some(base), model: Some(&model), deeper: None })?.complete(request, language).await
+                OpenAiWire::new(&key, Target { base_url: Some(base), model: Some(&model) })?.complete(request, language).await
             }
             None => {
                 let key = router.openai_key.clone().ok_or("尚未設定 OpenAI API 密鑰。")?;
@@ -271,12 +271,10 @@ pub(crate) mod tests {
     #[test]
     fn chat_completions_bodies_follow_each_service() {
         let request = Request { system: "rules", user: "hi", json: true, max_tokens: 100, feature: Feature::Other };
-        let official = chat_completions_body("gpt-6-luna", &request, true);
-        assert_eq!(official["max_completion_tokens"], 100);
-        assert!(official.get("max_tokens").is_none());
-        assert_eq!(official["messages"][0]["role"], "system");
-        assert_eq!(official["response_format"]["type"], "json_object");
-        let compatible = chat_completions_body("kimi-k2", &Request { system: "", json: false, ..request }, false);
+        let json = chat_completions_body("kimi-k2", &request);
+        assert_eq!(json["messages"][0]["role"], "system");
+        assert_eq!(json["response_format"]["type"], "json_object");
+        let compatible = chat_completions_body("kimi-k2", &Request { system: "", json: false, ..request });
         assert_eq!(compatible["max_tokens"], 100);
         assert!(compatible.get("max_completion_tokens").is_none());
         assert!(compatible.get("response_format").is_none());

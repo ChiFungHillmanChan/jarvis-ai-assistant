@@ -13,16 +13,7 @@ struct OpenAIRequest {
     model: String,
     messages: Vec<OpenAIMessage>,
     tools: Vec<serde_json::Value>,
-    /// api.openai.com only; compatible services take `max_tokens`.
-    #[serde(skip_serializing_if = "Option::is_none")]
-    max_completion_tokens: Option<u32>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    max_tokens: Option<u32>,
-    /// gpt-6-luna rejects function tools on Chat Completions unless reasoning
-    /// is off ("Function tools with reasoning_effort are not supported"),
-    /// verified live 2026-09-25. Not sent to compatible services.
-    #[serde(skip_serializing_if = "Option::is_none")]
-    reasoning_effort: Option<String>,
+    max_tokens: u32,
     /// "none" on the last allowed round, so the model answers from what the
     /// earlier rounds gathered instead of asking for another tool.
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -31,17 +22,16 @@ struct OpenAIRequest {
     stream_options: StreamOptions,
 }
 
-/// Where a chat turn goes: api.openai.com, or an OpenAI-compatible service
-/// such as Kimi or Qwen (a chain row with a `base_url`).
+/// Where a chat turn goes: an OpenAI-compatible service such as Kimi or
+/// Qwen (a chain row with a `base_url`). api.openai.com itself is on the
+/// Responses API (`openai_responses`, task 74); the app builds no `Target`
+/// without a `base_url`.
 #[derive(Clone, Copy, Debug)]
 pub struct Target<'a> {
-    /// None is api.openai.com.
+    /// None is api.openai.com's Chat Completions address.
     pub base_url: Option<&'a str>,
     /// The chain row's model. On api.openai.com, None follows the registry's default.
     pub model: Option<&'a str>,
-    /// "Think harder" (P06), as far as the model takes it. Not offered on
-    /// this wire yet (capability::deeper), so None outside tests.
-    pub deeper: Option<super::capability::Deeper>,
 }
 
 impl Target<'_> {
@@ -77,21 +67,13 @@ impl Target<'_> {
     }
 
     fn request(&self, model: String, messages: Vec<OpenAIMessage>, tools: Vec<serde_json::Value>, final_round: bool) -> OpenAIRequest {
-        let official = self.base_url.is_none();
-        // The registry's limits: OpenAI's own, or the compatible service's.
-        let limits = crate::ai::models::limits(crate::ai::models::openai_format_provider(self.base_url));
-        let cap = limits.chat_max_output_tokens.unwrap_or_default();
+        // The registry's output cap: the compatible service's.
+        let max_tokens = crate::ai::models::chat_max_output_tokens(crate::ai::models::openai_format_provider(self.base_url));
         OpenAIRequest {
             model,
             messages,
             tools,
-            max_completion_tokens: official.then_some(cap),
-            max_tokens: (!official).then_some(cap),
-            reasoning_effort: match (official, self.deeper) {
-                (true, Some(deeper)) if deeper.effort => Some("high".into()),
-                (true, _) => limits.chat_reasoning_effort,
-                (false, _) => None,
-            },
+            max_tokens,
             tool_choice: final_round.then_some("none"),
             stream: true,
             stream_options: StreamOptions { include_usage: true },
@@ -215,7 +197,6 @@ pub(crate) struct OpenAiWire {
     key: String,
     base_url: Option<String>,
     model: String,
-    deeper: Option<super::capability::Deeper>,
     /// A local server's own options: its address, key and tool mode.
     local: Option<super::local::LocalChat>,
 }
@@ -224,12 +205,12 @@ impl OpenAiWire {
     /// Fails when a compatible service has no model chosen.
     pub(crate) fn new(key: &str, target: Target<'_>) -> Result<Self, String> {
         let model = target.model()?;
-        Ok(OpenAiWire { key: key.to_string(), base_url: target.base_url.map(str::to_string), model, deeper: target.deeper, local: None })
+        Ok(OpenAiWire { key: key.to_string(), base_url: target.base_url.map(str::to_string), model, local: None })
     }
 
     /// A model on a local server.
     pub(crate) fn local(chat: super::local::LocalChat, model: &str) -> Self {
-        OpenAiWire { key: String::new(), base_url: None, model: model.to_string(), deeper: None, local: Some(chat) }
+        OpenAiWire { key: String::new(), base_url: None, model: model.to_string(), local: Some(chat) }
     }
 
     /// The tools are described in the system prompt and the calls come back
@@ -248,7 +229,7 @@ impl OpenAiWire {
     }
 
     fn target(&self) -> Target<'_> {
-        Target { base_url: self.base_url.as_deref(), model: Some(&self.model), deeper: self.deeper }
+        Target { base_url: self.base_url.as_deref(), model: Some(&self.model) }
     }
 
     /// The service's name in an error.
@@ -544,22 +525,22 @@ impl Wire for OpenAiWire {
             return local.complete(&client, &self.model, request).await;
         }
         let name = self.name();
-        let body = chat_completions_body(&self.model, request, self.base_url.is_none());
+        let body = chat_completions_body(&self.model, request);
         let value = super::complete::post(&client, &self.target().url(), &name, |r| r.bearer_auth(&self.key), &body).await?;
         chat_completions_result(&value, name, self.model.clone())
     }
 }
 
-/// OpenAI Chat Completions body. api.openai.com takes
-/// `max_completion_tokens`; compatible services and Ollama take `max_tokens`.
-pub(crate) fn chat_completions_body(model: &str, request: &PlainRequest<'_>, official: bool) -> serde_json::Value {
+/// OpenAI Chat Completions body, as compatible services and local servers
+/// take it.
+pub(crate) fn chat_completions_body(model: &str, request: &PlainRequest<'_>) -> serde_json::Value {
     let mut messages = Vec::new();
     if !request.system.is_empty() {
         messages.push(json!({"role": "system", "content": request.system}));
     }
     messages.push(json!({"role": "user", "content": request.user}));
     let mut body = json!({"model": model, "messages": messages});
-    body[if official { "max_completion_tokens" } else { "max_tokens" }] = json!(request.max_tokens);
+    body["max_tokens"] = json!(request.max_tokens);
     if request.json {
         body["response_format"] = json!({"type": "json_object"});
     }
@@ -631,56 +612,35 @@ mod tests {
     #[test]
     fn a_compatible_service_address_is_refused_in_tests() {
         for base in ["https://api.moonshot.ai/v1", "https://dashscope-intl.aliyuncs.com/compatible-mode/v1"] {
-            let target = Target { base_url: Some(base), model: Some("m"), deeper: None };
+            let target = Target { base_url: Some(base), model: Some("m") };
             let refused = std::panic::catch_unwind(|| target.url()).expect_err("refused");
             assert!(refused.downcast_ref::<String>().is_some_and(|message| message.starts_with(&format!("A compatible service: a test request to {base} was refused"))), "{base}");
         }
         for base in ["http://127.0.0.1:9/v1", "http://localhost:9/v1"] {
-            assert_eq!(Target { base_url: Some(base), model: Some("m"), deeper: None }.url(), format!("{base}/chat/completions"));
+            assert_eq!(Target { base_url: Some(base), model: Some("m") }.url(), format!("{base}/chat/completions"));
         }
     }
 
-    /// The output cap and reasoning effort are the registry's: OpenAI's own
-    /// for api.openai.com, the compatible service's for any other address.
+    /// The output cap is the registry's: the compatible service's, and no
+    /// reasoning effort. (api.openai.com's are in `openai_responses`.)
     #[test]
     fn request_limits_follow_the_registry() {
         let _registry = crate::ai::registry::test_override::with(|r| {
             fn limits<'a>(r: &'a mut crate::ai::registry::Registry, id: &str) -> &'a mut crate::ai::registry::doc::Limits {
                 &mut r.providers.iter_mut().find(|p| p.id == id).unwrap().limits
             }
-            limits(r, "openai").chat_max_output_tokens = Some(1234);
-            limits(r, "openai").chat_reasoning_effort = Some("low".into());
             limits(r, "kimi").chat_max_output_tokens = Some(777);
             limits(r, "openai_compat").chat_max_output_tokens = Some(555);
         });
         let wire = |base_url: Option<&str>| {
-            let target = Target { base_url, model: Some("m"), deeper: None };
+            let target = Target { base_url, model: Some("m") };
             serde_json::to_value(target.request("m".into(), Vec::new(), Vec::new(), false)).unwrap()
         };
-        let official = wire(None);
-        assert_eq!((official["max_completion_tokens"].as_u64(), official["reasoning_effort"].as_str()), (Some(1234), Some("low")));
         let kimi = wire(Some("https://api.moonshot.ai/v1"));
         assert_eq!((kimi["max_tokens"].as_u64(), kimi.get("reasoning_effort")), (Some(777), None));
         assert_eq!(wire(Some("https://api.deepseek.com/v1"))["max_tokens"].as_u64(), Some(555));
-        let target = Target { base_url: None, model: None, deeper: None };
+        let target = Target { base_url: None, model: None };
         assert_eq!(target.model().unwrap(), crate::ai::models::OPENAI_DEFAULT);
-    }
-
-    /// "Think harder" maps to a high reasoning effort on api.openai.com, for
-    /// a model that takes one. Written and tested, not offered yet: the chat
-    /// wire refuses tools with reasoning on (capability::deeper).
-    #[test]
-    fn think_harder_asks_for_a_high_reasoning_effort_on_openai_only() {
-        use crate::ai::capability::Deeper;
-        let effort = |base_url: Option<&'static str>, deeper| {
-            let target = Target { base_url, model: Some("m"), deeper };
-            serde_json::to_value(target.request("m".into(), Vec::new(), Vec::new(), false)).unwrap().get("reasoning_effort").cloned()
-        };
-        let high = Some(Deeper { thinking: true, effort: true });
-        assert_eq!(effort(None, high), Some(json!("high")));
-        assert_eq!(effort(None, None), crate::ai::models::limits("openai").chat_reasoning_effort.map(serde_json::Value::from));
-        assert_eq!(effort(None, Some(Deeper { thinking: true, effort: false })), effort(None, None), "no effort flag, no change");
-        assert_eq!(effort(Some("https://api.moonshot.ai/v1"), high), None, "compatible services get no reasoning_effort");
     }
 
     /// The bytes a compatible service is sent, frozen from main before
@@ -690,7 +650,7 @@ mod tests {
     /// server's plain request, which share these builders.
     #[test]
     fn a_compatible_service_is_sent_the_same_bytes() {
-        let compatible = Target { base_url: Some("https://api.moonshot.ai/v1"), model: Some("kimi-k2"), deeper: None };
+        let compatible = Target { base_url: Some("https://api.moonshot.ai/v1"), model: Some("kimi-k2") };
         let tools = tools::to_openai_format(&[tools::Tool { name: "remember".into(), description: "Save a fact.".into(), parameters: json!({"type": "object", "properties": {"content": {"type": "string"}}, "required": ["content"]}) }]);
         let first = vec![
             OpenAIMessage { role: "system".into(), content: Some("rules\n\ntoday".into()), tool_calls: None, tool_call_id: None },
@@ -709,7 +669,7 @@ mod tests {
             r#"{"model":"kimi-k2","messages":[{"role":"system","content":"rules\n\ntoday"},{"role":"user","content":"Remember Kenny."},{"role":"assistant","content":"Saving.","tool_calls":[{"id":"call_1","type":"function","function":{"name":"remember","arguments":"{\"content\":\"Kenny\"}"}}]},{"role":"tool","content":"Saved.","tool_call_id":"call_1"}],"tools":[{"function":{"description":"Save a fact.","name":"remember","parameters":{"properties":{"content":{"type":"string"}},"required":["content"],"type":"object"}},"type":"function"}],"max_tokens":4096,"tool_choice":"none","stream":true,"stream_options":{"include_usage":true}}"#
         );
         let request = PlainRequest { system: "Sort this.", user: "From: a@example.com", json: true, max_tokens: 300, feature: crate::ai::cost::Feature::MailSort };
-        let plain = |request: &PlainRequest<'_>| serde_json::to_string(&chat_completions_body("kimi-k2", request, false)).unwrap();
+        let plain = |request: &PlainRequest<'_>| serde_json::to_string(&chat_completions_body("kimi-k2", request)).unwrap();
         assert_eq!(plain(&request), r#"{"max_tokens":300,"messages":[{"content":"Sort this.","role":"system"},{"content":"From: a@example.com","role":"user"}],"model":"kimi-k2","response_format":{"type":"json_object"}}"#);
         assert_eq!(plain(&PlainRequest { system: "", json: false, ..request }), r#"{"max_tokens":300,"messages":[{"content":"From: a@example.com","role":"user"}],"model":"kimi-k2"}"#);
     }
@@ -747,14 +707,11 @@ mod tests {
     /// that nothing will run.
     #[test]
     fn only_the_last_round_turns_tools_off() {
-        let official = Target { base_url: None, model: None, deeper: None };
-        let compatible = Target { base_url: Some("https://api.moonshot.ai/v1"), model: Some("kimi-k2"), deeper: None };
-        for target in [official, compatible] {
-            let last = serde_json::to_value(target.request("m".into(), Vec::new(), Vec::new(), true)).unwrap();
-            assert_eq!(last["tool_choice"], "none");
-            let earlier = serde_json::to_value(target.request("m".into(), Vec::new(), Vec::new(), false)).unwrap();
-            assert!(earlier.get("tool_choice").is_none(), "{earlier}");
-        }
+        let target = Target { base_url: Some("https://api.moonshot.ai/v1"), model: Some("kimi-k2") };
+        let last = serde_json::to_value(target.request("m".into(), Vec::new(), Vec::new(), true)).unwrap();
+        assert_eq!(last["tool_choice"], "none");
+        let earlier = serde_json::to_value(target.request("m".into(), Vec::new(), Vec::new(), false)).unwrap();
+        assert!(earlier.get("tool_choice").is_none(), "{earlier}");
     }
 
     #[test]
@@ -814,7 +771,7 @@ mod tests {
     #[ignore]
     async fn live_compatible_service_takes_the_tool_request() {
         let key = std::env::var("GEMINI_API_KEY").expect("GEMINI_API_KEY");
-        let target = Target { base_url: Some(crate::ai::complete::tests::GEMINI_COMPAT), model: Some(crate::ai::models::GEMINI_FLASH), deeper: None };
+        let target = Target { base_url: Some(crate::ai::complete::tests::GEMINI_COMPAT), model: Some(crate::ai::models::GEMINI_FLASH) };
         let messages = vec![
             OpenAIMessage { role: "system".into(), content: Some("You are JARVIS. Use tools to answer.".into()), tool_calls: None, tool_call_id: None },
             OpenAIMessage { role: "user".into(), content: Some("What is on my calendar today? Use the calendar tool.".into()), tool_calls: None, tool_call_id: None },
