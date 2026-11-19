@@ -41,8 +41,8 @@ pub struct Completion {
     pub output_tokens: i64,
     /// Read from the provider's cache, billed at its cached rate.
     pub cached_tokens: i64,
-    /// Written to the provider's cache; only Bedrock reports it. Included in
-    /// `input_tokens`.
+    /// Written to the provider's cache; Bedrock and OpenAI (Responses API)
+    /// report it. Included in `input_tokens`.
     pub cache_write_tokens: i64,
     /// The reply carried no usage figures (only Bedrock can tell), so no row
     /// is stored for it rather than one of zeros.
@@ -147,20 +147,17 @@ fn record(db: &Database, provider: &str, feature: Feature, done: &mut Completion
 async fn complete_one(router: &AiRouter, db: &Database, entry: &ProviderChainEntry, request: &Request<'_>) -> Result<Completion, String> {
     let language = super::bedrock::UiLanguage::read(db);
     match entry.provider_type.as_str() {
-        "openai" => {
-            let wire = match entry.base_url.as_deref() {
-                Some(base) => {
-                    let key = router.compat_key(base).await.ok_or_else(|| format!("尚未設定 {} API 密鑰。", compat::label(base)))?;
-                    let model = entry.model_id.clone().filter(|m| !m.trim().is_empty()).ok_or_else(|| format!("尚未為 {} 選擇模型。", compat::label(base)))?;
-                    OpenAiWire::new(&key, Target { base_url: Some(base), model: Some(&model), deeper: None })?
-                }
-                None => {
-                    let key = router.openai_key.clone().ok_or("尚未設定 OpenAI API 密鑰。")?;
-                    OpenAiWire::new(&key, Target { base_url: None, model: entry.model_id.as_deref(), deeper: None })?
-                }
-            };
-            wire.complete(request, language).await
-        }
+        "openai" => match entry.base_url.as_deref() {
+            Some(base) => {
+                let key = router.compat_key(base).await.ok_or_else(|| format!("尚未設定 {} API 密鑰。", compat::label(base)))?;
+                let model = entry.model_id.clone().filter(|m| !m.trim().is_empty()).ok_or_else(|| format!("尚未為 {} 選擇模型。", compat::label(base)))?;
+                OpenAiWire::new(&key, Target { base_url: Some(base), model: Some(&model), deeper: None })?.complete(request, language).await
+            }
+            None => {
+                let key = router.openai_key.clone().ok_or("尚未設定 OpenAI API 密鑰。")?;
+                super::openai_responses::ResponsesWire::new(&key, entry.model_id.as_deref(), None).complete(request, language).await
+            }
+        },
         "local" => {
             let endpoint_id = entry.endpoint_id.as_deref().unwrap_or_default();
             let endpoint = router.find_endpoint(endpoint_id).ok_or("本機 AI 端點不存在或已停用。")?;
@@ -786,20 +783,31 @@ pub(crate) mod tests {
 
     #[tokio::test]
     async fn an_openai_plain_request() {
-        let server = serve(vec![Reply::json(200, json!({"choices": [{"message": {"content": "{\"a\":1}"}}], "usage": {"prompt_tokens": 10, "completion_tokens": 2, "prompt_tokens_details": {"cached_tokens": 4}}}))]).await;
+        let reply = json!({
+            "status": "completed",
+            "output": [{"type": "reasoning", "id": "rs_1", "summary": []}, {"type": "message", "role": "assistant", "content": [{"type": "output_text", "text": "{\"a\":1}", "annotations": []}]}],
+            "usage": {"input_tokens": 10, "output_tokens": 2, "input_tokens_details": {"cached_tokens": 4, "cache_write_tokens": 3}}
+        });
+        let server = serve(vec![Reply::json(200, reply)]).await;
         let _base = point_at(&format!("{}/v1", server.base));
         let mut router = AiRouter::new("gemini_primary");
         router.set_openai_key("sk-fixture-openai-not-real");
         let db = crate::db::test_database();
         let done = complete_one(&router, &db, &row("openai", None, None, None), &sort()).await.unwrap();
         let model = crate::ai::models::openai_default();
-        assert_eq!(figures(&done), ("{\"a\":1}", "OpenAI", model.as_str(), 10, 2, 4, 0));
+        assert_eq!(figures(&done), ("{\"a\":1}", "OpenAI", model.as_str(), 10, 2, 4, 3));
         let seen = server.seen();
-        assert_eq!((seen[0].method.as_str(), seen[0].path.as_str()), ("POST", "/v1/chat/completions"));
+        assert_eq!((seen[0].method.as_str(), seen[0].path.as_str()), ("POST", "/v1/responses"));
         assert_eq!(seen[0].header("authorization"), Some("Bearer sk-fixture-openai-not-real"));
         assert_eq!(
             seen[0].body,
-            json!({"model": model, "messages": [{"role": "system", "content": "Sort this."}, {"role": "user", "content": "From: a@example.com"}], "max_completion_tokens": 300, "response_format": {"type": "json_object"}})
+            json!({
+                "model": model,
+                "input": [{"role": "developer", "content": "Sort this."}, {"role": "user", "content": "From: a@example.com"}],
+                "max_output_tokens": 300,
+                "store": false,
+                "text": {"format": {"type": "json_object"}}
+            })
         );
     }
 
@@ -835,7 +843,7 @@ pub(crate) mod tests {
     async fn google_content_goes_only_where_mail_policy_allows() {
         use crate::ai::capability::{with_pick, Pick};
         use crate::ai::mail_policy::{carries_google_content, test_support::agree_to_gemini};
-        let reply = || Reply::json(200, json!({"choices": [{"message": {"content": "Kenny asks for the invoice."}}], "candidates": [{"content": {"parts": [{"text": "Kenny asks for the invoice."}]}}], "usage": {"prompt_tokens": 10, "completion_tokens": 2}, "usageMetadata": {"promptTokenCount": 10, "candidatesTokenCount": 2}}));
+        let reply = || Reply::json(200, json!({"choices": [{"message": {"content": "Kenny asks for the invoice."}}], "output": [{"type": "message", "content": [{"type": "output_text", "text": "Kenny asks for the invoice."}]}], "candidates": [{"content": {"parts": [{"text": "Kenny asks for the invoice."}]}}], "usage": {"prompt_tokens": 10, "completion_tokens": 2}, "usageMetadata": {"promptTokenCount": 10, "candidatesTokenCount": 2}}));
         for feature in [Feature::MailAnalysis, Feature::MailSort, Feature::Briefing, Feature::Memory] {
             assert!(carries_google_content(feature), "{feature:?}");
             let request = || Request { system: "", user: "From: kenny@example.com\nSubject: Invoice\n\nPlease pay by Friday.", json: false, max_tokens: 300, feature };
@@ -891,12 +899,12 @@ pub(crate) mod tests {
     }
 
     /// P07: the official OpenAI completion takes its model as chat does
-    /// (`Target::model`): a saved id that is blank goes out as the default
+    /// (`ResponsesWire::new`): a saved id that is blank goes out as the default
     /// (before: sent blank, and refused), and one with spaces round it goes
     /// out trimmed.
     #[tokio::test]
     async fn a_blank_saved_openai_model_goes_out_as_the_default() {
-        let reply = || Reply::json(200, json!({"choices": [{"message": {"content": "{}"}}], "usage": {"prompt_tokens": 1, "completion_tokens": 1}}));
+        let reply = || Reply::json(200, json!({"output": [{"type": "message", "content": [{"type": "output_text", "text": "{}"}]}], "usage": {"input_tokens": 1, "output_tokens": 1}}));
         let server = serve(vec![reply(), reply()]).await;
         let _base = point_at(&format!("{}/v1", server.base));
         let mut router = AiRouter::new("gemini_primary");

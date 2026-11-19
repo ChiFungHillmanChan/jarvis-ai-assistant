@@ -3007,7 +3007,11 @@ mod parity {
         /// out.
         fn completes(self, text: &str) -> Reply {
             match self {
-                W::OpenAi | W::Compatible | W::Local => Reply::json(200, json!({"choices": [{"message": {"content": text}}], "usage": {"prompt_tokens": 10, "completion_tokens": 2}})),
+                W::OpenAi => Reply::json(
+                    200,
+                    json!({"status": "completed", "output": [openai_wire::message_item(0, text)], "usage": {"input_tokens": 10, "output_tokens": 2, "input_tokens_details": {"cached_tokens": 0, "cache_write_tokens": 0}}}),
+                ),
+                W::Compatible | W::Local => Reply::json(200, json!({"choices": [{"message": {"content": text}}], "usage": {"prompt_tokens": 10, "completion_tokens": 2}})),
                 W::Claude => Reply::json(200, json!({"content": [{"type": "text", "text": text}], "usage": {"input_tokens": 10, "output_tokens": 2}})),
                 W::Gemini => Reply::json(200, json!({"candidates": [{"content": {"parts": [{"text": text}]}}], "usageMetadata": {"promptTokenCount": 10, "candidatesTokenCount": 2}})),
                 W::Bedrock => Reply::json(
@@ -3087,7 +3091,8 @@ mod parity {
         /// Where a plain completion of `model` is sent.
         fn plain_path(self, model: &str) -> String {
             match self {
-                W::OpenAi | W::Compatible | W::Local => "/v1/chat/completions".into(),
+                W::OpenAi => "/v1/responses".into(),
+                W::Compatible | W::Local => "/v1/chat/completions".into(),
                 W::Claude => "/v1/messages".into(),
                 W::Gemini => format!("/v1beta/models/{model}:generateContent"),
                 W::Bedrock => format!("/model/{model}/converse"),
@@ -3099,7 +3104,8 @@ mod parity {
         fn asks_for_json(self, body: &Value) -> bool {
             let in_words = |text: Option<&str>| text.is_some_and(|text| text.contains(crate::ai::bedrock::JSON_INSTRUCTION));
             match self {
-                W::OpenAi | W::Compatible | W::Local => body["response_format"] == json!({"type": "json_object"}),
+                W::OpenAi => body["text"]["format"] == json!({"type": "json_object"}),
+                W::Compatible | W::Local => body["response_format"] == json!({"type": "json_object"}),
                 W::Claude => in_words(body["system"].as_str()),
                 W::Gemini => body["generationConfig"]["responseMimeType"] == "application/json",
                 W::Bedrock => body["system"].as_array().is_some_and(|blocks| blocks.iter().any(|block| in_words(block["text"].as_str()))),
