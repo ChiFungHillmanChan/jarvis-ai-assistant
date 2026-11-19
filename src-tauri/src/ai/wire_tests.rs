@@ -1414,6 +1414,24 @@ mod gemini_wire {
         assert_eq!(rows(&db), vec![priced_row("gemini", "tools", crate::ai::models::GEMINI_FLASH, &[(100, 10, 0, 0), (150, 5, 0, 0)])]);
     }
 
+    /// A call that came with an id is answered with that id: Google asks
+    /// generateContent callers to send each FunctionResponse with the id and
+    /// name of its call (Gemini 3.8 and 4). A call without one is answered
+    /// without (a_tool_turn).
+    #[tokio::test]
+    async fn each_result_carries_the_id_of_its_call() {
+        let call = json!({"functionCall": {"name": "remember", "args": {"content": "Kenny is my accountant"}, "id": "call-7"}, "thoughtSignature": "sig-1"});
+        let server = serve(vec![Reply::sse(&[chunk(json!([call.clone()]), Some("STOP"), None)]), Reply::sse(&[chunk(json!([{"text": "Saved."}]), Some("STOP"), None)])]).await;
+        let _base = point_at(&format!("{}/v1beta", server.base));
+        let db = crate::db::test_database();
+        let turn = run_turn(&router(), row(), &[("user", "Remember Kenny is my accountant")], &db, Workload::Tools, true).await;
+        assert_eq!(turn.reply.as_deref(), Ok("Saved."));
+        let seen = server.seen();
+        assert_eq!(seen[1].body["contents"][1]["parts"][0], call, "the call goes back as it came");
+        let result = remembered("Kenny is my accountant").await;
+        assert_eq!(seen[1].body["contents"][2]["parts"][0], json!({"functionResponse": {"name": "remember", "id": "call-7", "response": {"result": result}}}));
+    }
+
     /// A field Gemini is asked to send as JSON text (render_chart's open
     /// `data` object) is an object again when the tool runs; the call goes
     /// back to Gemini as it came.

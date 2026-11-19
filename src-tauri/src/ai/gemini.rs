@@ -53,6 +53,9 @@ struct FunctionCallData {
 struct FunctionResponseData {
     name: String,
     response: serde_json::Value,
+    /// The id of the call this answers, when the call had one.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    id: Option<String>,
 }
 
 #[derive(Deserialize, Debug)]
@@ -389,7 +392,8 @@ impl Wire for GeminiWire {
                     Outcome::Ran(result) => result,
                     Outcome::Duplicate => SKIPPED.to_string(),
                 };
-                GeminiPart { function_response: Some(FunctionResponseData { name: call.name, response: json!({"result": result}) }), ..Default::default() }
+                let id = Some(call.id).filter(|id| !id.is_empty());
+                GeminiPart { function_response: Some(FunctionResponseData { name: call.name, response: json!({"result": result}), id }), ..Default::default() }
             })
             .collect();
         conversation.contents.push(GeminiContent { role: "user".into(), parts });
