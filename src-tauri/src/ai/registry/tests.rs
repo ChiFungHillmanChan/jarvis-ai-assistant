@@ -1157,3 +1157,32 @@ fn a_deprecated_family_reaches_only_the_ids_no_longer_entry_matches() {
         assert_eq!(registry.model_state("openai", id), ModelState::Deprecated { replacement: Some("gpt-6-luna".into()) }, "{id}");
     }
 }
+
+/// Claude requests use Anthropic's prompt cache, and a missing cache rate
+/// prices those tokens at $0: a copy whose priced Claude model (or Bedrock
+/// row for a Claude model) lacks either rate, in its base price or a tier,
+/// is refused. Other providers' models may leave them out.
+#[test]
+fn a_claude_model_needs_both_cache_rates() {
+    assert_eq!(fixture().check(), Ok(()));
+    let claude = |change: &dyn Fn(&mut doc::Prices)| {
+        with_models(|models| change(models.iter_mut().find(|m| m.provider == "claude" && m.prices.is_some()).unwrap().prices.as_mut().unwrap())).check()
+    };
+    assert!(claude(&|p| p.cache_read = None).is_err());
+    assert!(claude(&|p| p.cache_write = None).is_err());
+    let tier = |cache_read, cache_write| doc::Tier { above_input_tokens: 400_000, input: 9.0, output: 9.0, cache_read, cache_write };
+    assert_eq!(claude(&|p| p.tiers.push(tier(Some(1.0), Some(1.0)))), Ok(()));
+    assert!(claude(&|p| p.tiers.push(tier(None, Some(1.0)))).is_err());
+    assert!(claude(&|p| p.tiers.push(tier(Some(1.0), None))).is_err());
+    let on_bedrock = with_models(|models| {
+        let mut row = entry_like(models, "nova-pro", "anthropic.claude-test-v1:0", "bedrock", Status::Active);
+        row.prices.as_mut().unwrap().cache_write = None;
+        models.push(row);
+    });
+    assert!(on_bedrock.check().is_err());
+    let other = with_models(|models| {
+        let p = models.iter_mut().find(|m| m.provider == "gemini" && m.prices.is_some()).unwrap().prices.as_mut().unwrap();
+        (p.cache_read, p.cache_write) = (None, None);
+    });
+    assert_eq!(other.check(), Ok(()));
+}

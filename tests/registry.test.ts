@@ -165,6 +165,29 @@ test('the validator refuses a limit outside its bound, as the app does, and acce
   }
 });
 
+test('the validator requires both cache rates on every priced Claude model, in every tier, as the app does', () => {
+  // Registry::check in src-tauri/src/ai/registry/doc.rs (lacks_a_claude_cache_rate): Claude
+  // requests use Anthropic's prompt cache, and a missing rate prices those tokens at $0.
+  const claude = (doc: any) => doc.models.find((m: any) => m.provider === 'claude' && m.prices);
+  const refused = (errors: string[]) => errors.some(e => e.endsWith('a Claude model needs both cache_read and cache_write, in every price tier too'));
+  const tier = (cacheRead: number | null, cacheWrite: number | null) => ({ above_input_tokens: 400000, input: 9, output: 9, cache_read: cacheRead, cache_write: cacheWrite });
+  for (const field of ['cache_read', 'cache_write']) {
+    assert.ok(refused(errorsFor(doc => { claude(doc).prices[field] = null; })), field);
+  }
+  assert.deepEqual(errorsFor(doc => { claude(doc).prices.tiers.push(tier(1, 1)); }), []);
+  assert.ok(refused(errorsFor(doc => { claude(doc).prices.tiers.push(tier(null, 1)); })));
+  assert.ok(refused(errorsFor(doc => { claude(doc).prices.tiers.push(tier(1, null)); })));
+  // A Bedrock row for a Claude model is held to the same rule.
+  assert.ok(refused(errorsFor(doc => {
+    const row = structuredClone(doc.models.find((m: any) => m.provider === 'bedrock' && !m.managed && m.prices));
+    Object.assign(row, { id: 'anthropic.claude-test-v1:0' });
+    row.prices.cache_write = null;
+    doc.models.push(row);
+  })));
+  // Another provider's model may leave them out.
+  assert.deepEqual(errorsFor(doc => { Object.assign(doc.models.find((m: any) => m.provider === 'gemini' && m.prices).prices, { cache_read: null, cache_write: null }); }), []);
+});
+
 test("the validator refuses a feature's output cap outside its bound or a feature it does not know, as the schema says, and accepts a copy without them", () => {
   // FeatureLimits::check in src-tauri/src/ai/registry/doc.rs (MAX_OUTPUT_TOKENS).
   for (const feature of ['mail_analysis', 'mail_sort']) {

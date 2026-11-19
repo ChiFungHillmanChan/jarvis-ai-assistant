@@ -180,6 +180,15 @@ pub(crate) fn is_safe_model_id(id: &str) -> bool {
     !id.is_empty() && !id.contains("..") && id.bytes().all(|c| c.is_ascii_alphanumeric() || b"._:/-".contains(&c))
 }
 
+/// A priced Claude model (an Anthropic API entry, or a Bedrock row for a
+/// Claude model) without a cache read or cache write rate, in its base price
+/// or a tier. Claude requests use Anthropic's prompt cache, and a missing
+/// rate would price those tokens at $0 (mirrored in registry/validate.ts).
+fn lacks_a_claude_cache_rate(model: &Model) -> bool {
+    let claude = model.provider == "claude" || (model.provider == "bedrock" && model.id.contains("claude"));
+    claude && model.prices.as_ref().is_some_and(|p| p.cache_read.is_none() || p.cache_write.is_none() || p.tiers.iter().any(|t| t.cache_read.is_none() || t.cache_write.is_none()))
+}
+
 /// The limits this build reads, by provider. The bundled copy carries every
 /// one (`the_bundled_registry_carries_every_limit_the_app_reads`); a fetched
 /// copy that leaves one out keeps the bundled value (`load::apply_floor`).
@@ -473,6 +482,9 @@ impl Registry {
             // Gemini sends it as maxOutputTokens (gemini.rs output_cap).
             if model.max_output.is_some_and(|v| !(1..=MAX_MODEL_OUTPUT_TOKENS).contains(&v)) {
                 return Err(format!("models.{}.max_output is outside 1 to {MAX_MODEL_OUTPUT_TOKENS}", model.id));
+            }
+            if lacks_a_claude_cache_rate(model) {
+                return Err(format!("models.{} is a Claude model without both cache rates", model.id));
             }
         }
         // A default and a preset entry are sent when the user saved no
