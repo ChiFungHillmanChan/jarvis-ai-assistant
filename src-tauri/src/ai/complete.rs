@@ -4,7 +4,8 @@
 //! anything is sent, and nothing else is tried behind the user's back.
 //!
 //! Error bodies can echo the request (mail text), so they are never
-//! surfaced: only the provider and the HTTP status are.
+//! surfaced: only the provider and the HTTP status are, and for a refused
+//! request the reply's `error.message` on the card, as chat shows it.
 use super::cost::Feature;
 use super::openai::{OpenAiWire, Target};
 use super::provider::Wire;
@@ -248,7 +249,9 @@ pub(crate) async fn post(
 }
 
 /// What went wrong, in the user's terms. The body is inspected, never
-/// shown: it can echo the request. Gemini reports a bad key as 400.
+/// shown: it can echo the request. Gemini reports a bad key as 400. A
+/// refused request (400, 404) also carries the reply's `error.message` for
+/// the card, as chat does (failure::refusal); nothing else of the body.
 fn rejection(name: &str, status: u16, body: &str) -> String {
     let lower = body.to_lowercase();
     let bad_key = ["api_key_invalid", "api key not valid", "invalid_api_key", "incorrect api key", "invalid x-api-key", "invalid api key", "authentication"]
@@ -257,8 +260,8 @@ fn rejection(name: &str, status: u16, body: &str) -> String {
     match status {
         401 | 403 => format!("{name} 拒絕了 API 密鑰（{status}），請檢查後重試。"),
         400 if bad_key => format!("{name} 拒絕了 API 密鑰，請檢查是否完整複製。"),
-        400 => format!("{name} 不接受這個請求（400），請檢查所選模型。"),
-        404 => format!("{name} 找不到所選模型或網址（404）。"),
+        400 => super::failure::refusal(format!("{name} 不接受這個請求（400），請檢查所選模型。"), body),
+        404 => super::failure::refusal(format!("{name} 找不到所選模型或網址（404）。"), body),
         429 => format!("{name} 暫時限速或額度不足（429），請稍後重試。"),
         _ => format!("{name} 暫時未能回覆（{status}），請稍後重試。"),
     }
@@ -288,8 +291,14 @@ pub(crate) mod tests {
         let gemini = r#"{"error":{"code":400,"message":"API key not valid. Please pass a valid API key.","status":"INVALID_ARGUMENT","details":[{"reason":"API_KEY_INVALID"}]}}"#;
         assert!(rejection("Gemini", 400, gemini).contains("拒絕了 API 密鑰"));
         assert!(rejection("Kimi", 401, "").contains("拒絕了 API 密鑰"));
-        let other = rejection("Qwen", 400, r#"{"error":{"message":"model not supported"}}"#);
-        assert!(other.contains("模型") && !other.contains("model not supported"), "never echo the body: {other}");
+        // A refused request keeps the reply's error.message for the card
+        // (X5) and nothing else of the body; its class and its log line are
+        // JARVIS's sentence's, whatever the message says.
+        let other = rejection("Qwen", 400, r#"{"error":{"message":"ThrottlingException: limiting requests"},"echo":"PRIVATE-MAIL-CANARY"}"#);
+        assert!(other.starts_with("Qwen 不接受這個請求（400），請檢查所選模型。") && !other.contains("CANARY"), "{other}");
+        assert_eq!(crate::ai::failure::code_of(&other), crate::ai::failure::Code::BadRequest, "not a rate limit: {other}");
+        assert_eq!(crate::ai::failure::log_line("Qwen", &other), "Qwen failed (BadRequest): HTTP 400");
+        assert_eq!(rejection("Qwen", 404, "<html>PRIVATE-MAIL-CANARY</html>"), "Qwen 找不到所選模型或網址（404）。", "no message, nothing kept");
     }
 
     #[test]
@@ -1010,6 +1019,76 @@ pub(crate) mod tests {
         assert_eq!(empty, "本機 AI 沒有回覆內容。");
         for error in [claude, openai, gemini, local] {
             assert!(!error.contains("CANARY"), "{error}");
+        }
+    }
+
+    /// X5: "Test and use this AI" (commands::ai_choice::choose_ai, one
+    /// plain request for `Feature::Other`) on a Claude key Anthropic refuses
+    /// with a 400, in Anthropic's error shape. The card names the model and
+    /// the class in the interface language and quotes the reply's
+    /// `error.message`, as chat does; before, `provider_reason` was empty.
+    /// The other wires that send a plain request through `post` carry it
+    /// the same way. Nothing else of the reply reaches the card, and the log
+    /// line has the status and the codes only.
+    #[tokio::test]
+    async fn a_refused_plain_request_shows_the_services_reason() {
+        use crate::ai::bedrock::UiLanguage;
+        let scoped = "This API key is not scoped to a workspace, so this request must include the anthropic-workspace-id header";
+        let replies = [
+            ("claude", json!({"type": "error", "error": {"type": "invalid_request_error", "message": scoped}, "request_id": "req_PRIVATE-MAIL-CANARY"})),
+            ("openai", json!({"error": {"message": "Unsupported value: PRIVATE-REASON-OPENAI", "type": "invalid_request_error", "param": "PRIVATE-MAIL-CANARY", "code": "unsupported_value"}})),
+            ("gemini", json!({"error": {"code": 400, "message": "Request contains an invalid argument.", "status": "INVALID_ARGUMENT", "details": [{"echo": "PRIVATE-MAIL-CANARY"}]}})),
+            ("compatible", json!({"error": {"message": "Model Not Exist", "type": "invalid_request_error", "echo": "PRIVATE-MAIL-CANARY"}})),
+        ];
+        for language in [UiLanguage::En, UiLanguage::ZhHk] {
+            for (wire, reply) in &replies {
+                let server = serve(vec![Reply::json(400, reply.clone())]).await;
+                let compat_url = format!("{}/v1", server.base);
+                let mut router = AiRouter::new("gemini_primary");
+                let (_base, entry) = match *wire {
+                    "claude" => {
+                        router.set_claude_key("sk-ant-fixture-not-real");
+                        (point_at(&server.base), row("claude", None, None, None))
+                    }
+                    "openai" => {
+                        router.set_openai_key("sk-fixture-openai-not-real");
+                        (point_at(&compat_url), row("openai", None, None, None))
+                    }
+                    "gemini" => {
+                        router.set_gemini_key("AIza-fixture-not-real");
+                        (point_at(&format!("{}/v1beta", server.base)), row("gemini", None, None, None))
+                    }
+                    _ => {
+                        router.set_compat_key(&compat_url, "sk-fixture-compat-not-real");
+                        (point_at(&server.base), row("openai", Some("unlisted-chat-1"), Some(&compat_url), None))
+                    }
+                };
+                router.set_provider_chain(vec![entry]);
+                let db = crate::db::test_database();
+                if language == UiLanguage::ZhHk {
+                    db.conn.lock().unwrap().execute("INSERT OR REPLACE INTO user_preferences (key, value) VALUES ('ui_locale', 'zh-HK')", []).unwrap();
+                }
+                let mut result = None;
+                let logged = crate::test_log::capture(|| async {
+                    result = Some(complete(&router, &db, Request { system: "", user: "Reply with the single word OK.", json: false, max_tokens: 1_024, feature: Feature::Other }).await);
+                })
+                .await;
+                let error = result.unwrap().unwrap_err();
+                let card = crate::ai::failure::parse(&error).unwrap_or_else(|| panic!("{wire}: a card, not {error}"));
+                let label = card["model"]["label"].as_str().unwrap().to_string();
+                assert_eq!(server.seen().len(), 1, "{wire}: sent once");
+                assert_eq!(card["code"], "bad_request", "{wire}");
+                assert_eq!(
+                    card["message"],
+                    language.pick(format!("{label} did not accept this request (400). Check the chosen model, or pick another one."), format!("{label} 不接受這個請求（400），請檢查所選模型，或改用其他模型。")),
+                    "{wire}"
+                );
+                assert_eq!(card["provider_reason"], reply["error"]["message"], "{wire}: the service's own reason");
+                assert!(!error.contains("CANARY"), "{wire}: nothing else of the reply: {error}");
+                let reason = reply["error"]["message"].as_str().unwrap();
+                assert!(!logged.iter().any(|line| line.contains(reason) || line.contains("CANARY")), "{wire}: {logged:?}");
+                assert!(logged.iter().any(|line| line.contains("failed (BadRequest): HTTP 400")), "{wire}: {logged:?}");
+            }
         }
     }
 }
