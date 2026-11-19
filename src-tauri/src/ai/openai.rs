@@ -683,6 +683,37 @@ mod tests {
         assert_eq!(effort(Some("https://api.moonshot.ai/v1"), high), None, "compatible services get no reasoning_effort");
     }
 
+    /// The bytes a compatible service is sent, frozen from main before
+    /// api.openai.com moved to the Responses API (task 74): the first and
+    /// the last round of a tool turn, and a plain request with and without
+    /// JSON. Kimi stands in for every compatible service and for a local
+    /// server's plain request, which share these builders.
+    #[test]
+    fn a_compatible_service_is_sent_the_same_bytes() {
+        let compatible = Target { base_url: Some("https://api.moonshot.ai/v1"), model: Some("kimi-k2"), deeper: None };
+        let tools = tools::to_openai_format(&[tools::Tool { name: "remember".into(), description: "Save a fact.".into(), parameters: json!({"type": "object", "properties": {"content": {"type": "string"}}, "required": ["content"]}) }]);
+        let first = vec![
+            OpenAIMessage { role: "system".into(), content: Some("rules\n\ntoday".into()), tool_calls: None, tool_call_id: None },
+            OpenAIMessage { role: "user".into(), content: Some("Remember Kenny.".into()), tool_calls: None, tool_call_id: None },
+        ];
+        let mut later = first.clone();
+        later.push(OpenAIMessage { role: "assistant".into(), content: Some("Saving.".into()), tool_calls: Some(vec![ToolCall { id: "call_1".into(), call_type: "function".into(), function: FunctionCall { name: "remember".into(), arguments: "{\"content\":\"Kenny\"}".into() }, extra_content: None }]), tool_call_id: None });
+        later.push(OpenAIMessage { role: "tool".into(), content: Some("Saved.".into()), tool_calls: None, tool_call_id: Some("call_1".into()) });
+        let bytes = |messages, final_round| serde_json::to_string(&compatible.request(compatible.model().unwrap(), messages, tools.clone(), final_round)).unwrap();
+        assert_eq!(
+            bytes(first, false),
+            r#"{"model":"kimi-k2","messages":[{"role":"system","content":"rules\n\ntoday"},{"role":"user","content":"Remember Kenny."}],"tools":[{"function":{"description":"Save a fact.","name":"remember","parameters":{"properties":{"content":{"type":"string"}},"required":["content"],"type":"object"}},"type":"function"}],"max_tokens":4096,"stream":true,"stream_options":{"include_usage":true}}"#
+        );
+        assert_eq!(
+            bytes(later, true),
+            r#"{"model":"kimi-k2","messages":[{"role":"system","content":"rules\n\ntoday"},{"role":"user","content":"Remember Kenny."},{"role":"assistant","content":"Saving.","tool_calls":[{"id":"call_1","type":"function","function":{"name":"remember","arguments":"{\"content\":\"Kenny\"}"}}]},{"role":"tool","content":"Saved.","tool_call_id":"call_1"}],"tools":[{"function":{"description":"Save a fact.","name":"remember","parameters":{"properties":{"content":{"type":"string"}},"required":["content"],"type":"object"}},"type":"function"}],"max_tokens":4096,"tool_choice":"none","stream":true,"stream_options":{"include_usage":true}}"#
+        );
+        let request = PlainRequest { system: "Sort this.", user: "From: a@example.com", json: true, max_tokens: 300, feature: crate::ai::cost::Feature::MailSort };
+        let plain = |request: &PlainRequest<'_>| serde_json::to_string(&chat_completions_body("kimi-k2", request, false)).unwrap();
+        assert_eq!(plain(&request), r#"{"max_tokens":300,"messages":[{"content":"Sort this.","role":"system"},{"content":"From: a@example.com","role":"user"}],"model":"kimi-k2","response_format":{"type":"json_object"}}"#);
+        assert_eq!(plain(&PlainRequest { system: "", json: false, ..request }), r#"{"max_tokens":300,"messages":[{"content":"From: a@example.com","role":"user"}],"model":"kimi-k2"}"#);
+    }
+
     #[test]
     fn calls_without_an_index_are_kept_apart_by_id() {
         let mut slots: ToolSlots = HashMap::new();
