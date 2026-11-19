@@ -1,6 +1,6 @@
 {
   "version": 5,
-  "issued_at": "2026-11-19T15:09:03Z",
+  "issued_at": "2026-11-19T15:28:03Z",
   "min_app_version": "0.5.11",
   "providers": [
     {
@@ -2116,7 +2116,7 @@
       "bedrock": "global.anthropic.claude-sonnet-4-6"
     },
     "stt": {
-      "gemini": "gemini-4-hydrogen",
+      "gemini": "gemini-3.8-flash",
       "whisper": "ggml-base"
     },
     "tts": {
