@@ -1,6 +1,6 @@
 {
   "version": 5,
-  "issued_at": "2026-11-19T15:28:03Z",
+  "issued_at": "2026-11-19T15:52:25Z",
   "min_app_version": "0.5.11",
   "providers": [
     {
@@ -1309,6 +1309,36 @@
         "tiers": []
       },
       "context": null,
+      "max_output": 65536,
+      "capabilities": {
+        "tools": true,
+        "streaming": true,
+        "json": true,
+        "json_schema": false,
+        "vision": false,
+        "thinking": false,
+        "reasoning_effort": false
+      }
+    },
+    {
+      "id": "gemini-2.5-flash-lite",
+      "provider": "gemini",
+      "kind": "model",
+      "display_name": {
+        "en": "Gemini 2.5 Flash-Lite",
+        "zh-HK": "Gemini 2.5 Flash-Lite"
+      },
+      "status": "active",
+      "replacement": null,
+      "managed": false,
+      "prices": {
+        "input": 0.1,
+        "output": 0.4,
+        "cache_read": 0.01,
+        "cache_write": 0.1,
+        "tiers": []
+      },
+      "context": 1048576,
       "max_output": 65536,
       "capabilities": {
         "tools": true,
