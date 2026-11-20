@@ -70,6 +70,19 @@ impl Registry {
         self.provider(provider).map(|p| p.limits.clone()).unwrap_or_default()
     }
 
+    /// The reasoning effort a chat request to `model_id` sends: none for a
+    /// model whose own entry ([`Registry::own_entry`]) takes no effort
+    /// (`capabilities.reasoning_effort: false`), else that entry's own
+    /// `chat_reasoning_effort`, else the provider's. An id with no own entry
+    /// gets the provider's.
+    pub fn chat_reasoning_effort(&self, provider: &str, model_id: &str) -> Option<String> {
+        match self.own_entry(provider, model_id) {
+            Some(entry) if !entry.capabilities.reasoning_effort => None,
+            Some(Model { chat_reasoning_effort: Some(effort), .. }) => Some(effort.clone()),
+            _ => self.limits(provider).chat_reasoning_effort,
+        }
+    }
+
     pub fn feature_limits(&self, feature: &str) -> FeatureLimits {
         self.feature_limits.get(feature).cloned().unwrap_or_default()
     }

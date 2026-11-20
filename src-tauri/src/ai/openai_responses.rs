@@ -447,18 +447,22 @@ mod tests {
         assert!(body(&wire, false).get("tool_choice").is_none());
     }
 
-    /// The cap and the effort are the registry's; a model the registry says
-    /// takes no effort is sent none; a blank model is the registry default.
+    /// The cap and the effort are the registry's, a model's own effort
+    /// before the provider's; a model the registry says takes no effort is
+    /// sent none; a blank model is the registry default.
     #[test]
     fn request_limits_follow_the_registry() {
         let _registry = crate::ai::registry::test_override::with(|r| {
             let limits = &mut r.providers.iter_mut().find(|p| p.id == "openai").unwrap().limits;
             limits.chat_max_output_tokens = Some(1234);
             limits.chat_reasoning_effort = Some("low".into());
-            r.models.iter_mut().find(|m| m.provider == "openai" && m.id == "gpt-4o").unwrap().capabilities.reasoning_effort = false;
+            let gpt_4o = r.models.iter_mut().find(|m| m.provider == "openai" && m.id == "gpt-4o").unwrap();
+            (gpt_4o.capabilities.reasoning_effort, gpt_4o.chat_reasoning_effort) = (false, Some("high".into()));
+            r.models.iter_mut().find(|m| m.provider == "openai" && m.id == "gpt-5.6-luna").unwrap().chat_reasoning_effort = Some("medium".into());
         });
         let sent = body(&ResponsesWire::new("k", Some("gpt-6-luna"), None), false);
         assert_eq!((sent["max_output_tokens"].as_u64(), sent["reasoning"]["effort"].as_str()), (Some(1234), Some("low")));
+        assert_eq!(body(&ResponsesWire::new("k", Some("gpt-5.6-luna"), None), false)["reasoning"], json!({"effort": "medium"}), "the model's own effort");
         assert!(body(&ResponsesWire::new("k", Some("gpt-4o"), None), false).get("reasoning").is_none(), "no effort for a model that takes none");
         assert_eq!(body(&ResponsesWire::new("k", Some("gpt-4o-2024-08-06"), None), false).get("reasoning"), None, "a dated id is its entry's");
         assert_eq!(body(&ResponsesWire::new("k", Some("a-model-the-registry-lacks"), None), false)["reasoning"]["effort"], "low", "an unlisted id gets the provider's");

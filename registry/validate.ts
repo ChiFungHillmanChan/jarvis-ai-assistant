@@ -101,6 +101,11 @@ function semanticErrors(r: Registry, publishedVersion: number | undefined): stri
     if ('local' in m && provider.wire !== 'ollama') errors.push(`model "${m.id}": local settings on a provider that is not Ollama`);
     if ('bedrock' in m && !m.managed) errors.push(`model "${m.id}": bedrock settings on a model that is not managed`);
     if (m.status === 'active' && m.replacement !== null) errors.push(`model "${m.id}": an active model has no replacement`);
+    // The app reads a model's own effort only for OpenAI's chat requests, and
+    // sends none to a model that takes no effort (ai/registry/lookup.rs
+    // chat_reasoning_effort), so anywhere else the value would never be sent.
+    if (m.chat_reasoning_effort !== undefined && m.provider !== 'openai') errors.push(`model "${m.id}": chat_reasoning_effort is read only on OpenAI's models`);
+    if (m.chat_reasoning_effort !== undefined && !m.capabilities.reasoning_effort) errors.push(`model "${m.id}": chat_reasoning_effort on a model whose capabilities.reasoning_effort is false`);
     // JARVIS AI's prices are AWS's; each says where and when it was read.
     if (m.managed && m.prices && !(typeof m.price_source === 'string' && /https:\/\/\S+/.test(m.price_source) && /\b\d{4}-\d{2}-\d{2}\b/.test(m.price_source))) {
       errors.push(`model "${m.id}": a managed price must cite its source in price_source, a URL and the date it was read`);
