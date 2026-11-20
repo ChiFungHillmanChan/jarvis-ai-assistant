@@ -1,6 +1,6 @@
 {
   "version": 6,
-  "issued_at": "2026-11-20T15:24:16Z",
+  "issued_at": "2026-11-20T15:39:35Z",
   "min_app_version": "0.5.11",
   "providers": [
     {
@@ -558,6 +558,86 @@
         "thinking": true,
         "reasoning_effort": true
       }
+    },
+    {
+      "id": "gpt-6.1-sol",
+      "provider": "openai",
+      "kind": "model",
+      "display_name": {
+        "en": "GPT-6.1 Sol",
+        "zh-HK": "GPT-6.1 Sol"
+      },
+      "status": "active",
+      "replacement": null,
+      "managed": false,
+      "prices": {
+        "input": 2,
+        "output": 10,
+        "cache_read": 0.1,
+        "cache_write": 2.5,
+        "tiers": [
+          {
+            "above_input_tokens": 272000,
+            "input": 4,
+            "output": 15,
+            "cache_read": 0.2,
+            "cache_write": 5
+          }
+        ]
+      },
+      "price_source": "https://developers.openai.com/api/docs/pricing (Standard; cache_write is the 30-minute write, the long-context tier is above 272K input tokens), read 2026-11-19",
+      "context": 1050000,
+      "max_output": 128000,
+      "capabilities": {
+        "tools": true,
+        "streaming": true,
+        "json": true,
+        "json_schema": true,
+        "vision": false,
+        "thinking": true,
+        "reasoning_effort": true
+      },
+      "chat_reasoning_effort": "low"
+    },
+    {
+      "id": "gpt-6-astra",
+      "provider": "openai",
+      "kind": "model",
+      "display_name": {
+        "en": "GPT-6 Astra",
+        "zh-HK": "GPT-6 Astra"
+      },
+      "status": "active",
+      "replacement": null,
+      "managed": false,
+      "prices": {
+        "input": 10,
+        "output": 50,
+        "cache_read": 1,
+        "cache_write": 12.5,
+        "tiers": [
+          {
+            "above_input_tokens": 272000,
+            "input": 20,
+            "output": 75,
+            "cache_read": 2,
+            "cache_write": 25
+          }
+        ]
+      },
+      "price_source": "https://developers.openai.com/api/docs/pricing (Standard; cache_write is the 30-minute write, the long-context tier is above 272K input tokens), read 2026-11-19",
+      "context": 1050000,
+      "max_output": 128000,
+      "capabilities": {
+        "tools": true,
+        "streaming": true,
+        "json": true,
+        "json_schema": true,
+        "vision": false,
+        "thinking": true,
+        "reasoning_effort": true
+      },
+      "chat_reasoning_effort": "low"
     },
     {
       "id": "gpt-6-luna",
