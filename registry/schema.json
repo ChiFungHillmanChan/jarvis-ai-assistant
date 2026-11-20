@@ -156,6 +156,7 @@
     "modelId": { "description": "A model id the app may put in a URL path or a request: letters, digits and . _ : / -, with no '..' (ai/registry/doc.rs is_safe_model_id).", "type": "string", "pattern": "^(?!.*\\.\\.)[A-Za-z0-9._:/-]+$" },
     "outputTokens": { "description": "An output cap in tokens. The maximum is at least ten times version 1's largest (ai/registry/doc.rs MAX_OUTPUT_TOKENS).", "type": "integer", "minimum": 1, "maximum": 131072 },
     "reasoningEffort": { "description": "A reasoning effort OpenAI lists; each model accepts only some (ai/registry/doc.rs REASONING_EFFORTS).", "enum": ["none", "minimal", "low", "medium", "high", "xhigh", "max"] },
+    "thinkingLevel": { "description": "A thinking level Google lists for the Gemini API; each model accepts only some (ai/registry/doc.rs THINKING_LEVELS).", "enum": ["minimal", "low", "medium", "high", "xhigh"] },
     "contextTokens": { "description": "A context window in tokens (ai/registry/doc.rs MAX_CONTEXT_TOKENS).", "type": "integer", "minimum": 1, "maximum": 1048576 },
     "text": {
       "type": "object",
@@ -328,6 +329,7 @@
           }
         },
         "chat_reasoning_effort": { "description": "Optional, OpenAI only, on a model with capabilities.reasoning_effort true (registry/validate.ts): the reasoning effort this model's chat requests send, in place of the provider's limits.chat_reasoning_effort.", "$ref": "#/$defs/reasoningEffort" },
+        "default_thinking_level": { "description": "Optional, Gemini only, on a model (not a family) with capabilities.thinking true (registry/validate.ts): the thinking level Google uses for this model when a request names none. On Gemini, Think harder is hidden where a Think harder turn would go to the model a normal turn uses and this is the level it sends, high (ai/capability.rs think_harder): today a row pinned to such a model, as an unpinned row moves to features.premium.gemini while that differs from features.chat.gemini.", "$ref": "#/$defs/thinkingLevel" },
         "local": {
           "description": "For a model run by Ollama on this Mac.",
           "type": "object",

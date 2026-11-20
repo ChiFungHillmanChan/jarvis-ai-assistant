@@ -1128,7 +1128,10 @@ impl AiRouter {
         ledger: &SideEffectLedger,
     ) -> Result<String, String> {
         // "Think harder", as far as the model takes it; nothing extra for a
-        // model whose button is hidden.
+        // model that cannot take it (capability::deeper). A Gemini model
+        // whose button is hidden because it already thinks at the high level
+        // still gets HIGH on a marked turn (an error-card retry of a Think
+        // harder turn), which is its default.
         let deeper = capability::deeper_for(&entry, workload);
         let turn = provider::Turn { db, google_auth, window: app_handle, voice: tts_tx.clone(), workload, ledger };
         match entry.provider_type.as_str() {

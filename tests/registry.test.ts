@@ -185,6 +185,41 @@ test("the validator accepts a model's own reasoning effort only on an OpenAI mod
   assert.ok(outside.some(e => e.startsWith(`schema: /models/${seeded().models.length}/chat_reasoning_effort `)), outside.join('\n'));
 });
 
+test("the validator accepts a model's default thinking level only on a Gemini model that thinks, and only a level Google lists", () => {
+  // The Think harder button (src-tauri/src/ai/capability.rs) reads it only on Gemini rows, where
+  // Think harder sends a thinking level; the values are THINKING_LEVELS in
+  // src-tauri/src/ai/registry/doc.rs. Each case adds a row of its own, written out here under a
+  // new id, so no edit to registry/registry.json changes it (P04 R-1).
+  const withRow = (providerId: string, thinking: boolean, level: unknown) => errorsFor(doc => {
+    doc.models.push({
+      id: 'gemini-test-9', provider: providerId, kind: 'model', display_name: { en: 'Test', 'zh-HK': 'Test' }, status: 'active', replacement: null, managed: false,
+      prices: null, context: null, max_output: null,
+      capabilities: { tools: true, streaming: true, json: true, json_schema: false, vision: false, thinking, reasoning_effort: false },
+      default_thinking_level: level,
+    });
+  });
+  for (const level of ['minimal', 'low', 'medium', 'high', 'xhigh']) assert.deepEqual(withRow('gemini', true, level), [], level);
+  assert.deepEqual(withRow('claude', true, 'high'), ['model "gemini-test-9": default_thinking_level is read only on Gemini\'s models']);
+  assert.deepEqual(withRow('gemini', false, 'high'), ['model "gemini-test-9": default_thinking_level on a model whose capabilities.thinking is false']);
+  for (const outside of ['max', 'none', 'HIGH', '']) {
+    const errors = withRow('gemini', true, outside);
+    assert.ok(errors.some(e => e.startsWith(`schema: /models/${seeded().models.length}/default_thinking_level `)), `${JSON.stringify(outside)}: ${errors.join('\n')}`);
+  }
+  // A family is a price pattern that the app also matches for the ids it contains
+  // (Registry::own_entry), so a level on it would apply to every such id; Registry::check
+  // refuses it too. The same family row without the field is valid.
+  const withFamily = (level: unknown) => errorsFor(doc => {
+    doc.models.push({
+      id: 'gemini-test-family', provider: 'gemini', kind: 'family', display_name: { en: 'Test', 'zh-HK': 'Test' }, status: 'active', replacement: null, managed: false,
+      prices: { input: 1, output: 2, cache_read: null, cache_write: null, tiers: [] }, context: null, max_output: null,
+      capabilities: { tools: true, streaming: true, json: true, json_schema: false, vision: false, thinking: true, reasoning_effort: false },
+      ...(level === undefined ? {} : { default_thinking_level: level }),
+    });
+  });
+  assert.deepEqual(withFamily(undefined), []);
+  assert.deepEqual(withFamily('high'), ['model "gemini-test-family": default_thinking_level on a family; it describes one model']);
+});
+
 test('the validator requires both cache rates on every priced Claude model, in every tier, as the app does', () => {
   // Registry::check in src-tauri/src/ai/registry/doc.rs (lacks_a_claude_cache_rate): Claude
   // requests use Anthropic's prompt cache, and a missing rate prices those tokens at $0.

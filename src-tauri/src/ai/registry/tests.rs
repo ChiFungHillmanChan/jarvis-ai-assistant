@@ -1224,6 +1224,51 @@ fn a_models_own_reasoning_effort_must_be_one_openai_lists() {
     }
 }
 
+/// A model's `default_thinking_level` must be one of the levels Google
+/// lists: outside them the copy is refused, the field and the model named
+/// and the value not quoted; each of them is accepted. Every value here is
+/// the test's own, on the fixture (P04 R-1).
+#[test]
+fn a_models_default_thinking_level_must_be_one_google_lists() {
+    let with_level = |level: &str| with_models(|models| models.iter_mut().find(|m| m.provider == "gemini" && m.id == "gemini-3.7-flash").unwrap().default_thinking_level = Some(level.into()));
+    for outside in ["max", "none", "HIGH", ""] {
+        assert_eq!(with_level(outside).check(), Err("models.gemini-3.7-flash.default_thinking_level is not one of minimal, low, medium, high, xhigh".into()), "{outside:?}");
+    }
+    for level in ["minimal", "low", "medium", "high", "xhigh"] {
+        assert_eq!(with_level(level).check(), Ok(()), "{level}");
+    }
+}
+
+/// A family is a price pattern that `own_entry` also matches for the ids it
+/// contains, so a `default_thinking_level` on it would apply to all of them:
+/// the copy is refused, the field and the id named, the value not quoted. A
+/// model of the same provider with the field is accepted. The values are
+/// the test's own, on the fixture (P04 R-1).
+#[test]
+fn a_family_may_not_carry_a_default_thinking_level() {
+    let with_level = |id: &str| {
+        with_models(|models| {
+            let entry = models.iter_mut().find(|m| m.provider == "gemini" && m.id == id).unwrap_or_else(|| panic!("{id}"));
+            entry.default_thinking_level = Some("high".into());
+        })
+    };
+    assert_eq!(fixture().models.iter().find(|m| m.provider == "gemini" && m.id == "gemini-flash").unwrap().kind, super::doc::Kind::Family);
+    assert_eq!(with_level("gemini-flash").check(), Err("models.gemini-flash.default_thinking_level is on a family; it describes one model".into()));
+    assert_eq!(with_level("gemini-3.7-flash").check(), Ok(()));
+}
+
+/// `default_thinking_level` is read from the file under its schema name; a
+/// model without it has none.
+#[test]
+fn a_models_default_thinking_level_is_read_from_the_file() {
+    let mut doc: Value = serde_json::from_slice(include_bytes!("fixture.json")).unwrap();
+    let flash = doc["models"].as_array_mut().unwrap().iter_mut().find(|m| m["id"] == "gemini-3.7-flash").unwrap();
+    flash["default_thinking_level"] = json!("high");
+    let read = Registry::parse(&serde_json::to_vec(&doc).unwrap()).unwrap();
+    assert_eq!(read.models.iter().find(|m| m.id == "gemini-3.7-flash").unwrap().default_thinking_level.as_deref(), Some("high"));
+    assert!(read.models.iter().filter(|m| m.id != "gemini-3.7-flash").all(|m| m.default_thinking_level.is_none()));
+}
+
 /// A field this build does not read, on a model or at the top, is ignored
 /// and the copy is used as if it were not there: how an app built before a
 /// field was added (such as `models[].chat_reasoning_effort`) reads a copy
