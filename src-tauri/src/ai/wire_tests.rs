@@ -820,7 +820,7 @@ mod openai_wire {
             let db = crate::db::test_database();
             let logged = crate::test_log::capture(|| async {
                 let turn = run_turn(&router(), official(), &[("user", "Hi")], &db, Workload::Tools, false).await;
-                assert_eq!(turn.reply, Err(format!("OpenAI stream error: {event}")));
+                assert_eq!(turn.reply, Err(format!("OpenAI stream error: {}", json!({"error": {"code": code}}))));
                 assert_eq!(turn.window_lines().last().unwrap(), &format!("chat-state {}", json!({"state": "idle"})));
             })
             .await;
@@ -1258,12 +1258,17 @@ mod openai_wire {
         text
     }
 
-    /// Nothing of a reply reaches the log or the database: not its
-    /// encrypted reasoning, its response, item and call ids, an error's
-    /// message, nor an event that does not parse. The reasoning goes back
-    /// to OpenAI only, in the turn's next request.
+    /// Nothing of a reply reaches the log, the database or the failure
+    /// card: not its encrypted reasoning, its response, item and call ids,
+    /// an error's message, the partial reply a failed response carries, nor
+    /// an event that does not parse. The reasoning goes back to OpenAI only,
+    /// in the turn's next request. The turn runs through `run_chosen`, as
+    /// the router sends it, so the router's own log line and the card are
+    /// read too. The partial reply holds words the router classes errors by
+    /// ("（404）", "沒有回覆內容"): the failure is still a plain one, sent
+    /// once (review finding 2).
     #[tokio::test]
-    async fn no_reply_content_reaches_the_log_or_the_database() {
+    async fn no_reply_content_reaches_the_log_the_database_or_the_card() {
         let reasoning = json!({"type": "reasoning", "id": "rs_CANARY", "summary": [], "encrypted_content": "ENC-CANARY"});
         let call = json!({"type": "function_call", "id": "fc_CANARY", "call_id": "call_CANARY", "name": "list_tasks", "arguments": "{}", "status": "completed"});
         let created = json!({"type": "response.created", "response": {"id": "resp_CANARY", "status": "in_progress"}});
@@ -1273,20 +1278,54 @@ mod openai_wire {
         for event in [item_done(0, reasoning.clone()), item_done(1, call.clone()), done] {
             first.push_str(&format!("event: {}\ndata: {event}\n\n", event["type"].as_str().unwrap()));
         }
-        let failed = json!({"type": "response.failed", "response": {"id": "resp_CANARY", "status": "failed", "error": {"code": "server_error", "message": "MAIL-CANARY"}, "usage": usage(150, 5, 0, 0)}});
+        let partial = json!([
+            {"type": "reasoning", "id": "rs_CANARY_2", "summary": [], "encrypted_content": "ENC-CANARY-2"},
+            {"type": "message", "id": "msg_CANARY", "role": "assistant", "status": "incomplete", "content": [{"type": "output_text", "text": "MAIL-CANARY（404）沒有回覆內容", "annotations": []}]}
+        ]);
+        let failed = json!({"type": "response.failed", "response": {"id": "resp_CANARY_2", "status": "failed", "error": {"code": "server_error", "message": "MAIL-CANARY"}, "output": partial, "usage": usage(150, 5, 0, 0)}});
         let server = serve(vec![Reply::raw(200, "text/event-stream", first.into_bytes()), Reply::responses_sse(&[failed])]).await;
         let _base = point_at(&format!("{}/v1", server.base));
         let db = crate::db::test_database();
+        let entry = official();
+        let mut router = router();
+        router.set_provider_chain(vec![entry.clone()]);
+        let configured = vec![entry.clone()];
+        let (window, ledger, auth) = (Window::default(), SideEffectLedger::new(), Arc::new(crate::auth::google::GoogleAuth::new_empty()));
+        let messages: Vec<(String, String)> = vec![("user".into(), "What are my tasks?".into())];
+        let (messages, window, auth, ledger_ref, router, db_ref) = (&messages, &window, &auth, &ledger, &router, &db);
+        let mut reply = None;
         let logged = crate::test_log::capture(|| async {
-            let turn = run_turn(&router(), official(), &[("user", "What are my tasks?")], &db, Workload::Tools, true).await;
-            assert!(turn.reply.as_ref().is_err_and(|error| error.starts_with("OpenAI stream error: ")), "{:?}", turn.reply);
+            reply = Some(
+                cost::with_feature(
+                    cost::Feature::Chat,
+                    crate::ai::run_chosen(
+                        Some(entry),
+                        None,
+                        &configured,
+                        cost::Feature::Chat,
+                        Workload::Tools,
+                        ledger_ref,
+                        crate::ai::bedrock::UiLanguage::En,
+                        &crate::ai::resends_inside,
+                        &|_| true,
+                        |_, _| {},
+                        move |row| router.send_one(row, messages.clone(), db_ref, auth, window, None, Workload::Tools, ledger_ref),
+                    ),
+                )
+                .await,
+            );
         })
         .await;
+        let error = reply.unwrap().expect_err("the turn failed");
+        let card = crate::ai::failure::parse(&error).unwrap_or_else(|| panic!("not a card: {error}"));
+        assert_eq!((&card["code"], &card["provider_reason"]), (&json!("failed"), &Value::Null), "{card}");
+        assert!(!card.to_string().contains("CANARY"), "{card}");
         let seen = server.seen();
-        assert_eq!(seen.len(), 2);
+        assert_eq!(seen.len(), 2, "a plain failure is not sent again");
         assert_eq!(seen[1].body["input"][2], reasoning, "the reasoning goes back as it came");
         assert!(logged.iter().any(|line| line.contains("did not parse")), "{logged:?}");
         assert!(logged.contains(&"OpenAI stream error: server_error".to_string()), "{logged:?}");
+        assert!(logged.iter().any(|line| line.ends_with(" failed (Failed)")), "the router's line, the class only: {logged:?}");
         assert!(!logged.iter().any(|line| line.contains("CANARY")), "{logged:?}");
         let model = crate::ai::models::openai_default();
         assert_eq!(rows(&db), vec![priced_row("openai", "tools", &model, &[(100, 10, 40, 20), (150, 5, 0, 0)])]);

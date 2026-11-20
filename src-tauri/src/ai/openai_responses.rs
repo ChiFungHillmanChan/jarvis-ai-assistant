@@ -220,11 +220,16 @@ impl Reply {
             }
             "response.failed" | "error" => {
                 self.usage = figures(&event["response"]["usage"]);
-                // Only the error's own short code goes to the log, never its
-                // message, which can quote the request.
+                // Only the error's own short code goes to the log and into
+                // the error: never its message, which can quote the request,
+                // nor the partial reply a failed response carries in
+                // `output`. The router reads the error's words to class it
+                // (`failure::code_of`), so what the model was writing must
+                // not be among them.
                 let code = event.pointer("/response/error/code").or_else(|| event.get("code")).cloned().unwrap_or(Value::Null);
-                log::error!("{}", super::failure::stream_error_line(NAME, &json!({"error": {"code": code}}).to_string()));
-                return Err(RoundError::broken(format!("{NAME} stream error: {data}")));
+                let error = json!({"error": {"code": code}}).to_string();
+                log::error!("{}", super::failure::stream_error_line(NAME, &error));
+                return Err(RoundError::broken(format!("{NAME} stream error: {error}")));
             }
             // Refusal text is not shown, as on Chat Completions: a reply
             // that only refuses is an empty reply. Reasoning summaries are
