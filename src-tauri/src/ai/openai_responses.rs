@@ -42,10 +42,12 @@ impl ResponsesWire {
         ResponsesWire { key: key.to_string(), model, deeper, provider: super::cost::provider_id("openai", None) }
     }
 
-    /// An "Other service" row at OpenAI's own address (`is_openai_itself`):
-    /// its turns are stored under that row's provider id, as its plain
-    /// requests are (`complete::store_then_check`) and as before task 74.
-    pub(crate) fn at(mut self, base_url: &str) -> Self {
+    /// Store this wire's turns under the provider id of the row at
+    /// `base_url`, and change nothing else: requests still go to
+    /// api.openai.com. For an "Other service" row at OpenAI's own address
+    /// (`is_openai_itself`), whose plain requests are stored under that id
+    /// too (`complete::store_then_check`), as before task 74.
+    pub(crate) fn stored_under(mut self, base_url: &str) -> Self {
         self.provider = super::cost::provider_id("openai", Some(base_url));
         self
     }

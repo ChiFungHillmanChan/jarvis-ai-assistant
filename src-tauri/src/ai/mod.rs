@@ -1158,7 +1158,7 @@ impl AiRouter {
                     }
                     Some(base) => {
                         let Some(key) = self.compat_key(base).await else { return Err(format!("No {} API key configured", compat::label(base))) };
-                        openai_responses::ResponsesWire::new(&key, entry.model_id.as_deref(), deeper).at(base)
+                        openai_responses::ResponsesWire::new(&key, entry.model_id.as_deref(), deeper).stored_under(base)
                     }
                 };
                 provider::chat(&wire, chat_request(db, messages, deeper), turn).await
