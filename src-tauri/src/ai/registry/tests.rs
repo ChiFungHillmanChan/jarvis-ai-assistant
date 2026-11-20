@@ -1239,6 +1239,24 @@ fn a_models_default_thinking_level_must_be_one_google_lists() {
     }
 }
 
+/// A family is a price pattern that `own_entry` also matches for the ids it
+/// contains, so a `default_thinking_level` on it would apply to all of them:
+/// the copy is refused, the field and the id named, the value not quoted. A
+/// model of the same provider with the field is accepted. The values are
+/// the test's own, on the fixture (P04 R-1).
+#[test]
+fn a_family_may_not_carry_a_default_thinking_level() {
+    let with_level = |id: &str| {
+        with_models(|models| {
+            let entry = models.iter_mut().find(|m| m.provider == "gemini" && m.id == id).unwrap_or_else(|| panic!("{id}"));
+            entry.default_thinking_level = Some("high".into());
+        })
+    };
+    assert_eq!(fixture().models.iter().find(|m| m.provider == "gemini" && m.id == "gemini-flash").unwrap().kind, super::doc::Kind::Family);
+    assert_eq!(with_level("gemini-flash").check(), Err("models.gemini-flash.default_thinking_level is on a family; it describes one model".into()));
+    assert_eq!(with_level("gemini-3.7-flash").check(), Ok(()));
+}
+
 /// `default_thinking_level` is read from the file under its schema name; a
 /// model without it has none.
 #[test]

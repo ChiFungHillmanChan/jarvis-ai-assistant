@@ -352,9 +352,12 @@ pub struct Model {
     /// ([`Registry::chat_reasoning_effort`]). Only OpenAI's entries are read.
     pub chat_reasoning_effort: Option<String>,
     /// The thinking level Google uses for this model when a request names
-    /// none. Only Gemini's entries are read: the "Think harder" button is
-    /// hidden on a row pinned to a model already at the level it sends
-    /// (`ai::capability::think_harder`).
+    /// none. Only Gemini's entries are read, and a family may not carry it
+    /// ([`Registry::check`]). On Gemini the "Think harder" button is hidden
+    /// where a Think harder turn would go to the model a normal turn uses
+    /// and this is the level it sends (`ai::capability::think_harder`):
+    /// today a row pinned to such a model, as an unpinned row moves to
+    /// `features.premium.gemini` while that differs from `features.chat.gemini`.
     pub default_thinking_level: Option<String>,
     pub local: Option<Local>,
     pub download: Option<Download>,
@@ -506,6 +509,11 @@ impl Registry {
             }
             if model.default_thinking_level.as_deref().is_some_and(|level| !THINKING_LEVELS.contains(&level)) {
                 return Err(format!("models.{}.default_thinking_level is not one of {}", model.id, THINKING_LEVELS.join(", ")));
+            }
+            // A family is also the entry of every id it contains (lookup.rs
+            // own_entry), so a level on it would apply to all of them.
+            if model.kind == Kind::Family && model.default_thinking_level.is_some() {
+                return Err(format!("models.{}.default_thinking_level is on a family; it describes one model", model.id));
             }
         }
         // A default and a preset entry are sent when the user saved no

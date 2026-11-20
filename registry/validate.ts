@@ -113,6 +113,9 @@ function semanticErrors(r: Registry, publishedVersion: number | undefined): stri
     // would never be compared.
     if (m.default_thinking_level !== undefined && m.provider !== 'gemini') errors.push(`model "${m.id}": default_thinking_level is read only on Gemini's models`);
     if (m.default_thinking_level !== undefined && !m.capabilities.thinking) errors.push(`model "${m.id}": default_thinking_level on a model whose capabilities.thinking is false`);
+    // A family is also the entry of every id it contains (ai/registry/lookup.rs
+    // own_entry), so a level on it would apply to all of them (ai/registry/doc.rs check).
+    if (m.default_thinking_level !== undefined && m.kind === 'family') errors.push(`model "${m.id}": default_thinking_level on a family; it describes one model`);
     // JARVIS AI's prices are AWS's; each says where and when it was read.
     if (m.managed && m.prices && !(typeof m.price_source === 'string' && /https:\/\/\S+/.test(m.price_source) && /\b\d{4}-\d{2}-\d{2}\b/.test(m.price_source))) {
       errors.push(`model "${m.id}": a managed price must cite its source in price_source, a URL and the date it was read`);

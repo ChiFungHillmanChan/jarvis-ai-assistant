@@ -205,6 +205,19 @@ test("the validator accepts a model's default thinking level only on a Gemini mo
     const errors = withRow('gemini', true, outside);
     assert.ok(errors.some(e => e.startsWith(`schema: /models/${seeded().models.length}/default_thinking_level `)), `${JSON.stringify(outside)}: ${errors.join('\n')}`);
   }
+  // A family is a price pattern that the app also matches for the ids it contains
+  // (Registry::own_entry), so a level on it would apply to every such id; Registry::check
+  // refuses it too. The same family row without the field is valid.
+  const withFamily = (level: unknown) => errorsFor(doc => {
+    doc.models.push({
+      id: 'gemini-test-family', provider: 'gemini', kind: 'family', display_name: { en: 'Test', 'zh-HK': 'Test' }, status: 'active', replacement: null, managed: false,
+      prices: { input: 1, output: 2, cache_read: null, cache_write: null, tiers: [] }, context: null, max_output: null,
+      capabilities: { tools: true, streaming: true, json: true, json_schema: false, vision: false, thinking: true, reasoning_effort: false },
+      ...(level === undefined ? {} : { default_thinking_level: level }),
+    });
+  });
+  assert.deepEqual(withFamily(undefined), []);
+  assert.deepEqual(withFamily('high'), ['model "gemini-test-family": default_thinking_level on a family; it describes one model']);
 });
 
 test('the validator requires both cache rates on every priced Claude model, in every tier, as the app does', () => {

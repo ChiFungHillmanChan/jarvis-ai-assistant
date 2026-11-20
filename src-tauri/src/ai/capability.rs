@@ -355,9 +355,10 @@ pub(crate) const GEMINI_THINK_HARDER_LEVEL: &str = "high";
 
 /// Whether the "Think harder" button is shown for `entry`: Think harder can
 /// do something there ([`deeper`]) and its request is not the normal turn's.
-/// On the Gemini wire a marked turn on the model a normal turn uses (a
-/// pinned row; an unpinned row moves to the premium model) adds only the
-/// thinking level [`GEMINI_THINK_HARDER_LEVEL`], so where the registry says
+/// On the Gemini wire a marked turn on the model a normal turn uses (today
+/// a pinned row; an unpinned row moves to `features.premium.gemini` while
+/// that differs from `features.chat.gemini`) adds only the thinking level
+/// [`GEMINI_THINK_HARDER_LEVEL`], so where the registry says
 /// that model already thinks at that level by default
 /// (`models[].default_thinking_level`), the button would change nothing and
 /// is hidden (P06; DECISIONS.md, 2026-11-19). A model without the field
@@ -379,7 +380,12 @@ fn same_as_a_normal_turn(registry: &Registry, entry: &ProviderChainEntry) -> boo
 
 /// What a chat request on `entry` sends for "Think harder": only on a turn
 /// the user marked, and only what the model can take. A stale mark (the
-/// button was on, then the model changed) sends nothing extra.
+/// button was on, then the model changed) sends nothing extra to a model
+/// that cannot take it ([`deeper`] is None). A hidden button does not mean
+/// nothing extra: a marked turn can still reach a Gemini row whose button
+/// is hidden because its model already thinks at the high level
+/// ([`think_harder`]), for example when the error card retries a Think
+/// harder turn on that row, and it gets HIGH, which is that model's default.
 pub fn deeper_for(entry: &ProviderChainEntry, workload: Workload) -> Option<Deeper> {
     if workload == Workload::Premium { deeper(entry) } else { None }
 }

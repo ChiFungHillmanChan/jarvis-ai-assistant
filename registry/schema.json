@@ -329,7 +329,7 @@
           }
         },
         "chat_reasoning_effort": { "description": "Optional, OpenAI only, on a model with capabilities.reasoning_effort true (registry/validate.ts): the reasoning effort this model's chat requests send, in place of the provider's limits.chat_reasoning_effort.", "$ref": "#/$defs/reasoningEffort" },
-        "default_thinking_level": { "description": "Optional, Gemini only, on a model with capabilities.thinking true (registry/validate.ts): the thinking level Google uses for this model when a request names none. Think harder is hidden on a row pinned to a model whose default is already the level it sends (ai/capability.rs).", "$ref": "#/$defs/thinkingLevel" },
+        "default_thinking_level": { "description": "Optional, Gemini only, on a model (not a family) with capabilities.thinking true (registry/validate.ts): the thinking level Google uses for this model when a request names none. On Gemini, Think harder is hidden where a Think harder turn would go to the model a normal turn uses and this is the level it sends, high (ai/capability.rs think_harder): today a row pinned to such a model, as an unpinned row moves to features.premium.gemini while that differs from features.chat.gemini.", "$ref": "#/$defs/thinkingLevel" },
         "local": {
           "description": "For a model run by Ollama on this Mac.",
           "type": "object",
