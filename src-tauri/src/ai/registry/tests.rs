@@ -1186,3 +1186,56 @@ fn a_claude_model_needs_both_cache_rates() {
     });
     assert_eq!(other.check(), Ok(()));
 }
+
+/// A model's own `chat_reasoning_effort` comes before its provider's: an
+/// entry with one sends it (a dated id or a family's id too, as the entry
+/// is found), an entry without one or an id no entry matches sends the
+/// provider's, and a model that takes no effort sends none even with a
+/// value of its own. Every value here is the test's own, on the fixture
+/// (P04 R-1).
+#[test]
+fn a_models_own_reasoning_effort_comes_before_the_providers() {
+    let mut registry = (*fixture()).clone();
+    registry.providers.iter_mut().find(|p| p.id == "openai").unwrap().limits.chat_reasoning_effort = Some("minimal".into());
+    for (id, effort) in [("gpt-5.6-luna", "medium"), ("gpt-5", "xhigh"), ("gpt-4o", "high")] {
+        registry.models.iter_mut().find(|m| m.provider == "openai" && m.id == id).unwrap_or_else(|| panic!("{id}")).chat_reasoning_effort = Some(effort.into());
+    }
+    let effort = |model: &str| registry.chat_reasoning_effort("openai", model);
+    assert_eq!(effort("gpt-5.6-luna").as_deref(), Some("medium"), "the model's own");
+    assert_eq!(effort("gpt-5.6-luna-2026-07-09").as_deref(), Some("medium"), "a dated id is its entry's");
+    assert_eq!(effort("gpt-5-2025-08-07").as_deref(), Some("xhigh"), "a family's");
+    assert_eq!(effort("gpt-6-luna").as_deref(), Some("minimal"), "no value of its own: the provider's");
+    assert_eq!(effort("a-model-the-registry-lacks").as_deref(), Some("minimal"), "no entry: the provider's");
+    assert_eq!(effort("gpt-4o"), None, "a model that takes no effort, even with a value of its own");
+    registry.providers.iter_mut().find(|p| p.id == "openai").unwrap().limits.chat_reasoning_effort = None;
+    assert_eq!(registry.chat_reasoning_effort("openai", "gpt-6-luna"), None, "neither has one");
+    assert_eq!(registry.chat_reasoning_effort("openai", "gpt-5.6-luna").as_deref(), Some("medium"));
+}
+
+/// A model's own effort must be one of the values OpenAI lists: outside
+/// them the copy is refused, the field named and the value not quoted;
+/// each of them is accepted.
+#[test]
+fn a_models_own_reasoning_effort_must_be_one_openai_lists() {
+    let with_effort = |effort: &str| with_models(|models| models.iter_mut().find(|m| m.provider == "openai" && m.id == "gpt-6-luna").unwrap().chat_reasoning_effort = Some(effort.into()));
+    assert_eq!(with_effort("maximal").check(), Err("models.gpt-6-luna.chat_reasoning_effort is not one of none, minimal, low, medium, high, xhigh, max".into()));
+    for effort in super::doc::REASONING_EFFORTS {
+        assert_eq!(with_effort(effort).check(), Ok(()), "{effort}");
+    }
+}
+
+/// A field this build does not read, on a model or at the top, is ignored
+/// and the copy is used as if it were not there: how an app built before a
+/// field was added (such as `models[].chat_reasoning_effort`) reads a copy
+/// that has it.
+#[test]
+fn a_field_this_build_does_not_read_is_ignored() {
+    // Both copies go through serde_json's Value, which sorts keys (so the
+    // preset chains' file order is the same in both).
+    let plain: Value = serde_json::from_slice(include_bytes!("fixture.json")).unwrap();
+    let mut doc = plain.clone();
+    doc["models"][0]["a_field_added_later"] = json!("low");
+    doc["a_field_added_later"] = json!({"any": "shape"});
+    let read = Registry::parse(&serde_json::to_vec(&doc).unwrap()).expect("a copy with a field this build does not read is usable");
+    assert_eq!(read, Registry::parse(&serde_json::to_vec(&plain).unwrap()).unwrap());
+}

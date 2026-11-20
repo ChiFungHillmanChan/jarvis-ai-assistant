@@ -165,6 +165,26 @@ test('the validator refuses a limit outside its bound, as the app does, and acce
   }
 });
 
+test("the validator accepts a model's own reasoning effort only on an OpenAI model that takes one, and only a value OpenAI lists", () => {
+  // Registry::chat_reasoning_effort in src-tauri/src/ai/registry/lookup.rs reads it only for
+  // OpenAI's chat requests and sends none to a model that takes no effort; the values are
+  // REASONING_EFFORTS in src-tauri/src/ai/registry/doc.rs. Each case adds a row of its own,
+  // written out here under a new id, so no edit to registry/registry.json changes it (P04 R-1).
+  const withRow = (providerId: string, reasoningEffort: boolean, effort: unknown) => errorsFor(doc => {
+    doc.models.push({
+      id: 'gpt-test-9', provider: providerId, kind: 'model', display_name: { en: 'Test', 'zh-HK': 'Test' }, status: 'active', replacement: null, managed: false,
+      prices: null, context: null, max_output: null,
+      capabilities: { tools: true, streaming: true, json: true, json_schema: false, vision: false, thinking: true, reasoning_effort: reasoningEffort },
+      chat_reasoning_effort: effort,
+    });
+  });
+  for (const effort of ['none', 'minimal', 'low', 'medium', 'high', 'xhigh', 'max']) assert.deepEqual(withRow('openai', true, effort), [], effort);
+  assert.deepEqual(withRow('gemini', true, 'low'), ['model "gpt-test-9": chat_reasoning_effort is read only on OpenAI\'s models']);
+  assert.deepEqual(withRow('openai', false, 'low'), ['model "gpt-test-9": chat_reasoning_effort on a model whose capabilities.reasoning_effort is false']);
+  const outside = withRow('openai', true, 'maximal');
+  assert.ok(outside.some(e => e.startsWith(`schema: /models/${seeded().models.length}/chat_reasoning_effort `)), outside.join('\n'));
+});
+
 test('the validator requires both cache rates on every priced Claude model, in every tier, as the app does', () => {
   // Registry::check in src-tauri/src/ai/registry/doc.rs (lacks_a_claude_cache_rate): Claude
   // requests use Anthropic's prompt cache, and a missing rate prices those tokens at $0.

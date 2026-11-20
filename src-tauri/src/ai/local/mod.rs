@@ -160,7 +160,7 @@ impl LocalChat {
             let text = value.pointer("/message/content").and_then(serde_json::Value::as_str).unwrap_or_default().to_string();
             return crate::ai::complete::done(text, "Ollama".into(), model.to_string(), value.get("prompt_eval_count"), value.get("eval_count"));
         }
-        let body = crate::ai::openai::chat_completions_body(model, request, false);
+        let body = crate::ai::openai::chat_completions_body(model, request);
         let key = self.endpoint.api_key.clone();
         let value = crate::ai::complete::post(client, &format!("{base}/v1/chat/completions"), "本機 AI", |r| match &key {
             Some(key) if !key.is_empty() => r.bearer_auth(key),

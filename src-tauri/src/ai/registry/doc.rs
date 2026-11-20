@@ -341,6 +341,10 @@ pub struct Model {
     pub prices: Option<Prices>,
     pub max_output: Option<u32>,
     pub capabilities: Capabilities,
+    /// The reasoning effort this model's chat requests to api.openai.com
+    /// send, in place of OpenAI's `limits.chat_reasoning_effort`
+    /// ([`Registry::chat_reasoning_effort`]). Only OpenAI's entries are read.
+    pub chat_reasoning_effort: Option<String>,
     pub local: Option<Local>,
     pub download: Option<Download>,
 }
@@ -485,6 +489,9 @@ impl Registry {
             }
             if lacks_a_claude_cache_rate(model) {
                 return Err(format!("models.{} is a Claude model without both cache rates", model.id));
+            }
+            if model.chat_reasoning_effort.as_deref().is_some_and(|effort| !REASONING_EFFORTS.contains(&effort)) {
+                return Err(format!("models.{}.chat_reasoning_effort is not one of {}", model.id, REASONING_EFFORTS.join(", ")));
             }
         }
         // A default and a preset entry are sent when the user saved no

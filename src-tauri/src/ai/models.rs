@@ -117,6 +117,15 @@ pub fn max_tool_rounds(provider: &str) -> usize {
     limits(provider).max_tool_rounds.unwrap_or_default() as usize
 }
 
+/// The reasoning effort of a chat request to `model` on api.openai.com:
+/// none for a model the registry says takes no effort
+/// (`capabilities.reasoning_effort: false`), else the model's own
+/// `chat_reasoning_effort`, else OpenAI's. A model the registry does not
+/// list gets the provider's value.
+pub fn openai_chat_effort(model: &str) -> Option<String> {
+    registry::current().chat_reasoning_effort("openai", model)
+}
+
 /// The `anthropic-version` header.
 pub fn anthropic_version() -> String {
     limits("claude").api_version.unwrap_or_default()

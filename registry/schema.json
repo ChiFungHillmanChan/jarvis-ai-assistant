@@ -155,6 +155,7 @@
     "id": { "type": "string", "pattern": "^[a-z][a-z0-9_]*$" },
     "modelId": { "description": "A model id the app may put in a URL path or a request: letters, digits and . _ : / -, with no '..' (ai/registry/doc.rs is_safe_model_id).", "type": "string", "pattern": "^(?!.*\\.\\.)[A-Za-z0-9._:/-]+$" },
     "outputTokens": { "description": "An output cap in tokens. The maximum is at least ten times version 1's largest (ai/registry/doc.rs MAX_OUTPUT_TOKENS).", "type": "integer", "minimum": 1, "maximum": 131072 },
+    "reasoningEffort": { "description": "A reasoning effort OpenAI lists; each model accepts only some (ai/registry/doc.rs REASONING_EFFORTS).", "enum": ["none", "minimal", "low", "medium", "high", "xhigh", "max"] },
     "contextTokens": { "description": "A context window in tokens (ai/registry/doc.rs MAX_CONTEXT_TOKENS).", "type": "integer", "minimum": 1, "maximum": 1048576 },
     "text": {
       "type": "object",
@@ -253,7 +254,7 @@
             "completion_context_tokens": { "$ref": "#/$defs/contextTokens" },
             "default_context_tokens": { "$ref": "#/$defs/contextTokens" },
             "max_tool_rounds": { "type": "integer", "minimum": 1, "maximum": 50 },
-            "chat_reasoning_effort": { "description": "Sent to OpenAI as reasoning_effort.", "enum": ["none", "minimal", "low", "medium", "high", "xhigh", "max"] },
+            "chat_reasoning_effort": { "description": "Sent to OpenAI as the reasoning effort of a chat request, for a model without its own (models[].chat_reasoning_effort).", "$ref": "#/$defs/reasoningEffort" },
             "chat_temperature": { "type": "number", "minimum": 0, "maximum": 2 },
             "api_version": { "description": "Anthropic's anthropic-version header.", "type": "string", "pattern": "^[0-9]{4}-[0-9]{2}-[0-9]{2}$" }
           }
@@ -326,6 +327,7 @@
             "reasoning_effort": { "type": "boolean" }
           }
         },
+        "chat_reasoning_effort": { "description": "Optional, OpenAI only, on a model with capabilities.reasoning_effort true (registry/validate.ts): the reasoning effort this model's chat requests send, in place of the provider's limits.chat_reasoning_effort.", "$ref": "#/$defs/reasoningEffort" },
         "local": {
           "description": "For a model run by Ollama on this Mac.",
           "type": "object",

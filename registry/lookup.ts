@@ -12,6 +12,9 @@ export interface Prices {
   tiers: { above_input_tokens: number; input: number; output: number; cache_read: number | null; cache_write: number | null }[];
 }
 
+/** The reasoning efforts OpenAI lists (schema.json $defs/reasoningEffort). */
+export type ReasoningEffort = 'none' | 'minimal' | 'low' | 'medium' | 'high' | 'xhigh' | 'max';
+
 export interface RegistryModel {
   id: string;
   provider: string;
@@ -22,6 +25,9 @@ export interface RegistryModel {
   prices: Prices | null;
   max_output: number | null;
   display_name: { en: string; 'zh-HK': string };
+  capabilities: { tools: boolean; streaming: boolean; json: boolean; json_schema: boolean; vision: boolean; thinking: boolean; reasoning_effort: boolean };
+  /** OpenAI only: this model's chat effort, in place of the provider's limits.chat_reasoning_effort. */
+  chat_reasoning_effort?: ReasoningEffort;
   bedrock?: { region: string; model_id: string; invoke: string; hold_text_with_tools: boolean };
   [key: string]: unknown;
 }
