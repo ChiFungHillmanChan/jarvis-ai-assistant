@@ -4150,7 +4150,7 @@ mod resend_counts {
         let row = |provider_type: &str, base_url: Option<&str>| ProviderChainEntry { position: 0, provider_type: provider_type.into(), endpoint_id: None, model_id: Some("m".into()), enabled: true, base_url: base_url.map(Into::into) };
         let endpoint = LocalEndpoint { id: "lm".into(), name: "Local".into(), url: "http://127.0.0.1:9".into(), backend_type: BackendType::Vllm, api_key: None, use_tls: false, connection_timeout_ms: 5000, keep_alive_minutes: 30, is_active: true, last_health_check: None, last_health_status: None };
         let official = crate::ai::openai_responses::ResponsesWire::new(KEY, Some("m"), None);
-        let compatible = crate::ai::openai::OpenAiWire::new(KEY, crate::ai::openai::Target { base_url: Some("http://127.0.0.1:9/v1"), model: Some("m") }).unwrap();
+        let compatible = crate::ai::openai::OpenAiWire::new(KEY, crate::ai::openai::Target { base_url: "http://127.0.0.1:9/v1", model: Some("m") }).unwrap();
         let local = crate::ai::openai::OpenAiWire::local(crate::ai::local::LocalChat::plain(endpoint), "m");
         let claude = crate::ai::claude::ClaudeWire::new(KEY, "m");
         let gemini = crate::ai::gemini::GeminiWire::new(KEY, "m", None);

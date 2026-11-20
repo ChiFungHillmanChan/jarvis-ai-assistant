@@ -151,7 +151,7 @@ async fn complete_one(router: &AiRouter, db: &Database, entry: &ProviderChainEnt
             Some(base) if !super::is_openai_itself(entry) => {
                 let key = router.compat_key(base).await.ok_or_else(|| format!("尚未設定 {} API 密鑰。", compat::label(base)))?;
                 let model = entry.model_id.clone().filter(|m| !m.trim().is_empty()).ok_or_else(|| format!("尚未為 {} 選擇模型。", compat::label(base)))?;
-                OpenAiWire::new(&key, Target { base_url: Some(base), model: Some(&model) })?.complete(request, language).await
+                OpenAiWire::new(&key, Target { base_url: base, model: Some(&model) })?.complete(request, language).await
             }
             // api.openai.com, with the key its row saved (`is_openai_itself`).
             base => {

@@ -23,52 +23,43 @@ struct OpenAIRequest {
 }
 
 /// Where a chat turn goes: an OpenAI-compatible service such as Kimi or
-/// Qwen (a chain row with a `base_url`). api.openai.com itself is on the
-/// Responses API (`openai_responses`, task 74); the app builds no `Target`
-/// without a `base_url`.
+/// Qwen, at its chain row's `base_url`. api.openai.com itself, with or
+/// without an address on its row, is on the Responses API
+/// (`openai_responses`, `ai::is_openai_itself`; task 74).
 #[derive(Clone, Copy, Debug)]
 pub struct Target<'a> {
-    /// None is api.openai.com's Chat Completions address.
-    pub base_url: Option<&'a str>,
-    /// The chain row's model. On api.openai.com, None follows the registry's default.
+    pub base_url: &'a str,
+    /// The chain row's model; a compatible service needs one.
     pub model: Option<&'a str>,
 }
 
 impl Target<'_> {
     fn url(&self) -> String {
-        match self.base_url {
-            Some(base) => {
-                // The test build refuses a compatible service's own address,
-                // as `api_base` refuses OpenAI's.
-                #[cfg(test)]
-                if !super::wire_tests::is_loopback(base) {
-                    super::wire_tests::refuse_outside("A compatible service", base);
-                }
-                format!("{base}/chat/completions")
-            }
-            None => format!("{}/chat/completions", super::api_base("https://api.openai.com/v1")),
+        let base = self.base_url;
+        // The test build refuses a compatible service's own address, as
+        // `api_base` refuses OpenAI's.
+        #[cfg(test)]
+        if !super::wire_tests::is_loopback(base) {
+            super::wire_tests::refuse_outside("A compatible service", base);
         }
+        format!("{base}/chat/completions")
     }
 
     fn model(&self) -> Result<String, String> {
-        match self.base_url {
-            None => Ok(self.model.map(str::trim).filter(|m| !m.is_empty()).map(str::to_string).unwrap_or_else(crate::ai::models::openai_default)),
-            Some(base) => self
-                .model
-                .map(str::to_string)
-                .filter(|m| !m.trim().is_empty())
-                .ok_or_else(|| format!("尚未為 {} 選擇模型，請在設定中選擇。", super::compat::label(base))),
-        }
+        self.model
+            .map(str::to_string)
+            .filter(|m| !m.trim().is_empty())
+            .ok_or_else(|| format!("尚未為 {} 選擇模型，請在設定中選擇。", super::compat::label(self.base_url)))
     }
 
     /// Provider id in the cost table.
     fn provider(&self) -> String {
-        super::cost::provider_id("openai", self.base_url)
+        super::cost::provider_id("openai", Some(self.base_url))
     }
 
     fn request(&self, model: String, messages: Vec<OpenAIMessage>, tools: Vec<serde_json::Value>, final_round: bool) -> OpenAIRequest {
         // The registry's output cap: the compatible service's.
-        let max_tokens = crate::ai::models::chat_max_output_tokens(crate::ai::models::openai_format_provider(self.base_url));
+        let max_tokens = crate::ai::models::chat_max_output_tokens(crate::ai::models::openai_format_provider(Some(self.base_url)));
         OpenAIRequest {
             model,
             messages,
@@ -190,11 +181,11 @@ struct SseFunctionDelta {
     arguments: Option<String>,
 }
 
-/// The OpenAI format on the provider interface: api.openai.com, an
-/// OpenAI-compatible service at the chain row's address, or a model on the
-/// user's own server.
+/// The OpenAI format on the provider interface: an OpenAI-compatible
+/// service at the chain row's address, or a model on the user's own server.
 pub(crate) struct OpenAiWire {
     key: String,
+    /// The compatible service's address; None on a local server.
     base_url: Option<String>,
     model: String,
     /// A local server's own options: its address, key and tool mode.
@@ -205,7 +196,7 @@ impl OpenAiWire {
     /// Fails when a compatible service has no model chosen.
     pub(crate) fn new(key: &str, target: Target<'_>) -> Result<Self, String> {
         let model = target.model()?;
-        Ok(OpenAiWire { key: key.to_string(), base_url: target.base_url.map(str::to_string), model, local: None })
+        Ok(OpenAiWire { key: key.to_string(), base_url: Some(target.base_url.to_string()), model, local: None })
     }
 
     /// A model on a local server.
@@ -228,8 +219,10 @@ impl OpenAiWire {
         }
     }
 
+    /// The compatible service a request goes to. Only the compatible
+    /// paths ask: a local server's return before they do.
     fn target(&self) -> Target<'_> {
-        Target { base_url: self.base_url.as_deref(), model: Some(&self.model) }
+        Target { base_url: self.base_url.as_deref().expect("a compatible service's wire has its address"), model: Some(&self.model) }
     }
 
     /// The service's name in an error.
@@ -237,7 +230,7 @@ impl OpenAiWire {
         if self.local.is_some() {
             return "Local LLM".into();
         }
-        self.base_url.as_deref().map(super::compat::label).unwrap_or_else(|| "OpenAI".into())
+        super::compat::label(self.target().base_url)
     }
 }
 
@@ -612,12 +605,12 @@ mod tests {
     #[test]
     fn a_compatible_service_address_is_refused_in_tests() {
         for base in ["https://api.moonshot.ai/v1", "https://dashscope-intl.aliyuncs.com/compatible-mode/v1"] {
-            let target = Target { base_url: Some(base), model: Some("m") };
+            let target = Target { base_url: base, model: Some("m") };
             let refused = std::panic::catch_unwind(|| target.url()).expect_err("refused");
             assert!(refused.downcast_ref::<String>().is_some_and(|message| message.starts_with(&format!("A compatible service: a test request to {base} was refused"))), "{base}");
         }
         for base in ["http://127.0.0.1:9/v1", "http://localhost:9/v1"] {
-            assert_eq!(Target { base_url: Some(base), model: Some("m") }.url(), format!("{base}/chat/completions"));
+            assert_eq!(Target { base_url: base, model: Some("m") }.url(), format!("{base}/chat/completions"));
         }
     }
 
@@ -632,15 +625,13 @@ mod tests {
             limits(r, "kimi").chat_max_output_tokens = Some(777);
             limits(r, "openai_compat").chat_max_output_tokens = Some(555);
         });
-        let wire = |base_url: Option<&str>| {
+        let wire = |base_url: &str| {
             let target = Target { base_url, model: Some("m") };
             serde_json::to_value(target.request("m".into(), Vec::new(), Vec::new(), false)).unwrap()
         };
-        let kimi = wire(Some("https://api.moonshot.ai/v1"));
+        let kimi = wire("https://api.moonshot.ai/v1");
         assert_eq!((kimi["max_tokens"].as_u64(), kimi.get("reasoning_effort")), (Some(777), None));
-        assert_eq!(wire(Some("https://api.deepseek.com/v1"))["max_tokens"].as_u64(), Some(555));
-        let target = Target { base_url: None, model: None };
-        assert_eq!(target.model().unwrap(), crate::ai::models::OPENAI_DEFAULT);
+        assert_eq!(wire("https://api.deepseek.com/v1")["max_tokens"].as_u64(), Some(555));
     }
 
     /// The bytes a compatible service is sent, frozen from main before
@@ -650,7 +641,7 @@ mod tests {
     /// server's plain request, which share these builders.
     #[test]
     fn a_compatible_service_is_sent_the_same_bytes() {
-        let compatible = Target { base_url: Some("https://api.moonshot.ai/v1"), model: Some("kimi-k2") };
+        let compatible = Target { base_url: "https://api.moonshot.ai/v1", model: Some("kimi-k2") };
         let tools = tools::to_openai_format(&[tools::Tool { name: "remember".into(), description: "Save a fact.".into(), parameters: json!({"type": "object", "properties": {"content": {"type": "string"}}, "required": ["content"]}) }]);
         let first = vec![
             OpenAIMessage { role: "system".into(), content: Some("rules\n\ntoday".into()), tool_calls: None, tool_call_id: None },
@@ -707,7 +698,7 @@ mod tests {
     /// that nothing will run.
     #[test]
     fn only_the_last_round_turns_tools_off() {
-        let target = Target { base_url: Some("https://api.moonshot.ai/v1"), model: Some("kimi-k2") };
+        let target = Target { base_url: "https://api.moonshot.ai/v1", model: Some("kimi-k2") };
         let last = serde_json::to_value(target.request("m".into(), Vec::new(), Vec::new(), true)).unwrap();
         assert_eq!(last["tool_choice"], "none");
         let earlier = serde_json::to_value(target.request("m".into(), Vec::new(), Vec::new(), false)).unwrap();
@@ -771,7 +762,7 @@ mod tests {
     #[ignore]
     async fn live_compatible_service_takes_the_tool_request() {
         let key = std::env::var("GEMINI_API_KEY").expect("GEMINI_API_KEY");
-        let target = Target { base_url: Some(crate::ai::complete::tests::GEMINI_COMPAT), model: Some(crate::ai::models::GEMINI_FLASH) };
+        let target = Target { base_url: crate::ai::complete::tests::GEMINI_COMPAT, model: Some(crate::ai::models::GEMINI_FLASH) };
         let messages = vec![
             OpenAIMessage { role: "system".into(), content: Some("You are JARVIS. Use tools to answer.".into()), tool_calls: None, tool_call_id: None },
             OpenAIMessage { role: "user".into(), content: Some("What is on my calendar today? Use the calendar tool.".into()), tool_calls: None, tool_call_id: None },
