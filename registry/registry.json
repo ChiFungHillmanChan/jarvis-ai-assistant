@@ -1,6 +1,6 @@
 {
-  "version": 6,
-  "issued_at": "2026-11-20T15:39:35Z",
+  "version": 7,
+  "issued_at": "2026-11-20T16:30:33Z",
   "min_app_version": "0.5.11",
   "providers": [
     {
@@ -1082,7 +1082,8 @@
         "vision": false,
         "thinking": true,
         "reasoning_effort": false
-      }
+      },
+      "default_thinking_level": "high"
     },
     {
       "id": "gemini-4-neon",
@@ -1112,7 +1113,8 @@
         "vision": false,
         "thinking": true,
         "reasoning_effort": false
-      }
+      },
+      "default_thinking_level": "high"
     },
     {
       "id": "gemini-4-carbon",
@@ -1142,7 +1144,8 @@
         "vision": false,
         "thinking": true,
         "reasoning_effort": false
-      }
+      },
+      "default_thinking_level": "medium"
     },
     {
       "id": "gemini-4-argon",
@@ -1172,7 +1175,8 @@
         "vision": false,
         "thinking": true,
         "reasoning_effort": false
-      }
+      },
+      "default_thinking_level": "medium"
     },
     {
       "id": "gemini-3.8-flash",
@@ -1202,7 +1206,8 @@
         "vision": false,
         "thinking": true,
         "reasoning_effort": false
-      }
+      },
+      "default_thinking_level": "medium"
     },
     {
       "id": "gemini-3.7-flash",
@@ -1270,7 +1275,8 @@
         "vision": false,
         "thinking": true,
         "reasoning_effort": false
-      }
+      },
+      "default_thinking_level": "high"
     },
     {
       "id": "gemini-3.6-flash",
@@ -1300,7 +1306,8 @@
         "vision": false,
         "thinking": true,
         "reasoning_effort": false
-      }
+      },
+      "default_thinking_level": "medium"
     },
     {
       "id": "gemini-3.5-flash",
@@ -1360,7 +1367,8 @@
         "vision": false,
         "thinking": true,
         "reasoning_effort": false
-      }
+      },
+      "default_thinking_level": "minimal"
     },
     {
       "id": "gemini-3.1-flash-lite",
@@ -1390,7 +1398,8 @@
         "vision": false,
         "thinking": true,
         "reasoning_effort": false
-      }
+      },
+      "default_thinking_level": "minimal"
     },
     {
       "id": "gemini-3-flash-preview",
@@ -1420,7 +1429,8 @@
         "vision": false,
         "thinking": true,
         "reasoning_effort": false
-      }
+      },
+      "default_thinking_level": "high"
     },
     {
       "id": "gemini-2.5-pro",
