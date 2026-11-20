@@ -31,13 +31,23 @@ pub(crate) struct ResponsesWire {
     key: String,
     model: String,
     deeper: Option<super::capability::Deeper>,
+    /// The provider id a turn's usage is stored under.
+    provider: String,
 }
 
 impl ResponsesWire {
     /// `model` is the chain row's; none or blank follows the registry's default.
     pub(crate) fn new(key: &str, model: Option<&str>, deeper: Option<super::capability::Deeper>) -> Self {
         let model = model.map(str::trim).filter(|m| !m.is_empty()).map(str::to_string).unwrap_or_else(super::models::openai_default);
-        ResponsesWire { key: key.to_string(), model, deeper }
+        ResponsesWire { key: key.to_string(), model, deeper, provider: super::cost::provider_id("openai", None) }
+    }
+
+    /// An "Other service" row at OpenAI's own address (`is_openai_itself`):
+    /// its turns are stored under that row's provider id, as its plain
+    /// requests are (`complete::store_then_check`) and as before task 74.
+    pub(crate) fn at(mut self, base_url: &str) -> Self {
+        self.provider = super::cost::provider_id("openai", Some(base_url));
+        self
     }
 
     /// The reasoning effort of a chat request, if any. "Think harder" (P06)
@@ -244,7 +254,7 @@ impl Wire for ResponsesWire {
     }
 
     fn metering(&self) -> Metering {
-        Metering::Turn { provider: super::cost::provider_id("openai", None), model: self.model.clone() }
+        Metering::Turn { provider: self.provider.clone(), model: self.model.clone() }
     }
 
     /// A 429 or 5xx is sent once more here, as on Chat Completions.

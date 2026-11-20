@@ -899,6 +899,81 @@ mod openai_wire {
         assert!(rows(&db).is_empty());
     }
 
+    /// OpenAI's own address, as an "Other service" row may hold it.
+    const OPENAI_ITSELF: &str = "https://api.openai.com/v1";
+
+    /// An "Other service" row at OpenAI's own address is api.openai.com
+    /// (review finding 1): its chat turn goes to the Responses API with
+    /// `store: false` and the key that row saved, and is stored under that
+    /// row's provider id, as before. Any other address is a compatible
+    /// service on Chat Completions (`a_compatible_service`).
+    #[tokio::test]
+    async fn an_other_service_row_at_openais_own_address_is_openai() {
+        let row = |base: Option<&str>| ProviderChainEntry { base_url: base.map(str::to_string), ..official() };
+        for (base, itself) in [
+            (None, true),
+            (Some(OPENAI_ITSELF), true),
+            (Some("https://api.openai.com"), true),
+            (Some("https://api.moonshot.ai/v1"), false),
+            (Some("https://dashscope-intl.aliyuncs.com/compatible-mode/v1"), false),
+            (Some("https://openai-proxy.example.com/v1"), false),
+            (Some("https://api.openai.com.example.net/v1"), false),
+            (Some("http://127.0.0.1:9/v1"), false),
+        ] {
+            assert_eq!(crate::ai::is_openai_itself(&row(base)), itself, "{base:?}");
+        }
+        let server = serve(vec![text_reply()]).await;
+        let _base = point_at(&format!("{}/v1", server.base));
+        let mut router = AiRouter::new("gemini_primary");
+        router.set_compat_key(OPENAI_ITSELF, "sk-fixture-row-not-real");
+        let db = crate::db::test_database();
+        let model = crate::ai::models::openai_default();
+        let turn = run_turn(&router, compat(OPENAI_ITSELF, Some(&model)), &[("user", "Hi")], &db, Workload::Tools, false).await;
+        assert_eq!(turn.reply.as_deref(), Ok("Hello."));
+        let seen = server.seen();
+        assert_eq!(seen.len(), 1);
+        assert_eq!((seen[0].path.as_str(), seen[0].header("authorization")), ("/v1/responses", Some("Bearer sk-fixture-row-not-real")));
+        assert_eq!((&seen[0].body["model"], &seen[0].body["store"]), (&json!(model), &json!(false)));
+        assert_eq!(rows(&db), vec![priced_row("compat:api.openai.com", "chat", &model, &[(1200, 30, 1000, 150)])]);
+    }
+
+    /// The Settings test of an "Other service" at OpenAI's own address goes
+    /// where that row's requests go: the Responses API with `store: false`
+    /// and the pasted key, set on the candidate router as `choose_ai` sets
+    /// it. A compatible service's plain request still goes to Chat
+    /// Completions as `chat_completions_body` builds it, whose bytes
+    /// `openai::tests::a_compatible_service_is_sent_the_same_bytes` freezes.
+    #[tokio::test]
+    async fn plain_requests_at_openais_own_address_are_openai() {
+        use crate::ai::complete::{complete, Request};
+        let server = serve(vec![
+            Reply::json(200, json!({"output": [message_item(0, "OK")], "usage": usage(10, 1, 0, 0)})),
+            Reply::json(200, json!({"choices": [{"message": {"content": "{}"}}], "usage": {"prompt_tokens": 9, "completion_tokens": 1}})),
+        ])
+        .await;
+        let _base = point_at(&format!("{}/v1", server.base));
+        let db = crate::db::test_database();
+        let model = crate::ai::models::openai_default();
+        let mut router = AiRouter::new("gemini_primary");
+        router.set_compat_key(OPENAI_ITSELF, "sk-fixture-row-not-real");
+        router.set_provider_chain(vec![compat(OPENAI_ITSELF, Some(&model))]);
+        let settings_test = Request { system: "", user: "Reply with the single word OK.", json: false, max_tokens: 1_024, feature: cost::Feature::Other };
+        assert_eq!(complete(&router, &db, settings_test).await.map(|done| done.text), Ok("OK".to_string()));
+        let compatible = format!("{}/v1", server.base);
+        router.set_compat_key(&compatible, "sk-fixture-compat-not-real");
+        router.set_provider_chain(vec![compat(&compatible, Some("kimi-k2"))]);
+        let sort = Request { system: "Sort this.", user: "From: a@example.com", json: true, max_tokens: 300, feature: cost::Feature::Other };
+        complete(&router, &db, Request { ..sort }).await.unwrap();
+        let seen = server.seen();
+        assert_eq!(seen.len(), 2);
+        assert_eq!((seen[0].path.as_str(), seen[0].header("authorization")), ("/v1/responses", Some("Bearer sk-fixture-row-not-real")));
+        assert_eq!(seen[0].body, json!({"model": model, "input": [{"role": "user", "content": "Reply with the single word OK."}], "max_output_tokens": 1024, "store": false}));
+        assert_eq!((seen[1].path.as_str(), seen[1].header("authorization")), ("/v1/chat/completions", Some("Bearer sk-fixture-compat-not-real")));
+        assert_eq!(seen[1].body, crate::ai::openai::chat_completions_body("kimi-k2", &sort));
+        let providers: Vec<String> = rows(&db).into_iter().map(|row| row.provider).collect();
+        assert_eq!(providers, ["compat:api.openai.com".to_string(), cost::provider_id("openai", Some(&compatible))]);
+    }
+
     /// Calls in a reply cut off by the length limit may be half written:
     /// they do not run, and the text so far is the answer, with the
     /// sentence that nothing was done (R3-m2).

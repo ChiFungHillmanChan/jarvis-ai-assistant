@@ -481,12 +481,21 @@ const RESEND_DELAY: std::time::Duration = std::time::Duration::from_secs(1);
 const RESEND_DELAY: std::time::Duration = std::time::Duration::from_millis(0);
 
 /// Whether the chat wire `row` is sent on resends a 429 or 5xx once itself
-/// ([`provider::Wire::resends_transient`]): the OpenAI wire does for
-/// api.openai.com and the compatible services, and not for a local server
+/// ([`provider::Wire::resends_transient`]): the Responses wire does for
+/// api.openai.com, the OpenAI wire for the compatible services, and not for a local server
 /// (`AiRouter::send_one` sends "openai" rows to it, "local" rows to its
 /// local mode). No other wire resends.
 pub(crate) fn resends_inside(row: &ProviderChainEntry) -> bool {
     row.provider_type == "openai"
+}
+
+/// Whether an "openai" row is api.openai.com itself, on the Responses API
+/// (task 74): a row without an address, or an "Other service" row at
+/// OpenAI's own address, which the rest of the app already takes for OpenAI
+/// (`compat::is_openai`: its limits, its mail policy, its name on the card).
+/// Any other address is a compatible service on Chat Completions.
+pub(crate) fn is_openai_itself(row: &ProviderChainEntry) -> bool {
+    row.base_url.as_deref().is_none_or(compat::is_openai)
 }
 
 /// One request on the chosen model, with no other model tried in its place
@@ -1133,15 +1142,25 @@ impl AiRouter {
                 let model = entry.model_id.clone().unwrap_or_else(crate::ai::models::claude_default);
                 provider::chat(&claude::ClaudeWire::new(key, &model), chat_request(db, messages, deeper), turn).await
             }
-            "openai" if entry.base_url.is_some() => {
+            "openai" if !is_openai_itself(&entry) => {
                 let base = entry.base_url.clone().unwrap_or_default();
                 let Some(key) = self.compat_key(&base).await else { return Err(format!("No {} API key configured", compat::label(&base))) };
                 let wire = openai::OpenAiWire::new(&key, openai::Target { base_url: Some(&base), model: entry.model_id.as_deref() })?;
                 provider::chat(&wire, chat_request(db, messages, deeper), turn).await
             }
             "openai" => {
-                let Some(ref key) = self.openai_key else { return Err("No OpenAI API key configured".to_string()) };
-                let wire = openai_responses::ResponsesWire::new(key, entry.model_id.as_deref(), deeper);
+                // api.openai.com, with the key its row saved: OpenAI's own,
+                // or an "Other service" row's at OpenAI's address.
+                let wire = match entry.base_url.as_deref() {
+                    None => {
+                        let Some(ref key) = self.openai_key else { return Err("No OpenAI API key configured".to_string()) };
+                        openai_responses::ResponsesWire::new(key, entry.model_id.as_deref(), deeper)
+                    }
+                    Some(base) => {
+                        let Some(key) = self.compat_key(base).await else { return Err(format!("No {} API key configured", compat::label(base))) };
+                        openai_responses::ResponsesWire::new(&key, entry.model_id.as_deref(), deeper).at(base)
+                    }
+                };
                 provider::chat(&wire, chat_request(db, messages, deeper), turn).await
             }
             "bedrock" => {

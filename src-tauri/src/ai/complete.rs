@@ -148,13 +148,17 @@ async fn complete_one(router: &AiRouter, db: &Database, entry: &ProviderChainEnt
     let language = super::bedrock::UiLanguage::read(db);
     match entry.provider_type.as_str() {
         "openai" => match entry.base_url.as_deref() {
-            Some(base) => {
+            Some(base) if !super::is_openai_itself(entry) => {
                 let key = router.compat_key(base).await.ok_or_else(|| format!("尚未設定 {} API 密鑰。", compat::label(base)))?;
                 let model = entry.model_id.clone().filter(|m| !m.trim().is_empty()).ok_or_else(|| format!("尚未為 {} 選擇模型。", compat::label(base)))?;
                 OpenAiWire::new(&key, Target { base_url: Some(base), model: Some(&model) })?.complete(request, language).await
             }
-            None => {
-                let key = router.openai_key.clone().ok_or("尚未設定 OpenAI API 密鑰。")?;
+            // api.openai.com, with the key its row saved (`is_openai_itself`).
+            base => {
+                let key = match base {
+                    None => router.openai_key.clone().ok_or("尚未設定 OpenAI API 密鑰。")?,
+                    Some(base) => router.compat_key(base).await.ok_or_else(|| format!("尚未設定 {} API 密鑰。", compat::label(base)))?,
+                };
                 super::openai_responses::ResponsesWire::new(&key, entry.model_id.as_deref(), None).complete(request, language).await
             }
         },
