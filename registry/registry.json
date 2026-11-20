@@ -1,6 +1,6 @@
 {
   "version": 6,
-  "issued_at": "2026-11-20T12:52:45Z",
+  "issued_at": "2026-11-20T15:24:16Z",
   "min_app_version": "0.5.11",
   "providers": [
     {
@@ -663,7 +663,8 @@
         "vision": false,
         "thinking": true,
         "reasoning_effort": true
-      }
+      },
+      "chat_reasoning_effort": "low"
     },
     {
       "id": "gpt-4o-mini",
