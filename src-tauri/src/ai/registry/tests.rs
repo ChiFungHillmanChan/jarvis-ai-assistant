@@ -1224,6 +1224,33 @@ fn a_models_own_reasoning_effort_must_be_one_openai_lists() {
     }
 }
 
+/// A model's `default_thinking_level` must be one of the levels Google
+/// lists: outside them the copy is refused, the field and the model named
+/// and the value not quoted; each of them is accepted. Every value here is
+/// the test's own, on the fixture (P04 R-1).
+#[test]
+fn a_models_default_thinking_level_must_be_one_google_lists() {
+    let with_level = |level: &str| with_models(|models| models.iter_mut().find(|m| m.provider == "gemini" && m.id == "gemini-3.7-flash").unwrap().default_thinking_level = Some(level.into()));
+    for outside in ["max", "none", "HIGH", ""] {
+        assert_eq!(with_level(outside).check(), Err("models.gemini-3.7-flash.default_thinking_level is not one of minimal, low, medium, high, xhigh".into()), "{outside:?}");
+    }
+    for level in ["minimal", "low", "medium", "high", "xhigh"] {
+        assert_eq!(with_level(level).check(), Ok(()), "{level}");
+    }
+}
+
+/// `default_thinking_level` is read from the file under its schema name; a
+/// model without it has none.
+#[test]
+fn a_models_default_thinking_level_is_read_from_the_file() {
+    let mut doc: Value = serde_json::from_slice(include_bytes!("fixture.json")).unwrap();
+    let flash = doc["models"].as_array_mut().unwrap().iter_mut().find(|m| m["id"] == "gemini-3.7-flash").unwrap();
+    flash["default_thinking_level"] = json!("high");
+    let read = Registry::parse(&serde_json::to_vec(&doc).unwrap()).unwrap();
+    assert_eq!(read.models.iter().find(|m| m.id == "gemini-3.7-flash").unwrap().default_thinking_level.as_deref(), Some("high"));
+    assert!(read.models.iter().filter(|m| m.id != "gemini-3.7-flash").all(|m| m.default_thinking_level.is_none()));
+}
+
 /// A field this build does not read, on a model or at the top, is ignored
 /// and the copy is used as if it were not there: how an app built before a
 /// field was added (such as `models[].chat_reasoning_effort`) reads a copy

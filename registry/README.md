@@ -106,11 +106,14 @@ App 的 `Registry::check`（`src-tauri/src/ai/registry/doc.rs`）拒絕任何一
 | `api_version` | `YYYY-MM-DD` 格式的日期 |
 | `models[].max_output`（每個模型的輸出上限，Gemini 以 `maxOutputTokens` 送出） | 1 至 1,048,576（第 1 版最大 65,536） |
 | `models[].chat_reasoning_effort`（第 6 版加入，可省略；只用於 OpenAI 的模型） | 與 `chat_reasoning_effort` 相同的七個值之一 |
+| `models[].default_thinking_level`（第 7 版加入，可省略；只用於 Gemini 的模型） | `minimal`、`low`、`medium`、`high`、`xhigh` 之一（Google 的 thinking 指南所列，2026-11-19 閱讀；各模型只接受其中部分） |
 | `feature_limits.<功能>.max_output_tokens`（頂層欄位，第 3 版加入；`mail_analysis`、`mail_sort`） | 1 至 131,072（第 3 版均為 4,096） |
 
 輸出上限按設定它的程式分類：各服務商的對話模組（任何功能經該模組送出的請求）所用的上限放在該服務商的 `limits`，例如 `chat_max_output_tokens`，本機模型的對話用 `ollama` 的這一項（第 3 版加入）；功能自行送出、不論由哪個服務商回答的請求所用的上限放在 `feature_limits.<功能>.max_output_tokens`：`mail_analysis` 用於郵件分析（所選 AI 及 OpenAI 模式），`mail_sort` 用於以所選 AI 進行的 AI 分類。快取或遠端副本缺少其中任何一個上限（沒有 `feature_limits`、缺少其中一個功能、該功能是空物件，或 `ollama` 沒有 `chat_max_output_tokens`）時，App 使用內置副本的數值，與其他上限相同。內置副本必定帶有這些數值（Rust 測試 `the_bundled_registry_carries_every_limit_the_app_reads`）；只有兩者都沒有時（實際上只有 App 測試所用、凍結於第 1 版的 `fixture.json`），App 才使用程式內的常數 `OUTPUT_TOKENS_WHEN_UNSET`（4,096，即第 3 版之前程式內的數值），絕不會是 0 或無上限。`schema.json` 只接受 `features` 所用的功能名稱（`$defs/featureName`），每個功能只可有 `max_output_tokens`；App 只讀取 `mail_analysis` 及 `mail_sort`，不會讀取其他功能的數值，但這些數值同樣須在上述範圍之內，否則整份副本不用。
 
 `models[].chat_reasoning_effort` 是個別 OpenAI 模型的對話請求所送的 reasoning effort：App 送往 api.openai.com 的對話請求先用該模型自己的數值，沒有時用 `providers.openai.limits.chat_reasoning_effort`；`capabilities.reasoning_effort` 為 `false` 的模型一律不送 reasoning 欄位（`src-tauri/src/ai/registry/lookup.rs` 的 `chat_reasoning_effort`）。驗證器（`registry/validate.ts`）只接受 `provider` 為 `openai` 而且 `capabilities.reasoning_effort` 為 `true` 的模型帶有這個欄位，因為 App 在其他模型上不會讀取它；這兩項不在 `schema.json`，App 的 `Registry::check` 亦只檢查數值是否上表七個值之一。在這個欄位加入之前建置的 App 不認識它，會略過它（`doc.rs` 只讀取它認識的欄位，Rust 測試 `a_field_this_build_does_not_read_is_ignored`），照舊使用服務商的數值。
+
+`models[].default_thinking_level` 記錄 Gemini 模型本身的事實：請求沒有指定思考程度時，Google 為該模型使用的 thinking level。App 不會送出這個數值，只用它決定是否顯示 Think harder：Gemini 的對話列固定使用某個模型時（Think harder 不會把它改為 `features.premium.gemini`），如該模型的預設已等於 Think harder 所送的思考程度（`high`），Think harder 的請求與一般請求相同，按鈕因此不顯示（`src-tauri/src/ai/capability.rs` 的 `think_harder`）。沒有固定模型的列在 Think harder 時改用 premium 模型，與一般請求的模型不同，按鈕照常顯示；沒有這個欄位的模型亦照常顯示。Think harder 所送的內容不變。驗證器（`registry/validate.ts`）只接受 `provider` 為 `gemini` 而且 `capabilities.thinking` 為 `true` 的模型帶有這個欄位；這兩項不在 `schema.json`，App 的 `Registry::check` 亦只檢查數值是否上表五個值之一。在這個欄位加入之前建置的 App 會略過它，照舊顯示按鈕。
 
 模型 id（`models[].id`、`replacement`、`built_in_models`、`features` 的預設及 `presets` 的模型）只可包含英文字母、數字及 `.`、`_`、`:`、`/`、`-`，而且不可包含 `..`；`schema.json` 另要求 `models[].id` 為小寫（App 以不分大小寫的方式比對）。各功能的預設模型及 preset 所用的模型必須為 `active`；App 建議的替代模型亦只會是 `active` 的模型。
 

@@ -547,6 +547,17 @@ mod tests {
         assert_eq!(generation_config(100, Thinking::Chat(Some(Deeper { thinking: false, effort: true }))), json!({"maxOutputTokens": 100}));
     }
 
+    /// The level a Think harder turn sends is the one its button compares a
+    /// pinned model's `default_thinking_level` with
+    /// (`capability::GEMINI_THINK_HARDER_LEVEL`): the button is hidden where
+    /// the model already thinks at it, so the two must not drift apart.
+    #[test]
+    fn think_harder_sends_the_level_its_button_compares() {
+        use crate::ai::capability::{Deeper, GEMINI_THINK_HARDER_LEVEL};
+        let sent = thinking_config(Thinking::Chat(Some(Deeper { thinking: true, effort: false })));
+        assert_eq!(sent, Some(json!({"thinkingLevel": GEMINI_THINK_HARDER_LEVEL.to_uppercase()})));
+    }
+
     /// The one place that decides the thinking parameter, for a chat turn:
     /// HIGH on a marked turn for a thinking model, nothing otherwise, and
     /// never another level.

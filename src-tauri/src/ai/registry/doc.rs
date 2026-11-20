@@ -167,6 +167,12 @@ pub(crate) const MAX_TEMPERATURE: f32 = 2.0;
 /// and max": developers.openai.com/api/docs/guides/reasoning, read
 /// 2026-11-17). ai/openai.rs sends the value as written and holds no list.
 pub(crate) const REASONING_EFFORTS: &[&str] = &["none", "minimal", "low", "medium", "high", "xhigh", "max"];
+/// The thinking levels Google lists for the Gemini API (`models[].default_thinking_level`):
+/// the thinking guide's generateContent table, "minimal, low, medium, high,
+/// xhigh" across its models, each model accepting only some
+/// (ai.google.dev/gemini-api/docs/thinking?generate-content=true, read
+/// 2026-11-19).
+pub(crate) const THINKING_LEVELS: &[&str] = &["minimal", "low", "medium", "high", "xhigh"];
 
 /// YYYY-MM-DD in shape (Anthropic's `anthropic-version` header).
 fn is_date(value: &str) -> bool {
@@ -345,6 +351,11 @@ pub struct Model {
     /// send, in place of OpenAI's `limits.chat_reasoning_effort`
     /// ([`Registry::chat_reasoning_effort`]). Only OpenAI's entries are read.
     pub chat_reasoning_effort: Option<String>,
+    /// The thinking level Google uses for this model when a request names
+    /// none. Only Gemini's entries are read: the "Think harder" button is
+    /// hidden on a row pinned to a model already at the level it sends
+    /// (`ai::capability::think_harder`).
+    pub default_thinking_level: Option<String>,
     pub local: Option<Local>,
     pub download: Option<Download>,
 }
@@ -492,6 +503,9 @@ impl Registry {
             }
             if model.chat_reasoning_effort.as_deref().is_some_and(|effort| !REASONING_EFFORTS.contains(&effort)) {
                 return Err(format!("models.{}.chat_reasoning_effort is not one of {}", model.id, REASONING_EFFORTS.join(", ")));
+            }
+            if model.default_thinking_level.as_deref().is_some_and(|level| !THINKING_LEVELS.contains(&level)) {
+                return Err(format!("models.{}.default_thinking_level is not one of {}", model.id, THINKING_LEVELS.join(", ")));
             }
         }
         // A default and a preset entry are sent when the user saved no

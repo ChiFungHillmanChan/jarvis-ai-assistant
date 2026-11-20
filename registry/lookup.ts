@@ -15,6 +15,9 @@ export interface Prices {
 /** The reasoning efforts OpenAI lists (schema.json $defs/reasoningEffort). */
 export type ReasoningEffort = 'none' | 'minimal' | 'low' | 'medium' | 'high' | 'xhigh' | 'max';
 
+/** The thinking levels Google lists for the Gemini API (schema.json $defs/thinkingLevel). */
+export type ThinkingLevel = 'minimal' | 'low' | 'medium' | 'high' | 'xhigh';
+
 export interface RegistryModel {
   id: string;
   provider: string;
@@ -28,6 +31,8 @@ export interface RegistryModel {
   capabilities: { tools: boolean; streaming: boolean; json: boolean; json_schema: boolean; vision: boolean; thinking: boolean; reasoning_effort: boolean };
   /** OpenAI only: this model's chat effort, in place of the provider's limits.chat_reasoning_effort. */
   chat_reasoning_effort?: ReasoningEffort;
+  /** Gemini only: the thinking level Google uses for this model when a request names none. */
+  default_thinking_level?: ThinkingLevel;
   bedrock?: { region: string; model_id: string; invoke: string; hold_text_with_tools: boolean };
   [key: string]: unknown;
 }

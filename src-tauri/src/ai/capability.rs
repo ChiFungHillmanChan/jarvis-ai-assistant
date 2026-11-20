@@ -348,9 +348,33 @@ pub fn deeper(entry: &ProviderChainEntry) -> Option<Deeper> {
     (offered && (wanted.thinking || wanted.effort)).then_some(wanted)
 }
 
-/// Whether the "Think harder" button is shown for `entry`.
+/// The thinking level a Think harder turn sends on the Gemini wire
+/// (gemini.rs `thinking_config` sends it as "HIGH"), written as the registry
+/// writes `models[].default_thinking_level`.
+pub(crate) const GEMINI_THINK_HARDER_LEVEL: &str = "high";
+
+/// Whether the "Think harder" button is shown for `entry`: Think harder can
+/// do something there ([`deeper`]) and its request is not the normal turn's.
+/// On the Gemini wire a marked turn on the model a normal turn uses (a
+/// pinned row; an unpinned row moves to the premium model) adds only the
+/// thinking level [`GEMINI_THINK_HARDER_LEVEL`], so where the registry says
+/// that model already thinks at that level by default
+/// (`models[].default_thinking_level`), the button would change nothing and
+/// is hidden (P06; DECISIONS.md, 2026-11-19). A model without the field
+/// keeps the button. What a marked turn sends ([`deeper_for`]) is unchanged.
 pub fn think_harder(entry: &ProviderChainEntry) -> bool {
-    deeper(entry).is_some()
+    deeper(entry).is_some() && !same_as_a_normal_turn(&registry::current(), entry)
+}
+
+/// Whether a Think harder turn on `entry` sends what a normal chat turn
+/// sends: on the Gemini wire, to the same model, which already thinks at the
+/// level Think harder asks for.
+fn same_as_a_normal_turn(registry: &Registry, entry: &ProviderChainEntry) -> bool {
+    let (Ok(marked), Ok(normal)) = (check(registry, "premium", entry), check(registry, "chat", entry)) else { return false };
+    let Some(model) = marked.model.as_deref() else { return false };
+    marked.provider == "gemini"
+        && normal.model.as_deref() == Some(model)
+        && describing(registry, &marked.provider, model).and_then(|m| m.default_thinking_level.as_deref()) == Some(GEMINI_THINK_HARDER_LEVEL)
 }
 
 /// What a chat request on `entry` sends for "Think harder": only on a turn
@@ -368,12 +392,15 @@ pub fn thinks(provider: &str, model: &str) -> bool {
 }
 
 /// The model a "Think harder" turn on `entry` answers with, named for the
-/// button, or None when the button is hidden. An unpinned row answers with
-/// the registry's premium model (a Gemini row moves to the pro model, as
-/// before P06); a pinned row keeps its model. The button names it, so the
-/// move is shown before the user presses it and never happens on its own.
+/// button, or None when the button is hidden ([`think_harder`]). An unpinned
+/// row answers with the registry's premium model (a Gemini row moves to the
+/// pro model, as before P06); a pinned row keeps its model. The button names
+/// it, so the move is shown before the user presses it and never happens on
+/// its own.
 pub fn think_harder_model(entry: &ProviderChainEntry) -> Option<String> {
-    deeper(entry)?;
+    if !think_harder(entry) {
+        return None;
+    }
     check(&registry::current(), "premium", entry).ok().map(|target| target.label)
 }
 
@@ -601,6 +628,74 @@ mod tests {
         let pinned = think_harder_model(&row("gemini", Some(&chat), None)).unwrap();
         assert_eq!(pinned, check(&registry, "chat", &row("gemini", Some(&chat), None)).unwrap().label, "a pinned row keeps its model");
         assert_eq!(think_harder_model(&row("openai", None, None)), None);
+    }
+
+    /// Think harder is hidden where it changes nothing (DECISIONS.md,
+    /// 2026-11-19): a Gemini row pinned to a model whose
+    /// `default_thinking_level` is already the level Think harder sends
+    /// would send the normal turn's request. An unpinned row moves to the
+    /// premium model, so it keeps the button even where both models default
+    /// to that level; a model with a lower default, or none, keeps it. A
+    /// mark on a hidden row still sends what it sent before. Every value
+    /// here is the test's own, on the fixture (P04 R-1).
+    #[test]
+    fn think_harder_is_hidden_where_the_pinned_model_already_thinks_at_that_level() {
+        let (chat, premium) = {
+            let fixture = registry::current();
+            (fixture.feature_default("chat", "gemini").unwrap().to_string(), fixture.feature_default("premium", "gemini").unwrap().to_string())
+        };
+        assert_ne!(chat, premium, "an unpinned Gemini row moves to another model for Think harder");
+        let _registry = test_override::with(|r| {
+            for m in r.models.iter_mut().filter(|m| m.provider == "gemini") {
+                m.default_thinking_level = Some("high".into());
+            }
+            r.models.iter_mut().find(|m| m.id == "gemini-3.6-flash").unwrap().default_thinking_level = Some("medium".into());
+            r.models.iter_mut().find(|m| m.id == "gemini-3.5-flash").unwrap().default_thinking_level = None;
+        });
+        let pinned = |model: &str| row("gemini", Some(model), None);
+        for model in [chat.as_str(), premium.as_str()] {
+            assert!(!think_harder(&pinned(model)), "{model}: hidden");
+            assert_eq!(think_harder_model(&pinned(model)), None, "{model}: hidden");
+            assert_eq!(deeper_for(&pinned(model), Workload::Premium), Some(Deeper { thinking: true, effort: false }), "{model}: a mark still sends the high level");
+        }
+        let unpinned = row("gemini", None, None);
+        assert!(think_harder(&unpinned), "an unpinned row moves to the premium model");
+        assert_eq!(think_harder_model(&unpinned), check(&registry::current(), "premium", &unpinned).ok().map(|t| t.label));
+        for model in ["gemini-3.6-flash", "gemini-3.5-flash"] {
+            assert!(think_harder(&pinned(model)), "{model}: a lower default, or none");
+            assert!(think_harder_model(&pinned(model)).is_some(), "{model}");
+        }
+    }
+
+    /// The rule compares the two requests, not whether the row is pinned: in
+    /// a copy whose Gemini premium model were its chat model, an unpinned
+    /// row's Think harder turn would not move, so on a model already at the
+    /// high level its button is hidden too.
+    #[test]
+    fn an_unpinned_row_keeps_think_harder_only_while_the_premium_model_differs() {
+        let _registry = test_override::with(|r| {
+            let chat = r.feature_default("chat", "gemini").unwrap().to_string();
+            r.features.get_mut("premium").unwrap().insert("gemini".into(), chat.clone());
+            r.models.iter_mut().find(|m| m.provider == "gemini" && m.id == chat).unwrap().default_thinking_level = Some("high".into());
+        });
+        assert!(!think_harder(&row("gemini", None, None)));
+        assert_eq!(think_harder_model(&row("gemini", None, None)), None);
+    }
+
+    /// The rule is the Gemini wire's: the app reads `default_thinking_level`
+    /// only there, so a pinned Claude row whose entry carries the field
+    /// keeps the button.
+    #[test]
+    fn only_a_gemini_model_s_default_thinking_level_hides_think_harder() {
+        let _registry = test_override::with(|r| {
+            for m in r.models.iter_mut().filter(|m| m.provider == "claude") {
+                m.capabilities.thinking = true;
+                m.default_thinking_level = Some("high".into());
+            }
+        });
+        let claude = row("claude", Some(registry::current().feature_default("chat", "claude").unwrap()), None);
+        assert!(think_harder(&claude));
+        assert!(think_harder_model(&claude).is_some());
     }
 
     /// What a marked turn asks for follows the registry flags; an unmarked
