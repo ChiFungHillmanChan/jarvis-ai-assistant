@@ -1,6 +1,6 @@
 {
-  "version": 4,
-  "issued_at": "2026-11-18T12:00:59Z",
+  "version": 5,
+  "issued_at": "2026-11-19T15:59:06Z",
   "min_app_version": "0.5.11",
   "providers": [
     {
@@ -494,7 +494,15 @@
         "output": 1.2,
         "cache_read": 0.02,
         "cache_write": 0.25,
-        "tiers": []
+        "tiers": [
+          {
+            "above_input_tokens": 272000,
+            "input": 0.4,
+            "output": 1.8,
+            "cache_read": 0.04,
+            "cache_write": 0.5
+          }
+        ]
       },
       "context": null,
       "max_output": null,
@@ -516,8 +524,8 @@
         "en": "gpt-5",
         "zh-HK": "gpt-5"
       },
-      "status": "active",
-      "replacement": null,
+      "status": "deprecated",
+      "replacement": "gpt-6-luna",
       "managed": false,
       "prices": {
         "input": 1.25,
@@ -546,8 +554,8 @@
         "en": "GPT-4o mini",
         "zh-HK": "GPT-4o mini"
       },
-      "status": "active",
-      "replacement": null,
+      "status": "deprecated",
+      "replacement": "gpt-6-luna",
       "managed": false,
       "prices": {
         "input": 0.15,
@@ -576,8 +584,8 @@
         "en": "GPT-4o",
         "zh-HK": "GPT-4o"
       },
-      "status": "active",
-      "replacement": null,
+      "status": "deprecated",
+      "replacement": "gpt-6-luna",
       "managed": false,
       "prices": {
         "input": 2.5,
@@ -599,6 +607,36 @@
       }
     },
     {
+      "id": "claude-fable-5-2",
+      "provider": "claude",
+      "kind": "model",
+      "display_name": {
+        "en": "Claude Fable 5.2",
+        "zh-HK": "Claude Fable 5.2"
+      },
+      "status": "active",
+      "replacement": null,
+      "managed": false,
+      "prices": {
+        "input": 8,
+        "output": 40,
+        "cache_read": 0.2,
+        "cache_write": 10,
+        "tiers": []
+      },
+      "context": 1000000,
+      "max_output": 128000,
+      "capabilities": {
+        "tools": true,
+        "streaming": true,
+        "json": true,
+        "json_schema": false,
+        "vision": false,
+        "thinking": false,
+        "reasoning_effort": false
+      }
+    },
+    {
       "id": "claude-sonnet-5-5",
       "provider": "claude",
       "kind": "model",
@@ -612,7 +650,7 @@
       "prices": {
         "input": 2,
         "output": 10,
-        "cache_read": 0.2,
+        "cache_read": 0.1,
         "cache_write": 2.5,
         "tiers": []
       },
@@ -817,6 +855,156 @@
       }
     },
     {
+      "id": "gemini-4-hydrogen",
+      "provider": "gemini",
+      "kind": "model",
+      "display_name": {
+        "en": "Gemini 4 Hydrogen",
+        "zh-HK": "Gemini 4 Hydrogen"
+      },
+      "status": "active",
+      "replacement": null,
+      "managed": false,
+      "prices": {
+        "input": 1.5,
+        "output": 7.5,
+        "cache_read": 0.075,
+        "cache_write": 1.5,
+        "tiers": []
+      },
+      "context": 1048576,
+      "max_output": 65536,
+      "capabilities": {
+        "tools": true,
+        "streaming": true,
+        "json": true,
+        "json_schema": false,
+        "vision": false,
+        "thinking": true,
+        "reasoning_effort": false
+      }
+    },
+    {
+      "id": "gemini-4-neon",
+      "provider": "gemini",
+      "kind": "model",
+      "display_name": {
+        "en": "Gemini 4 Neon",
+        "zh-HK": "Gemini 4 Neon"
+      },
+      "status": "active",
+      "replacement": null,
+      "managed": false,
+      "prices": {
+        "input": 3,
+        "output": 15,
+        "cache_read": 0.15,
+        "cache_write": 3,
+        "tiers": []
+      },
+      "context": 1048576,
+      "max_output": 65536,
+      "capabilities": {
+        "tools": true,
+        "streaming": true,
+        "json": true,
+        "json_schema": false,
+        "vision": false,
+        "thinking": true,
+        "reasoning_effort": false
+      }
+    },
+    {
+      "id": "gemini-4-carbon",
+      "provider": "gemini",
+      "kind": "model",
+      "display_name": {
+        "en": "Gemini 4 Carbon",
+        "zh-HK": "Gemini 4 Carbon"
+      },
+      "status": "active",
+      "replacement": null,
+      "managed": false,
+      "prices": {
+        "input": 2,
+        "output": 10,
+        "cache_read": 0.1,
+        "cache_write": 2,
+        "tiers": []
+      },
+      "context": 1048576,
+      "max_output": 65536,
+      "capabilities": {
+        "tools": true,
+        "streaming": true,
+        "json": true,
+        "json_schema": false,
+        "vision": false,
+        "thinking": true,
+        "reasoning_effort": false
+      }
+    },
+    {
+      "id": "gemini-4-argon",
+      "provider": "gemini",
+      "kind": "model",
+      "display_name": {
+        "en": "Gemini 4 Argon",
+        "zh-HK": "Gemini 4 Argon"
+      },
+      "status": "active",
+      "replacement": null,
+      "managed": false,
+      "prices": {
+        "input": 2,
+        "output": 10,
+        "cache_read": 0.1,
+        "cache_write": 2,
+        "tiers": []
+      },
+      "context": 1048576,
+      "max_output": 65536,
+      "capabilities": {
+        "tools": true,
+        "streaming": true,
+        "json": true,
+        "json_schema": false,
+        "vision": false,
+        "thinking": true,
+        "reasoning_effort": false
+      }
+    },
+    {
+      "id": "gemini-3.8-flash",
+      "provider": "gemini",
+      "kind": "model",
+      "display_name": {
+        "en": "Gemini 3.8 Flash",
+        "zh-HK": "Gemini 3.8 Flash"
+      },
+      "status": "active",
+      "replacement": null,
+      "managed": false,
+      "prices": {
+        "input": 0.75,
+        "output": 3.75,
+        "cache_read": 0.075,
+        "cache_write": 0.75,
+        "tiers": []
+      },
+      "context": 1048576,
+      "max_output": 65536,
+      "capabilities": {
+        "tools": true,
+        "streaming": true,
+        "json": true,
+        "json_schema": false,
+        "vision": false,
+        "thinking": true,
+        "reasoning_effort": false
+      }
+    },
+    {
       "id": "gemini-3.7-flash",
       "provider": "gemini",
       "kind": "model",
@@ -824,8 +1012,8 @@
         "en": "Gemini 3.7 Flash",
         "zh-HK": "Gemini 3.7 Flash"
       },
-      "status": "active",
-      "replacement": null,
+      "status": "deprecated",
+      "replacement": "gemini-3.8-flash",
       "managed": false,
       "prices": {
         "input": 0.75,
@@ -847,7 +1035,7 @@
       }
     },
     {
-      "id": "gemini-3.1-pro",
+      "id": "gemini-3.1-pro-preview",
       "provider": "gemini",
       "kind": "model",
       "display_name": {
@@ -860,14 +1048,14 @@
       "prices": {
         "input": 2,
         "output": 12,
-        "cache_read": 0.5,
+        "cache_read": 0.2,
         "cache_write": 2,
         "tiers": [
           {
             "above_input_tokens": 200000,
             "input": 4,
             "output": 18,
-            "cache_read": 1,
+            "cache_read": 0.4,
             "cache_write": 4
           }
         ]
@@ -896,10 +1084,10 @@
       "replacement": null,
       "managed": false,
       "prices": {
-        "input": 1.5,
-        "output": 7.5,
-        "cache_read": 0.375,
-        "cache_write": 1.5,
+        "input": 0.75,
+        "output": 3.75,
+        "cache_read": 0.075,
+        "cache_write": 0.75,
         "tiers": []
       },
       "context": null,
@@ -922,8 +1110,8 @@
         "en": "Gemini 3.5 Flash",
         "zh-HK": "Gemini 3.5 Flash"
       },
-      "status": "active",
-      "replacement": null,
+      "status": "deprecated",
+      "replacement": "gemini-3.6-flash",
       "managed": false,
       "prices": {
         "input": 1.5,
@@ -958,7 +1146,7 @@
       "prices": {
         "input": 0.3,
         "output": 2.5,
-        "cache_read": 0.075,
+        "cache_read": 0.03,
         "cache_write": 0.3,
         "tiers": []
       },
@@ -988,7 +1176,7 @@
       "prices": {
         "input": 0.25,
         "output": 1.5,
-        "cache_read": 0.0625,
+        "cache_read": 0.025,
         "cache_write": 0.25,
         "tiers": []
       },
@@ -1005,20 +1193,20 @@
       }
     },
     {
-      "id": "gemini-3-flash",
+      "id": "gemini-3-flash-preview",
       "provider": "gemini",
       "kind": "model",
       "display_name": {
         "en": "Gemini 3 Flash",
         "zh-HK": "Gemini 3 Flash"
       },
-      "status": "active",
-      "replacement": null,
+      "status": "deprecated",
+      "replacement": "gemini-3.6-flash",
       "managed": false,
       "prices": {
         "input": 0.5,
         "output": 3,
-        "cache_read": 0.125,
+        "cache_read": 0.05,
         "cache_write": 0.5,
         "tiers": []
       },
@@ -1042,20 +1230,20 @@
         "en": "Gemini 2.5 Pro",
         "zh-HK": "Gemini 2.5 Pro"
       },
-      "status": "active",
-      "replacement": null,
+      "status": "deprecated",
+      "replacement": "gemini-3.8-flash",
       "managed": false,
       "prices": {
         "input": 1.25,
         "output": 10,
-        "cache_read": 0.31,
+        "cache_read": 0.125,
         "cache_write": 1.25,
         "tiers": [
           {
             "above_input_tokens": 200000,
             "input": 2.5,
             "output": 15,
-            "cache_read": 0.625,
+            "cache_read": 0.25,
             "cache_write": 2.5
           }
         ]
@@ -1068,7 +1256,7 @@
         "json": true,
         "json_schema": false,
         "vision": false,
-        "thinking": true,
+        "thinking": false,
         "reasoning_effort": false
       }
     },
@@ -1086,7 +1274,7 @@
       "prices": {
         "input": 1.25,
         "output": 10,
-        "cache_read": 0.31,
+        "cache_read": 0.125,
         "cache_write": 1.25,
         "tiers": []
       },
@@ -1110,13 +1298,13 @@
         "en": "Gemini 2.5 Flash",
         "zh-HK": "Gemini 2.5 Flash"
       },
-      "status": "active",
-      "replacement": null,
+      "status": "deprecated",
+      "replacement": "gemini-3.5-flash-lite",
       "managed": false,
       "prices": {
         "input": 0.3,
         "output": 2.5,
-        "cache_read": 0.075,
+        "cache_read": 0.03,
         "cache_write": 0.3,
         "tiers": []
       },
@@ -1128,7 +1316,37 @@
         "json": true,
         "json_schema": false,
         "vision": false,
-        "thinking": true,
+        "thinking": false,
+        "reasoning_effort": false
+      }
+    },
+    {
+      "id": "gemini-2.5-flash-lite",
+      "provider": "gemini",
+      "kind": "model",
+      "display_name": {
+        "en": "Gemini 2.5 Flash-Lite",
+        "zh-HK": "Gemini 2.5 Flash-Lite"
+      },
+      "status": "active",
+      "replacement": null,
+      "managed": false,
+      "prices": {
+        "input": 0.1,
+        "output": 0.4,
+        "cache_read": 0.01,
+        "cache_write": 0.1,
+        "tiers": []
+      },
+      "context": 1048576,
+      "max_output": 65536,
+      "capabilities": {
+        "tools": true,
+        "streaming": true,
+        "json": true,
+        "json_schema": false,
+        "vision": false,
+        "thinking": false,
         "reasoning_effort": false
       }
     },
@@ -1146,7 +1364,7 @@
       "prices": {
         "input": 0.3,
         "output": 2.5,
-        "cache_read": 0.075,
+        "cache_read": 0.03,
         "cache_write": 0.3,
         "tiers": []
       },
@@ -1890,27 +2108,27 @@
     "chat": {
       "openai": "gpt-6-luna",
       "claude": "claude-sonnet-5-5",
-      "gemini": "gemini-3.7-flash",
+      "gemini": "gemini-4-hydrogen",
       "bedrock": "global.anthropic.claude-sonnet-4-6",
       "jarvis_ai": "jarvis-ai"
     },
     "premium": {
       "openai": "gpt-6-luna",
       "claude": "claude-sonnet-5-5",
-      "gemini": "gemini-3.1-pro-preview",
+      "gemini": "gemini-4-neon",
       "bedrock": "global.anthropic.claude-sonnet-4-6"
     },
     "mail_analysis": {
       "openai": "gpt-6-luna",
       "claude": "claude-sonnet-5-5",
-      "gemini": "gemini-3.7-flash",
+      "gemini": "gemini-4-hydrogen",
       "bedrock": "global.anthropic.claude-sonnet-4-6",
       "jarvis_ai": "jarvis-ai"
     },
     "mail_sort": {
       "openai": "gpt-6-luna",
       "claude": "claude-sonnet-5-5",
-      "gemini": "gemini-3.7-flash",
+      "gemini": "gemini-4-hydrogen",
       "bedrock": "global.anthropic.claude-sonnet-4-6",
       "typesafe": "jev-latest",
       "jarvis_ai": "jarvis-ai"
@@ -1918,17 +2136,17 @@
     "briefing": {
       "openai": "gpt-6-luna",
       "claude": "claude-sonnet-5-5",
-      "gemini": "gemini-3.7-flash",
+      "gemini": "gemini-4-hydrogen",
       "bedrock": "global.anthropic.claude-sonnet-4-6"
     },
     "memory": {
       "openai": "gpt-6-luna",
       "claude": "claude-sonnet-5-5",
-      "gemini": "gemini-3.7-flash",
+      "gemini": "gemini-4-hydrogen",
       "bedrock": "global.anthropic.claude-sonnet-4-6"
     },
     "stt": {
-      "gemini": "gemini-3.7-flash",
+      "gemini": "gemini-3.8-flash",
       "whisper": "ggml-base"
     },
     "tts": {
@@ -1971,8 +2189,8 @@
     "chains": {
       "gemini_primary": {
         "label": {
-          "en": "Gemini Flash (routine) + Gemini Pro (fallback)",
-          "zh-HK": "Gemini Flash（日常）＋Gemini Pro（後備）"
+          "en": "Gemini 4 Hydrogen, with Gemini 3.1 Pro to pick if it fails",
+          "zh-HK": "Gemini 4 Hydrogen；失敗時可改用 Gemini 3.1 Pro"
         },
         "entries": [
           {
@@ -1987,13 +2205,13 @@
       },
       "gemini_flash": {
         "label": {
-          "en": "Gemini Flash (primary) + Pro (fallback)",
-          "zh-HK": "Gemini Flash（主要）＋Pro（後備）"
+          "en": "Gemini 3.8 Flash, with Gemini 3.1 Pro to pick if it fails",
+          "zh-HK": "Gemini 3.8 Flash；失敗時可改用 Gemini 3.1 Pro"
         },
         "entries": [
           {
             "provider": "gemini",
-            "model": "gemini-3.7-flash"
+            "model": "gemini-3.8-flash"
           },
           {
             "provider": "gemini",
@@ -2021,7 +2239,7 @@
         "entries": [
           {
             "provider": "gemini",
-            "model": "gemini-3.7-flash"
+            "model": "gemini-3.8-flash"
           }
         ]
       }

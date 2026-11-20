@@ -1117,3 +1117,72 @@ fn the_replacement_offered_is_always_active() {
     }), ModelState::Disabled { replacement: None });
     assert_eq!(state(&|m| set_status(m, "gpt-5.6-luna", Status::Disabled, None)), ModelState::Disabled { replacement: Some(default.clone()) });
 }
+
+/// Registry version 5 renames `gemini-3.1-pro` and `gemini-3-flash`, which
+/// Google does not serve, to the ids it does. On the frozen fixture: before,
+/// the pinned id reaches the short entry because it contains it; after, it
+/// reaches the renamed entry by its exact id, with the same price, state
+/// and output limit. Only the short id itself is no longer priced.
+#[test]
+fn renaming_an_entry_to_the_served_id_keeps_pinned_ids_priced_and_routed() {
+    let renames = [("gemini-3.1-pro", "gemini-3.1-pro-preview"), ("gemini-3-flash", "gemini-3-flash-preview")];
+    let before = fixture();
+    let after = with_models(|models| {
+        for (old, new) in renames {
+            models.iter_mut().find(|m| m.id == old).unwrap_or_else(|| panic!("{old}")).id = new.into();
+        }
+    });
+    for (old, new) in renames {
+        assert_eq!(before.own_entry("gemini", new).map(|m| m.id.as_str()), Some(old), "before: {new} reaches {old}");
+        assert_eq!(after.own_entry("gemini", new).map(|m| m.id.as_str()), Some(new), "after: {new} is its own entry");
+        assert!(after.price_for(new).is_some(), "{new}");
+        assert_eq!(before.price_for(new), after.price_for(new), "{new}");
+        assert_eq!(before.model_state("gemini", new), after.model_state("gemini", new), "{new}");
+        assert_eq!(before.max_output_tokens(new), after.max_output_tokens(new), "{new}");
+        assert!(before.price_for(old).is_some() && after.price_for(old).is_none(), "{old} is priced only before");
+    }
+}
+
+/// Registry version 5 marks the `gpt-5` family deprecated. A longer own
+/// entry still wins (`gpt-5.6-luna`, and an id that contains it, keep its
+/// active entry); an id only the family matches reads as deprecated, with
+/// the replacement named.
+#[test]
+fn a_deprecated_family_reaches_only_the_ids_no_longer_entry_matches() {
+    let registry = with_models(|models| set_status(models, "gpt-5", Status::Deprecated, Some("gpt-6-luna")));
+    for id in ["gpt-5.6-luna", "gpt-5.6-luna-2026-07-09"] {
+        assert_eq!(registry.model_state("openai", id), ModelState::Active, "{id}");
+    }
+    for id in ["gpt-5", "gpt-5-2025-08-07", "gpt-5-mini"] {
+        assert_eq!(registry.model_state("openai", id), ModelState::Deprecated { replacement: Some("gpt-6-luna".into()) }, "{id}");
+    }
+}
+
+/// Claude requests use Anthropic's prompt cache, and a missing cache rate
+/// prices those tokens at $0: a copy whose priced Claude model (or Bedrock
+/// row for a Claude model) lacks either rate, in its base price or a tier,
+/// is refused. Other providers' models may leave them out.
+#[test]
+fn a_claude_model_needs_both_cache_rates() {
+    assert_eq!(fixture().check(), Ok(()));
+    let claude = |change: &dyn Fn(&mut doc::Prices)| {
+        with_models(|models| change(models.iter_mut().find(|m| m.provider == "claude" && m.prices.is_some()).unwrap().prices.as_mut().unwrap())).check()
+    };
+    assert!(claude(&|p| p.cache_read = None).is_err());
+    assert!(claude(&|p| p.cache_write = None).is_err());
+    let tier = |cache_read, cache_write| doc::Tier { above_input_tokens: 400_000, input: 9.0, output: 9.0, cache_read, cache_write };
+    assert_eq!(claude(&|p| p.tiers.push(tier(Some(1.0), Some(1.0)))), Ok(()));
+    assert!(claude(&|p| p.tiers.push(tier(None, Some(1.0)))).is_err());
+    assert!(claude(&|p| p.tiers.push(tier(Some(1.0), None))).is_err());
+    let on_bedrock = with_models(|models| {
+        let mut row = entry_like(models, "nova-pro", "anthropic.claude-test-v1:0", "bedrock", Status::Active);
+        row.prices.as_mut().unwrap().cache_write = None;
+        models.push(row);
+    });
+    assert!(on_bedrock.check().is_err());
+    let other = with_models(|models| {
+        let p = models.iter_mut().find(|m| m.provider == "gemini" && m.prices.is_some()).unwrap().prices.as_mut().unwrap();
+        (p.cache_read, p.cache_write) = (None, None);
+    });
+    assert_eq!(other.check(), Ok(()));
+}

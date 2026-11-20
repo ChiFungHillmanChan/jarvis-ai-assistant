@@ -78,3 +78,12 @@ test('the Storage clean-up text and report say usage is kept as daily totals', (
   const sweep = between(settings, 'function handleSweep()', 'function handlePurge(');
   assert.match(sweep, /return sweepSummary\(await runStorageSweep\(\), text\);/);
 });
+
+// The button that adds the Gemini premium default shows that model's
+// registry name (addModelLabel), so its text follows the registry the app is
+// using; "+ Gemini Pro" went stale when the default became Gemini 4 Neon.
+test('the Settings button that adds the Gemini premium default is named from the registry', () => {
+  assert.match(settings, /^import \{[^}]*\baddModelLabel\b[^}]*\} from "\.\.\/lib\/ai-catalog";$/m);
+  const button = between(settings, 'handleAddToChain("gemini", undefined, models.defaults.gemini_pro)}', '</button>');
+  assert.match(button, />\{models \? addModelLabel\(models, models\.defaults\.gemini_pro\) : "\+ …"\}$/);
+});

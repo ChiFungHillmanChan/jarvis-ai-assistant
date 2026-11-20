@@ -15,6 +15,18 @@ export function cloudModelFor(catalog: AiModelCatalog | null, id: string): Cloud
   return catalog.cloud.filter(model => wanted.includes(model.id)).sort((a, b) => b.id.length - a.id.length)[0] ?? null;
 }
 
+/**
+ * The text of a Settings button that adds a model: "+ " and the registry's
+ * name for it, found as ai/registry/lookup.rs `label_for` finds it (the
+ * catalog entry that prices the id, not a family), else the id. The
+ * registry's model names are the same in both languages, and the app shows
+ * the English one in either.
+ */
+export function addModelLabel(catalog: AiModelCatalog, id: string): string {
+  const model = cloudModelFor(catalog, id);
+  return `+ ${model && !model.family ? model.label : id}`;
+}
+
 /** A per-1M-token rate as written in copy: 0.1 -> "0.10", 0.042 -> "0.042". */
 export function formatRate(usd: number): string {
   const cents = usd * 100;

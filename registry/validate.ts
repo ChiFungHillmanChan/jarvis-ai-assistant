@@ -69,6 +69,11 @@ function strings(value: unknown, path: string, out: [string, string][]): [string
   return out;
 }
 
+/** An Anthropic API model, or a Bedrock row for a Claude model (as ai/registry/doc.rs `is_claude`). */
+function isClaude(m: RegistryModel): boolean {
+  return m.provider === 'claude' || (m.provider === 'bedrock' && m.id.includes('claude'));
+}
+
 function semanticErrors(r: Registry, publishedVersion: number | undefined): string[] {
   const errors: string[] = [];
   const providers = new Map<string, Provider>();
@@ -109,6 +114,11 @@ function semanticErrors(r: Registry, publishedVersion: number | undefined): stri
     if (m.prices) {
       const above = m.prices.tiers.map(t => t.above_input_tokens);
       if (above.some((v, i) => i > 0 && v <= above[i - 1])) errors.push(`model "${m.id}": price tiers must rise`);
+    }
+    // Claude requests read from and write to Anthropic's prompt cache, and
+    // the app prices a missing cache rate as $0 (ai/registry/doc.rs check).
+    if (isClaude(m) && m.prices && [m.prices, ...m.prices.tiers].some(p => p.cache_read === null || p.cache_write === null)) {
+      errors.push(`model "${m.id}": a Claude model needs both cache_read and cache_write, in every price tier too`);
     }
   }
   // A configured id (a default, a preset entry, a replacement) must name a

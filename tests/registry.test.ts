@@ -95,8 +95,10 @@ test('the validator rejects a missing feature default', () => {
 test('the validator rejects a disabled or deprecated model used as a default', () => {
   const disabled = errorsFor(doc => { model(doc, 'gpt-6-luna').status = 'disabled'; model(doc, 'gpt-6-luna').replacement = 'gpt-5.6-luna'; });
   assert.ok(disabled.some(e => e.includes('features.chat.openai: model "gpt-6-luna" is disabled')), disabled.join('\n'));
-  // A default that reaches its entry through the price lookup is checked the same way.
-  const viaLookup = errorsFor(doc => { model(doc, 'gemini-3.1-pro').status = 'disabled'; });
+  // A default that reaches its entry through the price lookup is checked the
+  // same way. On the frozen fixture, where gemini-3.1-pro-preview reaches the
+  // gemini-3.1-pro entry; the editable file names that model exactly.
+  const viaLookup = (() => { const doc = fixture(); model(doc, 'gemini-3.1-pro').status = 'disabled'; return validateRegistry(doc); })();
   assert.ok(viaLookup.some(e => e.includes('features.premium.gemini: model "gemini-3.1-pro-preview" is disabled')));
   assert.ok(viaLookup.some(e => e.includes('presets.chains.gemini_pro_only[0]')));
   assert.ok(errorsFor(doc => { model(doc, 'claude-sonnet-5-5').status = 'deprecated'; model(doc, 'claude-sonnet-5-5').replacement = 'claude-opus-5-5'; })
@@ -161,6 +163,36 @@ test('the validator refuses a limit outside its bound, as the app does, and acce
     assert.ok(errors.some(e => e.startsWith(`schema: /providers/${index}/limits/${field} `)), `${id}.${field} = ${outside}: ${errors.join('\n')}`);
     assert.deepEqual(errorsFor(doc => { provider(doc, id).limits[field] = inside; }), [], `${id}.${field} = ${inside}`);
   }
+});
+
+test('the validator requires both cache rates on every priced Claude model, in every tier, as the app does', () => {
+  // Registry::check in src-tauri/src/ai/registry/doc.rs (lacks_a_claude_cache_rate): Claude
+  // requests use Anthropic's prompt cache, and a missing rate prices those tokens at $0.
+  // Each case adds a row of its own, written out here under a new id, so no
+  // edit to registry/registry.json that the validator accepts changes it (P04 R-1).
+  type Rates = { cache_read: number | null; cache_write: number | null };
+  const tier = (rates: Rates) => ({ above_input_tokens: 200000, input: 2, output: 2, ...rates });
+  const withRow = (providerId: string, id: string, base: Rates, tiers: Rates[] = []) => errorsFor(doc => {
+    doc.models.push({
+      id, provider: providerId, kind: 'model', display_name: { en: 'Test', 'zh-HK': 'Test' }, status: 'active', replacement: null, managed: false,
+      prices: { input: 1, output: 1, ...base, tiers: tiers.map(tier) }, context: null, max_output: null,
+      capabilities: { tools: true, streaming: true, json: true, json_schema: false, vision: false, thinking: false, reasoning_effort: false },
+    });
+  });
+  const both = { cache_read: 1, cache_write: 1 };
+  const refusal = (id: string) => [`model "${id}": a Claude model needs both cache_read and cache_write, in every price tier too`];
+  for (const [providerId, id] of [['claude', 'claude-test-9-9'], ['bedrock', 'anthropic.claude-test-v1:0']]) {
+    assert.deepEqual(withRow(providerId, id, both), [], `${id} with both rates`);
+    assert.deepEqual(withRow(providerId, id, both, [both]), [], `${id} with both rates in a tier`);
+    assert.deepEqual(withRow(providerId, id, { cache_read: null, cache_write: 1 }), refusal(id), `${id} without cache_read`);
+    assert.deepEqual(withRow(providerId, id, { cache_read: 1, cache_write: null }), refusal(id), `${id} without cache_write`);
+    assert.deepEqual(withRow(providerId, id, both, [{ cache_read: null, cache_write: 1 }]), refusal(id), `${id}: a tier without cache_read`);
+    assert.deepEqual(withRow(providerId, id, both, [{ cache_read: 1, cache_write: null }]), refusal(id), `${id}: a tier without cache_write`);
+  }
+  // Another provider's model, or a Bedrock row for another vendor's model, may leave them out.
+  const neither = { cache_read: null, cache_write: null };
+  assert.deepEqual(withRow('gemini', 'gemini-test-9', neither, [neither]), []);
+  assert.deepEqual(withRow('bedrock', 'amazon.test-v1:0', neither, [neither]), []);
 });
 
 test("the validator refuses a feature's output cap outside its bound or a feature it does not know, as the schema says, and accepts a copy without them", () => {

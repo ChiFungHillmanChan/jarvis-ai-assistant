@@ -52,7 +52,8 @@ PR 檢查只讀取，沒有 environment、secret 或 AWS 權限。除了 `regist
 
 - 雲端服務商回報的模型 id，以「包含於該 id 之內的最長 entry id」比對（不分大小寫；長度相同時取較後的 entry），範圍只限 `prices` 不為 `null` 且 `managed` 為 `false` 的 entry。這組 entry 即 `models.rs` 的 `CLOUD_MODELS`，次序亦相同。
 - `kind: "family"` 是一系列模型的價格樣式（例如 `gemini-flash`），不是可選擇的模型。
-- 功能預設、preset 及 `replacement` 先以完全相同的 id 比對，找不到才用上述規則（例如 `gemini-3.1-pro-preview` 對應 `gemini-3.1-pro`）。
+- 功能預設、preset 及 `replacement` 先以完全相同的 id 比對，找不到才用上述規則（例如 `gemini-2.5-flash-lite-preview-09-2025` 對應 `gemini-2.5-flash-lite`）。
+- 模型的 `status` 另有比對規則（`src-tauri/src/ai/registry/lookup.rs` 的 `own_entry`），與上述價格比對不同：先找同一服務商、id 完全相同的 entry（`managed: true` 的除外）；找不到時，取包含於該 id 之內的最長同一服務商 entry id（不分大小寫，未定價的 entry 及 family 亦計算在內）。`ollama`、`openai_compat`、`kimi`、`qwen` 及 `gemini_compat` 的 id 由使用者自選，只以完全相同的 id 比對。例如 family `gpt-5` 亦對應 `gpt-5-mini`、`gpt-5-nano`、`gpt-5.1`、別名 `gpt-5.6`、`gpt-5.6-sol` 及 `gpt-5.6-terra`（只有 `gpt-5.6-luna` 有自己的 entry）。`deprecated` 不會停止任何請求，App 目前亦不會因此顯示任何提示；但若在 OpenAI 於 2026-12-11 停止 `gpt-5` 時把這一列設為 `disabled`，上述仍在服務的模型亦會一併停止：使用它們的請求停止，直至使用者確認改用替代模型。安全的做法：先為這些 id 加入各自的 entry（價格及狀態按官方資料），或不把 family 一列設為 `disabled`（維持 `active` 或 `deprecated`）。
 - 比對到的 entry 必須屬於同一服務商，而且不可完全等於 `kind: "family"` 的 entry；只包含 family id 的 id 則可以（例如 `jev-latest` 對應 `jev`）。`bedrock` 例外：它的 id 是經 AWS 使用的其他廠商模型，價格記在該廠商的 entry 之下。
 - 仍包含真實 id 的錯字（例如 `gpt-6-luna-x` 會對應 `gpt-6-luna`）目前驗證器無法發現，要堵住須另設明確的別名清單。
 - `managed: true` 的 entry 屬 JARVIS AI 自家代理，只以完全相同的 id 比對，永不用於 App 的價格查詢。
@@ -109,6 +110,8 @@ App 的 `Registry::check`（`src-tauri/src/ai/registry/doc.rs`）拒絕任何一
 輸出上限按設定它的程式分類：各服務商的對話模組（任何功能經該模組送出的請求）所用的上限放在該服務商的 `limits`，例如 `chat_max_output_tokens`，本機模型的對話用 `ollama` 的這一項（第 3 版加入）；功能自行送出、不論由哪個服務商回答的請求所用的上限放在 `feature_limits.<功能>.max_output_tokens`：`mail_analysis` 用於郵件分析（所選 AI 及 OpenAI 模式），`mail_sort` 用於以所選 AI 進行的 AI 分類。快取或遠端副本缺少其中任何一個上限（沒有 `feature_limits`、缺少其中一個功能、該功能是空物件，或 `ollama` 沒有 `chat_max_output_tokens`）時，App 使用內置副本的數值，與其他上限相同。內置副本必定帶有這些數值（Rust 測試 `the_bundled_registry_carries_every_limit_the_app_reads`）；只有兩者都沒有時（實際上只有 App 測試所用、凍結於第 1 版的 `fixture.json`），App 才使用程式內的常數 `OUTPUT_TOKENS_WHEN_UNSET`（4,096，即第 3 版之前程式內的數值），絕不會是 0 或無上限。`schema.json` 只接受 `features` 所用的功能名稱（`$defs/featureName`），每個功能只可有 `max_output_tokens`；App 只讀取 `mail_analysis` 及 `mail_sort`，不會讀取其他功能的數值，但這些數值同樣須在上述範圍之內，否則整份副本不用。
 
 模型 id（`models[].id`、`replacement`、`built_in_models`、`features` 的預設及 `presets` 的模型）只可包含英文字母、數字及 `.`、`_`、`:`、`/`、`-`，而且不可包含 `..`；`schema.json` 另要求 `models[].id` 為小寫（App 以不分大小寫的方式比對）。各功能的預設模型及 preset 所用的模型必須為 `active`；App 建議的替代模型亦只會是 `active` 的模型。
+
+有價格的 Claude 模型（`provider` 為 `claude`，或 `provider` 為 `bedrock` 而 id 含 `claude`）的 `cache_read` 及 `cache_write` 都不可為 `null`，每個價格級距亦然：Claude 的請求會讀取及寫入 Anthropic 的 prompt cache，而 App 把缺少的快取價格當作 0 計算。這一項不在 `schema.json`：驗證器（`registry/validate.ts`）在簽署前拒絕，App 的 `Registry::check`（`lacks_a_claude_cache_rate`）亦會拒絕整份副本，使用中的副本不變。
 
 設定導引的本機模型清單（`provider` 為 `ollama` 而且有 `local.setup` 的 entry）的模型名稱會照原樣傳給 Ollama 下載及執行；App 不會另行核對這份清單，經簽署的註冊表即是依據。
 
