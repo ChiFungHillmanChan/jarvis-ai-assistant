@@ -136,8 +136,9 @@ pub struct Sums {
     /// row by row (a request, or a day's total) and then added up. A row
     /// whose input is smaller than its cache reads and writes cannot hold
     /// the cache (ai/cost.rs `correct_old_rows` corrects every such Bedrock
-    /// row before anything reads them, and no release stored a Claude row
-    /// with cache figures), so its input counts as stored: the figure is
+    /// row before anything reads them, and a Claude row with cache figures,
+    /// stored only since chat turns ask Anthropic to cache, holds the cache
+    /// in its input), so its input counts as stored: the figure is
     /// never below zero, and nothing is clamped away. So a group's figure
     /// changes when its requests are rolled into a day's total if one of them
     /// has input below its cache (input 100 with 300 cached and 1,000 with
