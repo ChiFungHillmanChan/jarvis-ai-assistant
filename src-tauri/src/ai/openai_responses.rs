@@ -278,7 +278,23 @@ impl Wire for ResponsesWire {
             .map_err(|e| e.to_string())?;
         // The standing rules as the first developer message: models from
         // GPT-6.2 put top-level `instructions` after the input, uncached.
-        let mut input = vec![json!({"role": "developer", "content": request.system.joined()})];
+        // From GPT-5.6, OpenAI saves a prefix only at a cache breakpoint, and
+        // with none given its one implicit breakpoint ends after the latest
+        // message, so the time in the request's own part kept the next turn
+        // from reading anything. Where breakpoints are supported the message
+        // goes in two blocks: the static rules, ending at an explicit
+        // breakpoint the next turn reads, then the part written for this
+        // request. The text is the same; each round's whole input is still
+        // saved for the next.
+        let content = if supports_cache_breakpoint(&self.model) {
+            json!([
+                {"type": "input_text", "text": request.system.cacheable, "prompt_cache_breakpoint": {"mode": "explicit"}},
+                {"type": "input_text", "text": format!("\n\n{}", request.system.dynamic)}
+            ])
+        } else {
+            json!(request.system.joined())
+        };
+        let mut input = vec![json!({"role": "developer", "content": content})];
         input.extend(request.messages.into_iter().filter(|(_, content)| !content.trim().is_empty()).map(|(role, content)| json!({"role": role, "content": content})));
         Ok(Conversation { client, input, tools: super::tools::to_responses_format(&request.tools), reply: Vec::new() })
     }
@@ -368,6 +384,25 @@ impl Wire for ResponsesWire {
         let value = super::complete::post(&client, &url(), NAME, |r| r.bearer_auth(&self.key), &plain_body(&self.model, request)).await?;
         plain_result(&value, NAME.into(), self.model.clone())
     }
+}
+
+/// Whether a chat request to `model` may carry an explicit prompt-cache
+/// breakpoint. OpenAI documents them for GPT-5.6 and later; its prompt
+/// caching guide marks them "Not supported" on GPT-5.5 and earlier and does
+/// not say whether such a model ignores the field or rejects the request.
+/// So only an id that is plainly GPT-5.6 or later gets one: "gpt-", a major
+/// number, an optional ".minor" (0 when absent), then the end or "-". Any
+/// other id (o-series, 4o, a fine-tune, anything unknown or malformed) fails
+/// safe and is sent as before.
+pub(crate) fn supports_cache_breakpoint(model: &str) -> bool {
+    let number = |digits: &str| if !digits.is_empty() && digits.bytes().all(|b| b.is_ascii_digit()) { digits.parse::<u32>().ok() } else { None };
+    let Some(("gpt", rest)) = model.split_once('-') else { return false };
+    let version = rest.split('-').next().unwrap_or_default();
+    let (major, minor) = match version.split_once('.') {
+        Some((major, minor)) => (number(major), number(minor)),
+        None => (number(version), Some(0)),
+    };
+    matches!((major, minor), (Some(major), Some(minor)) if (major, minor) >= (5, 6))
 }
 
 /// A plain request: not streamed, no tools, and, as on Chat Completions,
@@ -485,6 +520,82 @@ mod tests {
         let sent = crate::ai::tools::to_responses_format(&tools);
         assert_eq!(sent.len(), tools.len());
         assert_eq!(sent[0], json!({"type": "function", "name": tools[0].name, "description": tools[0].description, "parameters": tools[0].parameters, "strict": false}));
+    }
+
+    /// Explicit cache breakpoints only where OpenAI documents them, GPT-5.6
+    /// and later; any other id, an unknown or malformed one included, is not.
+    #[test]
+    fn only_gpt_5_6_and_later_take_a_cache_breakpoint() {
+        for id in ["gpt-6-luna", "gpt-6.2-astra", "gpt-6.2-astra-2026-11-20", "gpt-5.6-luna", "gpt-5.7", "gpt-5.10", "gpt-7"] {
+            assert!(supports_cache_breakpoint(id), "{id}");
+        }
+        let older = ["gpt-5.5", "gpt-5", "gpt-5-pro", "gpt-5.4-mini", "gpt-4o", "gpt-4o-mini", "gpt-4.1", "o3", "o4-mini", "ft:gpt-6.2-astra:x"];
+        let malformed = ["", "gpt-", "gpt-6.", "gpt-.6", "gpt-6.x", "gpt-x.2", "gpt-+6", "gpt-6.+2", "gpt-6.2.1", "gpt-6.2astra", "gpt-6..2", "GPT-6.2", " gpt-6.2", "gpt-99999999999"];
+        for id in older.into_iter().chain(malformed) {
+            assert!(!supports_cache_breakpoint(id), "{id:?}");
+        }
+    }
+
+    /// The first request of a turn, as `start` and `chat_body` build it.
+    async fn first_request(wire: &ResponsesWire, system: crate::ai::provider::SystemPrompt, messages: &[(&str, &str)]) -> Value {
+        let messages = messages.iter().map(|(role, content)| (role.to_string(), content.to_string())).collect();
+        let conversation = wire.start(ChatRequest { system, messages, tools: crate::ai::tools::get_tool_definitions(), deeper: None }).await.unwrap();
+        serde_json::to_value(wire.chat_body(&conversation, false)).unwrap()
+    }
+
+    fn system_at(db: &crate::db::Database, now: chrono::DateTime<chrono::Local>) -> crate::ai::provider::SystemPrompt {
+        crate::ai::provider::SystemPrompt { cacheable: crate::ai::tools::build_cacheable_system_prompt(), dynamic: crate::ai::tools::build_dynamic_suffix("Ada", now, "en", db) }
+    }
+
+    /// Two turns 47 seconds apart with a memory saved between them: the
+    /// developer message's first block, which ends at the one explicit
+    /// breakpoint, is byte for byte the same, so the next turn can read what
+    /// the first wrote; only the second block differs. The text is the same
+    /// as one string, and the caching mode stays OpenAI's implicit default.
+    #[tokio::test]
+    async fn the_static_rules_end_at_a_breakpoint_that_the_next_turn_shares() {
+        use chrono::TimeZone;
+        let db = crate::db::test_database();
+        let wire = ResponsesWire::new("k", Some("gpt-6.2-astra"), None);
+        let t = chrono::Local.with_ymd_and_hms(2026, 11, 20, 16, 28, 25).unwrap();
+        let first_turn = [("user", "Hello, what can you do?")];
+        let second_turn = [("user", "Hello, what can you do?"), ("assistant", "I keep your tasks, calendar and mail."), ("user", "Remember Kenny is my accountant.")];
+        let (first_system, first_joined) = { let s = system_at(&db, t); let joined = s.joined(); (s, joined) };
+        let first = first_request(&wire, first_system, &first_turn).await;
+        db.conn.lock().unwrap().execute("INSERT INTO user_memory (category, content) VALUES ('fact', 'Kenny is my accountant')", []).unwrap();
+        let second = first_request(&wire, system_at(&db, t + chrono::TimeDelta::try_seconds(47).unwrap()), &second_turn).await;
+
+        let blocks = |body: &Value| body["input"][0]["content"].as_array().expect("the developer message in blocks").clone();
+        let (a, b) = (blocks(&first), blocks(&second));
+        assert_eq!((a.len(), b.len()), (2, 2));
+        let rules = json!({"type": "input_text", "text": crate::ai::tools::build_cacheable_system_prompt(), "prompt_cache_breakpoint": {"mode": "explicit"}});
+        assert_eq!((&a[0], &b[0]), (&rules, &rules), "the static rules end at the breakpoint on both turns");
+        assert_ne!(a[1], b[1]);
+        let own = |block: &Value| block["text"].as_str().unwrap().to_string();
+        assert!(own(&a[1]).starts_with("\n\nCurrent user: Ada\n") && own(&a[1]).contains("16:28:25") && !own(&a[1]).contains("Kenny"));
+        assert!(own(&b[1]).contains("16:29:12") && own(&b[1]).contains("Kenny is my accountant"));
+        assert_eq!(a[1].as_object().unwrap().len(), 2, "the request's own part is plain text: {}", a[1]);
+        assert_eq!(format!("{}{}", own(&a[0]), own(&a[1])), first_joined, "the same text as one string");
+        for body in [&first, &second] {
+            assert_eq!(body["input"][0]["role"], "developer");
+            assert_eq!(body.to_string().matches("prompt_cache_breakpoint").count(), 1, "one breakpoint in the whole body");
+            assert!(body.get("prompt_cache_options").is_none(), "implicit caching is kept");
+        }
+        assert_eq!(first["tools"], second["tools"]);
+    }
+
+    /// Every other model is sent the request it was sent before: the system
+    /// prompt as one string and no breakpoint anywhere.
+    #[tokio::test]
+    async fn other_models_get_the_system_prompt_as_one_string() {
+        let db = crate::db::test_database();
+        for model in ["gpt-4o", "gpt-4o-mini", "gpt-5", "gpt-5.5", "o3"] {
+            let system = system_at(&db, chrono::Local::now());
+            let joined = system.joined();
+            let body = first_request(&ResponsesWire::new("k", Some(model), None), system, &[("user", "Hi")]).await;
+            assert_eq!(body["input"], json!([{"role": "developer", "content": joined}, {"role": "user", "content": "Hi"}]), "{model}");
+            assert!(!body.to_string().contains("prompt_cache"), "{model}");
+        }
     }
 
     /// Cache reads and writes are inside `input_tokens`; reasoning is inside

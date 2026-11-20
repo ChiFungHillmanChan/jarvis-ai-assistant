@@ -495,12 +495,25 @@ mod openai_wire {
     }
 
     /// A Responses body with the developer message and the tool list
-    /// checked and replaced by markers.
+    /// checked and replaced by markers. For a model that takes a cache
+    /// breakpoint the message must be two blocks, the breakpoint exactly
+    /// {"mode": "explicit"} on the first and none of any shape on the
+    /// second; for any other model it must be one string.
     fn marked_input(body: &Value) -> Value {
         let mut body = body.clone();
         let developer = &body["input"][0];
         assert_eq!(developer["role"], "developer");
-        assert_app_system_prompt(developer["content"].as_str().unwrap());
+        let model = body["model"].as_str().unwrap();
+        let text = if crate::ai::openai_responses::supports_cache_breakpoint(model) {
+            let blocks = developer["content"].as_array().unwrap_or_else(|| panic!("{model} takes a cache breakpoint: the developer message in blocks"));
+            assert_eq!(blocks.len(), 2, "the static rules, then the request's own part");
+            assert_eq!(blocks[0]["prompt_cache_breakpoint"], json!({"mode": "explicit"}), "the breakpoint ends the static rules");
+            assert!(blocks[1].get("prompt_cache_breakpoint").is_none(), "and only them: {}", blocks[1]);
+            blocks.iter().map(|block| block["text"].as_str().unwrap()).collect::<String>()
+        } else {
+            developer["content"].as_str().unwrap_or_else(|| panic!("{model} takes no cache breakpoint: the developer message as one string")).to_string()
+        };
+        assert_app_system_prompt(&text);
         body["input"][0]["content"] = json!("<system>");
         assert_eq!(body["tools"], json!(responses_tools()), "every tool, in the Responses function format");
         body["tools"] = json!("<tools>");
@@ -729,6 +742,11 @@ mod openai_wire {
         assert_eq!(seen.len(), 2);
         assert_eq!(seen[0].body.get("tool_choice"), None);
         assert_eq!(seen[1].body["tool_choice"], "none");
+        // Every round, the last one included, sends the developer message
+        // in the model's shape.
+        for request in &seen {
+            marked_input(&request.body);
+        }
         assert_eq!(turn.window_lines().last().unwrap(), &token_done());
     }
 
