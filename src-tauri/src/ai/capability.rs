@@ -360,6 +360,13 @@ pub fn deeper_for(entry: &ProviderChainEntry, workload: Workload) -> Option<Deep
     if workload == Workload::Premium { deeper(entry) } else { None }
 }
 
+/// Whether the registry marks `model`, as used with `provider`, as thinking
+/// (`capabilities.thinking`). A model the registry does not describe does
+/// not count as thinking.
+pub fn thinks(provider: &str, model: &str) -> bool {
+    describing(&registry::current(), provider, model).is_some_and(|m| m.capabilities.thinking)
+}
+
 /// The model a "Think harder" turn on `entry` answers with, named for the
 /// button, or None when the button is hidden. An unpinned row answers with
 /// the registry's premium model (a Gemini row moves to the pro model, as
