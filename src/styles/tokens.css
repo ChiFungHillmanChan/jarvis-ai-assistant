@@ -1,6 +1,6 @@
 /* Shared control tokens. Selectors match workspace.css so the app's three appearances stay in step. */
 :root, :root[data-appearance="dark"] {
-  --ui-control-bg: #171b21;
+  --ui-control-bg: #131925;
   --ui-control-border: #2a3344;
   --ui-control-border-hover: #4a5a70;
   --ui-focus: #4cc3ff;

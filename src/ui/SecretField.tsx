@@ -33,19 +33,33 @@ export default function SecretField({ saved, onSave, onRemove, label, placeholde
     }
   }
 
+  async function remove() {
+    setFailed(false);
+    try {
+      await onRemove?.();
+    } catch {
+      setFailed(true);
+    }
+  }
+
+  const failure = failed && <span className="ui-secret-error" role="alert">{text('Could not save. Try again.', '無法儲存，請再試一次。')}</span>;
+
   if (saved) {
     return (
-      <div className="ui-secret">
-        <span className="ui-secret-saved">{text('Saved in Keychain', '已儲存在鑰匙圈')}</span>
-        {onRemove && (
-          <Button
-            kind="danger"
-            confirm={{ message: text('Remove this key from Keychain?', '要從鑰匙圈移除此金鑰嗎？'), label: text('Remove', '移除') }}
-            onClick={onRemove}
-          >
-            {text('Remove', '移除')}
-          </Button>
-        )}
+      <div className="ui-field">
+        <div className="ui-secret">
+          <span className="ui-secret-saved">{text('Saved in Keychain', '已儲存在鑰匙圈')}</span>
+          {onRemove && (
+            <Button
+              kind="danger"
+              confirm={{ message: text('Remove this key from Keychain?', '要從鑰匙圈移除此金鑰嗎？'), label: text('Remove', '移除') }}
+              onClick={remove}
+            >
+              {text('Remove', '移除')}
+            </Button>
+          )}
+        </div>
+        {failure}
       </div>
     );
   }
@@ -66,7 +80,7 @@ export default function SecretField({ saved, onSave, onRemove, label, placeholde
         />
         <Button kind="secondary" busy={busy} disabled={!draft.trim()} onClick={save}>{text('Save', '儲存')}</Button>
       </div>
-      {failed && <span className="ui-secret-error" role="alert">{text('Could not save. Try again.', '無法儲存，請再試一次。')}</span>}
+      {failure}
     </div>
   );
 }

@@ -131,6 +131,40 @@ test('TextField commits on blur and Enter, SecretField never takes the secret va
   assert.match(s, /已儲存在鑰匙圈/);
 });
 
+test('Switch is 46px by 26px with a 20px thumb that travels 20px', () => {
+  const css = src('src/ui/ui.css');
+  assert.match(css, /\.ui-switch \{[^}]*width:46px/);
+  assert.match(css, /\.ui-switch \{[^}]*height:26px/);
+  assert.match(css, /\.ui-switch::after \{[^}]*width:20px; height:20px/);
+  assert.match(css, /translateX\(20px\)/);
+});
+
+test('dark control background is the board value', () => {
+  assert.match(src('src/styles/tokens.css'), /--ui-control-bg: #131925;/);
+});
+
+test('TextField ignores Enter while an IME composes', () => {
+  const t = src('src/ui/TextField.tsx');
+  assert.match(t, /isComposing/);
+  assert.match(t, /229/);
+  assert.match(t, /committed/);
+});
+
+test('Button catches a rejecting action and guards re-entry', () => {
+  const b = src('src/ui/Button.tsx');
+  assert.match(b, /catch/);
+  assert.match(b, /onError/);
+  assert.match(b, /running\.current/);
+});
+
+test('SecretField props carry no secret value and Remove has an error path', () => {
+  const s = src('src/ui/SecretField.tsx');
+  const props = s.match(/interface SecretFieldProps \{[^}]*\}/)?.[0] ?? '';
+  assert.ok(props.length > 0);
+  assert.doesNotMatch(props, /\b(value|secret)\b/);
+  assert.match(s, /async function remove\(\)[\s\S]*catch/);
+});
+
 test('SettingRow and SettingGroup exist', () => {
   assert.match(src('src/ui/SettingRow.tsx'), /export default function SettingRow/);
   assert.match(src('src/ui/SettingGroup.tsx'), /export default function SettingGroup/);
@@ -139,7 +173,7 @@ test('SettingRow and SettingGroup exist', () => {
 test('tokens define the ui variables for dark, light and system-light', () => {
   const css = src('src/styles/tokens.css');
   for (const v of ['--ui-control-bg', '--ui-control-border', '--ui-control-border-hover', '--ui-focus', '--ui-focus-glow', '--ui-danger-bg', '--ui-danger-border', '--ui-danger-text', '--ui-good', '--ui-good-bg', '--ui-warn']) {
-    assert.match(css, new RegExp(`${v}:`));
+    assert.equal(css.split(`${v}:`).length - 1, 3, `${v} should be defined for dark, light and system`);
   }
   assert.match(css, /:root\[data-appearance="light"\]/);
   assert.match(css, /prefers-color-scheme: light[\s\S]*data-appearance="system"/);

@@ -1,4 +1,4 @@
-import { useEffect, useId, useState } from 'react';
+import { useEffect, useId, useRef, useState } from 'react';
 import './ui.css';
 
 interface TextFieldProps {
@@ -13,10 +13,17 @@ interface TextFieldProps {
 export default function TextField({ value, onCommit, label, placeholder, maxLength, showLabel }: TextFieldProps) {
   const id = useId();
   const [draft, setDraft] = useState(value);
-  useEffect(() => { setDraft(value); }, [value]);
+  // The last value handed to onCommit, so Enter then blur cannot commit twice while `value` is still stale.
+  const committed = useRef(value);
+  useEffect(() => { setDraft(value); committed.current = value; }, [value]);
 
   function commit() {
-    if (draft !== value) void onCommit(draft);
+    if (draft === committed.current) return;
+    committed.current = draft;
+    Promise.resolve(onCommit(draft)).catch(e => {
+      committed.current = value;
+      console.error(e);
+    });
   }
 
   return (
@@ -32,7 +39,7 @@ export default function TextField({ value, onCommit, label, placeholder, maxLeng
         aria-label={showLabel ? undefined : label}
         onChange={e => setDraft(e.target.value)}
         onBlur={commit}
-        onKeyDown={e => { if (e.key === 'Enter') commit(); }}
+        onKeyDown={e => { if (e.key === 'Enter' && !e.nativeEvent.isComposing && e.keyCode !== 229) commit(); }}
       />
     </div>
   );
