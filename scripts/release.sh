@@ -40,6 +40,11 @@ if [ -f "${REPO_ROOT}/.env" ]; then
   . "${REPO_ROOT}/.env"
   set +a
 fi
+# The dev .env also holds AI provider keys for local testing. No build reads
+# them (none is an option_env! value), and the test suite below must run as
+# CI does, with no key in the environment: some tests count which providers
+# have a key, and resolve_key reads the environment before the Keychain.
+unset GEMINI_API_KEY ANTHROPIC_API_KEY OPENAI_API_KEY TYPESAFE_API_KEY
 if [ -z "${GOOGLE_CLIENT_ID:-}" ]; then
   echo "WARNING: GOOGLE_CLIENT_ID not set — the shipped DMG will have no Google sign-in."
   read -r -p "Continue anyway? [y/N] " GO_ANYWAY
