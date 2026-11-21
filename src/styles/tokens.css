@@ -1,0 +1,30 @@
+/* Shared control tokens. Selectors match workspace.css so the app's three appearances stay in step. */
+:root, :root[data-appearance="dark"] {
+  --ui-control-bg: #171b21;
+  --ui-control-border: #2a3344;
+  --ui-control-border-hover: #4a5a70;
+  --ui-focus: #4cc3ff;
+  --ui-focus-glow: rgba(76, 195, 255, .25);
+  --ui-danger-bg: #2a1517;
+  --ui-danger-border: #5a2a2d;
+  --ui-danger-text: #ffb4a8;
+  --ui-good: #3ddc97;
+  --ui-good-bg: #12261f;
+  --ui-warn: #f5a454;
+}
+:root[data-appearance="light"] {
+  --ui-control-bg: #fff;
+  --ui-control-border: #d7dee6;
+  --ui-control-border-hover: #99a9bc;
+  --ui-focus: #096080;
+  --ui-focus-glow: rgba(9, 96, 128, .25);
+  --ui-danger-bg: #f9e9e7;
+  --ui-danger-border: #e3b4af;
+  --ui-danger-text: #a2342a;
+  --ui-good: #246b50;
+  --ui-good-bg: #e3f1ea;
+  --ui-warn: #865a12;
+}
+@media (prefers-color-scheme: light) {
+  :root[data-appearance="system"] { --ui-control-bg:#fff; --ui-control-border:#d7dee6; --ui-control-border-hover:#99a9bc; --ui-focus:#096080; --ui-focus-glow:rgba(9, 96, 128, .25); --ui-danger-bg:#f9e9e7; --ui-danger-border:#e3b4af; --ui-danger-text:#a2342a; --ui-good:#246b50; --ui-good-bg:#e3f1ea; --ui-warn:#865a12; }
+}

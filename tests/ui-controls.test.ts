@@ -81,3 +81,73 @@ test('runAction awaits an async action', async () => {
   await runAction('secondary', async () => { await Promise.resolve(); done = true; }, undefined, async () => true);
   assert.equal(done, true);
 });
+
+// Component source checks: tests cannot import .tsx, so these read the files as text.
+import { readFileSync } from 'node:fs';
+const src = (path: string) => readFileSync(new URL(`../${path}`, import.meta.url), 'utf8');
+
+test('Select is a native select with optgroup, a label and a described-by hint', () => {
+  const s = src('src/ui/Select.tsx');
+  assert.match(s, /<select/);
+  assert.match(s, /optgroup/);
+  assert.match(s, /groupOptions\(/);
+  assert.match(s, /aria-describedby/);
+  assert.match(s, /aria-label/);
+});
+
+test('Switch is a role=switch button with aria-checked', () => {
+  const s = src('src/ui/Switch.tsx');
+  assert.match(s, /role="switch"/);
+  assert.match(s, /aria-checked/);
+});
+
+test('Segmented is a radiogroup that moves focus with nextIndex', () => {
+  const s = src('src/ui/Segmented.tsx');
+  assert.match(s, /role="radiogroup"/);
+  assert.match(s, /role="radio"/);
+  assert.match(s, /aria-checked/);
+  assert.match(s, /tabIndex/);
+  assert.match(s, /nextIndex\(/);
+});
+
+test('Button runs its action through runAction with the confirm dialog', () => {
+  const s = src('src/ui/Button.tsx');
+  assert.match(s, /runAction\(/);
+  assert.match(s, /confirmAction/);
+});
+
+test('a danger Button requires confirm in its type', () => {
+  const s = src('src/ui/Button.tsx');
+  assert.match(s, /kind: 'danger';\s*confirm: \{/);
+});
+
+test('TextField commits on blur and Enter, SecretField never takes the secret value', () => {
+  const t = src('src/ui/TextField.tsx');
+  assert.match(t, /onBlur/);
+  assert.match(t, /'Enter'/);
+  const s = src('src/ui/SecretField.tsx');
+  assert.match(s, /saved: boolean/);
+  assert.match(s, /type="password"/);
+  assert.match(s, /已儲存在鑰匙圈/);
+});
+
+test('SettingRow and SettingGroup exist', () => {
+  assert.match(src('src/ui/SettingRow.tsx'), /export default function SettingRow/);
+  assert.match(src('src/ui/SettingGroup.tsx'), /export default function SettingGroup/);
+});
+
+test('tokens define the ui variables for dark, light and system-light', () => {
+  const css = src('src/styles/tokens.css');
+  for (const v of ['--ui-control-bg', '--ui-control-border', '--ui-control-border-hover', '--ui-focus', '--ui-focus-glow', '--ui-danger-bg', '--ui-danger-border', '--ui-danger-text', '--ui-good', '--ui-good-bg', '--ui-warn']) {
+    assert.match(css, new RegExp(`${v}:`));
+  }
+  assert.match(css, /:root\[data-appearance="light"\]/);
+  assert.match(css, /prefers-color-scheme: light[\s\S]*data-appearance="system"/);
+});
+
+test('main.tsx imports tokens.css after App, which pulls in workspace.css', () => {
+  const m = src('src/main.tsx');
+  assert.match(m, /import "\.\/styles\/tokens\.css"/);
+  assert.ok(m.indexOf('./App') < m.indexOf('./styles/tokens.css'));
+  assert.match(src('src/App.tsx'), /styles\/workspace\.css/);
+});
