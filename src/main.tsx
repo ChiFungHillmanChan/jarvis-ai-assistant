@@ -3,6 +3,7 @@ import ReactDOM from "react-dom/client";
 import "./styles/global.css";
 import "./styles/animations.css";
 import App from "./App";
+import "./styles/tokens.css";
 import { UiLocaleProvider } from "./i18n";
 import ErrorBoundary from "./components/ErrorBoundary";
 import { watchUserActivity } from "./lib/user-activity";

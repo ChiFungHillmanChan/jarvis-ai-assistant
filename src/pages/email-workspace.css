@@ -33,7 +33,7 @@
 .mail-workspace button:hover:not(:disabled) { border-color: var(--border-strong); background: var(--surface-hover); }
 .mail-workspace button:disabled { cursor: default; opacity: .45; }
 .mail-workspace :focus-visible { outline: 2px solid var(--cyan); outline-offset: 2px; }
-.mail-workspace input:not([type=checkbox]), .mail-workspace select, .mail-workspace textarea { box-sizing: border-box; width: 100%; min-width: 0; padding: 7px 9px; border: 1px solid var(--mail-line); border-radius: 7px; background: var(--bg-primary); color: var(--text-primary); }
+.mail-workspace input:not([type=checkbox]), .mail-workspace textarea { box-sizing: border-box; width: 100%; min-width: 0; padding: 7px 9px; border: 1px solid var(--mail-line); border-radius: 7px; background: var(--bg-primary); color: var(--text-primary); }
 .mail-workspace input[type=checkbox] { flex-shrink: 0; margin: 0; accent-color: var(--cyan); }
 .mail-workspace textarea { resize: vertical; }
 .mail-workspace .visually-hidden { position: absolute; width: 1px; height: 1px; overflow: hidden; clip-path: inset(50%); white-space: nowrap; }
@@ -96,7 +96,6 @@
 .mail-workspace .mail-toolbar-actions { display: flex; gap: 6px; }
 .mail-workspace .mail-selection { display: flex; flex-wrap: wrap; align-items: center; gap: 6px; padding: 8px 14px; border-bottom: 1px solid var(--mail-line); background: var(--accent-wash); font-size: 13px; }
 .mail-workspace .mail-selection > span { margin-right: 4px; font-weight: 600; }
-.mail-workspace .mail-selection select { width: auto; max-width: 180px; padding: 5px 8px; }
 .mail-workspace .mail-message-list { min-height: 0; flex: 1; overflow-y: auto; }
 .mail-workspace .mail-message-list[aria-busy="true"] { opacity: .7; transition: opacity .15s; }
 .mail-workspace .mail-row { display: flex; align-items: flex-start; gap: 10px; padding: 10px 14px 10px 12px; border-bottom: 1px solid var(--mail-line); box-shadow: inset 2px 0 transparent; }
@@ -194,8 +193,9 @@
 .mail-workspace .mail-dialog::backdrop { background: rgba(0,0,0,.6); }
 .mail-workspace .mail-dialog fieldset { min-width: 0; padding: 0; margin: 0; border: 0; }
 .mail-workspace .mail-dialog h2 { margin-bottom: 14px; font-size: 17px; overflow-wrap: anywhere; }
-.mail-workspace .mail-dialog label { display: block; margin: 14px 0; color: var(--text-secondary); font-size: 13.5px; line-height: 1.6; }
-.mail-workspace .mail-dialog label > input:not([type=checkbox]), .mail-workspace .mail-dialog label > select, .mail-workspace .mail-dialog label > textarea { margin-top: 6px; }
+.mail-workspace .mail-dialog label:where(:not(.ui-label)) { display: block; margin: 14px 0; color: var(--text-secondary); font-size: 13.5px; line-height: 1.6; }
+.mail-workspace .mail-dialog label > input:not([type=checkbox]), .mail-workspace .mail-dialog label > textarea { margin-top: 6px; }
+.mail-workspace .mail-dialog .ui-field { margin: 14px 0; }
 .mail-workspace .mail-dialog .mail-consent { display: flex; align-items: flex-start; gap: 9px; }
 .mail-workspace .mail-dialog .mail-consent input { margin-top: 4px; }
 .mail-workspace .mail-dialog footer { justify-content: flex-end; margin-top: 20px; }
@@ -205,7 +205,7 @@
 .mail-workspace .mail-account-actions button { justify-content: flex-start; text-align: left; }
 .mail-workspace .mail-dialog .mail-alert { margin-top: 12px; }
 /* The Bedrock model picker (components/BedrockModelPicker.tsx): the button and its status line under the select. */
-.mail-workspace .mail-dialog .mail-bedrock-model > label:first-child { margin-bottom: 8px; }
+.mail-workspace .mail-dialog .mail-bedrock-model > .ui-field:first-child { margin-bottom: 8px; }
 .mail-workspace .mail-bedrock-model .mail-hint { margin-top: 8px; }
 
 @media (prefers-reduced-motion: reduce) { .mail-workspace * { transition: none !important; } }

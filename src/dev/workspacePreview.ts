@@ -46,6 +46,7 @@ export function installWorkspacePreview() {
     if (command.startsWith('plugin:')) return null;
     switch (command) {
       case 'check_onboarding_status': return true;
+      case 'account_status': return { available: false, signed_in: false, email: null, tier: null, subscription_status: null, trial_ends_at: null, period_ends_at: null, cancel_at_period_end: false };
       case 'get_settings': return { values: { ai_provider: 'gemini_primary', google_email: 'alex@example.com', ...saved } };
       case 'update_setting': saved[args.key] = args.value; localStorage.setItem('jarvis-workspace-preview', JSON.stringify(saved)); return null;
       case 'get_conversations': return conversations[args.sessionId || 'legacy'] || [];

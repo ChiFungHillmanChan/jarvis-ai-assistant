@@ -52,10 +52,11 @@ test('the usage panel has the period selector and the group-by control', () => {
   const panel = source('../src/components/CostPanel.tsx');
   assert.match(panel, /useState<PeriodDays>\(30\)/, 'the period starts at 30 days');
   assert.match(panel, /useState<GroupBy>\("model"\)/, 'grouped by model first');
-  assert.match(panel, /aria-label=\{text\("Period", "期間"\)\}/);
-  assert.match(panel, /\{PERIODS\.map\(\(period\) => <option key=\{period\} value=\{String\(period\)\}>\{periodLabel\(period, text\)\}<\/option>\)\}/);
-  assert.match(panel, /aria-label=\{text\("Group by", "分組方式"\)\}/);
-  assert.match(panel, /\{GROUP_BYS\.map\(\(by\) => <option key=\{by\} value=\{by\}>\{groupByLabel\(by, text\)\}<\/option>\)\}/);
+  assert.match(panel, /<Select label=\{text\("Period", "期間"\)\} showLabel value=\{String\(days\)\}/);
+  assert.match(panel, /setDays\(Number\(v\) as PeriodDays\)/, 'the period is a number again at the boundary');
+  assert.match(panel, /PERIODS\.map\(\(period\) => \(\{ value: String\(period\), label: periodLabel\(period, text\) \}\)\)/);
+  assert.match(panel, /<Select label=\{text\("Group by", "分組方式"\)\} showLabel value=\{groupBy\}/);
+  assert.match(panel, /GROUP_BYS\.map\(\(by\) => \(\{ value: by, label: groupByLabel\(by, text\) \}\)\)/);
   assert.match(panel, /useTauriCommand<CostStats>\("get_cost_stats", \{ days \}\)/);
   assert.match(panel, /useTauriCommand<BlendedCost>\("get_blended_cost", \{ days \}\)/);
   assert.match(panel, /useTauriCommand<UsageGroup\[\]>\("get_usage_groups", \{ days, groupBy \}\)/);

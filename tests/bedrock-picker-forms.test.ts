@@ -487,13 +487,13 @@ test('the picker in a form: changes the form only, requires a model, and its but
   const picker = source('../src/components/BedrockModelPicker.tsx');
   assert.match(picker, /if \(props\.place !== "settings"\) \{\s*props\.onChange\(value\);\s*return;\s*\}/, 'a choice goes into the form');
   assert.match(picker, /function type\(draft: string\) \{\s*dispatch\(\{ type: "type", draft \}\);\s*if \(props\.place !== "settings"\) props\.onChange\(draft\.trim\(\)\);/, 'typed text goes into the form, trimmed');
-  assert.match(picker, /onChange=\{\(e\) => choose\(e\.target\.value\)\} required=\{form\}/, 'the select is required in a form');
+  assert.match(picker, /describedBy=\{statusId\} onChange=\{choose\} required=\{form\}/, 'the select is required in a form');
   assert.match(picker, /disabled=\{busy\} required=\{form\}\s*onChange=\{\(e\) => type\(e\.target\.value\)\}/, 'the ID field is required in a form');
   assert.match(picker, /\{!form && <button disabled=\{!changed \|\| busy\}/, '"Save model" only in Settings');
   assert.match(picker, /onKeyDown=\{\(e\) => \{ if \(!form && e\.key === "Enter"/, 'Enter saves only in Settings');
   assert.match(picker, /<button type="button" disabled=\{listState\.status === "loading" \|\| busy\} onClick=\{onReload\}/);
   assert.match(picker, /placeholder=\{form \? undefined : fallback\}/, 'an empty ID field in a form shows no id');
-  assert.match(picker, /<option key=\{option\.value\} value=\{option\.value\} disabled=\{option\.disabled\}>/);
+  assert.match(picker, /options=\{options\.map\(\(option\) => \(\{ value: option\.value, label: option\.label, disabled: option\.disabled, group: groupLabel\(option\.group, text\) \?\? undefined \}\)\)\}/, 'each option keeps its label, disabled state and group heading');
   assert.match(picker, /<p id=\{statusId\} role="status" className=\{LOOK\[place\]\.help\}>/, 'the status line is announced as in Settings');
   assert.match(picker, /mail: \{ field: "mail-bedrock-model", help: "mail-hint" \}/);
   assert.match(picker, /setup: \{ field: "setup-bedrock-model", help: "setup-hint" \}/);

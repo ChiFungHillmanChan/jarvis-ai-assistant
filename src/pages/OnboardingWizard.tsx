@@ -5,6 +5,7 @@ import * as mail from '../lib/mail';
 import { canStartFirstAnalysis, triageConsentText } from '../lib/setup-flow';
 import { applyTestedMailSettings, getSetupStatus, setupError, testMailAiConnection, type SetupStatus } from '../lib/setup';
 import ChooseAi from '../components/ChooseAi';
+import Select from '../ui/Select';
 import { parseAiError, problemText } from '../lib/ai-error';
 import BedrockModelPicker from '../components/BedrockModelPicker';
 import { useBedrockModelList } from '../hooks/useBedrockModelList';
@@ -146,7 +147,7 @@ export default function OnboardingWizard({ onComplete }: { onComplete: () => voi
   return <div className="setup-screen">
     <header className="setup-titlebar" data-tauri-drag-region><WindowControls /><span data-tauri-drag-region>JARVIS</span></header>
     <main className="setup-content">
-      <div className="setup-topline"><span>{text(`Step ${step} of 3`, `第 ${step}／3 步`)}</span><label>{text('Interface language', '介面語言')}<select disabled={!!busy || localBusy} value={locale} onChange={event => setLocale(event.target.value as 'en' | 'zh-HK')}><option value="zh-HK">繁體中文（香港）</option><option value="en">English</option></select></label></div>
+      <div className="setup-topline"><span>{text(`Step ${step} of 3`, `第 ${step}／3 步`)}</span><Select label={text('Interface language', '介面語言')} showLabel width={190} disabled={!!busy || localBusy} value={locale} onChange={setLocale} options={[{ value: 'zh-HK', label: '繁體中文（香港）' }, { value: 'en', label: 'English' }]} /></div>
       <h1>{step === 1 ? text('Choose your AI', '選擇你的 AI') : step === 2 ? text('Connect your mail workspace', '連接電郵工作區') : text('Get your first useful result', '取得第一份實用結果')}</h1>
       <p>{text('Existing credentials and connected mailboxes are reused. Calendar and voice have separate optional setup.', '系統會沿用已儲存的憑證及已連接的信箱。日曆及語音可按需要另行設定。')}</p>
       {saveError && <p className="setup-error" role="alert">{text(saveError, '未能儲存介面語言。關閉 JARVIS 前請重試。')} <button onClick={retrySave}>{text('Retry saving language', '重試儲存語言')}</button></p>}
@@ -163,7 +164,7 @@ export default function OnboardingWizard({ onComplete }: { onComplete: () => voi
             <p>{text('Your company administrator provides these credentials. Model availability depends on the region and account. Start with a text model approved by your company.', '憑證由公司管理員提供；可用模型取決於地區及帳戶。請先使用公司批准的文字模型。')}</p>
             <label>Access Key ID<input autoComplete="off" value={accessKey} onChange={event => { setAccessKey(event.target.value); setCredentialDirty(true); }} placeholder={text('Leave both keys blank to reuse saved credentials', '兩個欄位都留空會沿用已儲存憑證')} /></label>
             <label>Secret Access Key<input type="password" autoComplete="off" value={secretKey} onChange={event => { setSecretKey(event.target.value); setCredentialDirty(true); }} /></label>
-            <label>{text('Region for new credentials', '新憑證使用的地區')}<select value={region} onChange={event => setRegion(event.target.value)}><option value="us-east-1">us-east-1 — US</option><option value="ap-southeast-1">ap-southeast-1 — Singapore</option><option value="ap-northeast-1">ap-northeast-1 — Tokyo</option><option value="eu-west-2">eu-west-2 — London</option></select></label>
+            <Select label={text('Region for new credentials', '新憑證使用的地區')} showLabel value={region} onChange={setRegion} options={[{ value: 'us-east-1', label: 'us-east-1 — US' }, { value: 'ap-southeast-1', label: 'ap-southeast-1 — Singapore' }, { value: 'ap-northeast-1', label: 'ap-northeast-1 — Tokyo' }, { value: 'eu-west-2', label: 'eu-west-2 — London' }]} />
             <BedrockModelPicker place="setup" value={settings.bedrock_model} stored={workspace.settings.bedrock_model} fallback={models?.defaults.bedrock ?? ''} listState={bedrockList.list} onReload={bedrockList.reload} onChange={model => changeSettings({ ...settings, processing_mode: 'bedrock', bedrock_model: model })} />
             <label className="setup-checkbox"><input type="checkbox" checked={consent} onChange={event => setConsent(event.target.checked)} />{text('The test sends synthetic text and may incur a small charge. Later mail analysis sends selected mail content, instructions and valid memories to this provider.', '測試會傳送合成文字，可能產生少量費用。之後分析郵件時，所選郵件內容、指示及有效記憶會傳送至此供應商。')}</label>
             <button type="button" className="setup-primary" disabled={!consent || settings.processing_mode !== 'bedrock' || !modelChosen(settings.bedrock_model)} onClick={() => void testAndSave()}>{text('Test and use Bedrock for mail', '測試並以 Bedrock 處理電郵')}</button>
@@ -171,7 +172,7 @@ export default function OnboardingWizard({ onComplete }: { onComplete: () => voi
         </>}
         {step === 2 && <>
           <div className="setup-current"><h2>{text('Read-only Gmail and Calendar access', '唯讀授權 Gmail 及日曆')}</h2><p>{text('JARVIS requests read-only mail and calendar access and stores readable copies of the mail on this Mac. This connection cannot send mail or change events. Disconnecting keeps local copies; deleting a local account removes them.', 'JARVIS 會要求唯讀郵件及日曆權限，並將可讀郵件副本儲存於此 Mac。本次連接不能寄信，亦不能修改日曆活動。斷開連接會保留副本；刪除本機帳戶才會清除副本。')}</p></div>
-          {workspace.accounts.length > 0 && <label>{text('Mailbox', '信箱')}<select value={accountId} onChange={event => setAccountId(event.target.value)}>{workspace.accounts.map(account => <option key={account.id} value={account.id}>{account.email} · {account.connected ? text('Connected', '已連接') : text('Disconnected', '已斷開')} · {account.message_count}</option>)}</select></label>}
+          {workspace.accounts.length > 0 && <Select label={text('Mailbox', '信箱')} showLabel value={accountId} onChange={setAccountId} options={workspace.accounts.map(account => ({ value: account.id, label: `${account.email} · ${account.connected ? text('Connected', '已連接') : text('Disconnected', '已斷開')} · ${account.message_count}` }))} />}
           <div className="setup-actions"><button type="button" onClick={() => void run(connectingGmail, async () => { const account = await mail.mailConnectAccount(); setAccountId(account.id); await syncAccount(account.id); })}>{text('Connect Gmail and sync first batch', '連接 Gmail 並同步首批郵件')}</button><button type="button" disabled={!workspace.accounts.find(account => account.id === accountId)?.connected} onClick={() => void run(text('Syncing mail', '同步郵件'), () => syncAccount(accountId))}>{text('Sync selected mailbox', '同步所選信箱')}</button></div>
           <p className="setup-hint">{text('Up to 50 messages per sync, not a full backup. Company accounts may need administrator approval. If sign-in expires or is blocked, check the account policy before retrying.', '每次最多同步 50 封，並非完整備份。公司帳戶可能需要管理員批准；登入逾時或被封鎖時，請先核對帳戶政策。')}</p>
           {(workspace.triage.chosen_ai || workspace.triage.typesafe_key) && <div className="setup-current"><h2>{text('Sort new mail with AI', '以 AI 整理新郵件')}</h2>

@@ -9,10 +9,11 @@
 .setup-content p, .setup-local p { line-height: 1.7; font-size: 13px; }
 .setup-topline, .setup-actions, .setup-footer { display: flex; gap: 10px; align-items: center; flex-wrap: wrap; }
 .setup-topline { justify-content: space-between; color: #9fb3c8; font-size: 12px; }
+.setup-content .ui-field, .setup-local .ui-field { margin: 14px 0; }
+.setup-topline .ui-field { margin: 0; }
 .setup-fields { border: 0; margin: 0; padding: 0; min-width: 0; }
-.setup-content label:not(.setup-checkbox), .setup-local label:not(.setup-checkbox) { display: flex; flex-direction: column; gap: 7px; font-size: 13px; margin: 14px 0; }
-.setup-content input:not([type=checkbox]):not([type=radio]), .setup-content select, .setup-content textarea, .setup-local select { width: 100%; padding: 10px 12px; border-radius: 6px; border: 1px solid rgba(130,160,190,.3); color: inherit; background: var(--bg-secondary, #181e28); font: inherit; }
-.setup-content select option, .setup-local select option { background: #181e28; color: #e4edf6; }
+.setup-content label:not(.setup-checkbox):where(:not(.ui-label)), .setup-local label:not(.setup-checkbox):where(:not(.ui-label)) { display: flex; flex-direction: column; gap: 7px; font-size: 13px; margin: 14px 0; }
+.setup-content input:not([type=checkbox]):not([type=radio]), .setup-content textarea { width: 100%; padding: 10px 12px; border-radius: 6px; border: 1px solid rgba(130,160,190,.3); color: inherit; background: var(--bg-secondary, #181e28); font: inherit; }
 .setup-content button, .setup-local button { border: 1px solid rgba(130,160,190,.3); border-radius: 6px; padding: 9px 13px; color: inherit; background: transparent; font: inherit; font-size: 12px; cursor: pointer; }
 .setup-content button:disabled, .setup-local button:disabled { opacity: .45; cursor: default; }
 .setup-content .setup-primary, .setup-local .setup-primary { background: rgba(0,180,255,.12); border-color: rgba(0,180,255,.5); color: #77d5ff; }
@@ -56,11 +57,8 @@
 .choose-ai-details button { margin: 4px 8px 4px 0; }
 .welcome-card .setup-hint { margin-top: 14px; }
 .setup-screen > .setup-guide { margin: auto; min-height: 0; }
-/* Native selects ignore padding, so they rendered shorter than inputs. */
-.setup-content select, .setup-local select { -webkit-appearance: none; appearance: none; padding-right: 34px; background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='12' height='12' viewBox='0 0 24 24' fill='none' stroke='%239fb3c8' stroke-width='2.5' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpath d='m6 9 6 6 6-6'/%3E%3C/svg%3E"); background-repeat: no-repeat; background-position: right 12px center; }
-.setup-topline select { width: auto; min-width: 190px; padding-top: 7px; padding-bottom: 7px; }
 .setup-content input[type=radio]:focus-visible, .setup-local input[type=radio]:focus-visible { outline-offset: 2px; border-radius: 50%; }
 .setup-content input[type=checkbox], .setup-content input[type=radio], .setup-local input[type=checkbox], .setup-local input[type=radio] { accent-color: #43b4ed; }
 /* The Bedrock model picker (components/BedrockModelPicker.tsx): the button and its status line under the select. */
-.setup-content .setup-bedrock-model > label:first-child { margin-bottom: 8px; }
+.setup-content .setup-bedrock-model > .ui-field:first-child { margin-bottom: 8px; }
 .setup-content .setup-bedrock-model .setup-hint { margin-top: 8px; }

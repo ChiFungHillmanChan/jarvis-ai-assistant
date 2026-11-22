@@ -9,6 +9,7 @@ import ConsentCard from './ConsentCard';
 import { aiModels, useAiModels, type AiModelCatalog } from '../lib/ai-models';
 import { localized, serviceFor, serviceLabel, setupOptions, type SetupOption } from '../lib/ai-catalog';
 import LocalMailSetup from './LocalMailSetup';
+import Select from '../ui/Select';
 import '../styles/setup.css';
 
 // The services, their hints, key pages and regions are the model
@@ -151,9 +152,8 @@ export default function ChooseAi({ onChosen, onBusyChange }: { onChosen?: (ai: C
       {options.map(([id, label, hint]) => <label key={id} className="setup-checkbox"><input type="radio" name="choose-ai" checked={option === id} onChange={() => pick(id)} /><span>{label}<small>{hint}</small></span></label>)}
     </fieldset>
     {option && <div className="choose-ai-details">
-      {named && named.regions.length > 1 && <label>{text('Account region', '帳戶地區')}<select disabled={!!busy} value={service?.id ?? ''} onChange={e => { setRegion(e.target.value); setModels(null); setModel(''); }}>
-        {named.regions.map(r => <option key={r.id} value={r.id}>{r.id === 'global' ? text('International', '國際') : r.id === 'china' ? text('Mainland China', '中國內地') : r.id}</option>)}
-      </select></label>}
+      {named && named.regions.length > 1 && <Select label={text('Account region', '帳戶地區')} showLabel disabled={!!busy} value={service?.id ?? ''} onChange={v => { setRegion(v); setModels(null); setModel(''); }}
+        options={named.regions.map(r => ({ value: r.id, label: r.id === 'global' ? text('International', '國際') : r.id === 'china' ? text('Mainland China', '中國內地') : r.id }))} />}
       {option === 'other' && <label>{text('API base URL (ends in /v1 for most services)', 'API 基本網址（大多以 /v1 結尾）')}<input value={otherUrl} disabled={!!busy} spellCheck={false} placeholder="https://api.deepseek.com/v1" onChange={e => { setOtherUrl(e.target.value); setModels(null); setModel(''); }} /></label>}
       {option === 'openai' && <p className="setup-hint">{text('Hong Kong is not on the OpenAI API supported list. Use an eligible account, or choose another AI.', 'OpenAI API 支援地區清單未列出香港。請使用合資格帳戶，或選擇其他 AI。')}</p>}
       {option !== 'ollama' && <>
@@ -162,16 +162,14 @@ export default function ChooseAi({ onChosen, onBusyChange }: { onChosen?: (ai: C
       </>}
       {optionalModel && provider && <>
         <button type="button" disabled={!!busy} onClick={() => void loadModels(provider)}>{text('Choose a model', '選擇模型')}</button>
-        {models && models.length > 0 && <label>{text('Model', '模型')}<select disabled={!!busy} value={model} onChange={e => setModel(e.target.value)}>
-          <option value="">{text(`Latest (recommended)${latest ? `: ${latest}` : ''}, updates with JARVIS`, `最新模型（建議）${latest ? `：${latest}` : ''}，隨 JARVIS 更新`)}</option>{models.map(m => <option key={m} value={m}>{m}</option>)}
-        </select></label>}
+        {models && models.length > 0 && <Select label={text('Model', '模型')} showLabel disabled={!!busy} value={model} onChange={setModel}
+          options={[{ value: '', label: text(`Latest (recommended)${latest ? `: ${latest}` : ''}, updates with JARVIS`, `最新模型（建議）${latest ? `：${latest}` : ''}，隨 JARVIS 更新`) }, ...models.map(m => ({ value: m, label: m }))]} />}
         {!models?.length && <p className="setup-hint">{text('Uses the latest recommended model unless you choose one.', '未選擇模型時，會使用最新的建議模型。')}</p>}
       </>}
       {needsModel && <>
         {option !== 'ollama' && <button type="button" disabled={!!busy || (option === 'other' && !otherUrl.trim())} onClick={() => void loadModels('compatible')}>{text('Load models', '載入模型')}</button>}
-        {models && models.length > 0 && <label>{text('Model', '模型')}<select disabled={!!busy} value={model} onChange={e => setModel(e.target.value)}>
-          <option value="">{text('Choose a model', '選擇模型')}</option>{models.map(m => <option key={m} value={m}>{m}</option>)}
-        </select></label>}
+        {models && models.length > 0 && <Select label={text('Model', '模型')} showLabel disabled={!!busy} value={model} onChange={setModel}
+          options={[{ value: '', label: text('Choose a model', '選擇模型') }, ...models.map(m => ({ value: m, label: m }))]} />}
         {option === 'ollama' && models && models.length === 0 && <>
           <p className="setup-hint">{text('Ollama is not running, or has no model yet. Prepare a model below, or open Ollama and load the models you already have.', 'Ollama 未開啟或尚未安裝模型。請在下方準備模型，或開啟 Ollama 後載入已安裝的模型。')}</p>
           <LocalMailSetup onReady={() => loadModels('ollama')} onBusyChange={b => setBusy(b ? text('Installing', '安裝中') : '')} />
