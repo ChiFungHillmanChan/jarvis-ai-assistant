@@ -196,11 +196,7 @@
 .mail-workspace .mail-dialog label:where(:not(.ui-label)) { display: block; margin: 14px 0; color: var(--text-secondary); font-size: 13.5px; line-height: 1.6; }
 .mail-workspace .mail-dialog label > input:not([type=checkbox]), .mail-workspace .mail-dialog label > textarea { margin-top: 6px; }
 .mail-workspace .mail-dialog .ui-field { margin: 14px 0; }
-.mail-workspace .mail-dialog .mail-consent { display: flex; align-items: flex-start; gap: 9px; }
-.mail-workspace .mail-dialog .mail-consent input { margin-top: 4px; }
 .mail-workspace .mail-dialog footer { justify-content: flex-end; margin-top: 20px; }
-.mail-workspace .mail-settings-block + .mail-settings-block { margin-top: 18px; padding-top: 4px; border-top: 1px solid var(--mail-line); }
-.mail-workspace .mail-settings-block h3 { margin-top: 12px; }
 .mail-workspace .mail-account-actions { display: flex; flex-direction: column; gap: 8px; margin: 12px 0; }
 .mail-workspace .mail-account-actions button { justify-content: flex-start; text-align: left; }
 .mail-workspace .mail-dialog .mail-alert { margin-top: 12px; }

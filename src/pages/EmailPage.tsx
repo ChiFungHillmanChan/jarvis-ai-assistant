@@ -1,28 +1,23 @@
 import { useEffect, useRef, useState, type ReactNode } from "react";
 import { Paperclip } from "lucide-react";
 import * as mail from "../lib/mail";
-import type { MailAccount, MailAnalysis, MailItem, MailMemory, MailMemoryInput, MailMessage, MailPage, MailSettings, MailView, MailWorkspace } from "../lib/mail";
-import { useIsActiveTab, useWorkspaceValue } from "../workspace/WorkspaceContext";
+import type { MailAccount, MailAnalysis, MailItem, MailMemory, MailMemoryInput, MailMessage, MailPage, MailView, MailWorkspace } from "../lib/mail";
+import { useWorkspaceValue } from "../workspace/WorkspaceContext";
+import { useSettingsDialog } from "../settings/SettingsContext";
 import ReadableContent from "../components/content/ReadableContent";
 import { CategoryTag, MailAgenda, MailAiCard } from "../components/mail/MailItems";
-import { analysisSource, backendUtc, categoryLabel, decodeEntities, fileSize, formatDue, MAIL_CATEGORIES, mailSourceUrl, parseSender, readableBody, revealMailSource } from "../lib/mail-presentation";
+import { analysisSource, backendUtc, categoryLabel, decodeEntities, fileSize, formatDue, MAIL_CATEGORIES, mailSourceUrl, parseSender, readableBody, revealMailSource, sortedByText } from "../lib/mail-presentation";
 import { openUrl } from "../lib/commands";
-import { useAiModels } from "../lib/ai-models";
-import { cloudModelFor, formatRate, mailSetupModels } from "../lib/ai-catalog";
 import { useUiLocale } from "../i18n";
 import { parseAiError, type AiProblem, type Pick } from "../lib/ai-error";
 import ConsentCard from "../components/ConsentCard";
 import ModelErrorCard from "../components/ModelErrorCard";
-import BedrockModelPicker from "../components/BedrockModelPicker";
-import { useBedrockModelList } from "../hooks/useBedrockModelList";
-import { modelChosen } from "../lib/bedrock-models";
 import Select from "../ui/Select";
 import "./email-workspace.css";
 
 type Editor =
   | { type: "group"; id?: number; name: string; instructions: string; members?: number[] }
   | { type: "memory"; input: MailMemoryInput }
-  | { type: "settings"; input: MailSettings; consent: boolean; triage: boolean; triageConsent: boolean; typesafeKey: string }
   | { type: "account"; account: MailAccount }
   | { type: "delete"; kind: "account" | "group" | "memory"; id: string | number; name: string };
 
@@ -31,18 +26,10 @@ const PAGE = 50;
 const storedState = (data: MailWorkspace) => JSON.stringify([data.accounts.map(a => [a.id, a.connected, a.message_count]), data.triage.untriaged, data.triage.attention, data.triage.open_items]);
 
 export default function EmailPage({ onSetup }: { onSetup?: () => void }) {
-  const models = useAiModels();
-  // An example Ollama model for the placeholder: the first one mail setup offers.
-  const localExample = mailSetupModels(models)[0]?.id ?? "";
-  // The rate comes from ai/models.rs; a model without a price gets no figure.
-  const openAiPriceHint = (model: string) => {
-    const priced = cloudModelFor(models, model);
-    const rate = priced ? formatRate(priced.price.input_per_million) : null;
-    return rate
-      ? text(`Uses the OpenAI key saved in Settings. Your OpenAI account pays; ${model} costs about US$${rate} per million input tokens.`, `使用設定頁儲存的 OpenAI 密鑰，費用由你的 OpenAI 帳戶支付；${model} 每百萬輸入 token 約 US$${rate}。`)
-      : text("Uses the OpenAI key saved in Settings. Your OpenAI account pays.", "使用設定頁儲存的 OpenAI 密鑰，費用由你的 OpenAI 帳戶支付。");
-  };
   const { text, locale } = useUiLocale();
+  // The Mail page's settings live in Settings > Mail and follow-ups.
+  const { openSettings } = useSettingsDialog();
+  const openMailSettings = () => openSettings('mail');
   const dateTime = (value: string | null) => value ? backendUtc(value).toLocaleString(locale, { month: "numeric", day: "numeric", hour: "2-digit", minute: "2-digit" }) : text("Not synced", "未同步");
   const [workspace, setWorkspace] = useState<MailWorkspace | null>(null);
   const [accountId, setAccountId] = useWorkspaceValue("mailAccountId", "");
@@ -73,10 +60,6 @@ export default function EmailPage({ onSetup }: { onSetup?: () => void }) {
   const connectCancelled = useRef(false);
   const stored = useRef("");
   const dialog = useRef<HTMLDialogElement>(null);
-  // The Bedrock model list, asked for only while Analysis settings is open
-  // on this tab with "Your AWS Bedrock account" chosen (hooks/useBedrockModelList.ts).
-  const tabActive = useIsActiveTab();
-  const bedrockList = useBedrockModelList(tabActive && editor?.type === "settings" && editor.input.processing_mode === "bedrock");
   const reader = useRef<HTMLElement>(null);
   const requestedSource = useRef<number | null>(null);
   const group = workspace?.groups.find(item => item.id === groupId);
@@ -93,12 +76,7 @@ export default function EmailPage({ onSetup }: { onSetup?: () => void }) {
   // that fails on every email.
   const noAi = !!triage?.enabled && !triageReady;
   const noAiText = text("AI sorting is on, but you have not set up an AI yet. Choose “Set up your AI”.", "已開啟 AI 整理，但你尚未設定 AI。請按「設定你的 AI」。");
-  const chosenAi = triage?.chosen_ai ?? null;
-  const sortedBy = triage?.typesafe_key
-    ? text(`TypeSafe Jev decides the category and whether it needs you; ${chosenAi ?? "no AI yet"} writes a summary and finds dates only for the emails that need one.`, `TypeSafe Jev 判斷分類及是否需要你處理；只有需要摘要或含日期的郵件，才交由${chosenAi ? ` ${chosenAi} ` : "（尚未選擇 AI）"}撰寫摘要及找出日期。`)
-    : chosenAi
-    ? text(`${chosenAi}, the AI you chose, decides the category, writes a summary and finds dates.`, `由你選擇的 ${chosenAi} 判斷分類、撰寫摘要及找出日期。`)
-    : text("Choose your AI in Settings → Your AI first.", "請先到「設定 → 你的 AI」選擇 AI。");
+  const sortedBy = sortedByText(triage, text);
 
   useEffect(() => {
     let current = true;
@@ -224,10 +202,6 @@ export default function EmailPage({ onSetup }: { onSetup?: () => void }) {
     if (!group) return;
     setEditor({ type: "memory", input: item ? { ...item } : { id: null, group_id: group.id, content: "", kind: "fact", source_message_id: null, expires_at: null, status: "active" } });
   }
-  function openSettings() {
-    if (!workspace) return;
-    setEditor({ type: "settings", input: { ...workspace.settings }, consent: workspace.settings.processing_mode !== "local", triage: workspace.triage.enabled, triageConsent: workspace.triage.enabled, typesafeKey: "" });
-  }
   async function saveEditor() {
     if (!editor) return;
     const draft = editor;
@@ -237,11 +211,6 @@ export default function EmailPage({ onSetup }: { onSetup?: () => void }) {
         if (draft.members?.length) { await mail.mailSetGroupMembers(saved.id, draft.members, true); setSelected([]); }
       }
       if (draft.type === "memory") await mail.mailSaveMemory({ ...draft.input, content: draft.input.content.trim() });
-      if (draft.type === "settings") {
-        await mail.mailSaveSettings(draft.input);
-        if (draft.typesafeKey.trim()) await mail.saveTypeSafeKey(draft.typesafeKey.trim());
-        await mail.mailSetAutoTriage(draft.triage && draft.triageConsent);
-      }
       if (draft.type === "delete") {
         if (draft.kind === "account") { await mail.mailRemoveAccount(String(draft.id)); if (accountId === draft.id) setAccountId(""); setMessageId(null); }
         if (draft.kind === "group") { await mail.mailDeleteGroup(Number(draft.id)); if (groupId === draft.id) choose({}); if (targetGroup === String(draft.id)) setTargetGroup(""); }
@@ -307,7 +276,7 @@ export default function EmailPage({ onSetup }: { onSetup?: () => void }) {
   return <div className="mail-workspace">
     <header className="mail-heading">
       <div><h1>{text("Mail", "電郵工作區")}</h1><p role="status" className="mail-status">{statusText || (noAi ? noAiText : triageReady ? text("AI sorts new mail as it arrives. Copies stay on this Mac.", "新郵件同步後由 AI 自動整理；郵件副本保存在此 Mac。") : text("Local copies of your mailboxes. Turn on AI sorting in Analysis settings.", "信箱的本機副本。可在「分析設定」開啟 AI 自動整理。"))}</p></div>
-      <div className="mail-heading-actions">{onSetup && <button disabled={!!busy} onClick={onSetup}>{text("Setup guide", "設定導引")}</button>}<button disabled={!!busy || !workspace} onClick={openSettings}>{text("Analysis settings", "分析設定")}</button></div>
+      <div className="mail-heading-actions">{onSetup && <button disabled={!!busy} onClick={onSetup}>{text("Setup guide", "設定導引")}</button>}<button disabled={!!busy || !workspace} onClick={openMailSettings}>{text("Analysis settings", "分析設定")}</button></div>
     </header>
     {aiProblem && (aiProblem.problem.kind === "failure"
       ? <ModelErrorCard failure={aiProblem.problem.failure} onRetry={pick => { const { redo } = aiProblem; setAiProblem(null); return redo(pick); }} />
@@ -348,8 +317,8 @@ export default function EmailPage({ onSetup }: { onSetup?: () => void }) {
             {triageReady
               ? <button className="mail-primary" disabled={!!busy || !triage?.untriaged} onClick={() => void sortWithAi()}>{triage?.untriaged ? text(`Sort ${triage.untriaged} with AI`, `AI 整理 ${triage.untriaged} 封`) : text("All sorted", "已全部整理")}</button>
               : noAi
-              ? <button className="mail-primary" disabled={!!busy} onClick={onSetup ?? openSettings}>{text("Set up your AI", "設定你的 AI")}</button>
-              : <button className="mail-primary" disabled={!!busy || !workspace} onClick={openSettings}>{text("Turn on AI sorting", "開啟 AI 整理")}</button>}
+              ? <button className="mail-primary" disabled={!!busy} onClick={onSetup ?? openMailSettings}>{text("Set up your AI", "設定你的 AI")}</button>
+              : <button className="mail-primary" disabled={!!busy || !workspace} onClick={openMailSettings}>{text("Turn on AI sorting", "開啟 AI 整理")}</button>}
           </div>
         </div>
         {selectionActive && view !== "due" && <div className="mail-selection" role="region" aria-label={text("Selected messages", "已選郵件")}>
@@ -444,47 +413,11 @@ export default function EmailPage({ onSetup }: { onSetup?: () => void }) {
           <button type="button" className="mail-danger" onClick={() => setEditor({ type: "delete", kind: "account", id: editor.account.id, name: editor.account.email })}>{text("Delete account and local mail", "刪除帳戶及本機郵件")}</button>
         </div>
         <p className="mail-hint">{text("Rescan re-reads the newest 50 emails and restarts “Load older” from there. Use it to fill a gap left by an older version.", "重新掃描會重新讀取最新 50 封，並由此重新開始「載入較舊郵件」；可用來補回舊版本留下的缺口。")}</p></>}
-      {editor.type === "settings" && <>
-        <h2>{text("Analysis settings", "分析設定")}</h2>
-        <section className="mail-settings-block">
-          <h3>{text("AI sorting", "AI 自動整理")}</h3>
-          <p className="mail-hint">{workspace?.triage.typesafe_key
-            ? text(`Each new email is read once. TypeSafe Jev gets the sender, recipients, subject, the first 1,500 characters and your mailbox addresses to decide its category and whether it needs you. Only emails that need a summary or mention a date go to ${chosenAi ?? "your AI"} (up to 6,000 characters). Nothing is sent from your Gmail or added to your calendar without your click.`, `每封新郵件只讀取一次：TypeSafe Jev 會收到寄件人、收件人、主旨、正文開頭 1,500 字及你的信箱地址，用來判斷分類及是否需要你處理；只有需要摘要或含日期的郵件，才會把最多 6,000 字傳送至${chosenAi ? ` ${chosenAi}` : "你選擇的 AI"}。未經你按下按鈕，不會寄出郵件或加入日曆。`)
-            : text(`Each new email is read once. The sender, recipients, subject and up to 6,000 characters go to ${chosenAi ?? "the AI you choose"}, which decides the category, writes a summary and finds dates. Nothing is sent from your Gmail or added to your calendar without your click.`, `每封新郵件只讀取一次：寄件人、收件人、主旨及最多 6,000 字正文會傳送至${chosenAi ? ` ${chosenAi}` : "你選擇的 AI"}，用來判斷分類、撰寫摘要及找出日期。未經你按下按鈕，不會寄出郵件或加入日曆。`)}</p>
-          {!chosenAi && <p className="mail-hint">{text("No AI chosen yet: choose one in Settings → Your AI.", "尚未選擇 AI：請到「設定 → 你的 AI」選擇。")}</p>}
-          <label>{text("TypeSafe API key (optional, cheaper sorting)", "TypeSafe API 密鑰（選用，分類較便宜）")}<input type="password" autoComplete="off" value={editor.typesafeKey} placeholder={workspace?.triage.typesafe_key ? text("Saved. Enter a new key to replace it.", "已儲存；輸入新密鑰即可取代。") : text("Optional", "選用")} onChange={e => setEditor({ ...editor, typesafeKey: e.target.value })} /></label>
-          <p className="mail-hint">{text(`With a TypeSafe key, Jev sorts every email first and only the ones that need a summary go to ${chosenAi ?? "your AI"}.`, `加入 TypeSafe 密鑰後，由 Jev 先分類每封郵件，只有需要摘要的郵件才交給${chosenAi ? ` ${chosenAi}` : "你選擇的 AI"}。`)}</p>
-          <label className="mail-consent"><input type="checkbox" checked={editor.triage} onChange={e => setEditor({ ...editor, triage: e.target.checked, triageConsent: e.target.checked && editor.triageConsent })} />{text("Sort new mail with AI", "以 AI 整理新郵件")}</label>
-          {editor.triage && <label className="mail-consent"><input type="checkbox" required checked={editor.triageConsent} onChange={e => setEditor({ ...editor, triageConsent: e.target.checked })} />{(editor.typesafeKey.trim() || workspace?.triage.typesafe_key)
-            ? text(`I understand that email text is sent to TypeSafe and, for some emails, ${chosenAi ?? "my AI"}, as described above.`, `我明白郵件內容會按上述方式傳送至 TypeSafe，部分郵件亦會傳送至${chosenAi ? ` ${chosenAi}` : "我選擇的 AI"}。`)
-            : text(`I understand that email text is sent to ${chosenAi ?? "my AI"}, as described above.`, `我明白郵件內容會按上述方式傳送至${chosenAi ? ` ${chosenAi}` : "我選擇的 AI"}。`)}</label>}
-        </section>
-        <section className="mail-settings-block">
-          <h3>{text("Group analysis", "群組分析")}</h3>
-          <Select label={text("Processing", "處理方式")} showLabel value={editor.input.processing_mode} onChange={processing_mode => setEditor({ ...editor, consent: false, input: { ...editor.input, processing_mode } })}
-            options={[{ value: "assistant", label: text("Same AI as the assistant", "與 AI 助理相同的 AI") }, { value: "local", label: text("Ollama on this Mac", "此 Mac 的 Ollama") }, { value: "openai", label: "OpenAI" }, { value: "bedrock", label: text("Your AWS Bedrock account", "自備 AWS Bedrock 帳戶") }]} />
-          {editor.input.processing_mode === "assistant" ? <>
-            <p className="mail-hint">{text("Uses the AI chosen in Settings → Your AI, with its saved key.", "使用在「設定 → 你的 AI」選擇的 AI 及其已儲存的密鑰。")}</p>
-            <label className="mail-consent"><input type="checkbox" required checked={editor.consent} onChange={e => setEditor({ ...editor, consent: e.target.checked })} />{text("I understand that analysis sends the group's emails, instructions and active memories to that AI (unless it is Ollama on this Mac).", "我明白分析時，群組郵件、指示及有效記憶會傳送至該 AI（如為此 Mac 的 Ollama 則不會離開此 Mac）。")}</label>
-          </> : editor.input.processing_mode === "local" ? <>
-            <label>{text("Ollama model name", "Ollama 模型名稱")}<input value={editor.input.local_model} onChange={e => setEditor({ ...editor, input: { ...editor.input, local_model: e.target.value } })} placeholder={localExample ? text(`An installed model, e.g. ${localExample}`, `已安裝的模型，例如 ${localExample}`) : text("An installed model", "已安裝的模型")} /></label>
-            <p className="mail-hint">{text("Install and start Ollama in Settings → Local AI first.", "請先在設定的「本機 AI」安裝並啟動 Ollama。")}</p>
-          </> : editor.input.processing_mode === "openai" ? <>
-            <label>{text("OpenAI model", "OpenAI 模型")}<input required value={editor.input.openai_model} onChange={e => setEditor({ ...editor, input: { ...editor.input, openai_model: e.target.value } })} placeholder={models?.defaults.openai} /></label>
-            <p className="mail-hint">{openAiPriceHint(editor.input.openai_model.trim() || models?.defaults.openai || "")}</p>
-            <label className="mail-consent"><input type="checkbox" required checked={editor.consent} onChange={e => setEditor({ ...editor, consent: e.target.checked })} />{text("I understand that analysis sends the group's emails, instructions and active memories to OpenAI.", "我明白分析時，群組郵件、指示及有效記憶會傳送至 OpenAI。")}</label>
-          </> : <>
-            <BedrockModelPicker place="mail" value={editor.input.bedrock_model} stored={workspace?.settings.bedrock_model ?? ""} fallback={models?.defaults.bedrock ?? ""} listState={bedrockList.list} onReload={bedrockList.reload} onChange={model => setEditor({ ...editor, input: { ...editor.input, bedrock_model: model } })} />
-            <p className="mail-hint">{text("Add your AWS credentials and region in Settings → Models first. Your AWS account pays.", "請先在設定的「模型」頁面填入 AWS 憑證及地區；費用由你的 AWS 帳戶支付。")}</p>
-            <label className="mail-consent"><input type="checkbox" required checked={editor.consent} onChange={e => setEditor({ ...editor, consent: e.target.checked })} />{text("I understand that analysis sends the group's emails, instructions and active memories to AWS Bedrock.", "我明白分析時，群組郵件、指示及有效記憶會傳送至 AWS Bedrock。")}</label>
-          </>}
-        </section>
-      </>}
       {editor.type === "delete" && <><h2>{text("Confirm deletion", "確認刪除")}</h2><p className="mail-preserve">{editor.name}</p><p>{editor.kind === "account" ? text("This deletes the account, its local emails, their group memberships, AI results and memories sourced from them. Your Gmail is not affected.", "將刪除帳戶、其本機郵件、相關群組連結、AI 整理結果，以及以這些郵件為來源的記憶。Gmail 中的原信不受影響。") : editor.kind === "group" ? text("This deletes the group, its instructions and memories. Emails are kept.", "將刪除群組、指示及記憶；郵件仍然保留。") : text("A deleted memory cannot be restored.", "記憶刪除後無法還原。")}</p></>}
       {error && <p role="alert" className="mail-alert">{error}</p>}
       <footer className="mail-actions">
         <button type="button" onClick={() => setEditor(null)}>{editor.type === "account" ? text("Close", "關閉") : text("Cancel", "取消")}</button>
-        {editor.type !== "account" && <button type="submit" className={editor.type === "delete" ? "mail-danger" : "mail-primary"} disabled={(editor.type === "group" && !editor.name.trim()) || (editor.type === "memory" && !editor.input.content.trim()) || (editor.type === "settings" && editor.input.processing_mode === "bedrock" && !modelChosen(editor.input.bedrock_model))}>{busy ? text("Working…", "處理中…") : editor.type === "delete" ? text("Delete", "刪除") : text("Save", "儲存")}</button>}
+        {editor.type !== "account" && <button type="submit" className={editor.type === "delete" ? "mail-danger" : "mail-primary"} disabled={(editor.type === "group" && !editor.name.trim()) || (editor.type === "memory" && !editor.input.content.trim())}>{busy ? text("Working…", "處理中…") : editor.type === "delete" ? text("Delete", "刪除") : text("Save", "儲存")}</button>}
       </footer>
     </fieldset></form></dialog>}
   </div>;
