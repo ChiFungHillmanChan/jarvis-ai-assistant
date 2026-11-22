@@ -3,7 +3,7 @@ import { useUiLocale } from '../../i18n';
 import type { AiModelCatalog } from '../../lib/ai-models';
 import { listAiModels, type CurrentAi } from '../../lib/ai-choice';
 import { localized, setupOptions } from '../../lib/ai-catalog';
-import { openAiRegionNote, optionFor, testDisclosure } from '../../components/ChooseAi';
+import { TestConsent, openAiRegionNote, optionFor } from '../../components/ChooseAi';
 import Button from '../../ui/Button';
 import SecretField from '../../ui/SecretField';
 import Select from '../../ui/Select';
@@ -33,6 +33,8 @@ export default function OtherServiceCard({ catalog, current, busy, onTestAndUse 
   const [models, setModels] = useState<string[] | null>(null);
   const [model, setModel] = useState('');
   const [error, setError] = useState('');
+  // The test sends a message, so it waits for the tick; a new service needs it again (as ChooseAi does).
+  const [consent, setConsent] = useState(false);
   // A Kimi or Qwen key, held only until it is tested, as setup holds it.
   const pending = useRef<string | undefined>(undefined);
 
@@ -46,43 +48,50 @@ export default function OtherServiceCard({ catalog, current, busy, onTestAndUse 
   const saveLabel = busy ? text('Testing…', '測試中…') : text(TEST_AND_SAVE.en, TEST_AND_SAVE.zh);
   const fail = (e: unknown) => setError(saveErrorLine(e, text));
 
-  function pick(next: Service) { setService(next); setRegion('global'); setModels(null); setModel(''); setError(''); pending.current = undefined; }
+  function pick(next: Service) { setService(next); setRegion('global'); setModels(null); setModel(''); setError(''); setConsent(false); pending.current = undefined; }
   async function loadModels(apiKey?: string) {
     setError('');
     const list = await listAiModels('compatible', place?.base_url, apiKey);
     pending.current = apiKey;
     setModels(list); setModel(list.length === 1 ? list[0] : '');
   }
-  const save = (apiKey?: string) => onTestAndUse(named
-    ? { provider: 'compatible', apiKey, baseUrl: place?.base_url, model }
-    : { provider: service as 'openai' | 'claude', apiKey, model: cheapest?.id });
+  const save = async (apiKey?: string) => {
+    await onTestAndUse(named
+      ? { provider: 'compatible', apiKey, baseUrl: place?.base_url, model }
+      : { provider: service as 'openai' | 'claude', apiKey, model: cheapest?.id });
+    setConsent(false);
+  };
 
   return <div className="settings-ai-detail">
     <h3>{text('Use another AI service', '使用其他 AI 服務')}</h3>
     <div className="settings-ai-model">
       <Select label={text('Service', '服務')} showLabel value={service} options={services} disabled={busy} width={260} onChange={pick} />
-      {named && named.regions.length > 1 && <Select label={text('Account region', '帳戶地區')} showLabel value={place?.id ?? ''} disabled={busy} width={260}
+      {named && named.regions.length > 1 && <div id="ai-region"><Select label={text('Account region', '帳戶地區')} showLabel value={place?.id ?? ''} disabled={busy} width={260}
         onChange={v => { setRegion(v); setModels(null); setModel(''); pending.current = undefined; }}
-        options={named.regions.map(r => ({ value: r.id, label: r.id === 'global' ? text('International', '國際') : r.id === 'china' ? text('Mainland China', '中國內地') : r.id }))} />}
+        options={named.regions.map(r => ({ value: r.id, label: r.id === 'global' ? text('International', '國際') : r.id === 'china' ? text('Mainland China', '中國內地') : r.id }))} /></div>}
     </div>
     {service === 'openai' && <p className="ui-hint" role="note">{openAiRegionNote(text)}</p>}
     <GuideSteps steps={steps} last={
-      <SecretField key={`${service}-${place?.id ?? ''}`} saved={false} label={text(`${name} API key`, `${name} API 密鑰`)}
-        saveLabel={named ? text('Load models', '載入模型') : saveLabel}
-        placeholder={isSaved ? text('Saved in Keychain. Paste a new key to replace it', '已儲存在鑰匙圈。貼上新密鑰即可更換') : text(`Paste your ${name} API key`, `貼上你的 ${name} API 密鑰`)}
-        errorFor={e => saveErrorLine(e, text)}
-        onSave={key => { setError(''); return named ? loadModels(key) : save(key); }} />
+      <div id="ai-test-use">
+        <TestConsent id="ai-test-consent" option={service} name={name} consent={consent} disabled={busy} onChange={setConsent} />
+        <div id="ai-key">
+          <SecretField key={`${service}-${place?.id ?? ''}`} saved={false} label={text(`${name} API key`, `${name} API 密鑰`)}
+            saveLabel={named ? text('Load models', '載入模型') : saveLabel} saveDisabled={!named && !consent}
+            placeholder={isSaved ? text('Saved in Keychain. Paste a new key to replace it', '已儲存在鑰匙圈。貼上新密鑰即可更換') : text(`Paste your ${name} API key`, `貼上你的 ${name} API 密鑰`)}
+            errorFor={e => saveErrorLine(e, text)}
+            onSave={key => { setError(''); return named ? loadModels(key) : save(key); }} />
+        </div>
+      </div>
     } />
     {cheapest && <p className="ui-hint">{text(`JARVIS uses ${cheapest.label}, the low-cost model of ${name}.`, `JARVIS 會使用 ${name} 的低成本模型 ${cheapest.label}。`)}</p>}
-    {named && <div className="settings-ai-model">
+    {named && <div id="ai-model" className="settings-ai-model">
       {isSaved && !models && <Button kind="quiet" onClick={() => loadModels()} onError={fail}>{text('Load models with the saved key', '以已儲存的密鑰載入模型')}</Button>}
       {models && <>
         <Select label={text('Model', '模型')} showLabel value={model} disabled={busy} width={320} onChange={setModel}
           options={[{ value: '', label: text('Choose a model', '選擇模型') }, ...models.map(m => ({ value: m, label: m }))]} />
-        <Button kind="primary" busy={busy} disabled={!model} onClick={() => save(pending.current)} onError={fail}>{saveLabel}</Button>
+        <Button kind="primary" busy={busy} disabled={!model || !consent} onClick={() => save(pending.current)} onError={fail}>{saveLabel}</Button>
       </>}
     </div>}
-    <p className="ui-hint">{testDisclosure(service, name, text)}</p>
     {error && <p className="ui-secret-error" role="alert">{error}</p>}
   </div>;
 }

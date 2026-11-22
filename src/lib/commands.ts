@@ -142,7 +142,7 @@ export async function getDailyBriefing(): Promise<DailyBrief | null> { return in
 export async function googleConnect(force = false): Promise<string> { return invoke("google_connect", { force }); }
 export async function googleCancelConnect(): Promise<void> { return invoke("google_cancel_connect"); }
 export async function googleStatus(): Promise<boolean> { return invoke("google_status"); }
-/** Settings > Google. "reconnect": Google no longer accepts the main account's grant. */
+/** Settings > Connections. "reconnect": Google no longer accepts the main account's grant. */
 /** `gmail`: the Assistant's mail tools are on. The first connect is Calendar only; Gmail is added with googleConnectGmail. */
 export interface GoogleAccounts { main: { state: "connected" | "reconnect" | "not_connected"; name: string | null; email: string | null; gmail: boolean; calendar: boolean }; others: MailAccount[] }
 export async function googleAccounts(): Promise<GoogleAccounts> { return invoke("google_accounts"); }

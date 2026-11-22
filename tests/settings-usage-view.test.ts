@@ -157,7 +157,8 @@ test('with no requests, Usage shows one line and a link to Your AI, not the char
 
 test('Show details stays mounted whatever the figures are doing, so a period change never collapses it', () => {
   const code = usage();
-  assert.match(code, /return <>\s*\{period\}\s*\{body\}\s*<details /);
+  // The "what is recorded" line (inventory row 61) sits between the figures and Show details, outside both.
+  assert.match(code, /return <>\s*\{period\}\s*\{body\}\s*<p className="ui-hint settings-usage-about">[\s\S]*?<\/p>\s*<details /);
   const component = code.slice(code.indexOf('export default function Usage'), code.indexOf('function Tile'));
   assert.equal((component.match(/^  return /gm) ?? []).length, 1, 'one return at the component level, no early return');
 });

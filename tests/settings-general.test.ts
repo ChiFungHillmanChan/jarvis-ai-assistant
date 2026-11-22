@@ -113,7 +113,7 @@ test('General keeps the reply-language flag and applies the UI rule', () => {
   assert.match(general, /'language_follows_ui', 'true'/);
   assert.match(general, /replyLanguageOnLocaleChange\(locale, next, values\)/);
   assert.match(general, /accountSectionVisible\(/);
-  assert.match(general, /<BackgroundSettings show="startup" \/>/);
+  assert.match(general, /<BackgroundSettings \/>/);
 });
 
 test('a failed save is shown in both languages', () => {
@@ -154,7 +154,45 @@ test('a failed theme save shows at the theme row and the theme rolls back', () =
   assert.match(workspace, /setAppearanceValue\(previous\)/);
 });
 
-test('the old Voice reply-language select also records a direct choice', () => {
-  const old = source('../src/pages/Settings.tsx');
-  assert.match(old, /await setPreference\("language_follows_ui", "false"\);\s*await setPreference\("language", v\);/);
+test('the one reply-language select records a direct choice; Voice has no second one', () => {
+  // The old page also had a reply-language select under Voice. The dialog has
+  // one, in General, and it records the direct choice before the language.
+  const general = source('../src/settings/sections/General.tsx');
+  assert.match(general, /save\('reply-language', \['language_follows_ui', 'false'\], \['language', v\]\)/);
+  const voice = source('../src/settings/sections/Voice.tsx') + source('../src/settings/hooks/useVoiceSettings.ts');
+  assert.doesNotMatch(voice, /['"]language['"]\s*[,\]]/, 'Voice does not write the reply language');
+});
+
+// Inventory row 135: wallpaper mode says how to bring JARVIS back, in both languages.
+test('the wallpaper row says how to bring JARVIS back', () => {
+  const general = source('../src/settings/sections/General.tsx');
+  const wallpaper = general.slice(general.indexOf("<SettingRow {...row('wallpaper')}"), general.indexOf("<SettingGroup title={text('Startup'"));
+  assert.match(wallpaper, /To bring it back later, say Hey Jarvis, click the tray icon, or press Cmd\+Shift\+W\. Closing the window sends it back to the background\./);
+  assert.match(wallpaper, /之後可說出「Hey Jarvis」、按選單列圖示，或按 Cmd\+Shift\+W 重新開啟。關閉視窗會將 JARVIS 移回背景。/);
+});
+
+// Final review I2: spec 6.3 lists sign out among the controls that ask first.
+test('Sign out asks first, and the question says what it clears and keeps', () => {
+  const panel = source('../src/components/AccountPanel.tsx');
+  // One shared question, used by both places that sign out.
+  const confirm = source('../src/components/ConfirmDialog.tsx');
+  assert.match(confirm, /export function confirmSignOut\(t: \(key: MessageKey\) => string\): Promise<boolean> \{\s*return confirmAction\(t\('signOutConfirm'\), t\('signOut'\)\);\s*\}/);
+  assert.match(panel, /const signOut = async \(\) => \{\s*if \(!\(await confirmSignOut\(t\)\)\) return;\s*await endSession\(\);\s*\};/);
+  assert.match(panel, /onClick=\{\(\) => void signOut\(\)\}>\{t\("signOut"\)\}/);
+  // The sidebar account menu asks the same question before it signs out.
+  const sidebar = source('../src/components/SidebarAccount.tsx');
+  const asks = sidebar.indexOf('if (signedIn && !(await confirmSignOut(t))) return;');
+  assert.ok(asks > 0, 'the sidebar menu asks first');
+  assert.ok(asks < sidebar.indexOf('if (signedIn) await accountSignOut();'), 'before it signs out');
+  // No other copy of the question or of a sign-out without it.
+  const callers = ['components/AccountPanel.tsx', 'components/SidebarAccount.tsx', 'components/PaywallGate.tsx'].filter(f => source(`../src/${f}`).includes('signOutConfirm'));
+  assert.deepEqual(callers, [], 'the text lives only in confirmSignOut');
+  const catalog = source('../src/i18n/catalog.ts');
+  // account_sign_out removes the refresh token and cached plan, then opens the
+  // hosted logout page (auth/cognito.rs sign_out); AI keys, mail and chats stay.
+  assert.match(catalog, /signOutConfirm: \['Sign out of JARVIS on this Mac\? Your browser opens to finish signing out\. Your mail, chats, settings and AI keys stay on this Mac\.', '要在此 Mac 登出 JARVIS 嗎？瀏覽器會開啟以完成登出。你的郵件、對話、設定及 AI 密鑰會保留在此 Mac。'\]/);
+  const cognito = source('../src-tauri/src/auth/cognito.rs');
+  assert.match(cognito, /KeychainStore::delete\(KEYCHAIN_SERVICE, KEYCHAIN_ACCOUNT\);\s*forget_plan\(\);/);
+  assert.match(cognito, /const KEYCHAIN_SERVICE: &str = "com\.jarvis\.account";/, 'not the AI key service');
+  assert.match(cognito, /open::that\(logout_url\(&cfg\)\)/);
 });

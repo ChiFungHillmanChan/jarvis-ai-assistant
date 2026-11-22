@@ -1,6 +1,7 @@
 import { createContext, useCallback, useContext, useEffect, useMemo, useReducer, type ReactNode } from 'react';
 import type { SettingsSectionId } from './sections';
-import { initialSettingsDialog, isSettingsShortcut, settingsDialogReducer } from './settings-dialog-state';
+import { LocalSetupProvider } from './LocalSetupContext';
+import { commitFocusedField, initialSettingsDialog, isSettingsShortcut, settingsDialogReducer } from './settings-dialog-state';
 
 interface SettingsDialogValue {
   open: boolean;
@@ -16,8 +17,10 @@ const SettingsContext = createContext<SettingsDialogValue | null>(null);
 
 export function SettingsProvider({ children }: { children: ReactNode }) {
   const [state, dispatch] = useReducer(settingsDialogReducer, initialSettingsDialog);
-  const openSettings = useCallback((section?: SettingsSectionId) => dispatch({ type: 'open', section }), []);
-  const closeSettings = useCallback(() => dispatch({ type: 'close' }), []);
+  // Every close and every section change, from any path (Esc, X, backdrop,
+  // nav, a link inside a section), saves a half-typed field first.
+  const openSettings = useCallback((section?: SettingsSectionId) => { commitFocusedField(document); dispatch({ type: 'open', section }); }, []);
+  const closeSettings = useCallback(() => { commitFocusedField(document); dispatch({ type: 'close' }); }, []);
   const openSetupGuide = useCallback(() => dispatch({ type: 'open-setup' }), []);
   const closeSetupGuide = useCallback(() => dispatch({ type: 'close-setup' }), []);
 
@@ -44,7 +47,7 @@ export function SettingsProvider({ children }: { children: ReactNode }) {
     closeSetupGuide,
   }), [state, openSettings, closeSettings, openSetupGuide, closeSetupGuide]);
 
-  return <SettingsContext.Provider value={value}>{children}</SettingsContext.Provider>;
+  return <SettingsContext.Provider value={value}><LocalSetupProvider>{children}</LocalSetupProvider></SettingsContext.Provider>;
 }
 
 export function useSettingsDialog(): SettingsDialogValue {

@@ -128,11 +128,12 @@ test('Briefing saves through the daily briefing command and shows what the backe
   assert.match(code, /normalizeBriefingTime\(/);
 });
 
-test('General shows only the startup part of BackgroundSettings; the old page still shows all of it', () => {
-  assert.match(source('../src/settings/sections/General.tsx'), /<BackgroundSettings show="startup" \/>/);
+test('General shows only the startup part; the briefing is only in its own section', () => {
+  assert.match(source('../src/settings/sections/General.tsx'), /<BackgroundSettings \/>/);
   const background = source('../src/components/BackgroundSettings.tsx');
-  assert.match(background, /show = 'all'/);
-  assert.match(source('../src/pages/Settings.tsx'), /<BackgroundSettings \/>/);
+  assert.doesNotMatch(background, /DailyBriefing|dailyBriefing/, 'the briefing half went with the old page');
+  assert.match(background, /getOpenAtLogin\(\), getKeepAwake\(\)/);
+  assert.match(source(BRIEFING), /getDailyBriefingSettings\(\)/);
 });
 
 test('Briefing says so when a change is still saving, and shows a normalised time as saved', () => {

@@ -6,6 +6,7 @@ import { connectionsChanged } from "../lib/connections";
 import { mailWorkspace, type MailAccount } from "../lib/mail";
 import { useWorkspace } from "./WorkspaceContext";
 import { useSettingsDialog } from "../settings/SettingsContext";
+import { sectionLabel } from "../settings/sections";
 import "../pages/settings-workspace.css";
 
 function syncLabel(value: string | null, locale: string): string {
@@ -20,7 +21,9 @@ export default function ConnectionsPage() {
   const { open, state } = useWorkspace();
   const settings = useSettingsDialog();
   // Open Settings on the section this button is about.
-  const openSettings = (section: "google" | "ai") => settings.openSettings(section === 'google' ? 'connections' : 'ai');
+  // Provider keys and AWS Bedrock credentials are in Advanced → Cloud providers.
+  const openSettings = (section: "google" | "cloud") => settings.openSettings(section === 'google' ? 'connections' : 'advanced-cloud');
+  const cloudLabel = sectionLabel('advanced-cloud', text);
   const [accounts, setAccounts] = useState<MailAccount[] | null>(null);
   const [assistantGoogle, setAssistantGoogle] = useState<boolean | null>(null);
   const [mailError, setMailError] = useState(false);
@@ -110,7 +113,7 @@ export default function ConnectionsPage() {
             <h2 id="connections-assistant-title">{text('Google for Assistant and Calendar', '助手及日曆的 Google 連接')}</h2>
             <p>{text('This separate Google connection provides Assistant mail tools, Calendar and briefings. A Gmail account added to Mail does not connect these tools.', '此獨立 Google 連接供助手郵件工具、日曆及簡報使用。在郵件頁加入 Gmail 帳戶不會自動連接這些工具。')}</p>
           </div>
-          <button onClick={() => openSettings("google")}>{text('Manage in Settings', '在設定頁管理')}</button>
+          <button onClick={() => openSettings("google")}>{text('Manage in Settings', '在設定中管理')}</button>
         </div>
         {googleError ? (
           <p role="alert" className="connections-message connections-error">{text('Could not read Assistant Google status. Refresh to try again.', '未能讀取助手 Google 狀態。請重新整理再試。')}</p>
@@ -119,7 +122,7 @@ export default function ConnectionsPage() {
             {assistantGoogle === null ? text("Loading Google status…", "正在載入 Google 狀態…") : assistantGoogle ? text("Google is connected for Assistant and Calendar.", "Google 已連接至助手及日曆。") : text("Google is not connected for Assistant and Calendar.", "Google 尚未連接至助手及日曆。")}
           </p>
         )}
-        <p className="connections-message">{text('Choose Assistant Google in Settings to connect, switch or disconnect this account.', '請在設定頁的「助手 Google」連接、切換或中斷帳戶連接。')}</p>
+        <p className="connections-message">{text('Open Settings → Connections to connect, switch or disconnect this account.', '請在「設定 → 連接」連接、切換或中斷此帳戶。')}</p>
       </section>
 
       <section className="connections-section" aria-labelledby="connections-tools-title">
@@ -135,7 +138,7 @@ export default function ConnectionsPage() {
           <IntegrationConnection service="obsidian" />
           <div className="connections-service">
             <div><h3>{text("AI providers", "AI 供應商")}</h3><p>{text("OpenAI, Gemini, Claude and AWS Bedrock credentials.", "OpenAI、Gemini、Claude 及 AWS Bedrock 憑證。")}</p></div>
-            <button onClick={() => openSettings("ai")}>{text("Manage in Settings", "在設定頁管理")}</button>
+            <button onClick={() => openSettings("cloud")}>{text(`Open Advanced → ${cloudLabel}`, `開啟「進階 → ${cloudLabel}」`)}</button>
           </div>
         </div>
       </section>

@@ -6,16 +6,17 @@ import { localized } from '../../lib/ai-catalog';
 import { confirmAction } from '../../components/ConfirmDialog';
 import ConsentCard from '../../components/ConsentCard';
 import { chosenNotice, useAiConsent } from '../../components/ChooseAi';
-import { useLocalSetup } from '../../components/LocalMailSetup';
 import Button from '../../ui/Button';
 import { nextIndex } from '../../ui/keys';
 import { geminiEffectiveModel, jarvisAiAvailable, localUnavailable, mainPathModels, needsChainConfirm, sortCostPer1000 } from '../ai-choice';
 import { useProviderChain } from '../hooks/useProviderChain';
 import { useSettingsDialog } from '../SettingsContext';
+import { useSettingsLocalSetup } from '../LocalSetupContext';
 import GeminiCard from '../ai/GeminiCard';
 import LocalCard from '../ai/LocalCard';
 import OtherServiceCard from '../ai/OtherServiceCard';
 import { CANCELLED, type TestAndUse } from '../ai/save';
+import { useRow } from './advanced/useRow';
 
 type Card = 'jarvis' | 'gemini' | 'local' | 'other';
 interface Face { id: Card; name: string; blurb: string; cost: string; disabled?: boolean }
@@ -40,11 +41,13 @@ function cardFor(current: CurrentAi | null): Card | null {
 export default function YourAi() {
   const { text } = useUiLocale();
   const { openSettings } = useSettingsDialog();
+  const row = useRow();
   const catalog = useAiModels();
   const { chain, current, ready, error, reload } = useProviderChain();
   const { consentNeeded, setConsentNeeded, googleNote } = useAiConsent(current);
-  // Downloading does not change mail; Test and save applies the choice, as the other cards do.
-  const local = useLocalSetup({ applyToMail: false, onReady: () => local.refresh() });
+  // Downloading does not change mail; Test and save applies the choice, as the
+  // other cards do. The download is owned above the dialog, so it survives a close.
+  const { setup: local, otherBusy: localBlocked } = useSettingsLocalSetup('ai');
   const [picked, setPicked] = useState<Card | null>(null);
   const [busy, setBusy] = useState(false);
   const [notice, setNotice] = useState('');
@@ -88,7 +91,8 @@ export default function YourAi() {
   ];
   const recommended: Card = jarvis ? 'jarvis' : 'gemini';
   const saved = cardFor(current);
-  const card = picked ?? (saved && faces.some(f => f.id === saved) ? saved : recommended);
+  // A download still going reopens on its card, so its progress shows again.
+  const card = picked ?? (local.busy ? 'local' : saved && faces.some(f => f.id === saved) ? saved : recommended);
 
   function onKeyDown(e: KeyboardEvent, index: number) {
     const next = nextIndex(index, e.key, faces.length);
@@ -100,11 +104,11 @@ export default function YourAi() {
 
   return <>
     <p className="settings-ai-intro">{text('JARVIS needs an AI to read your mail and answer you. Pick one. You can change it any time.', 'JARVIS 需要一個 AI 來閱讀你的郵件並回覆你。請選擇一個，之後可隨時更換。')}</p>
-    {current && <p className="ui-hint" role="status">{text(`Now using ${current.label}${current.model ? ` · ${current.model}` : ''}. Only one AI is used at a time.`, `目前使用 ${current.label}${current.model ? `・${current.model}` : ''}。每次只會使用一個 AI。`)}</p>}
-    {current && consentNeeded && <ConsentCard request={consentNeeded} onAgreed={() => setConsentNeeded(null)} />}
-    {current && googleNote && <p className="ui-hint" role="note">{googleNote}</p>}
+    {current && <p id="ai-current" className="ui-hint" role="status">{text(`Now using ${current.label}${current.model ? ` · ${current.model}` : ''}. Only one AI is used at a time.`, `目前使用 ${current.label}${current.model ? `・${current.model}` : ''}。每次只會使用一個 AI。`)}</p>}
+    {current && consentNeeded && <div id="ai-consent"><ConsentCard request={consentNeeded} onAgreed={() => setConsentNeeded(null)} /></div>}
+    {current && googleNote && <p id="ai-google-note" className="ui-hint" role="note">{googleNote}</p>}
 
-    <div className="settings-ai-cards" role="radiogroup" aria-label={text('Your AI', '你的 AI')}>
+    <div id="ai-choice" className="settings-ai-cards" role="radiogroup" aria-label={text('Your AI', '你的 AI')}>
       {faces.map((face, i) => (
         <button key={face.id} ref={el => { cards.current[i] = el; }} type="button" role="radio" className="settings-ai-card"
           aria-checked={card === face.id} tabIndex={card === face.id ? 0 : -1} disabled={face.disabled || busy}
@@ -118,10 +122,14 @@ export default function YourAi() {
 
     {card === 'jarvis' && jarvisChoice && <div className="settings-ai-detail"><p className="ui-hint">{localized(jarvisChoice.hint, text)}</p></div>}
     {card === 'gemini' && <GeminiCard catalog={catalog} models={mainPathModels(catalog.cloud, 'gemini')} current={current} busy={busy} onTestAndUse={testAndUse} />}
-    {card === 'local' && <LocalCard setup={local} unavailable={unavailable} current={current} busy={busy} onTestAndUse={testAndUse} />}
+    {card === 'local' && <LocalCard setup={local} blocked={localBlocked} unavailable={unavailable} current={current} busy={busy} onTestAndUse={testAndUse} />}
     {card === 'other' && <OtherServiceCard catalog={catalog} current={current} busy={busy} onTestAndUse={testAndUse} />}
 
     {notice && <p className="settings-ai-notice" role="status">{notice}</p>}
+    <p id="ai-mail-link" className="settings-ai-footer">
+      {text('The AI you choose here answers you in chat and sorts your mail. Mail analysis can use a different AI in its own settings.', '你在此選擇的 AI 會在對話中回覆你，並整理你的郵件。郵件分析亦可在其設定中另選 AI。')}{' '}
+      <Button kind="quiet" onClick={() => openSettings('mail')}>{row('ai-mail-link').title}</Button>
+    </p>
     <p className="settings-ai-footer">
       {text('Bedrock, custom addresses, provider order and every model are in Advanced.', 'Bedrock、自訂位址、供應商次序及所有模型都在進階設定中。')}{' '}
       <Button kind="quiet" onClick={() => openSettings('advanced-models')}>{text('Open Advanced → Models', '開啟「進階 → 模型」')}</Button>

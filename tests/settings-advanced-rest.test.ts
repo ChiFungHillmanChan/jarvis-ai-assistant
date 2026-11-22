@@ -1,7 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { existsSync, readdirSync, readFileSync, statSync } from 'node:fs';
-import { dirname, join, relative } from 'node:path';
+import { dirname, join } from 'node:path';
 import { ROWS } from '../src/settings/rows.ts';
 import { clearAiError, lastAiError, recordAiError, subscribeAiErrors } from '../src/settings/ai-error-log.ts';
 
@@ -154,13 +154,41 @@ function filesUnder(dir: string): string[] {
   });
 }
 
-const OLD_PAGE = 'src/pages/Settings.tsx';
-const BRIDGE = 'src/settings/LegacySection.tsx';
+/** New side: every file under src/settings/ and what they render. */
+const newCommands = () => reachableCommands(filesUnder('src/settings'), () => false);
 
-/** Old side: the page and what it renders, but not the new dialog code it reaches through SettingsContext. */
-const oldCommands = () => reachableCommands([OLD_PAGE], file => file.startsWith('src/settings/'));
-/** New side: every file under src/settings/ and what they render, never the old page or the bridge that shows it. */
-const newCommands = () => reachableCommands(filesUnder('src/settings').filter(f => f !== BRIDGE), file => file === OLD_PAGE || file === BRIDGE);
+/**
+ * The old side, snapshotted from src/pages/Settings.tsx at 001eae0 (the last
+ * commit that has it), by running this extraction on that file (following its
+ * imports, but not into src/settings/, the new dialog it reached through
+ * SettingsContext): every command the old page and the components it rendered
+ * could call, sorted. The page is deleted in Task 19, so the superset test
+ * compares against this list instead of reading the file. Do not edit it by
+ * hand.
+ */
+const OLD_SETTINGS_COMMANDS: readonly string[] = [
+  '${service}_cancel_connect', '${service}_connection_status', '${service}_disconnect', 'account_sign_in',
+  'account_sign_out', 'account_status', 'add_local_endpoint', 'ai_consent_needed', 'ai_google_content_note',
+  'ai_models', 'apply_tested_mail_settings', 'cancel_local_setup', 'cancel_model_pull',
+  'check_backend_prerequisites', 'check_system_compatibility', 'choose_ai', 'clear_aws_credentials',
+  'cloud_speech', 'current_ai', 'delete_all_data', 'disable_wake_word', 'disable_wallpaper',
+  'download_model', 'enable_wake_word', 'enable_wallpaper', 'get_api_key_status',
+  'get_aws_credentials_status', 'get_blended_cost', 'get_cost_stats', 'get_daily_briefing_settings',
+  'get_keep_awake', 'get_open_at_login', 'get_provider_chain', 'get_recommended_models', 'get_settings',
+  'get_storage_usage', 'get_usage_groups', 'get_user_preference', 'get_voice_settings', 'get_voice_state',
+  'get_wake_word_status', 'get_wallpaper_status', 'github_begin_connect', 'github_complete_connect',
+  'github_set_client_id', 'give_ai_consent', 'google_accounts', 'google_cancel_connect', 'google_connect',
+  'google_connect_gmail', 'google_disconnect', 'is_model_downloaded', 'list_ai_consents', 'list_ai_models',
+  'list_bedrock_models', 'list_endpoint_models', 'list_local_endpoints', 'list_tts_voices',
+  'mail_cancel_connect', 'mail_connect_account', 'mail_disconnect_account', 'mail_sync_account',
+  'mail_workspace', 'notion_connect', 'obsidian_select_vault', 'open_obsidian', 'open_url',
+  'payments_open_portal', 'payments_reopen_url', 'prepare_local_ai', 'probe_local_setup', 'pull_model',
+  'purge_storage', 'remove_local_endpoint', 'revoke_ai_consent', 'run_storage_sweep', 'save_github_token',
+  'save_notion_token', 'save_obsidian_key', 'set_api_key', 'set_aws_credentials',
+  'set_daily_briefing_settings', 'set_keep_awake', 'set_open_at_login', 'set_retention_policy',
+  'set_user_preference', 'set_voice_setting', 'start_listening', 'stop_listening', 'sync_calendar',
+  'test_endpoint_connection', 'test_mail_ai_connection', 'update_provider_chain', 'update_setting',
+];
 
 /**
  * Commands the old page called that the new dialog may leave out: only the
@@ -181,8 +209,14 @@ const newCommands = () => reachableCommands(filesUnder('src/settings').filter(f 
  */
 const ALLOWED_MISSING: Record<string, string> = {};
 
+test('the snapshot is sorted, has no repeats, and the old page is gone', () => {
+  assert.equal(OLD_SETTINGS_COMMANDS.length, 94);
+  assert.deepEqual([...OLD_SETTINGS_COMMANDS], [...new Set(OLD_SETTINGS_COMMANDS)].sort());
+  assert.ok(!existsSync(join(root, 'src/pages/Settings.tsx')));
+});
+
 test('the new settings dialog calls every command the old Settings page called', () => {
-  const before = oldCommands();
+  const before = new Set(OLD_SETTINGS_COMMANDS);
   const after = newCommands();
   assert.ok(before.size > 40, `old page commands found: ${before.size}`);
   const missing = [...before].filter(c => !after.has(c) && !(c in ALLOWED_MISSING)).sort();
@@ -196,15 +230,15 @@ test('the kept control of each removed duplicate still calls its command', () =>
 });
 
 test('the extraction finds rendered child components and lib wrappers', () => {
-  const before = oldCommands();
-  // Direct invoke in the page, lib wrappers, and a child component's own commands.
-  for (const command of ['cloud_speech', 'save_notion_token', 'save_obsidian_key', 'revoke_ai_consent', 'get_cost_stats', '${service}_disconnect', 'ai_models'])
-    assert.ok(before.has(command), command);
+  const after = newCommands();
+  // Direct invoke in a section, lib wrappers, and a child component's own
+  // commands; each was on the old side too.
+  for (const command of ['cloud_speech', 'save_notion_token', 'save_obsidian_key', 'revoke_ai_consent', 'get_cost_stats', '${service}_disconnect', 'ai_models']) {
+    assert.ok(OLD_SETTINGS_COMMANDS.includes(command), command);
+    assert.ok(after.has(command), command);
+  }
   // One wrapper does not pull in its whole file.
-  assert.ok(!before.has('get_notion_stats'), 'only imported wrappers count');
-  // The bridge is not counted for the new side.
-  assert.ok(!reachableCommands([BRIDGE], f => f === OLD_PAGE).has('save_notion_token'));
-  assert.equal(relative(root, join(root, OLD_PAGE)), OLD_PAGE);
+  assert.ok(!after.has('get_notion_stats'), 'only imported wrappers count');
 });
 
 // ---------------------------------------------------------------------------

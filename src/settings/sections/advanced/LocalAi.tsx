@@ -1,11 +1,13 @@
 import { useUiLocale } from '../../../i18n';
-import LocalMailSetup from '../../../components/LocalMailSetup';
+import { useEffect } from 'react';
+import { LocalMailSetupPanel } from '../../../components/LocalMailSetup';
 import Button from '../../../ui/Button';
 import SettingGroup from '../../../ui/SettingGroup';
 import SettingRow from '../../../ui/SettingRow';
 import { addEntry } from '../../advanced-chain';
 import { useChainEditor } from '../../hooks/useChainEditor';
 import { useLocalEndpoints } from '../../hooks/useLocalEndpoints';
+import { useSettingsLocalSetup } from '../../LocalSetupContext';
 import LocalEngines from './LocalEngines';
 import LocalEndpoints from './LocalEndpoints';
 import { useRow } from './useRow';
@@ -20,6 +22,10 @@ export default function LocalAi() {
   const row = useRow();
   const endpoints = useLocalEndpoints();
   const editor = useChainEditor();
+  // The run is owned above the dialog, so closing Settings or changing section does not cancel it.
+  const { setup, otherBusy } = useSettingsLocalSetup('mail');
+  // A finished run adds the Ollama endpoint; show it.
+  useEffect(() => { if (setup.ready) void endpoints.load(); }, [setup.ready]);
   const addToChain = (endpointId: string, modelId: string) => editor.save(addEntry(editor.chain, { provider_type: 'local', endpoint_id: endpointId, model_id: modelId }));
 
   if (endpoints.loadError || editor.loadError) {
@@ -40,7 +46,7 @@ export default function LocalAi() {
 
     <SettingGroup title={text('Mail on this Mac', '在此 Mac 上處理郵件')}>
       <SettingRow {...row('local-mail-setup')} control={null}>
-        <LocalMailSetup confirmPrepare={{ message: text('Use a model on this Mac for mail? Once the test passes, mail analysis switches from its current AI to this model. You can switch it back again in the mail settings.', '要使用此 Mac 上的模型處理郵件嗎？測試通過後，郵件分析會由目前的 AI 改用此模型。你可在郵件設定中再次改回。'), label: text('Prepare and use', '準備並使用') }} onReady={() => endpoints.load()} />
+        <LocalMailSetupPanel setup={setup} blocked={otherBusy} confirmPrepare={{ message: text('Use a model on this Mac for mail? Once the test passes, mail analysis switches from its current AI to this model. You can switch it back again in the mail settings.', '要使用此 Mac 上的模型處理郵件嗎？測試通過後，郵件分析會由目前的 AI 改用此模型。你可在郵件設定中再次改回。'), label: text('Prepare and use', '準備並使用') }} />
       </SettingRow>
     </SettingGroup>
   </>;

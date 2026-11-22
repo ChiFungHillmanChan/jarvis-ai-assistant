@@ -1,8 +1,8 @@
 // The Bedrock model picker: the options it offers, the line saying which
 // list they come from, and the picker's own state. One picker serves three
-// places: Settings > Models > Provider priority (a Bedrock row), the Mail
-// page's Analysis settings (group analysis with "Your AWS Bedrock account"),
-// and the setup guide's "Advanced: use a company AWS Bedrock account for
+// places: Settings > Advanced > Models > Provider order (a Bedrock row),
+// Settings > Advanced > Models > Mail analysis models (group analysis with "Your AWS
+// Bedrock account"), and the setup guide's "Advanced: use a company AWS Bedrock account for
 // mail". The list comes from list_bedrock_models
 // (src-tauri/src/aws/model_list.rs): the inference profiles and text models
 // AWS lists for the saved region, or a built-in list and the reason.
@@ -42,7 +42,7 @@ export type BedrockModelList = {
 
 /**
  * Where the picker's list stands while the picker is on screen: in Settings >
- * Models, the Mail dialog's Analysis settings or the setup guide.
+ * Advanced > Models (provider order and mail analysis models) or the setup guide.
  */
 export type BedrockListState =
   | { status: 'idle' }
@@ -150,17 +150,6 @@ export function groupLabel(group: PickerGroup, text: Text): string | null {
     case 'built-in': return text('Built-in list', '內置清單');
     default: return null;
   }
-}
-
-/** The options split into runs of one group, for <optgroup>. */
-export function groupedOptions(options: PickerOption[]): { group: PickerGroup; options: PickerOption[] }[] {
-  const runs: { group: PickerGroup; options: PickerOption[] }[] = [];
-  for (const option of options) {
-    const last = runs[runs.length - 1];
-    if (last && last.group === option.group) last.options.push(option);
-    else runs.push({ group: option.group, options: [option] });
-  }
-  return runs;
 }
 
 function allowed(permissions: string[], text: Text): string {

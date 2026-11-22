@@ -58,3 +58,15 @@ export function isBackdropClick(
   if (!dialog || downTarget !== dialog || clickTarget !== dialog) return false;
   return x < rect.left || x > rect.right || y < rect.top || y > rect.bottom;
 }
+
+/**
+ * Leave the focused field inside the dialog before it closes or changes
+ * section, so the field's blur save starts first. The content unmounts in
+ * the same render, WebKit fires no blur on a removed focused node, and a
+ * clicked button (X, nav) does not take focus. The close does not wait for
+ * the save. Focus outside the dialog is left alone.
+ */
+export function commitFocusedField(doc: { activeElement: unknown }): void {
+  const active = doc.activeElement as { closest?(selector: string): unknown; blur?(): void } | null;
+  if (active?.closest?.('.settings-dialog')) active.blur?.();
+}

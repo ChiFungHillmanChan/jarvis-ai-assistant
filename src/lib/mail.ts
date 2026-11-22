@@ -46,4 +46,3 @@ export const mailSetAttention = (messageId: number, attention: boolean) => invok
 export const mailListItems = (messageId?: number, includeClosed = false) => invoke<MailItem[]>("mail_list_items", { messageId, includeClosed });
 export const mailUpdateItem = (itemId: number, status: MailItem['status'], remindAt: string | null) => invoke<MailItem>("mail_update_item", { itemId, status, remindAt });
 export const mailItemToCalendar = (itemId: number) => invoke<MailItem>("mail_item_to_calendar", { itemId });
-export const saveTypeSafeKey = (value: string) => invoke<void>("set_api_key", { provider: "typesafe", value });

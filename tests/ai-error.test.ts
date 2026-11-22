@@ -151,10 +151,18 @@ test("a failed test shows the card's sentence and the service's reason, never it
 
 test('Settings → Your AI and the setup guide show the error through that line', () => {
   const source = (path: string) => readFileSync(new URL(path, import.meta.url), 'utf8');
+  // Settings → Your AI: each card's failed save reads through saveErrorLine,
+  // which is errorLine (or nothing for the kept provider order).
+  assert.match(source('../src/settings/ai/save.ts'), /return e === CANCELLED \? '' : errorLine\(e, text\);/);
+  for (const card of ['GeminiCard', 'LocalCard', 'OtherServiceCard']) {
+    const code = source(`../src/settings/ai/${card}.tsx`);
+    assert.match(code, /saveErrorLine\(e, text\)/, card);
+    assert.doesNotMatch(code, /setError\(String\(/, card);
+  }
   const chooseAi = source('../src/components/ChooseAi.tsx');
   assert.match(chooseAi, /catch \(e\) \{ if \(mounted\.current\) setError\(errorLine\(e, text\)\); \}/);
   assert.doesNotMatch(chooseAi, /setError\(String\(/);
-  // The setup guide's AI step is this panel, so it shows the same line.
+  // The setup guide's AI step is ChooseAi, so it shows the same line.
   assert.match(source('../src/pages/QuickSetup.tsx'), /<ChooseAi /);
   // The card and the line say "The service said" with the same words.
   assert.match(source('../src/components/ModelErrorCard.tsx'), /\{serviceSaid\(failure\.provider_reason, text\)\}/);

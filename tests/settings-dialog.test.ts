@@ -1,8 +1,8 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { readFileSync, readdirSync } from 'node:fs';
+import { existsSync, readFileSync, readdirSync } from 'node:fs';
 import { join } from 'node:path';
-import { initialSettingsDialog, isBackdropClick, isSettingsShortcut, settingsDialogReducer, type SettingsDialogState } from '../src/settings/settings-dialog-state.ts';
+import { commitFocusedField, initialSettingsDialog, isBackdropClick, isSettingsShortcut, settingsDialogReducer, type SettingsDialogState } from '../src/settings/settings-dialog-state.ts';
 
 // Task 5: the settings dialog shell. The open/close/section logic is a pure
 // reducer tested here; the JSX files cannot be imported under node, so their
@@ -75,7 +75,7 @@ test('the dialog size and backdrop match the spec', () => {
   const css = source('../src/settings/settings.css');
   assert.match(css, /width:\s*min\(78vw,\s*1120px\)/);
   assert.match(css, /height:\s*min\(80vh,\s*780px\)/);
-  assert.match(css, /@media \(max-width: 900px\)\s*\{[^}]*width:\s*94vw;[^}]*height:\s*90vh;/);
+  assert.match(css, /@media \(max-width: 1000px\)\s*\{[^}]*width:\s*94vw;[^}]*height:\s*90vh;/);
   assert.match(css, /::backdrop\s*\{[^}]*rgba\(0,\s*0,\s*0,\s*\.45\)[^}]*backdrop-filter:\s*blur\(2px\)/);
 });
 
@@ -87,26 +87,27 @@ test('the titlebar Set up button is gone and the setup guide state lives in the 
   assert.match(app, /<SettingsProvider>/);
   assert.match(app, /<SettingsDialog \/>/);
   assert.match(app, /closeSetupGuide\(\); dispatch\(\{ type: 'open', view: 'email' \}\);/, 'completing setup still opens Mail');
-  assert.match(app, /id: 'settings', title: viewName\('settings', locale\), hint: text\('Workspace', '工作區'\), action: \(\) => openSettings\(\)/);
+  assert.match(app, /id: 'settings', title: text\('Settings', '設定'\), hint: text\('Workspace', '工作區'\), action: \(\) => openSettings\(\)/);
 });
 
 test('every entry point opens the dialog', () => {
   assert.match(source('../src/components/SidebarAccount.tsx'), /openSettings\(/);
   const connections = source('../src/workspace/ConnectionsPage.tsx');
   assert.doesNotMatch(connections, /writeValue\("tool:settings"/);
-  assert.match(connections, /openSettings\(section === 'google' \? 'connections' : 'ai'\)/);
+  assert.match(connections, /openSettings\(section === 'google' \? 'connections' : 'advanced-cloud'\)/);
+  // Final review M5: Bedrock credentials live in Advanced → Cloud providers, and the button names it.
+  assert.match(connections, /const cloudLabel = sectionLabel\('advanced-cloud', text\);/);
+  assert.match(connections, /onClick=\{\(\) => openSettings\("cloud"\)\}>\{text\(`Open Advanced → \$\{cloudLabel\}`, `開啟「進階 → \$\{cloudLabel\}」`\)\}/);
 });
 
-test('the bridge renders the old sections a new section replaces', () => {
-  const bridge = source('../src/settings/LegacySection.tsx');
-  assert.match(bridge, /<Settings embedded=\{\{ sections \}\} \/>/);
-  assert.match(bridge, /legacySectionsFor\(id\)/);
-  assert.match(bridge, /This section moves here soon\./);
-  assert.match(bridge, /此部分即將移到這裏。/);
-  const settings = source('../src/pages/Settings.tsx');
-  assert.match(settings, /export default function Settings\(\{ embedded \}: \{ embedded\?: \{ sections: string\[\] \} \} = \{\}\)/);
-  assert.match(settings, /const shows = \(id: string\) => embedded \? embedded\.sections\.includes\(id\) : section === id;/);
-  assert.doesNotMatch(settings, /\{section === "/, 'every render condition goes through shows()');
+test('the old page and its bridge are gone; every section has its own view', () => {
+  for (const gone of ['../src/pages/Settings.tsx', '../src/settings/LegacySection.tsx']) assert.ok(!existsSync(new URL(gone, import.meta.url)), gone);
+  const dialog = source('../src/settings/SettingsDialog.tsx');
+  assert.doesNotMatch(dialog, /LegacySection|pages\/Settings/);
+  assert.match(dialog, /const SECTION_VIEWS: Record<SettingsSectionId, ComponentType> = \{/, 'a missing view is a type error');
+  assert.match(dialog, /<ErrorBoundary key=\{section\}><View \/><\/ErrorBoundary>/);
+  assert.doesNotMatch(source('../src/settings/sections.ts'), /legacySectionsFor/);
+  assert.doesNotMatch(source('../src/App.tsx'), /pages\/Settings/);
 });
 
 function files(dir: string): string[] {
@@ -160,12 +161,66 @@ test('a native close updates the dialog state, and focus is restored once', () =
   assert.match(dialog, /\} else \{\s*if \(el\.open\) el\.close\(\);\s*finishClose\(\);\s*\}/, 'the close branch resets even when the element is already closed');
 });
 
-test('the bridge closes the dialog before opening Mail; the old tab does not', () => {
-  const settings = source('../src/pages/Settings.tsx');
-  assert.match(settings, /onClick=\{\(\) => \{ if \(embedded\) closeSettings\(\); open\("email"\); \}\}/);
+test('Your AI links to the mail analysis settings inside the dialog', () => {
+  // The old page's "Mail analysis settings" opened the Mail tab (closing the
+  // dialog first when bridged). Those settings now live in Mail and
+  // follow-ups, so the link moves within the dialog and closes nothing.
+  const ai = source('../src/settings/sections/YourAi.tsx');
+  assert.match(ai, /<p id="ai-mail-link" className="settings-ai-footer">/);
+  assert.match(ai, /onClick=\{\(\) => openSettings\('mail'\)\}>\{row\('ai-mail-link'\)\.title\}<\/Button>/);
+  assert.match(ai, /text\('The AI you choose here answers you in chat and sorts your mail\. Mail analysis can use a different AI in its own settings\.', '你在此選擇的 AI 會在對話中回覆你，並整理你的郵件。郵件分析亦可在其設定中另選 AI。'\)/);
+  assert.doesNotMatch(ai, /open\('email'\)|closeSettings/);
 });
 
 test('App documents that only one ConfirmDialog is mounted at a time', () => {
   const app = source('../src/App.tsx');
   assert.match(app, /Only one ConfirmDialog may be mounted at a time/);
+});
+
+// Final review I4: a half-typed field is saved before the content unmounts.
+function focused(insideDialog: boolean) {
+  const calls: string[] = [];
+  return { calls, el: { closest: (selector: string) => (calls.push(`closest ${selector}`), insideDialog ? {} : null), blur: () => calls.push('blur') } };
+}
+
+test('a field focused inside the dialog is blurred, so its blur save starts', () => {
+  const field = focused(true);
+  commitFocusedField({ activeElement: field.el });
+  assert.deepEqual(field.calls, ['closest .settings-dialog', 'blur']);
+});
+
+test('focus outside the dialog, or no focus, is left alone', () => {
+  const outside = focused(false);
+  commitFocusedField({ activeElement: outside.el });
+  assert.deepEqual(outside.calls, ['closest .settings-dialog']);
+  assert.doesNotThrow(() => commitFocusedField({ activeElement: null }));
+  assert.doesNotThrow(() => commitFocusedField({ activeElement: {} }));
+});
+
+test('every close and section change blurs the focused field first', () => {
+  const provider = source('../src/settings/SettingsContext.tsx');
+  assert.match(provider, /const openSettings = useCallback\(\(section\?: SettingsSectionId\) => \{ commitFocusedField\(document\); dispatch\(\{ type: 'open', section \}\); \}, \[\]\);/);
+  assert.match(provider, /const closeSettings = useCallback\(\(\) => \{ commitFocusedField\(document\); dispatch\(\{ type: 'close' \}\); \}, \[\]\);/);
+  const dialog = source('../src/settings/SettingsDialog.tsx');
+  // Esc (cancel), X and the backdrop all close through closeSettings; the nav goes through openSettings.
+  assert.match(dialog, /function cancel\(e: Event\) \{[\s\S]*?closeSettings\(\);/);
+  assert.match(dialog, /onClick=\{closeSettings\}><X size=\{18\} \/>/);
+  assert.ok(/e\.clientX, e\.clientY\)\) closeSettings\(\);/.test(dialog), 'the backdrop closes through closeSettings');
+  assert.match(dialog, /function go\(id: SettingsSectionId\) \{\s*setQuery\(''\);\s*openSettings\(id\);/);
+  assert.doesNotMatch(dialog, /dispatch\(/, 'the dialog never changes state around the provider');
+});
+
+// Final review I3: rows stack on narrow content, and fixed control widths never overflow.
+test('a setting row stacks when the dialog content is narrow', () => {
+  const css = source('../src/settings/settings.css');
+  assert.match(css, /\.settings-dialog-body \{ container: settings-body \/ inline-size;/);
+  const narrow = css.match(/@container settings-body \(max-width: 560px\) \{([\s\S]*?)\n\}/)?.[1] ?? '';
+  assert.match(narrow, /\.ui-setting-row \{ flex-wrap: wrap;/);
+  assert.match(narrow, /\.ui-setting-text \{ flex-basis: 100%; \}/);
+  assert.match(narrow, /\.ui-setting-control \{ flex-basis: 100%;/);
+  assert.match(css, /\.settings-dialog-frame \{ container: settings-frame \/ inline-size;/);
+  assert.match(css, /@container settings-frame \(max-width: 639px\)/);
+  const ui = source('../src/ui/ui.css');
+  assert.match(ui, /\.ui-setting-control \{ flex-shrink:0; max-width:100%; \}/);
+  assert.match(ui, /\.ui-setting-control > \* \{ max-width:100%; \}/);
 });

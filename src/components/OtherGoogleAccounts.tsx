@@ -7,7 +7,7 @@ import { confirmAction } from "./ConfirmDialog";
 import "../pages/settings-workspace.css";
 
 /**
- * Settings > Google: the user's second and third Google accounts. Each is a
+ * Settings > Connections: the user's second and third Google accounts. Each is a
  * Mail mailbox that also shares its calendar, both read-only
  * (src-tauri/src/mail/additional.rs); the assistant can read them, and only
  * the main account is ever written to.

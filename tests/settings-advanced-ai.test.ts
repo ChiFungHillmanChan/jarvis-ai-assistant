@@ -163,7 +163,7 @@ test('every danger confirm in the three sections says what is lost and whether i
 test('SecretField takes its own Remove confirm, and keeps the old one when none is given', () => {
   const field = source('src/ui/SecretField.tsx');
   assert.match(field, /removeConfirm\?: string/);
-  assert.match(field, /message: removeConfirm \?\? text\('Remove this key from Keychain\?', '要從鑰匙圈移除此金鑰嗎？'\)/);
+  assert.match(field, /message: removeConfirm \?\? text\('Remove this key from Keychain\?', '要從鑰匙圈移除此密鑰嗎？'\)/);
 });
 
 test('every key, TypeSafe included, has one field and a Remove through set_api_key', () => {
@@ -275,6 +275,21 @@ test('the Advanced AI pages and the key rows say 密鑰', () => {
   }
 });
 
+// Final review M1 and the T7 colon: one word for a key app-wide, and no
+// space after a full-width colon where two strings are joined.
+test('no user-facing string in src says 金鑰, and the Your AI key rows search as 密鑰', () => {
+  const offenders = filesUnder('src').filter(f => /\.(ts|tsx)$/.test(f) && /金鑰/.test(source(f)));
+  assert.deepEqual(offenders, []);
+  for (const id of ['ai-key', 'ai-model']) assert.match(JSON.stringify(ROWS.find(x => x.id === id)), /密鑰/, id);
+});
+
+test('no joined string puts a space after a full-width colon', () => {
+  const joined = /：['"`]\)\}? +[{$]|：['"`]\)\}\{' '\}/;
+  const offenders = filesUnder('src').filter(f => /\.(ts|tsx)$/.test(f) && joined.test(source(f)));
+  assert.deepEqual(offenders, []);
+  assert.match(source('src/settings/sections/Connections.tsx'), /`\$\{text\('Connected as ', '已連接帳戶：'\)\}\$\{who\}`/);
+});
+
 function filesUnder(dir: string): string[] {
   return readdirSync(join(root, dir)).flatMap(name => {
     const path = `${dir}/${name}`;
@@ -283,9 +298,9 @@ function filesUnder(dir: string): string[] {
 }
 
 test('the LocalMailSetup panel is rendered in exactly one settings file, and only there with a confirm', () => {
-  const rendering = filesUnder('src/settings').filter(f => /<LocalMailSetup\b/.test(source(f)));
+  const rendering = filesUnder('src/settings').filter(f => /<LocalMailSetup(Panel)?\b/.test(source(f)));
   assert.deepEqual(rendering, [ADV + 'LocalAi.tsx']);
-  assert.match(source(ADV + 'LocalAi.tsx'), /<LocalMailSetup[^>]*confirmPrepare=\{\{ message: text\('[^']+', '[^']+'\)/);
+  assert.match(source(ADV + 'LocalAi.tsx'), /<LocalMailSetupPanel[^>]*confirmPrepare=\{\{ message: text\('[^']+', '[^']+'\)/);
   const panel = source('src/components/LocalMailSetup.tsx');
   assert.match(panel, /confirmPrepare\?: \{ message: string; label\?: string \}/);
   assert.match(panel, /confirmPrepare \? <Button kind="danger" confirm=\{confirmPrepare\}/);
@@ -319,4 +334,21 @@ test('each new file stays at about 250 lines or fewer', () => {
     const lines = source(file).split('\n').length;
     assert.ok(lines <= 250, `${file} has ${lines} lines`);
   }
+});
+
+// Review fix (Task 19, inventory row 26): Advanced > Models tests through
+// choose_ai too, so both of its Test buttons wait for the same tick.
+test('Advanced > Models keeps both Test buttons disabled without the tick', () => {
+  const code = readFileSync(new URL('../src/settings/sections/advanced/ChooseModel.tsx', import.meta.url), 'utf8');
+  assert.match(code, /<TestConsent option="other" name=\{serviceName\} consent=\{urlConsent\} disabled=\{busy\} onChange=\{setUrlConsent\} \/>/);
+  assert.match(code, /<TestConsent option=\{provider\} name=\{name\} consent=\{modelConsent\} disabled=\{busy\} onChange=\{setModelConsent\} \/>/);
+  assert.match(code, /disabled=\{!listedModel \|\| !urlConsent\}/);
+  assert.match(code, /<Button kind="secondary" busy=\{busy\} disabled=\{!modelConsent\} onClick=\{\(\) => run\('model'/);
+  assert.match(code, /onChange=\{v => \{ setProvider\(v\); setModel\(''\); setModelConsent\(false\); \}\}/, 'a new service needs the tick again');
+  assert.doesNotMatch(code, /<p className="ui-hint">\{testDisclosure\(/);
+});
+
+// Final review M2: a tick given for one address does not cover another.
+test('editing the base URL clears the test-message consent', () => {
+  assert.match(source(ADV + 'ChooseModel.tsx'), /onChange=\{e => \{ setBaseUrl\(e\.target\.value\); setListed\(null\); setListedModel\(''\); setUrlConsent\(false\); \}\}/);
 });

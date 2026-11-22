@@ -5,6 +5,7 @@ import { NOT_SIGNED_IN, SIGN_IN_CANCELLED, accountChanged, onAccountChanged, cre
 import { createAccountMonitor, type PaymentState } from "../lib/account-monitor";
 import { formatPlanDate, planLine } from "../lib/paywall";
 import { useUiLocale } from "../i18n";
+import { confirmSignOut } from "./ConfirmDialog";
 import type { MessageKey } from "../i18n/catalog";
 
 type Busy = null | "signin" | "signout" | "checkout" | "portal" | "reopen" | "refresh";
@@ -108,7 +109,12 @@ export default function AccountPanel() {
     setStatus(next);
     accountChanged(next);
   });
-  const signOut = () => run("signout", async current => {
+  // Spec 6.3: sign out asks first (the shared question, as the sidebar menu asks).
+  const signOut = async () => {
+    if (!(await confirmSignOut(t))) return;
+    await endSession();
+  };
+  const endSession = () => run("signout", async current => {
     monitor.current?.cancelPayment();
     setPage(null);
     await accountSignOut();

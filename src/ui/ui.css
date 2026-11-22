@@ -54,5 +54,7 @@
 .ui-setting-title { display:flex; align-items:center; gap:8px; color:var(--text-primary); font-weight:500; }
 .ui-setting-badge { padding:1px 6px; border:1px solid var(--ui-control-border); border-radius:4px; color:var(--text-muted); font-size:11px; font-weight:400; }
 .ui-setting-desc { margin-top:2px; color:var(--text-muted); font-size:13px; }
-.ui-setting-control { flex-shrink:0; }
+.ui-setting-control { flex-shrink:0; max-width:100%; }
+/* A control given a fixed width (style={{ width: 340 }}) never overflows its row. */
+.ui-setting-control > * { max-width:100%; }
 .ui-setting-extra { margin-top:8px; }

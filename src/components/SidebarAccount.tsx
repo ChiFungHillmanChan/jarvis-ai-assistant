@@ -8,6 +8,7 @@ import { nameToShow } from '../lib/user-name';
 import { createAccountMonitor } from '../lib/account-monitor';
 import type { WorkspaceView } from '../workspace/model';
 import { useSettingsDialog } from '../settings/SettingsContext';
+import { confirmSignOut } from './ConfirmDialog';
 
 /**
  * The bottom row of the sidebar: the user's name (nameToShow: what JARVIS calls you, then a typed display name, then the Google name) or the signed-in account's email, with 連接服務, 設定 and sign-in tucked into a menu above it.
@@ -111,6 +112,8 @@ export default function SidebarAccount({ active, onNavigate }: { active: Workspa
   const signInOrOut = async () => {
     if (accountBusy || sessionChanging) return;
     setOpen(false);
+    // Spec 6.3: sign out asks first, with the same question as Settings.
+    if (signedIn && !(await confirmSignOut(t))) return;
     setAccountBusy(true);
     try {
       if (signedIn) await accountSignOut();
@@ -141,7 +144,7 @@ export default function SidebarAccount({ active, onNavigate }: { active: Workspa
           <button role="menuitem" className="sidebar-item" aria-current={active === 'connections' ? 'page' : undefined} onClick={() => go('connections')}>
             <Plug size={16} /><span>{t('navConnections')}</span>
           </button>
-          <button role="menuitem" className="sidebar-item" aria-current={active === 'settings' ? 'page' : undefined} onClick={() => { setOpen(false); openSettings(); }}>
+          <button role="menuitem" className="sidebar-item" onClick={() => { setOpen(false); openSettings(); }}>
             <Settings2 size={16} /><span>{t('navSettings')}</span>
           </button>
           {account?.available && (

@@ -151,12 +151,15 @@ export default function General() {
             setFailed(f => ({ ...f, wallpaper: false }));
             wallpaper.toggle(next).catch(e => { console.error(e); setFailed(f => ({ ...f, wallpaper: true })); });
           }} />
-      }>{failure('wallpaper')}</SettingRow>
+      }>
+        <span className="ui-hint">{text('When active, JARVIS goes fullscreen behind all windows. After enabling, it stays interactive until you send it to the background. To bring it back later, say Hey Jarvis, click the tray icon, or press Cmd+Shift+W. Closing the window sends it back to the background.', '啟用後，JARVIS 會以全螢幕顯示在其他視窗後方，並保持可互動狀態，直至移至背景。之後可說出「Hey Jarvis」、按選單列圖示，或按 Cmd+Shift+W 重新開啟。關閉視窗會將 JARVIS 移回背景。')}</span>
+        {failure('wallpaper')}
+      </SettingRow>
     </SettingGroup>
 
     <SettingGroup title={text('Startup', '啟動')}>
       {/* Open at login and keep awake are BackgroundSettings' own controls; these ids let search land here. */}
-      <div id="open-at-login"><span id="keep-awake" /><BackgroundSettings show="startup" /></div>
+      <div id="open-at-login"><span id="keep-awake" /><BackgroundSettings /></div>
     </SettingGroup>
   </>;
 }

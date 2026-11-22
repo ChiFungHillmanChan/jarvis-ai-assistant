@@ -117,6 +117,29 @@ test('draftReplyPrompt quotes the sender and subject as data and asks for a draf
   assert.doesNotMatch(z, /[嘅咗唔係冇啲喺嚟]/);
 });
 
+// Final review M3. The prompt quotes a sender and subject a stranger chose.
+// The turn is marked as having read untrusted text only because the fixed
+// words trip needs_personal_context (src-tauri/src/commands/chat.rs): that
+// adds [CONTEXT] and sets untrusted_context, so the after-untrusted-read
+// tools still wait for a click. Pin both halves of that dependency.
+test('draftReplyPrompt always carries the words that mark the chat turn as touching mail', () => {
+  // A sender and subject with no trigger words of their own.
+  const item = { ...mailItem(1, 'reply', null), sender: 'Ann <a@b.co>', subject: 'Hello' };
+  const p = draftReplyPrompt(item, en).toLowerCase();
+  // needs_personal_context lowercases and matches English terms as whole words.
+  assert.match(p, /(^|[^a-z0-9])email([^a-z0-9]|$)/);
+  assert.match(draftReplyPrompt(item, zh), /郵件/);
+  assert.match(draftReplyPrompt({ ...item, subject: '' }, zh), /郵件/);
+  const chat = read('src-tauri/src/commands/chat.rs');
+  const enTerms = chat.match(/const EN: &\[&str\] = &\[([\s\S]*?)\];/)?.[1] ?? '';
+  const zhTerms = chat.match(/const ZH: &\[&str\] = &\[([\s\S]*?)\];/)?.[1] ?? '';
+  assert.match(enTerms, /"email"/);
+  assert.match(zhTerms, /"郵件"/);
+  assert.match(chat, /EN\.iter\(\)\.any\(\|k\| contains_word\(lower, k\)\) \|\| ZH\.iter\(\)\.any\(\|k\| raw\.contains\(k\)\)/);
+  assert.match(chat, /let mut untrusted_context = !all_messages\.is_empty\(\);/);
+  assert.match(read(HOME + 'home-items.ts'), /needs_personal_context/, 'the prompt names the dependency');
+});
+
 // ---- source checks ----
 
 test('the home container no longer renders JarvisScene and keeps its live data hooks', () => {

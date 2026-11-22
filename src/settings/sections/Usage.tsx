@@ -93,6 +93,10 @@ export default function Usage() {
   return <>
     {period}
     {body}
+    <p className="ui-hint settings-usage-about">{text(
+      "The AI requests JARVIS sent from this Mac, recorded only on this Mac. Costs are worked out from list prices where JARVIS knows them, so your provider's bill is the final figure. Token counts show input without the cache, output, and cache reads and writes when there are any. For AWS Bedrock these are the figures AWS returned for each request (input is AWS's inputTokens), and your AWS bill is the final figure.",
+      'JARVIS 在此 Mac 發出的 AI 請求，只記錄在此 Mac。費用按 JARVIS 已知的公開價目計算，實際收費以供應商帳單為準。token 數目分開顯示不含快取的輸入、輸出，以及快取讀取及寫入（如有）。AWS Bedrock 的數字是 AWS 就每次請求回報的數字（輸入即 AWS 的 inputTokens），實際收費以你的 AWS 帳單為準。',
+    )}</p>
     <details id={details.id} className="settings-usage-details" onToggle={e => setDetailsOpen(e.currentTarget.open)}>
       <summary>{details.title}<span className="ui-hint">{details.description}</span></summary>
       {detailsOpen && <CostPanel />}

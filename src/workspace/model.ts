@@ -1,7 +1,7 @@
 import { translate, type UiLocale } from '../i18n/catalog.ts';
-export const views = ['home', 'chat', 'email', 'calendar', 'github', 'notion', 'cron', 'connections', 'settings', 'result'] as const;
+export const views = ['home', 'chat', 'email', 'calendar', 'github', 'notion', 'cron', 'connections', 'result'] as const;
 export type WorkspaceView = typeof views[number];
-export const viewNames: Record<WorkspaceView, string> = { home: 'Automation', chat: 'Assistant', email: 'Mail', calendar: 'Calendar', github: 'GitHub', notion: 'Notes', cron: 'Automations', connections: 'Connections', settings: 'Settings', result: 'Result' };
+export const viewNames: Record<WorkspaceView, string> = { home: 'Automation', chat: 'Assistant', email: 'Mail', calendar: 'Calendar', github: 'GitHub', notion: 'Notes', cron: 'Automations', connections: 'Connections', result: 'Result' };
 export interface WorkspaceTab { id: string; view: WorkspaceView; title: string; sessionId?: string; pinned?: boolean; notice?: boolean }
 export interface WorkspaceState { tabs: WorkspaceTab[]; activeId: string; history: WorkspaceTab[]; previousId?: string }
 export type WorkspacePages = Record<string, Record<string, unknown>>;
@@ -78,9 +78,25 @@ export function restoreWorkspace(raw: string | undefined): WorkspaceState {
     return { tabs, history, activeId: tabs.some(t => t.id === parsed.activeId) ? parsed.activeId : 'automation' };
   } catch { return initialWorkspace(); }
 }
+/**
+ * Drops tabs whose view no longer exists (Settings became a dialog in PR 6, so
+ * a layout saved before then can hold a 'settings' tab). If the active tab
+ * goes, the first remaining tab becomes active, or home when none remain. A
+ * state with nothing to drop is returned as it is.
+ * validTab already rejects a removed view; this is deliberate defence in depth.
+ */
+export function dropRemovedViews(state: WorkspaceState): WorkspaceState {
+  const known = (t: WorkspaceTab) => views.includes(t.view);
+  if (state.tabs.every(known) && state.history.every(known)) return state;
+  const remaining = state.tabs.filter(known);
+  const tabs = remaining.length ? remaining : initialWorkspace().tabs;
+  const activeId = tabs.some(t => t.id === state.activeId) ? state.activeId : tabs[0].id;
+  const previousId = state.previousId !== undefined && tabs.some(t => t.id === state.previousId) ? state.previousId : undefined;
+  return { tabs, activeId, history: state.history.filter(known), ...(previousId !== undefined ? { previousId } : {}) };
+}
 export function shouldFocusResult(activeId: string, originId: string, activeView: WorkspaceView): boolean { return activeId === originId && activeView === 'chat'; }
 
-const viewKeys = { home: 'navAutomation', chat: 'navAssistant', email: 'navMail', calendar: 'navCalendar', github: 'navGitHub', notion: 'navNotes', cron: 'navAutomations', connections: 'navConnections', settings: 'navSettings', result: 'navResult' } as const;
+const viewKeys = { home: 'navAutomation', chat: 'navAssistant', email: 'navMail', calendar: 'navCalendar', github: 'navGitHub', notion: 'navNotes', cron: 'navAutomations', connections: 'navConnections', result: 'navResult' } as const;
 export function viewName(view: WorkspaceView, locale: UiLocale) { return translate(locale, viewKeys[view]); }
 export const LEGACY_TITLE = 'Voice and earlier conversations';
 const defaultChatTitles = ['New task', viewNames.chat];

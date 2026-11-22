@@ -1,6 +1,6 @@
 import { createContext, useCallback, useContext, useEffect, useReducer, useRef, useState, useSyncExternalStore, type Dispatch, type ReactNode, type SetStateAction } from 'react';
 import { getSettings, updateSetting } from '../lib/commands';
-import { initialWorkspace, pruneWorkspacePages, restoreWorkspace, workspaceReducer, viewNames, type WorkspaceAction, type WorkspacePages, type WorkspaceState, type WorkspaceView } from './model';
+import { dropRemovedViews, initialWorkspace, pruneWorkspacePages, restoreWorkspace, workspaceReducer, viewNames, type WorkspaceAction, type WorkspacePages, type WorkspaceState, type WorkspaceView } from './model';
 
 interface WorkspaceContextValue {
   state: WorkspaceState;
@@ -52,7 +52,7 @@ export function WorkspaceProvider({ children }: { children: ReactNode }) {
     let cancelled = false;
     getSettings().then(settings => {
       if (cancelled) return;
-      const layout = restoreWorkspace(settings.values.workspace_layout_v1);
+      const layout = dropRemovedViews(restoreWorkspace(settings.values.workspace_layout_v1));
       dispatch({ type: 'restore', state: layout });
       try { const saved = JSON.parse(settings.values.workspace_pages_v1 || '{}'); if (saved && typeof saved === 'object' && !Array.isArray(saved)) pages.current = pruneWorkspacePages(layout, saved); } catch { /* Recover from an invalid saved layout with a fresh workspace. */ }
       const mode = settings.values.workspace_appearance;
@@ -106,8 +106,6 @@ export function WorkspaceProvider({ children }: { children: ReactNode }) {
 }
 export function useWorkspace() { const value = useContext(WorkspaceContext); if (!value) throw new Error('WorkspaceProvider is required'); return value; }
 export function WorkspaceTabScope({ id, children }: { id: string; children: ReactNode }) { return <TabContext.Provider value={id}>{children}</TabContext.Provider>; }
-/** Whether the tab this component renders in is the one on screen. */
-export function useIsActiveTab(): boolean { const { state } = useWorkspace(); const tab = useContext(TabContext); return state.activeId === tab; }
 export function useWorkspaceValue<T>(key: string, initial: T): [T, Dispatch<SetStateAction<T>>] {
   const { readValue, writeValue, subscribe } = useWorkspace();
   const tab = useContext(TabContext);
