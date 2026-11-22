@@ -42,6 +42,11 @@ export function installWorkspacePreview() {
   const jobs = [{ id: 1, name: 'Morning briefing', schedule: '0 0 9 * * MON-FRI', action_type: 'briefing', status: 'active', last_run: day + ' 09:00:00', next_run: null, description: 'Review my calendar every weekday at 9 am.' }, { id: 2, name: 'Weekly project review', schedule: '0 0 16 * * FRI', action_type: 'summary', status: 'paused', last_run: null, next_run: null, description: 'Summarize project progress on Friday.' }];
   const runs = [{ id: 1, job_id: 1, started_at: day + ' 09:00:00', finished_at: day + ' 09:00:12', status: 'success', result: 'Your calendar has one customer review today.\n\nPrepare the rollout plan before the meeting.', error: null }];
   let wakeOn = false;
+  // Home (Task 17). Add &home-needs-google or &home-needs-ai to the URL for the setup card.
+  const homeFlags = new URLSearchParams(location.search);
+  const homeNeedsGoogle = homeFlags.has('home-needs-google'), homeNeedsAi = homeFlags.has('home-needs-ai');
+  const localDay = (iso: string) => { const d = new Date(iso); return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`; };
+  const homeBrief = { date: shift(0), shown_at: day + ' 08:30:00', trigger: 'scheduled', local: [now.toDateString(), 'Meetings: 4 today', '  09:30　Standup', '  11:00　Evoke pilot check-in', 'Tasks: 1 overdue, 1 due today', 'Mail: 3 unread'].join('\n'), summary: 'Four meetings today. **Reply to Jordan about the quote** before the onboarding review.', summary_pending: false, summary_error: null };
   // Settings > Voice (Task 14). Nothing is spoken or downloaded.
   const voiceSettings: Record<string, unknown> = { enabled: true, tts_voice: 'Samantha', tts_voice_yue: 'Sinji', tts_rate: 200, tts_enabled: true, keep_recordings: true };
   const voiceFields: Record<string, string> = { tts_voice: 'tts_voice', tts_voice_yue: 'tts_voice_yue', tts_enabled: 'tts_enabled', keep_voice_recordings: 'keep_recordings' };
@@ -137,7 +142,10 @@ export function installWorkspacePreview() {
       case 'get_tasks': return tasks;
       case 'update_task': tasks = tasks.map(t => t.id === args.id ? { ...t, status: args.status } : t); return null;
       case 'get_emails': case 'mail_list_memories': return [];
-      case 'get_events': case 'get_todays_events': return [...events, ...weekEvents];
+      case 'get_events': return [...events, ...weekEvents];
+      // Today only, as calendar.rs todays_events_query: the home page's Today column and Your day.
+      case 'get_todays_events': return [...events, ...weekEvents].filter(e => e.start_time.includes('T') ? shift(0) === localDay(e.start_time) : e.start_time === day);
+      case 'get_daily_briefing': return homeBrief;
       case 'get_github_items': return github;
       case 'get_notion_pages': return notes;
       case 'get_cron_jobs': return jobs.map(j => ({ ...j }));
@@ -188,8 +196,8 @@ export function installWorkspacePreview() {
       case 'get_preference': return '';
       case 'is_model_downloaded': return true;
       case 'stop_speaking': return null;
-      case 'google_accounts': return { main: { state: 'connected', name: 'Alex Chan', email: 'alex@example.com', gmail: true, calendar: true }, others: [] };
-      case 'current_ai': return currentAiValue;
+      case 'google_accounts': return { main: { state: homeNeedsGoogle ? 'not_connected' : 'connected', name: 'Alex Chan', email: 'alex@example.com', gmail: !homeNeedsGoogle, calendar: !homeNeedsGoogle }, others: [] };
+      case 'current_ai': return homeNeedsAi ? null : currentAiValue;
       // Nothing is sent or saved: the preview answers as if the test passed and keeps no key.
       case 'choose_ai': { const c = args.choice; const label = c.provider === 'compatible' ? 'Sample service' : c.provider === 'ollama' ? 'Ollama' : c.provider === 'gemini' ? 'Gemini' : c.provider === 'claude' ? 'Claude' : 'OpenAI'; currentAiValue = { provider: c.provider, label, model: c.model ?? null, base_url: c.baseUrl ?? null }; return currentAiValue; }
       case 'list_ai_models': return ['sample-chat', 'sample-chat-long'];
