@@ -1302,6 +1302,7 @@ mod tests {
             let started = Instant::now();
             let received_at = DateTime::parse_from_rfc3339(&message.received_at).unwrap().with_timezone(&Local);
             let received_local = received_at.format("%Y-%m-%d %H:%M (%a, UTC%:z)").to_string();
+            // Copied from triage_one's no-TypeSafe path: keep the two in sync.
             let (to, text) = message_text(message);
             let input = json!({
                 "from": take_chars(&message.sender, 300),
@@ -1350,8 +1351,8 @@ mod tests {
     /// - Wrong date: an item dated other than the date the email states
     ///   (`stated_date`), counted for both models.
     ///
-    /// Passes if Flash-Lite misses at most 1 per 20 found and has no wrong
-    /// date. Sends the synthetic emails only:
+    /// Passes if every 3.8 Flash request succeeded, and Flash-Lite misses at
+    /// most 1 per 20 found and has no wrong date. Sends the synthetic emails only:
     /// JARVIS_LIVE_GEMINI_KEY=... cargo test live_flash_lite_vs_flash_on_the_measured_set -- --ignored --nocapture
     #[tokio::test]
     #[ignore]
@@ -1433,10 +1434,11 @@ mod tests {
             );
         }
         let candidate_wrong = wrong_dates(&candidate);
-        let pass = misses.len() * 20 <= found && candidate_wrong.is_empty();
+        let reference_failed = reference.iter().filter(|s| s.failed).count();
+        let pass = reference_failed == 0 && misses.len() * 20 <= found && candidate_wrong.is_empty();
         println!("found by {REFERENCE}: {found}; {CANDIDATE} misses {} at emails {misses:?}; extra items {extra}", misses.len());
         println!("{}: {CANDIDATE} misses {} of {found} (allowed {}), wrong dates {}", if pass { "PASS" } else { "FAIL" }, misses.len(), found / 20, candidate_wrong.len());
-        assert!(reference.iter().any(|s| !s.failed), "{REFERENCE} sorted nothing");
+        assert!(pass, "FAIL: {REFERENCE} failed {reference_failed} requests; {CANDIDATE} misses {} of {found}, wrong dates at emails {candidate_wrong:?}", misses.len());
     }
 
     /// Live check against TypeSafe; run with TYPESAFE_API_KEY set:

@@ -1,6 +1,6 @@
 {
   "version": 8,
-  "issued_at": "2026-11-22T01:12:30Z",
+  "issued_at": "2026-11-22T01:17:08Z",
   "min_app_version": "0.5.11",
   "providers": [
     {
@@ -2338,7 +2338,7 @@
     "mail_sort": {
       "openai": "gpt-6-luna",
       "claude": "claude-sonnet-5-5",
-      "gemini": "gemini-4-hydrogen",
+      "gemini": "gemini-3.1-flash-lite",
       "bedrock": "global.anthropic.claude-sonnet-4-6",
       "typesafe": "jev-latest",
       "jarvis_ai": "jarvis-ai"
@@ -2415,17 +2415,17 @@
       },
       "gemini_flash": {
         "label": {
-          "en": "Gemini 3.1 Flash-Lite, with Gemini 3.8 Flash to pick if it fails",
-          "zh-HK": "Gemini 3.1 Flash-Lite；失敗時可改用 Gemini 3.8 Flash"
+          "en": "Gemini 3.8 Flash, with Gemini 3.1 Pro to pick if it fails",
+          "zh-HK": "Gemini 3.8 Flash；失敗時可改用 Gemini 3.1 Pro"
         },
         "entries": [
           {
             "provider": "gemini",
-            "model": "gemini-3.1-flash-lite"
+            "model": "gemini-3.8-flash"
           },
           {
             "provider": "gemini",
-            "model": "gemini-3.8-flash"
+            "model": "gemini-3.1-pro-preview"
           }
         ]
       },

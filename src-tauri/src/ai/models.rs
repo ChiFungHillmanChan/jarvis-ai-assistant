@@ -575,7 +575,7 @@ mod tests {
     #[test]
     fn every_default_model_has_a_real_price() {
         for registry in [registry::fixture(), registry::bundled()] {
-            for (feature, provider) in [("chat", "openai"), ("chat", "claude"), ("chat", "gemini"), ("premium", "gemini"), ("chat", "bedrock"), ("mail_sort", "typesafe")] {
+            for (feature, provider) in [("chat", "openai"), ("chat", "claude"), ("chat", "gemini"), ("premium", "gemini"), ("mail_sort", "gemini"), ("chat", "bedrock"), ("mail_sort", "typesafe")] {
                 let id = registry.default_model(feature, provider);
                 assert!(registry.find_priced(&id).is_some(), "{id} has no price in registry version {}", registry.version);
             }
