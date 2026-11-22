@@ -2,7 +2,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import { existsSync, readFileSync, readdirSync } from 'node:fs';
 import { join } from 'node:path';
-import { initialSettingsDialog, isBackdropClick, isSettingsShortcut, settingsDialogReducer, type SettingsDialogState } from '../src/settings/settings-dialog-state.ts';
+import { commitFocusedField, initialSettingsDialog, isBackdropClick, isSettingsShortcut, settingsDialogReducer, type SettingsDialogState } from '../src/settings/settings-dialog-state.ts';
 
 // Task 5: the settings dialog shell. The open/close/section logic is a pure
 // reducer tested here; the JSX files cannot be imported under node, so their
@@ -75,7 +75,7 @@ test('the dialog size and backdrop match the spec', () => {
   const css = source('../src/settings/settings.css');
   assert.match(css, /width:\s*min\(78vw,\s*1120px\)/);
   assert.match(css, /height:\s*min\(80vh,\s*780px\)/);
-  assert.match(css, /@media \(max-width: 900px\)\s*\{[^}]*width:\s*94vw;[^}]*height:\s*90vh;/);
+  assert.match(css, /@media \(max-width: 1000px\)\s*\{[^}]*width:\s*94vw;[^}]*height:\s*90vh;/);
   assert.match(css, /::backdrop\s*\{[^}]*rgba\(0,\s*0,\s*0,\s*\.45\)[^}]*backdrop-filter:\s*blur\(2px\)/);
 });
 
@@ -172,4 +172,52 @@ test('Your AI links to the mail analysis settings inside the dialog', () => {
 test('App documents that only one ConfirmDialog is mounted at a time', () => {
   const app = source('../src/App.tsx');
   assert.match(app, /Only one ConfirmDialog may be mounted at a time/);
+});
+
+// Final review I4: a half-typed field is saved before the content unmounts.
+function focused(insideDialog: boolean) {
+  const calls: string[] = [];
+  return { calls, el: { closest: (selector: string) => (calls.push(`closest ${selector}`), insideDialog ? {} : null), blur: () => calls.push('blur') } };
+}
+
+test('a field focused inside the dialog is blurred, so its blur save starts', () => {
+  const field = focused(true);
+  commitFocusedField({ activeElement: field.el });
+  assert.deepEqual(field.calls, ['closest .settings-dialog', 'blur']);
+});
+
+test('focus outside the dialog, or no focus, is left alone', () => {
+  const outside = focused(false);
+  commitFocusedField({ activeElement: outside.el });
+  assert.deepEqual(outside.calls, ['closest .settings-dialog']);
+  assert.doesNotThrow(() => commitFocusedField({ activeElement: null }));
+  assert.doesNotThrow(() => commitFocusedField({ activeElement: {} }));
+});
+
+test('every close and section change blurs the focused field first', () => {
+  const provider = source('../src/settings/SettingsContext.tsx');
+  assert.match(provider, /const openSettings = useCallback\(\(section\?: SettingsSectionId\) => \{ commitFocusedField\(document\); dispatch\(\{ type: 'open', section \}\); \}, \[\]\);/);
+  assert.match(provider, /const closeSettings = useCallback\(\(\) => \{ commitFocusedField\(document\); dispatch\(\{ type: 'close' \}\); \}, \[\]\);/);
+  const dialog = source('../src/settings/SettingsDialog.tsx');
+  // Esc (cancel), X and the backdrop all close through closeSettings; the nav goes through openSettings.
+  assert.match(dialog, /function cancel\(e: Event\) \{[\s\S]*?closeSettings\(\);/);
+  assert.match(dialog, /onClick=\{closeSettings\}><X size=\{18\} \/>/);
+  assert.ok(/e\.clientX, e\.clientY\)\) closeSettings\(\);/.test(dialog), 'the backdrop closes through closeSettings');
+  assert.match(dialog, /function go\(id: SettingsSectionId\) \{\s*setQuery\(''\);\s*openSettings\(id\);/);
+  assert.doesNotMatch(dialog, /dispatch\(/, 'the dialog never changes state around the provider');
+});
+
+// Final review I3: rows stack on narrow content, and fixed control widths never overflow.
+test('a setting row stacks when the dialog content is narrow', () => {
+  const css = source('../src/settings/settings.css');
+  assert.match(css, /\.settings-dialog-body \{ container: settings-body \/ inline-size;/);
+  const narrow = css.match(/@container settings-body \(max-width: 560px\) \{([\s\S]*?)\n\}/)?.[1] ?? '';
+  assert.match(narrow, /\.ui-setting-row \{ flex-wrap: wrap;/);
+  assert.match(narrow, /\.ui-setting-text \{ flex-basis: 100%; \}/);
+  assert.match(narrow, /\.ui-setting-control \{ flex-basis: 100%;/);
+  assert.match(css, /\.settings-dialog-frame \{ container: settings-frame \/ inline-size;/);
+  assert.match(css, /@container settings-frame \(max-width: 639px\)/);
+  const ui = source('../src/ui/ui.css');
+  assert.match(ui, /\.ui-setting-control \{ flex-shrink:0; max-width:100%; \}/);
+  assert.match(ui, /\.ui-setting-control > \* \{ max-width:100%; \}/);
 });

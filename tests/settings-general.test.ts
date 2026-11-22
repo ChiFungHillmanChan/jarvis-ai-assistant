@@ -170,3 +170,18 @@ test('the wallpaper row says how to bring JARVIS back', () => {
   assert.match(wallpaper, /To bring it back later, say Hey Jarvis, click the tray icon, or press Cmd\+Shift\+W\. Closing the window sends it back to the background\./);
   assert.match(wallpaper, /之後可說出「Hey Jarvis」、按選單列圖示，或按 Cmd\+Shift\+W 重新開啟。關閉視窗會將 JARVIS 移回背景。/);
 });
+
+// Final review I2: spec 6.3 lists sign out among the controls that ask first.
+test('Sign out asks first, and the question says what it clears and keeps', () => {
+  const panel = source('../src/components/AccountPanel.tsx');
+  assert.match(panel, /const signOut = async \(\) => \{\s*if \(!\(await confirmAction\(t\("signOutConfirm"\), t\("signOut"\)\)\)\) return;\s*await endSession\(\);\s*\};/);
+  assert.match(panel, /onClick=\{\(\) => void signOut\(\)\}>\{t\("signOut"\)\}/);
+  const catalog = source('../src/i18n/catalog.ts');
+  // account_sign_out removes the refresh token and cached plan, then opens the
+  // hosted logout page (auth/cognito.rs sign_out); AI keys, mail and chats stay.
+  assert.match(catalog, /signOutConfirm: \['Sign out of JARVIS on this Mac\? Your browser opens to finish signing out\. Your mail, chats, settings and AI keys stay on this Mac\.', '要在此 Mac 登出 JARVIS 嗎？瀏覽器會開啟以完成登出。你的郵件、對話、設定及 AI 密鑰會保留在此 Mac。'\]/);
+  const cognito = source('../src-tauri/src/auth/cognito.rs');
+  assert.match(cognito, /KeychainStore::delete\(KEYCHAIN_SERVICE, KEYCHAIN_ACCOUNT\);\s*forget_plan\(\);/);
+  assert.match(cognito, /const KEYCHAIN_SERVICE: &str = "com\.jarvis\.account";/, 'not the AI key service');
+  assert.match(cognito, /open::that\(logout_url\(&cfg\)\)/);
+});

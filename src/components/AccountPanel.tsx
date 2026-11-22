@@ -5,6 +5,7 @@ import { NOT_SIGNED_IN, SIGN_IN_CANCELLED, accountChanged, onAccountChanged, cre
 import { createAccountMonitor, type PaymentState } from "../lib/account-monitor";
 import { formatPlanDate, planLine } from "../lib/paywall";
 import { useUiLocale } from "../i18n";
+import { confirmAction } from "./ConfirmDialog";
 import type { MessageKey } from "../i18n/catalog";
 
 type Busy = null | "signin" | "signout" | "checkout" | "portal" | "reopen" | "refresh";
@@ -108,7 +109,14 @@ export default function AccountPanel() {
     setStatus(next);
     accountChanged(next);
   });
-  const signOut = () => run("signout", async current => {
+  // Spec 6.3: sign out asks first. It ends the account session (the refresh
+  // token and cached plan in the Keychain) and opens the browser logout page;
+  // nothing else on this Mac is removed.
+  const signOut = async () => {
+    if (!(await confirmAction(t("signOutConfirm"), t("signOut")))) return;
+    await endSession();
+  };
+  const endSession = () => run("signout", async current => {
     monitor.current?.cancelPayment();
     setPage(null);
     await accountSignOut();
