@@ -11,6 +11,10 @@ import { ROWS, rowText, type RowMeta } from './rows';
 import { searchRows } from './search';
 import LegacySection from './LegacySection';
 import General from './sections/General';
+import Connections from './sections/Connections';
+import Privacy from './sections/Privacy';
+import SetupGuide from './sections/SetupGuide';
+import About from './sections/About';
 import { isBackdropClick } from './settings-dialog-state';
 import './settings.css';
 
@@ -18,6 +22,10 @@ import './settings.css';
 // shows the old page's body through LegacySection until it is rebuilt.
 const SECTION_VIEWS: Partial<Record<SettingsSectionId, ComponentType>> = {
   general: General,
+  connections: Connections,
+  privacy: Privacy,
+  setup: SetupGuide,
+  about: About,
 };
 
 export default function SettingsDialog() {

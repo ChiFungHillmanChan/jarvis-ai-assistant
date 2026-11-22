@@ -72,3 +72,19 @@
   .settings-dialog-nav-list { display: none; }
   .settings-dialog-nav-select { display: block; }
 }
+
+/* Connections, Privacy and data, Setup guide (Task 7) */
+.settings-row-actions { display: flex; flex-wrap: wrap; align-items: center; justify-content: flex-end; gap: 8px; }
+.settings-chip { display: inline-flex; align-items: center; padding: 3px 8px; border: 1px solid var(--ui-control-border); border-radius: 999px; color: var(--text-secondary); font-size: 12px; white-space: nowrap; }
+.settings-chip.is-on { border-color: var(--ui-good); color: var(--ui-good); }
+.settings-storage-total { font-size: 20px; font-variant-numeric: tabular-nums; }
+.settings-storage-list { display: grid; grid-template-columns: auto auto; justify-content: start; gap: 4px 24px; margin: 0 0 8px; font-size: 13px; }
+.settings-storage-list dt { color: var(--text-secondary); }
+.settings-storage-list dd { margin: 0; font-variant-numeric: tabular-nums; }
+.settings-storage-path { font-family: var(--font-mono); word-break: break-all; }
+.settings-erase { justify-content: flex-start; margin-top: 8px; }
+.settings-erase .ui-input { width: 220px; }
+.settings-checklist { list-style: none; margin: 0; padding: 0; }
+.settings-checklist li { display: flex; align-items: center; gap: 12px; padding: 8px 0; }
+.settings-checklist li + li { border-top: 1px solid var(--border-primary); }
+.settings-checklist-title { flex: 1; min-width: 0; color: var(--text-primary); font-size: 13px; }
