@@ -283,9 +283,9 @@ function filesUnder(dir: string): string[] {
 }
 
 test('the LocalMailSetup panel is rendered in exactly one settings file, and only there with a confirm', () => {
-  const rendering = filesUnder('src/settings').filter(f => /<LocalMailSetup\b/.test(source(f)));
+  const rendering = filesUnder('src/settings').filter(f => /<LocalMailSetup(Panel)?\b/.test(source(f)));
   assert.deepEqual(rendering, [ADV + 'LocalAi.tsx']);
-  assert.match(source(ADV + 'LocalAi.tsx'), /<LocalMailSetup[^>]*confirmPrepare=\{\{ message: text\('[^']+', '[^']+'\)/);
+  assert.match(source(ADV + 'LocalAi.tsx'), /<LocalMailSetupPanel[^>]*confirmPrepare=\{\{ message: text\('[^']+', '[^']+'\)/);
   const panel = source('src/components/LocalMailSetup.tsx');
   assert.match(panel, /confirmPrepare\?: \{ message: string; label\?: string \}/);
   assert.match(panel, /confirmPrepare \? <Button kind="danger" confirm=\{confirmPrepare\}/);

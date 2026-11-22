@@ -12,8 +12,10 @@ import { TEST_AND_SAVE } from './providerGuides';
 import { saveErrorLine, type TestAndUse } from './save';
 
 interface LocalCardProps {
-  /** The local setup flow (LocalMailSetup's useLocalSetup), shared with the card face. */
+  /** The local setup flow (LocalMailSetup's useLocalSetup), owned above the dialog (LocalSetupContext). */
   setup: ReturnType<typeof useLocalSetup>;
+  /** The Advanced → Local AI run is going; only one download runs at a time. */
+  blocked: boolean;
   /** Why Ollama cannot run on this Mac (localUnavailable), or null. */
   unavailable: string | null;
   current: CurrentAi | null;
@@ -22,7 +24,7 @@ interface LocalCardProps {
 }
 
 /** On this Mac: install Ollama, download the model that suits this Mac, then use a model Ollama has. */
-export default function LocalCard({ setup, unavailable, current, busy, onTestAndUse }: LocalCardProps) {
+export default function LocalCard({ setup, blocked, unavailable, current, busy, onTestAndUse }: LocalCardProps) {
   const { text } = useUiLocale();
   const { openSettings } = useSettingsDialog();
   const { probe } = setup;
@@ -58,7 +60,7 @@ export default function LocalCard({ setup, unavailable, current, busy, onTestAnd
         <div className="settings-ai-step-body">
           <span>{text('Let JARVIS download the model that suits your Mac.', '讓 JARVIS 下載適合你的 Mac 的模型。')}</span>
           {setup.model && <span className="settings-chip">{setup.model}</span>}
-          <Button kind="secondary" busy={setup.busy} disabled={busy || setup.checking || !probe || !setup.model} onClick={() => setup.prepare()}>{text('Download model', '下載模型')}</Button>
+          <Button kind="secondary" busy={setup.busy} disabled={busy || blocked || setup.checking || !probe || !setup.model} onClick={() => setup.prepare()}>{text('Download model', '下載模型')}</Button>
           {setup.busy && <Button kind="quiet" disabled={setup.stage === 'applying'} onClick={setup.cancel}>{text('Cancel', '取消')}</Button>}
           {!setup.busy && <Button kind="quiet" disabled={setup.checking} onClick={setup.refresh}>{text('Check again', '重新檢查')}</Button>}
         </div>

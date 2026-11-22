@@ -6,12 +6,12 @@ import { localized } from '../../lib/ai-catalog';
 import { confirmAction } from '../../components/ConfirmDialog';
 import ConsentCard from '../../components/ConsentCard';
 import { chosenNotice, useAiConsent } from '../../components/ChooseAi';
-import { useLocalSetup } from '../../components/LocalMailSetup';
 import Button from '../../ui/Button';
 import { nextIndex } from '../../ui/keys';
 import { geminiEffectiveModel, jarvisAiAvailable, localUnavailable, mainPathModels, needsChainConfirm, sortCostPer1000 } from '../ai-choice';
 import { useProviderChain } from '../hooks/useProviderChain';
 import { useSettingsDialog } from '../SettingsContext';
+import { useSettingsLocalSetup } from '../LocalSetupContext';
 import GeminiCard from '../ai/GeminiCard';
 import LocalCard from '../ai/LocalCard';
 import OtherServiceCard from '../ai/OtherServiceCard';
@@ -45,8 +45,9 @@ export default function YourAi() {
   const catalog = useAiModels();
   const { chain, current, ready, error, reload } = useProviderChain();
   const { consentNeeded, setConsentNeeded, googleNote } = useAiConsent(current);
-  // Downloading does not change mail; Test and save applies the choice, as the other cards do.
-  const local = useLocalSetup({ applyToMail: false, onReady: () => local.refresh() });
+  // Downloading does not change mail; Test and save applies the choice, as the
+  // other cards do. The download is owned above the dialog, so it survives a close.
+  const { setup: local, otherBusy: localBlocked } = useSettingsLocalSetup('ai');
   const [picked, setPicked] = useState<Card | null>(null);
   const [busy, setBusy] = useState(false);
   const [notice, setNotice] = useState('');
@@ -90,7 +91,8 @@ export default function YourAi() {
   ];
   const recommended: Card = jarvis ? 'jarvis' : 'gemini';
   const saved = cardFor(current);
-  const card = picked ?? (saved && faces.some(f => f.id === saved) ? saved : recommended);
+  // A download still going reopens on its card, so its progress shows again.
+  const card = picked ?? (local.busy ? 'local' : saved && faces.some(f => f.id === saved) ? saved : recommended);
 
   function onKeyDown(e: KeyboardEvent, index: number) {
     const next = nextIndex(index, e.key, faces.length);
@@ -120,7 +122,7 @@ export default function YourAi() {
 
     {card === 'jarvis' && jarvisChoice && <div className="settings-ai-detail"><p className="ui-hint">{localized(jarvisChoice.hint, text)}</p></div>}
     {card === 'gemini' && <GeminiCard catalog={catalog} models={mainPathModels(catalog.cloud, 'gemini')} current={current} busy={busy} onTestAndUse={testAndUse} />}
-    {card === 'local' && <LocalCard setup={local} unavailable={unavailable} current={current} busy={busy} onTestAndUse={testAndUse} />}
+    {card === 'local' && <LocalCard setup={local} blocked={localBlocked} unavailable={unavailable} current={current} busy={busy} onTestAndUse={testAndUse} />}
     {card === 'other' && <OtherServiceCard catalog={catalog} current={current} busy={busy} onTestAndUse={testAndUse} />}
 
     {notice && <p className="settings-ai-notice" role="status">{notice}</p>}

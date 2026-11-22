@@ -102,7 +102,7 @@ test('Other services use the cheapest model of the chosen service and the guides
 });
 
 test('On this Mac reuses the local setup flow and its compatibility check', () => {
-  assert.match(yourAi, /useLocalSetup\(/);
+  assert.match(yourAi, /useSettingsLocalSetup\('ai'\)/);
   assert.match(yourAi, /localUnavailable\(/);
   assert.match(yourAi, /disabled: !!unavailable/, 'the card is disabled when the check fails');
   assert.match(local, /setupError\(unavailable, text\)/, 'and says why');
@@ -168,7 +168,7 @@ test('the card face cost line follows the effective Gemini model', () => {
 });
 
 test('On this Mac downloads without touching mail, refreshes, and saves through Test and save', () => {
-  assert.match(yourAi, /useLocalSetup\(\{ applyToMail: false, onReady: \(\) => local\.refresh\(\) \}\)/);
+  assert.match(source('../src/settings/LocalSetupContext.tsx'), /const ai = useLocalSetup\(\{ applyToMail: false, probeOnMount: false, onReady: \(\) => ai\.refresh\(\) \}\);/);
   assert.match(localMail, /applyToMail = true/);
   assert.match(localMail, /if \(!applyToMail\)/);
   assert.match(localMail, /useLocalSetup\(\{ onReady, onBusyChange \}\)/, 'onboarding still applies the model to mail');
@@ -220,4 +220,36 @@ test('every Your AI row has its DOM id, so a search hit scrolls to it', () => {
   const all = yourAi + gemini + other + local;
   for (const id of ['ai-current', 'ai-consent', 'ai-google-note', 'ai-choice', 'ai-region', 'ai-key', 'ai-model', 'ai-ollama', 'ai-test-consent', 'ai-test-use', 'ai-mail-link'])
     assert.match(all, new RegExp(`id="${id}"`), id);
+});
+
+// Final review I1: closing Settings or changing section must not cancel an
+// Ollama download. A run is cancelled when its owner unmounts, and dialog
+// content unmounts on both, so Settings' runs are owned above the dialog.
+test('the Settings download runs are owned above the dialog, so a close does not cancel them', () => {
+  const context = source('../src/settings/LocalSetupContext.tsx');
+  assert.match(context, /export function LocalSetupProvider\(/);
+  assert.match(context, /const mail = useLocalSetup\(\{ probeOnMount: false \}\);/, 'Advanced → Local AI still applies the model to mail');
+  assert.match(source('../src/settings/SettingsContext.tsx'), /<SettingsContext\.Provider value=\{value\}><LocalSetupProvider>\{children\}<\/LocalSetupProvider><\/SettingsContext\.Provider>/);
+  assert.doesNotMatch(source('../src/settings/SettingsDialog.tsx'), /LocalSetupProvider/, 'not inside the dialog, which unmounts its content');
+  // No section owns a run of its own.
+  const owners = ['sections/YourAi.tsx', 'sections/advanced/LocalAi.tsx', 'ai/LocalCard.tsx'].filter(f => /\buseLocalSetup\(|<LocalMailSetup\b/.test(source(`../src/settings/${f}`)));
+  assert.deepEqual(owners, []);
+  assert.match(source('../src/settings/sections/advanced/LocalAi.tsx'), /useSettingsLocalSetup\('mail'\)/);
+  assert.match(source('../src/settings/sections/advanced/LocalAi.tsx'), /<LocalMailSetupPanel setup=\{setup\} blocked=\{otherBusy\}/);
+});
+
+test('a reopened Your AI shows the running download, and only one run goes at a time', () => {
+  const context = source('../src/settings/LocalSetupContext.tsx');
+  assert.match(context, /useEffect\(\(\) => \{ if \(!setup\.busy\) void setup\.refresh\(\); \}, \[\]\);/, 'the Mac is checked on open, never during a run');
+  assert.match(context, /const otherBusy = value\[which === 'ai' \? 'mail' : 'ai'\]\.busy;/);
+  assert.match(yourAi, /const card = picked \?\? \(local\.busy \? 'local' :/);
+  assert.match(local, /disabled=\{busy \|\| blocked \|\| setup\.checking/);
+  assert.match(localMail, /disabled=\{busy \|\| blocked \|\| checking/);
+});
+
+test('onboarding keeps its own run, which still checks the Mac on mount', () => {
+  assert.match(localMail, /export default function LocalMailSetup\([\s\S]*?\) \{\s*const setup = useLocalSetup\(\{ onReady, onBusyChange \}\);\s*return <LocalMailSetupPanel setup=\{setup\} confirmPrepare=\{confirmPrepare\} \/>;/);
+  assert.match(localMail, /probeOnMount = true/);
+  assert.match(localMail, /if \(probeOnMount\) void refresh\(\);/);
+  for (const file of ['../src/components/ChooseAi.tsx', '../src/components/LocalAiSetup.tsx']) assert.match(source(file), /<LocalMailSetup\b/, file);
 });
