@@ -6,7 +6,7 @@ import { TestConsent } from '../../components/ChooseAi';
 import Button from '../../ui/Button';
 import SecretField from '../../ui/SecretField';
 import Select from '../../ui/Select';
-import { costRatio, geminiDefault, geminiModelToSave, sortCostPer1000 } from '../ai-choice';
+import { costRatio, geminiDefault, geminiModelNote, geminiModelToSave, sortCostPer1000 } from '../ai-choice';
 import GuideSteps from './GuideSteps';
 import { TEST_AND_SAVE, guideFor } from './providerGuides';
 import { saveErrorLine, type TestAndUse } from './save';
@@ -58,6 +58,7 @@ export default function GeminiCard({ catalog, models, current, busy, onTestAndUs
     } />
     <div id="ai-model" className="settings-ai-model">
       <Select label={text('Model', '模型')} showLabel value={model} options={options} disabled={busy} width={320} onChange={setModel} />
+      <p id="ai-model-use" className="ui-hint">{geminiModelNote(catalog, toSave.model, text)}</p>
       <p className="ui-hint">{text('The recommended model handles mail well and costs little.', '推薦的模型能妥善整理郵件，費用低。')}</p>
       {cost && <p className="settings-ai-cost">{text(`About US$${cost} to sort 1,000 emails`, `整理 1,000 封郵件約 US$${cost}`)}</p>}
       {current?.provider === 'gemini' && toSave.changed && (

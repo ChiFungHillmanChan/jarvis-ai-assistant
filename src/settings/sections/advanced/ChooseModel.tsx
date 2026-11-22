@@ -91,7 +91,7 @@ export default function ChooseModel({ editor, catalog, onChosen }: { editor: Cha
       <SettingRow {...row('ai-base-url')} control={null}>
         <div className="settings-advanced-form">
           <input className="ui-input" aria-label={row('ai-base-url').title} value={baseUrl} disabled={busy} spellCheck={false} placeholder="https://api.example.com/v1"
-            onChange={e => { setBaseUrl(e.target.value); setListed(null); setListedModel(''); }} />
+            onChange={e => { setBaseUrl(e.target.value); setListed(null); setListedModel(''); setUrlConsent(false); }} />
           <input className="ui-input" type="password" autoComplete="off" spellCheck={false} aria-label={text(`${serviceName} API key`, `${serviceName} API 密鑰`)} value={apiKey} disabled={busy}
             placeholder={saved?.provider === 'compatible' && saved.base_url === url ? text('Saved. Leave blank to keep it', '已儲存，留空即沿用') : text('API key', 'API 密鑰')}
             onChange={e => setApiKey(e.target.value)} />

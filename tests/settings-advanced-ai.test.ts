@@ -163,7 +163,7 @@ test('every danger confirm in the three sections says what is lost and whether i
 test('SecretField takes its own Remove confirm, and keeps the old one when none is given', () => {
   const field = source('src/ui/SecretField.tsx');
   assert.match(field, /removeConfirm\?: string/);
-  assert.match(field, /message: removeConfirm \?\? text\('Remove this key from Keychain\?', '要從鑰匙圈移除此金鑰嗎？'\)/);
+  assert.match(field, /message: removeConfirm \?\? text\('Remove this key from Keychain\?', '要從鑰匙圈移除此密鑰嗎？'\)/);
 });
 
 test('every key, TypeSafe included, has one field and a Remove through set_api_key', () => {
@@ -275,6 +275,21 @@ test('the Advanced AI pages and the key rows say 密鑰', () => {
   }
 });
 
+// Final review M1 and the T7 colon: one word for a key app-wide, and no
+// space after a full-width colon where two strings are joined.
+test('no user-facing string in src says 金鑰, and the Your AI key rows search as 密鑰', () => {
+  const offenders = filesUnder('src').filter(f => /\.(ts|tsx)$/.test(f) && /金鑰/.test(source(f)));
+  assert.deepEqual(offenders, []);
+  for (const id of ['ai-key', 'ai-model']) assert.match(JSON.stringify(ROWS.find(x => x.id === id)), /密鑰/, id);
+});
+
+test('no joined string puts a space after a full-width colon', () => {
+  const joined = /：['"`]\)\}? +[{$]|：['"`]\)\}\{' '\}/;
+  const offenders = filesUnder('src').filter(f => /\.(ts|tsx)$/.test(f) && joined.test(source(f)));
+  assert.deepEqual(offenders, []);
+  assert.match(source('src/settings/sections/Connections.tsx'), /`\$\{text\('Connected as ', '已連接帳戶：'\)\}\$\{who\}`/);
+});
+
 function filesUnder(dir: string): string[] {
   return readdirSync(join(root, dir)).flatMap(name => {
     const path = `${dir}/${name}`;
@@ -331,4 +346,9 @@ test('Advanced > Models keeps both Test buttons disabled without the tick', () =
   assert.match(code, /<Button kind="secondary" busy=\{busy\} disabled=\{!modelConsent\} onClick=\{\(\) => run\('model'/);
   assert.match(code, /onChange=\{v => \{ setProvider\(v\); setModel\(''\); setModelConsent\(false\); \}\}/, 'a new service needs the tick again');
   assert.doesNotMatch(code, /<p className="ui-hint">\{testDisclosure\(/);
+});
+
+// Final review M2: a tick given for one address does not cover another.
+test('editing the base URL clears the test-message consent', () => {
+  assert.match(source(ADV + 'ChooseModel.tsx'), /onChange=\{e => \{ setBaseUrl\(e\.target\.value\); setListed\(null\); setListedModel\(''\); setUrlConsent\(false\); \}\}/);
 });

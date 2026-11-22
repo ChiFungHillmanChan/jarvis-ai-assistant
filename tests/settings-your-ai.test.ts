@@ -1,7 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
-import { GEMINI_SORT_MEASURED, costRatio, geminiDefault, geminiEffectiveModel, geminiModelToSave, localUnavailable, sortCostPer1000 } from '../src/settings/ai-choice.ts';
+import { GEMINI_SORT_MEASURED, costRatio, geminiDefault, geminiEffectiveModel, geminiModelNote, geminiModelToSave, localUnavailable, sortCostPer1000 } from '../src/settings/ai-choice.ts';
 import { PROVIDER_GUIDES, TEST_AND_SAVE } from '../src/settings/ai/providerGuides.ts';
 import type { AiModelCatalog, CloudModel } from '../src/lib/ai-models.ts';
 import type { LocalSetupProbe } from '../src/lib/setup.ts';
@@ -252,4 +252,21 @@ test('onboarding keeps its own run, which still checks the Mac on mount', () => 
   assert.match(localMail, /probeOnMount = true/);
   assert.match(localMail, /if \(probeOnMount\) void refresh\(\);/);
   for (const file of ['../src/components/ChooseAi.tsx', '../src/components/LocalAiSetup.tsx']) assert.match(source(file), /<LocalMailSetup\b/, file);
+});
+
+// Final review M4: the Gemini model select says which work the model does.
+test('the Gemini model note follows what geminiModelToSave saves, with names from the catalog', () => {
+  const en = (a: string) => a;
+  const zh = (_: string, b: string) => b;
+  const withChat = { defaults: { gemini_mail_sort: lite.id, gemini_flash: flash.id }, cloud } as unknown as AiModelCatalog;
+  // The mail sort default saves no model: only mail sorting uses it, chat keeps the registry chat default.
+  assert.equal(geminiModelNote(withChat, geminiModelToSave(lite.id, null, lite.id).model, en), `Used for sorting mail. Chat uses ${flash.label}.`);
+  assert.equal(geminiModelNote(withChat, geminiModelToSave(lite.id, null, lite.id).model, zh), `用於整理郵件。對話使用 ${flash.label}。`);
+  // Any other model is pinned, so chat uses it too.
+  assert.equal(geminiModelNote(withChat, geminiModelToSave(flash.id, null, lite.id).model, en), 'Used for chat and for sorting mail.');
+  assert.equal(geminiModelNote(withChat, geminiModelToSave(flash.id, null, lite.id).model, zh), '用於對話及整理郵件。');
+  // A chat default the catalog does not list shows its id.
+  const unlisted = { defaults: { gemini_mail_sort: lite.id, gemini_flash: 'gemini-unlisted' }, cloud } as unknown as AiModelCatalog;
+  assert.equal(geminiModelNote(unlisted, undefined, en), 'Used for sorting mail. Chat uses gemini-unlisted.');
+  assert.match(gemini, /<p id="ai-model-use" className="ui-hint">\{geminiModelNote\(catalog, toSave\.model, text\)\}<\/p>/);
 });

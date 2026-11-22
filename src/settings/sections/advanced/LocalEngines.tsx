@@ -87,7 +87,7 @@ export default function LocalEngines({ endpoints, onAddToChain, chainBusy }: Loc
               onChange={e => (tab === 'vllm' ? engines.setVllmUrl(e.target.value) : engines.setGenericUrl(e.target.value))} />
             <Button kind="secondary" busy={engines.connectBusy} disabled={!url.trim()} onClick={() => engines.connect(tab)}>{text('Connect', '連接')}</Button>
           </span>}
-        {engines.error && <p className="ui-secret-error" role="alert">{text('That did not work:', '未能完成：')} {engines.error}</p>}
+        {engines.error && <p className="ui-secret-error" role="alert">{text('That did not work: ', '未能完成：')}{engines.error}</p>}
       </SettingRow>
     </SettingGroup>
   );

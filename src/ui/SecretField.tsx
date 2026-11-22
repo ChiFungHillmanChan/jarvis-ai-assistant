@@ -64,7 +64,7 @@ export default function SecretField({ saved, onSave, onRemove, label, placeholde
           {onRemove && (
             <Button
               kind="danger"
-              confirm={{ message: removeConfirm ?? text('Remove this key from Keychain?', '要從鑰匙圈移除此金鑰嗎？'), label: text('Remove', '移除') }}
+              confirm={{ message: removeConfirm ?? text('Remove this key from Keychain?', '要從鑰匙圈移除此密鑰嗎？'), label: text('Remove', '移除') }}
               onClick={remove}
             >
               {text('Remove', '移除')}

@@ -41,7 +41,7 @@ export default function Connections() {
   const accountStatus = google.google === null
     ? (google.loadError ? text('Google connection status is unavailable.', '未能取得 Google 連接狀態。') : text('Checking Google connection…', '正在檢查 Google 連接…'))
     : main?.state === 'reconnect' ? text('Google no longer accepts this connection. Reconnect to keep using mail tools, Calendar and briefings.', 'Google 已不接受此連接。請重新連接，以繼續使用郵件工具、日曆及簡報。')
-      : connected ? (who ? `${text('Connected as', '已連接帳戶：')} ${who}` : text('Connected', '已連接'))
+      : connected ? (who ? `${text('Connected as ', '已連接帳戶：')}${who}` : text('Connected', '已連接'))
         : text('Not connected', '尚未連接');
 
   const accountAction = google.google === null

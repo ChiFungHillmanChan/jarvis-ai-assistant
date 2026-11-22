@@ -6,6 +6,7 @@ import { connectionsChanged } from "../lib/connections";
 import { mailWorkspace, type MailAccount } from "../lib/mail";
 import { useWorkspace } from "./WorkspaceContext";
 import { useSettingsDialog } from "../settings/SettingsContext";
+import { sectionLabel } from "../settings/sections";
 import "../pages/settings-workspace.css";
 
 function syncLabel(value: string | null, locale: string): string {
@@ -20,7 +21,9 @@ export default function ConnectionsPage() {
   const { open, state } = useWorkspace();
   const settings = useSettingsDialog();
   // Open Settings on the section this button is about.
-  const openSettings = (section: "google" | "ai") => settings.openSettings(section === 'google' ? 'connections' : 'ai');
+  // Provider keys and AWS Bedrock credentials are in Advanced → Cloud providers.
+  const openSettings = (section: "google" | "cloud") => settings.openSettings(section === 'google' ? 'connections' : 'advanced-cloud');
+  const cloudLabel = sectionLabel('advanced-cloud', text);
   const [accounts, setAccounts] = useState<MailAccount[] | null>(null);
   const [assistantGoogle, setAssistantGoogle] = useState<boolean | null>(null);
   const [mailError, setMailError] = useState(false);
@@ -135,7 +138,7 @@ export default function ConnectionsPage() {
           <IntegrationConnection service="obsidian" />
           <div className="connections-service">
             <div><h3>{text("AI providers", "AI 供應商")}</h3><p>{text("OpenAI, Gemini, Claude and AWS Bedrock credentials.", "OpenAI、Gemini、Claude 及 AWS Bedrock 憑證。")}</p></div>
-            <button onClick={() => openSettings("ai")}>{text("Manage in Settings", "在設定中管理")}</button>
+            <button onClick={() => openSettings("cloud")}>{text(`Open Advanced → ${cloudLabel}`, `開啟「進階 → ${cloudLabel}」`)}</button>
           </div>
         </div>
       </section>

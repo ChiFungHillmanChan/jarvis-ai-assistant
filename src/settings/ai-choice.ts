@@ -65,6 +65,18 @@ export function geminiModelToSave(selected: string, saved: string | null, mailSo
   return { model, changed: model !== effective(saved) };
 }
 
+/**
+ * Which work the Gemini model in the Select does, from what a save sends
+ * (geminiModelToSave). No model: only mail sorting uses it, and chat keeps
+ * the registry chat default. A pinned model serves chat too.
+ */
+export function geminiModelNote(catalog: AiModelCatalog, savedModel: string | undefined, text: (en: string, zh: string) => string): string {
+  if (savedModel) return text('Used for chat and for sorting mail.', '用於對話及整理郵件。');
+  const chatId = catalog.defaults.gemini_flash;
+  const chat = catalog.cloud.find(model => model.provider === 'gemini' && model.id === chatId)?.label ?? chatId;
+  return text(`Used for sorting mail. Chat uses ${chat}.`, `用於整理郵件。對話使用 ${chat}。`);
+}
+
 /** The Gemini model in effect: the saved one, or the mail sort default when none is saved. */
 export function geminiEffectiveModel(catalog: AiModelCatalog | null, saved: string | null): CloudModel | null {
   if (!saved) return geminiDefault(catalog);

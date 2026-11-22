@@ -1,8 +1,8 @@
 // The Bedrock model picker: the options it offers, the line saying which
 // list they come from, and the picker's own state. One picker serves three
 // places: Settings > Advanced > Models > Provider order (a Bedrock row),
-// Settings > Mail and follow-ups (group analysis with "Your AWS Bedrock account"),
-// and the setup guide's "Advanced: use a company AWS Bedrock account for
+// Settings > Advanced > Models > Mail analysis models (group analysis with "Your AWS
+// Bedrock account"), and the setup guide's "Advanced: use a company AWS Bedrock account for
 // mail". The list comes from list_bedrock_models
 // (src-tauri/src/aws/model_list.rs): the inference profiles and text models
 // AWS lists for the saved region, or a built-in list and the reason.
@@ -42,7 +42,7 @@ export type BedrockModelList = {
 
 /**
  * Where the picker's list stands while the picker is on screen: in Settings >
- * Advanced > Models, Settings > Mail and follow-ups or the setup guide.
+ * Advanced > Models (provider order and mail analysis models) or the setup guide.
  */
 export type BedrockListState =
   | { status: 'idle' }

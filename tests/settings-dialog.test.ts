@@ -94,7 +94,10 @@ test('every entry point opens the dialog', () => {
   assert.match(source('../src/components/SidebarAccount.tsx'), /openSettings\(/);
   const connections = source('../src/workspace/ConnectionsPage.tsx');
   assert.doesNotMatch(connections, /writeValue\("tool:settings"/);
-  assert.match(connections, /openSettings\(section === 'google' \? 'connections' : 'ai'\)/);
+  assert.match(connections, /openSettings\(section === 'google' \? 'connections' : 'advanced-cloud'\)/);
+  // Final review M5: Bedrock credentials live in Advanced → Cloud providers, and the button names it.
+  assert.match(connections, /const cloudLabel = sectionLabel\('advanced-cloud', text\);/);
+  assert.match(connections, /onClick=\{\(\) => openSettings\("cloud"\)\}>\{text\(`Open Advanced → \$\{cloudLabel\}`, `開啟「進階 → \$\{cloudLabel\}」`\)\}/);
 });
 
 test('the old page and its bridge are gone; every section has its own view', () => {
