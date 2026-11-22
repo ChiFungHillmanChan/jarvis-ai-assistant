@@ -16,6 +16,9 @@ import Connections from './sections/Connections';
 import Privacy from './sections/Privacy';
 import SetupGuide from './sections/SetupGuide';
 import About from './sections/About';
+import Models from './sections/advanced/Models';
+import CloudProviders from './sections/advanced/CloudProviders';
+import LocalAi from './sections/advanced/LocalAi';
 import { isBackdropClick } from './settings-dialog-state';
 import './settings.css';
 
@@ -28,6 +31,9 @@ const SECTION_VIEWS: Partial<Record<SettingsSectionId, ComponentType>> = {
   privacy: Privacy,
   setup: SetupGuide,
   about: About,
+  'advanced-models': Models,
+  'advanced-cloud': CloudProviders,
+  'advanced-local': LocalAi,
 };
 
 export default function SettingsDialog() {

@@ -7,6 +7,7 @@ import { testDisclosure } from '../../components/ChooseAi';
 import type { useLocalSetup } from '../../components/LocalMailSetup';
 import Button from '../../ui/Button';
 import Select from '../../ui/Select';
+import { useSettingsDialog } from '../SettingsContext';
 import { TEST_AND_SAVE } from './providerGuides';
 import { saveErrorLine, type TestAndUse } from './save';
 
@@ -23,6 +24,7 @@ interface LocalCardProps {
 /** On this Mac: install Ollama, download the model that suits this Mac, then use a model Ollama has. */
 export default function LocalCard({ setup, unavailable, current, busy, onTestAndUse }: LocalCardProps) {
   const { text } = useUiLocale();
+  const { openSettings } = useSettingsDialog();
   const { probe } = setup;
   const installed = probe?.installedModels ?? [];
   const [model, setModel] = useState(current?.provider === 'ollama' && current.model ? current.model : '');
@@ -73,6 +75,8 @@ export default function LocalCard({ setup, unavailable, current, busy, onTestAnd
       {setup.bytes && <progress max={setup.bytes.total} value={Math.min(setup.bytes.done, setup.bytes.total)} />}</div>}
     {setup.ready && <p className="ui-hint" role="status">{text(`The model is downloaded. Choose it above and press "${TEST_AND_SAVE.en}": JARVIS tests it, then uses it for chat and mail.`, `模型已下載。請在上方選擇該模型並按「${TEST_AND_SAVE.zh}」：JARVIS 會先測試，然後用於聊天及郵件。`)}</p>}
     <p className="ui-hint">{testDisclosure('ollama', 'Ollama', text)}</p>
+    <p className="ui-hint">{text('Other local servers, and a local model for mail only, are in Advanced.', '其他本機伺服器，以及只用於郵件的本機模型，都在進階設定中。')}{' '}
+      <Button kind="quiet" onClick={() => openSettings('advanced-local')}>{text('Open Advanced → Local AI', '開啟「進階 → 本機 AI」')}</Button></p>
     {(setup.error || error) && <p className="ui-secret-error" role="alert">{setup.error || error}</p>}
   </div>;
 }

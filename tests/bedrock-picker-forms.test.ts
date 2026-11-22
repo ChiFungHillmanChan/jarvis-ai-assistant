@@ -124,7 +124,7 @@ const ready = (reason: BedrockListReason, list: BedrockModelList = builtIn): Bed
 
 // Requirement 9: each place has its own true "no credentials" line, in both
 // languages. Settings' says to save them below; the Mail dialog has no such
-// panel (they are in Settings > Models); the setup guide takes the keys
+// panel (they are in Settings > Advanced > Cloud providers); the setup guide takes the keys
 // above and saves them with its test button, which needs a model, so it
 // says to choose one first (review M-3). Breaks if a place falls back to
 // another place's words.
@@ -136,11 +136,11 @@ test('each place says where to save AWS credentials, in both languages', () => {
   assert.equal(listStatus(ready('no_credentials'), en), listStatus(ready('no_credentials'), en, 'settings'), 'Settings is the default place');
   assert.equal(
     listStatus(ready('no_credentials'), en, 'mail'),
-    `Built-in list: no AWS credentials are saved. Save them in Settings → Models, under AWS Bedrock, to load the list from your AWS account. ${BUILT_IN_REGION_NOTE[0]}`,
+    `Built-in list: no AWS credentials are saved. Save them in Settings → Advanced → Cloud providers to load the list from your AWS account. ${BUILT_IN_REGION_NOTE[0]}`,
   );
   assert.equal(
     listStatus(ready('no_credentials'), zh, 'mail'),
-    `內置清單：尚未儲存 AWS 憑證。請在設定的「模型」頁面「AWS Bedrock」部分儲存憑證，即可從你的 AWS 帳戶載入清單。${BUILT_IN_REGION_NOTE[1]}`,
+    `內置清單：尚未儲存 AWS 憑證。請在「設定 → 進階 → 雲端服務」儲存憑證，即可從你的 AWS 帳戶載入清單。${BUILT_IN_REGION_NOTE[1]}`,
   );
   assert.equal(
     listStatus(ready('no_credentials'), en, 'setup'),
@@ -156,8 +156,8 @@ test('each place says where to save AWS credentials, in both languages', () => {
     const setup = [listStatus(ready(reason), en, 'setup'), listStatus(ready(reason), zh, 'setup')];
     assert.doesNotMatch(mail[0], /below/, `${reason}: nothing is below in the Mail dialog`);
     assert.doesNotMatch(mail[1], /下方/, reason);
-    assert.match(mail[0], /Settings → Models, under AWS Bedrock/, reason);
-    assert.match(mail[1], /設定的「模型」頁面「AWS Bedrock」部分/, reason);
+    assert.match(mail[0], /Settings → Advanced → Cloud providers/, reason);
+    assert.match(mail[1], /「設定 → 進階 → 雲端服務」/, reason);
     assert.doesNotMatch(setup[0], /below|Settings/, `${reason}: the keys are in the setup guide's own block`);
     assert.doesNotMatch(setup[1], /下方|設定的/, reason);
     assert.match(setup[0], /above.*“Test and use Bedrock for mail”/, reason);
@@ -438,7 +438,8 @@ test('only Settings and the hook call listBedrockModels, anywhere under src/', (
   const read = (file: string) => readFileSync(new URL(file, root), 'utf8');
   assert.ok(files.length > 50, 'the walk reaches the source tree');
   assert.deepEqual(files.filter((file) => /\blistBedrockModels\b/.test(read(file))).sort(), ['hooks/useBedrockModelList.ts', 'lib/commands.ts', 'pages/Settings.tsx']);
-  assert.deepEqual(files.filter((file) => /["'`]list_bedrock_models["'`]/.test(read(file))), ['lib/commands.ts']);
+  // dev/workspacePreview.ts answers the command with sample data in the browser preview; it is never in the app.
+  assert.deepEqual(files.filter((file) => /["'`]list_bedrock_models["'`]/.test(read(file))).sort(), ['dev/workspacePreview.ts', 'lib/commands.ts']);
 });
 
 // Review M-5.1: a form gets the form options (no empty "Default" entry, a

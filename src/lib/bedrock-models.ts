@@ -203,18 +203,18 @@ export const BUILT_IN_REGION_NOTE = ['AWS may not offer every model in this list
 /**
  * Where the saved credentials are fixed, for the three reasons about them.
  * Settings has them in its AWS Bedrock panel below the picker; the Mail
- * dialog does not, they are in Settings → Models; the setup guide takes new
+ * dialog does not, they are in Settings → Advanced → Cloud providers; the setup guide takes new
  * keys above the picker and saves them with its test button.
  */
 function credentialsReason(reason: 'no_credentials' | 'unreadable_credentials' | 'credentials_refused', place: Exclude<PickerPlace, 'settings'>, text: Text): string {
   if (place === 'mail') {
     switch (reason) {
       case 'no_credentials':
-        return text('Built-in list: no AWS credentials are saved. Save them in Settings → Models, under AWS Bedrock, to load the list from your AWS account.', '內置清單：尚未儲存 AWS 憑證。請在設定的「模型」頁面「AWS Bedrock」部分儲存憑證，即可從你的 AWS 帳戶載入清單。');
+        return text('Built-in list: no AWS credentials are saved. Save them in Settings → Advanced → Cloud providers to load the list from your AWS account.', '內置清單：尚未儲存 AWS 憑證。請在「設定 → 進階 → 雲端服務」儲存憑證，即可從你的 AWS 帳戶載入清單。');
       case 'unreadable_credentials':
-        return text('Built-in list: JARVIS could not read your saved AWS credentials. Save them again in Settings → Models, under AWS Bedrock.', '內置清單：JARVIS 未能讀取已儲存的 AWS 憑證，請在設定的「模型」頁面「AWS Bedrock」部分重新儲存。');
+        return text('Built-in list: JARVIS could not read your saved AWS credentials. Save them again in Settings → Advanced → Cloud providers.', '內置清單：JARVIS 未能讀取已儲存的 AWS 憑證，請在「設定 → 進階 → 雲端服務」重新儲存。');
       case 'credentials_refused':
-        return text('Built-in list: AWS did not accept the saved AWS credentials. Check them in Settings → Models, under AWS Bedrock.', '內置清單：AWS 不接受已儲存的 AWS 憑證，請在設定的「模型」頁面「AWS Bedrock」部分檢查。');
+        return text('Built-in list: AWS did not accept the saved AWS credentials. Check them in Settings → Advanced → Cloud providers.', '內置清單：AWS 不接受已儲存的 AWS 憑證，請在「設定 → 進階 → 雲端服務」檢查。');
     }
   }
   switch (reason) {

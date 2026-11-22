@@ -113,3 +113,24 @@
 .settings-ai-cost { color: var(--text-primary); font-size: 13px; font-variant-numeric: tabular-nums; }
 .settings-ai-notice { margin: 12px 0 0; color: var(--ui-good); font-size: 13px; }
 .settings-ai-footer { margin: 20px 0 0; color: var(--text-secondary); font-size: 12px; }
+
+/* Advanced > Models, Cloud providers, Local AI (Task 11) */
+.settings-row-actions-start { justify-content: flex-start; }
+.settings-chain-list, .settings-check-list, .settings-model-list, .settings-endpoint-list { list-style: none; margin: 8px 0 0; padding: 0; }
+.settings-chain-item, .settings-model-list li { display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: 8px 12px; padding: 6px 0; }
+.settings-chain-item + .settings-chain-item, .settings-model-list li + li { border-top: 1px solid var(--border-primary); }
+.settings-chain-label { min-width: 0; color: var(--text-primary); font-size: 13px; overflow-wrap: anywhere; }
+.settings-chain-label[data-off] { color: var(--text-muted); }
+.settings-check-list li { padding: 4px 0; font-size: 13px; }
+.settings-endpoint { display: flex; flex-direction: column; gap: 6px; padding: 10px 12px; margin-bottom: 8px; border: 1px solid var(--settings-border); border-radius: 8px; }
+.settings-code { font-family: var(--font-mono); font-size: 12px; color: var(--text-secondary); overflow-wrap: anywhere; }
+.settings-advanced-form { display: flex; flex-direction: column; gap: 8px; max-width: 560px; }
+.settings-url-input { flex: 1 1 260px; width: auto; }
+.settings-dialog .settings-bedrock-model, .settings-dialog .mail-bedrock-model { display: flex; flex-direction: column; align-items: flex-start; gap: 8px; margin: 8px 0; }
+.settings-dialog .settings-bedrock-model label, .settings-dialog .mail-bedrock-model label { display: flex; flex-direction: column; gap: 4px; font-size: 12px; color: var(--text-secondary); }
+.settings-dialog .settings-bedrock-model input, .settings-dialog .mail-bedrock-model input { box-sizing: border-box; height: 36px; padding: 6px 10px; border: 1px solid var(--ui-control-border); border-radius: 8px; background: var(--ui-control-bg); color: var(--text-primary); font: inherit; }
+.settings-dialog .settings-bedrock-model > button, .settings-dialog .mail-bedrock-model > button { min-height: 32px; padding: 4px 12px; border: 1px solid var(--ui-control-border); border-radius: 8px; background: var(--ui-control-bg); color: var(--text-primary); font: inherit; cursor: pointer; }
+.settings-dialog .settings-bedrock-model .settings-help, .settings-dialog .mail-bedrock-model .mail-hint { margin: 0; color: var(--text-muted); font-size: 12px; }
+.settings-dialog .settings-bedrock-model-error { margin: 0; color: var(--ui-danger-text); font-size: 12px; }
+/* LocalMailSetup's panel styles every button; its danger confirm keeps the danger look. */
+.settings-dialog .setup-local .ui-button-danger { padding: 6px 14px; border-color: var(--ui-danger-border); background: var(--ui-danger-bg); color: var(--ui-danger-text); font-size: 13px; }
