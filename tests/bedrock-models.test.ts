@@ -2,10 +2,21 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import { readFileSync, readdirSync } from 'node:fs';
 import {
-  BUILT_IN_REGION_NOTE, OTHER_MODEL, groupLabel, groupedOptions, initialPicker, listStatus, pickerOptions, pickerReducer, selectValue,
+  BUILT_IN_REGION_NOTE, OTHER_MODEL, groupLabel, initialPicker, listStatus, pickerOptions, pickerReducer, selectValue,
   type BedrockModelList,
 } from '../src/lib/bedrock-models.ts';
 import { ACTIVITY_EVENTS, activityGate, userHasActed, watchUserActivity } from '../src/lib/user-activity.ts';
+
+// The runs of one group, in order, as the shared Select renders them under <optgroup>.
+function groupRuns<O extends { group: string }>(options: O[]): { group: O['group']; options: O[] }[] {
+  const runs: { group: O['group']; options: O[] }[] = [];
+  for (const option of options) {
+    const last = runs.at(-1);
+    if (last && last.group === option.group) last.options.push(option);
+    else runs.push({ group: option.group, options: [option] });
+  }
+  return runs;
+}
 
 // Fix round 7: the Bedrock model picker. The options and the line under the
 // select are pure functions; Settings.tsx is JSX, so its wiring is checked in
@@ -49,7 +60,7 @@ test('the AWS list: the named default, then the profiles, then the models, then 
     { value: 'amazon.nova-micro-v1:0', group: 'models', label: 'Nova Micro (amazon.nova-micro-v1:0)' },
     { value: OTHER_MODEL, group: 'other', label: 'Other (enter an ID)' },
   ]);
-  assert.deepEqual(groupedOptions(options).map((run) => [run.group, groupLabel(run.group, en)]), [
+  assert.deepEqual(groupRuns(options).map((run) => [run.group, groupLabel(run.group, en)]), [
     ['default', null], ['profiles', 'Inference profiles from AWS'], ['models', 'Models from AWS'], ['other', null],
   ]);
   assert.equal(pickerOptions(awsList, '', '', zh)[0].label, '預設：Claude Sonnet 4.6（global.anthropic.claude-sonnet-4-6）');
@@ -58,7 +69,7 @@ test('the AWS list: the named default, then the profiles, then the models, then 
 
 // Breaks if the built-in list is labelled as coming from AWS.
 test('the built-in list is one group of its own', () => {
-  const runs = groupedOptions(pickerOptions(builtIn, '', '', en));
+  const runs = groupRuns(pickerOptions(builtIn, '', '', en));
   assert.deepEqual(runs.map((run) => run.group), ['default', 'built-in', 'other']);
   assert.equal(groupLabel('built-in', en), 'Built-in list');
   assert.equal(groupLabel('built-in', zh), '內置清單');

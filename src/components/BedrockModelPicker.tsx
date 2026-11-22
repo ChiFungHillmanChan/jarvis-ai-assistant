@@ -24,7 +24,7 @@ type Props = Shared & (
     saved: string;
     /** Saves the id at once; resolves to the refusal, or null. */
     onSave: (model: string) => Promise<string | null>;
-    styles: { select: CSSProperties; button: CSSProperties; input: CSSProperties };
+    styles: { button: CSSProperties; input: CSSProperties };
     /** Where the status line sends someone for the AWS keys; the old page's panel below by default. */
     credentialsIn?: CredentialsIn;
   }

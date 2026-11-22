@@ -200,9 +200,6 @@
 .mail-workspace .mail-account-actions { display: flex; flex-direction: column; gap: 8px; margin: 12px 0; }
 .mail-workspace .mail-account-actions button { justify-content: flex-start; text-align: left; }
 .mail-workspace .mail-dialog .mail-alert { margin-top: 12px; }
-/* The Bedrock model picker (components/BedrockModelPicker.tsx): the button and its status line under the select. */
-.mail-workspace .mail-dialog .mail-bedrock-model > .ui-field:first-child { margin-bottom: 8px; }
-.mail-workspace .mail-bedrock-model .mail-hint { margin-top: 8px; }
 
 @media (prefers-reduced-motion: reduce) { .mail-workspace * { transition: none !important; } }
 

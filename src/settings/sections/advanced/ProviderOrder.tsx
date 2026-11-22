@@ -13,7 +13,7 @@ import type { ChainEditor } from '../../hooks/useChainEditor';
 import { useRow } from './useRow';
 
 /** The picker's inline looks belong to the old page; the dialog styles it with settings.css. */
-const PLAIN = { select: {}, button: {}, input: {} };
+const PLAIN = { button: {}, input: {} };
 
 interface ProviderOrderProps {
   editor: ChainEditor;

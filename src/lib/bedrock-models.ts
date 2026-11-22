@@ -152,17 +152,6 @@ export function groupLabel(group: PickerGroup, text: Text): string | null {
   }
 }
 
-/** The options split into runs of one group, for <optgroup>. */
-export function groupedOptions(options: PickerOption[]): { group: PickerGroup; options: PickerOption[] }[] {
-  const runs: { group: PickerGroup; options: PickerOption[] }[] = [];
-  for (const option of options) {
-    const last = runs[runs.length - 1];
-    if (last && last.group === option.group) last.options.push(option);
-    else runs.push({ group: option.group, options: [option] });
-  }
-  return runs;
-}
-
 function allowed(permissions: string[], text: Text): string {
   return permissions.join(text(' and ', ' 及 '));
 }

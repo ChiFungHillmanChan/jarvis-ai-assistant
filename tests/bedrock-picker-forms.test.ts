@@ -7,9 +7,20 @@ import { flushSync } from 'react-dom';
 import { createRoot } from 'react-dom/client';
 import { mockIPC } from '@tauri-apps/api/mocks';
 import {
-  BUILT_IN_REGION_NOTE, OTHER_MODEL, formPickerOptions, formRegionNote, groupLabel, groupedOptions, listStatus, modelChosen, otherIdHelp, selectValue, initialPicker,
+  BUILT_IN_REGION_NOTE, OTHER_MODEL, formPickerOptions, formRegionNote, groupLabel, listStatus, modelChosen, otherIdHelp, selectValue, initialPicker,
   type BedrockListReason, type BedrockListState, type BedrockModelList,
 } from '../src/lib/bedrock-models.ts';
+
+// The runs of one group, in order, as the shared Select renders them under <optgroup>.
+function groupRuns<O extends { group: string }>(options: O[]): { group: O['group']; options: O[] }[] {
+  const runs: { group: O['group']; options: O[] }[] = [];
+  for (const option of options) {
+    const last = runs.at(-1);
+    if (last && last.group === option.group) last.options.push(option);
+    else runs.push({ group: option.group, options: [option] });
+  }
+  return runs;
+}
 
 // P02b: the Bedrock model picker in the Mail page's Analysis settings and in
 // the setup guide's company Bedrock option. The options, the wording per
@@ -84,8 +95,8 @@ test('the default model is offered by name with its id', () => {
   // Before the list arrives, the app's default id is offered.
   assert.deepEqual(formPickerOptions(null, '', '', DEFAULT, en).map((option) => [option.group, option.value]), [['choose', ''], ['default', DEFAULT], ['other', OTHER_MODEL]]);
   // The same groups and order as Settings after that: AWS's profiles, its models, Other last.
-  assert.deepEqual(groupedOptions(aws).map((run) => run.group), ['choose', 'default', 'profiles', 'models', 'other']);
-  assert.deepEqual(groupedOptions(listed).map((run) => run.group), ['built-in', 'other']);
+  assert.deepEqual(groupRuns(aws).map((run) => run.group), ['choose', 'default', 'profiles', 'models', 'other']);
+  assert.deepEqual(groupRuns(listed).map((run) => run.group), ['built-in', 'other']);
 });
 
 // Requirement 6: an id saved earlier that the list does not hold is the
