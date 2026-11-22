@@ -1261,6 +1261,184 @@ mod tests {
         assert!(result.triaged > 0);
     }
 
+    /// What one model made of one email in the Gemini default test.
+    #[derive(Default)]
+    struct Sorted {
+        needs_reply: bool,
+        /// (is a reply item, due date), as parse_luna kept them.
+        items: Vec<(bool, Option<String>)>,
+        failed: bool,
+        /// Why it failed: JARVIS's own message or the service's status, never mail text.
+        error: Option<String>,
+        cost_micro: i64,
+        input_tokens: i64,
+        output_tokens: i64,
+        millis: u128,
+    }
+
+    /// The date each synthetic email states (native_qa::seed_once): qa-001
+    /// asks for "星期五前" and was received Thursday 2026-09-10, so Friday
+    /// 2026-09-11; every other one says "到期：2026-09-30".
+    fn stated_date(provider_id: &str) -> &'static str {
+        if provider_id == "qa-001" { "2026-09-11" } else { "2026-09-30" }
+    }
+
+    /// Sorts the measured set with `model` as the chosen AI, one email per
+    /// request as triage_one's no-TypeSafe path sends it (same instructions,
+    /// input and schema; parse_luna and parse_combined read the answer). The
+    /// items are read before `finalize`: the set was received in September,
+    /// so the stale-mail rule would drop every dated item for both models
+    /// and leave nothing to compare.
+    async fn sort_measured_set(key: &str, model: &str, messages: &[(String, TriageInput)]) -> Vec<Sorted> {
+        let db = crate::db::test_database();
+        crate::ai::mail_policy::test_support::agree_to_gemini(&db);
+        let mut router = crate::ai::AiRouter::new("gemini_primary");
+        router.set_gemini_key(key);
+        router.set_provider_chain(vec![crate::ai::ProviderChainEntry { position: 0, provider_type: "gemini".into(), endpoint_id: None, model_id: Some(model.into()), enabled: true, base_url: None }]);
+        let (db, router) = (&db, &router);
+        let today_text = Local::now().format("%Y-%m-%d (%a)").to_string();
+        let today_text = &today_text;
+        stream::iter(messages.iter().map(|(_, message)| async move {
+            let started = Instant::now();
+            let received_at = DateTime::parse_from_rfc3339(&message.received_at).unwrap().with_timezone(&Local);
+            let received_local = received_at.format("%Y-%m-%d %H:%M (%a, UTC%:z)").to_string();
+            let (to, text) = message_text(message);
+            let input = json!({
+                "from": take_chars(&message.sender, 300),
+                "to": take_chars(&to, 300),
+                "subject": take_chars(&message.subject, 300),
+                "text": take_chars(&text, LUNA_TEXT_CHARS),
+                // Production offers the sender's saved open items; for this
+                // set finalize saves none (all stale), so there are none.
+                "known_follow_ups": [],
+            })
+            .to_string();
+            let instructions = format!("{}\n{}", luna_instructions("zh-HK", today_text, &received_local), combined_rules());
+            let mut sorted = Sorted::default();
+            match ask_chosen_ai(router, db, &instructions, &input, combined_schema()).await {
+                Ok((value, done)) => {
+                    sorted.cost_micro = done.cost_micro.unwrap_or(0);
+                    sorted.input_tokens = done.input_tokens;
+                    sorted.output_tokens = done.output_tokens;
+                    match parse_luna(&value, &message.subject, &text, received_at.date_naive(), &Local, &[]) {
+                        Ok(extraction) => {
+                            sorted.needs_reply = parse_combined(&value, &extraction.category).needs_reply >= 0.7;
+                            sorted.items = extraction.items.iter().map(|i| (i.kind == "reply", i.due_date.clone())).collect();
+                        }
+                        Err(error) => (sorted.failed, sorted.error) = (true, Some(error)),
+                    }
+                }
+                Err(error) => (sorted.failed, sorted.error) = (true, Some(error)),
+            }
+            sorted.millis = started.elapsed().as_millis();
+            sorted
+        }))
+        .buffered(CONCURRENCY)
+        .collect()
+        .await
+    }
+
+    /// Decides the default Gemini model (settings redesign, PR 3): sorts the
+    /// 120 synthetic emails of the 20 Nov measurement (native_qa::seed_once)
+    /// with gemini-3.8-flash, the reference, and gemini-3.1-flash-lite.
+    ///
+    /// - Found: each item 3.8 Flash extracted, plus each email it says needs
+    ///   a reply.
+    /// - Miss: a found item Flash-Lite has no match for in the same email (a
+    ///   reply item for a reply item, any other kind for any other kind, with
+    ///   the same due date), or a needs-reply Flash-Lite did not give.
+    /// - Wrong date: an item dated other than the date the email states
+    ///   (`stated_date`), counted for both models.
+    ///
+    /// Passes if Flash-Lite misses at most 1 per 20 found and has no wrong
+    /// date. Sends the synthetic emails only:
+    /// JARVIS_LIVE_GEMINI_KEY=... cargo test live_flash_lite_vs_flash_on_the_measured_set -- --ignored --nocapture
+    #[tokio::test]
+    #[ignore]
+    async fn live_flash_lite_vs_flash_on_the_measured_set() {
+        let Some((key, _outside)) = crate::ai::wire_tests::live_key("JARVIS_LIVE_GEMINI_KEY") else {
+            panic!("set JARVIS_LIVE_GEMINI_KEY to run this test");
+        };
+        // The registry the app ships (prices, thinking flags, the sort cap),
+        // not the frozen version-1 fixture the other tests run on, which has
+        // no gemini-3.8-flash: its requests would go without thinkingLevel
+        // LOW and without a price.
+        let _registry = crate::ai::registry::test_override::set((*crate::ai::registry::bundled()).clone());
+        const REFERENCE: &str = "gemini-3.8-flash";
+        const CANDIDATE: &str = "gemini-3.1-flash-lite";
+        for model in [REFERENCE, CANDIDATE] {
+            let status = reqwest::Client::new().get(format!("{}/models/{model}", crate::ai::gemini::API_BASE)).header("x-goog-api-key", &key).send().await.unwrap().status();
+            println!("{model}: models.get HTTP {status}");
+            assert!(status.is_success(), "{model} is not served (HTTP {status}): FAIL, the default stays {REFERENCE}");
+        }
+        let seeded = crate::db::test_database();
+        crate::native_qa::seed_once(&mut seeded.conn.lock().unwrap()).unwrap();
+        let mut messages: Vec<(String, TriageInput)> = Vec::new();
+        for message in store::untriaged_messages(&seeded, 1_000).unwrap() {
+            let provider_id: String = seeded.conn.lock().unwrap().query_row("SELECT provider_id FROM mail_messages WHERE id=?1", [message.id], |r| r.get(0)).unwrap();
+            messages.push((provider_id, message));
+        }
+        messages.sort_by(|a, b| a.0.cmp(&b.0));
+        assert_eq!(messages.len(), 120);
+
+        let started = Instant::now();
+        let reference = sort_measured_set(&key, REFERENCE, &messages).await;
+        let reference_time = started.elapsed();
+        let started = Instant::now();
+        let candidate = sort_measured_set(&key, CANDIDATE, &messages).await;
+        let candidate_time = started.elapsed();
+
+        let wrong_dates = |runs: &[Sorted]| -> Vec<usize> {
+            let mut wrong = Vec::new();
+            for (index, ((provider_id, _), sorted)) in messages.iter().zip(runs).enumerate() {
+                if sorted.items.iter().any(|(_, due)| due.as_deref().is_some_and(|d| d != stated_date(provider_id))) {
+                    wrong.push(index + 1);
+                }
+            }
+            wrong
+        };
+        let (mut found, mut misses, mut extra) = (0usize, Vec::new(), 0usize);
+        for (index, (r, c)) in reference.iter().zip(&candidate).enumerate() {
+            if r.needs_reply {
+                found += 1;
+                if !c.needs_reply {
+                    misses.push(index + 1);
+                }
+            }
+            let mut unmatched: Vec<&(bool, Option<String>)> = c.items.iter().collect();
+            for item in &r.items {
+                found += 1;
+                match unmatched.iter().position(|other| *other == item) {
+                    Some(at) => { unmatched.remove(at); }
+                    None => misses.push(index + 1),
+                }
+            }
+            extra += unmatched.len();
+        }
+        for (name, runs, time) in [(REFERENCE, &reference, reference_time), (CANDIDATE, &candidate, candidate_time)] {
+            let sorted = runs.iter().filter(|s| !s.failed).count();
+            let items: usize = runs.iter().map(|s| s.items.len()).sum();
+            let dated = runs.iter().flat_map(|s| &s.items).filter(|(_, due)| due.is_some()).count();
+            let replies = runs.iter().filter(|s| s.needs_reply).count();
+            let cost: i64 = runs.iter().map(|s| s.cost_micro).sum();
+            let input: i64 = runs.iter().map(|s| s.input_tokens).sum();
+            let output: i64 = runs.iter().map(|s| s.output_tokens).sum();
+            let mut errors: Vec<String> = runs.iter().filter_map(|s| s.error.as_deref().map(|e| take_chars(e, 160))).collect();
+            errors.sort();
+            errors.dedup();
+            let millis: u128 = runs.iter().map(|s| s.millis).sum();
+            println!(
+                "{name}: sorted {sorted}/120, failed {}, items {items} ({dated} dated), needs reply {replies}, wrong dates {:?}, cost US${:.4} (US${:.5} per email), tokens {:.0} in / {:.0} out per email, {:.1} s per email, run {:.0} s, errors {errors:?}",
+                120 - sorted, wrong_dates(runs), cost as f64 / 1e6, cost as f64 / 1e6 / 120.0, input as f64 / 120.0, output as f64 / 120.0, millis as f64 / 120_000.0, time.as_secs_f64()
+            );
+        }
+        let candidate_wrong = wrong_dates(&candidate);
+        let pass = misses.len() * 20 <= found && candidate_wrong.is_empty();
+        println!("found by {REFERENCE}: {found}; {CANDIDATE} misses {} at emails {misses:?}; extra items {extra}", misses.len());
+        println!("{}: {CANDIDATE} misses {} of {found} (allowed {}), wrong dates {}", if pass { "PASS" } else { "FAIL" }, misses.len(), found / 20, candidate_wrong.len());
+        assert!(reference.iter().any(|s| !s.failed), "{REFERENCE} sorted nothing");
+    }
+
     /// Live check against TypeSafe; run with TYPESAFE_API_KEY set:
     /// cargo test --manifest-path src-tauri/Cargo.toml live_jev -- --ignored --nocapture
     #[tokio::test]

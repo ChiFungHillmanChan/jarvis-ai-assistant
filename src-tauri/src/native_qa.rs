@@ -5,8 +5,10 @@
 compile_error!("native-qa is for debug builds only; never package it for release");
 
 use rusqlite::{params, Connection};
+#[cfg(feature = "native-qa")]
 use std::path::PathBuf;
 
+#[cfg(feature = "native-qa")]
 pub fn directory() -> Result<PathBuf, Box<dyn std::error::Error>> {
     let path = PathBuf::from(std::env::var("JARVIS_NATIVE_QA_DIR")?);
     if !path.is_absolute() {
