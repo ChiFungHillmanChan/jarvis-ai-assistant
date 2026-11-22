@@ -36,6 +36,8 @@ export default function Models() {
   const [presetFailed, setPresetFailed] = useState(false);
   // The Bedrock list is asked for while a Bedrock row is on screen, or once someone asks for it.
   const [asked, setAsked] = useState(false);
+  // choose_ai rewrites the mail mode too; the mail rows read it again after a choice here.
+  const [mailReload, setMailReload] = useState(0);
   const list = useBedrockModelList(asked || editor.chain.some(entry => entry.provider_type === 'bedrock'));
   const bedrock = { list: list.list, reload: () => { setAsked(true); list.reload(); } };
 
@@ -72,7 +74,7 @@ export default function Models() {
       </SettingRow>
     </SettingGroup>
 
-    <ChooseModel editor={editor} catalog={catalog} />
-    <MailModels catalog={catalog} bedrock={bedrock} />
+    <ChooseModel editor={editor} catalog={catalog} onChosen={() => setMailReload(n => n + 1)} />
+    <MailModels catalog={catalog} bedrock={bedrock} reloadKey={mailReload} />
   </>;
 }

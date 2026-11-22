@@ -23,7 +23,7 @@ const CLOUDS: { value: Cloud; label: string }[] = [{ value: 'gemini', label: 'Go
  * Both save through choose_ai, as Your AI does: it tests the choice, then
  * replaces the provider order, so an order of more than one entry asks first.
  */
-export default function ChooseModel({ editor, catalog }: { editor: ChainEditor; catalog: AiModelCatalog }) {
+export default function ChooseModel({ editor, catalog, onChosen }: { editor: ChainEditor; catalog: AiModelCatalog; onChosen: () => void }) {
   const { text } = useUiLocale();
   const row = useRow();
   const saved = editor.current;
@@ -49,6 +49,7 @@ export default function ChooseModel({ editor, catalog }: { editor: ChainEditor; 
       setNotice(chosenNotice(chosen, text));
       if (place === 'url') setApiKey('');
       void editor.reload();
+      onChosen();
     } catch (e) {
       setError({ place, line: errorLine(e, text) });
     } finally {
@@ -88,8 +89,8 @@ export default function ChooseModel({ editor, catalog }: { editor: ChainEditor; 
         <div className="settings-advanced-form">
           <input className="ui-input" aria-label={row('ai-base-url').title} value={baseUrl} disabled={busy} spellCheck={false} placeholder="https://api.example.com/v1"
             onChange={e => { setBaseUrl(e.target.value); setListed(null); setListedModel(''); }} />
-          <input className="ui-input" type="password" autoComplete="off" spellCheck={false} aria-label={text(`${serviceName} API key`, `${serviceName} API 金鑰`)} value={apiKey} disabled={busy}
-            placeholder={saved?.provider === 'compatible' && saved.base_url === url ? text('Saved. Leave blank to keep it', '已儲存，留空即沿用') : text('API key', 'API 金鑰')}
+          <input className="ui-input" type="password" autoComplete="off" spellCheck={false} aria-label={text(`${serviceName} API key`, `${serviceName} API 密鑰`)} value={apiKey} disabled={busy}
+            placeholder={saved?.provider === 'compatible' && saved.base_url === url ? text('Saved. Leave blank to keep it', '已儲存，留空即沿用') : text('API key', 'API 密鑰')}
             onChange={e => setApiKey(e.target.value)} />
           <span className="settings-row-actions settings-row-actions-start">
             <Button kind="secondary" disabled={busy || !url} onClick={loadModels}>{text('Load models', '載入模型')}</Button>
@@ -114,7 +115,7 @@ export default function ChooseModel({ editor, catalog }: { editor: ChainEditor; 
             <Select label={text('Model', '模型')} value={model} options={modelOptions} disabled={busy} width={340} onChange={setModel} />
             <Button kind="secondary" busy={busy} onClick={() => run('model', { provider, model: model || undefined })}>{text('Test and use', '測試並使用')}</Button>
           </span>
-          <p className="ui-hint">{text(`Uses the ${name} key saved in Cloud providers. Every listed model is offered here, including the expensive ones Your AI leaves out.`, `使用在「雲端服務」中儲存的 ${name} 金鑰。這裡列出所有模型，包括「你的 AI」未列出的高價模型。`)}</p>
+          <p className="ui-hint">{text(`Uses the ${name} key saved in Cloud providers. Every listed model is offered here, including the expensive ones Your AI leaves out.`, `使用在「雲端服務」中儲存的 ${name} 密鑰。這裡列出所有模型，包括「你的 AI」未列出的高價模型。`)}</p>
           <p className="ui-hint">{testDisclosure(provider, name, text)}</p>
         </div>
         {failure('model')}

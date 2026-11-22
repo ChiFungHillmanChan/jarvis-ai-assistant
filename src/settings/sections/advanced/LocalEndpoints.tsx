@@ -59,7 +59,7 @@ export default function LocalEndpoints({ endpoints, editor, onAddToChain }: Loca
                 <span className="settings-row-actions settings-row-actions-start">
                   <Button kind="secondary" onClick={() => endpoints.test(ep.id)}>{text('Test connection', '測試連接')}</Button>
                   <Button kind="danger" disabled={editor.busy}
-                    confirm={{ message: text(`Remove the endpoint ${ep.name}? Its models leave the provider order and any API key saved for it is deleted. This cannot be undone.`, `要移除端點 ${ep.name} 嗎？其模型會從供應商次序中移除，為它儲存的 API 金鑰亦會刪除。此操作無法復原。`), label: text('Remove', '移除') }}
+                    confirm={{ message: text(`Remove the endpoint ${ep.name}? Its models leave the provider order and any API key saved for it is deleted. This cannot be undone.`, `要移除端點 ${ep.name} 嗎？其模型會從供應商次序中移除，為它儲存的 API 密鑰亦會刪除。此操作無法復原。`), label: text('Remove', '移除') }}
                     onClick={async () => {
                       await endpoints.remove(ep.id);
                       const left = withoutEndpoint(editor.chain, ep.id);

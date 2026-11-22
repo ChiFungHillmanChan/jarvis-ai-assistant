@@ -9,18 +9,19 @@ import Button from '../../../ui/Button';
 import SettingGroup from '../../../ui/SettingGroup';
 import SettingRow from '../../../ui/SettingRow';
 import TextField from '../../../ui/TextField';
+import { mergeMailSetting, type MailModelKey as ModelKey } from '../../mail-models';
 import { useRow } from './useRow';
-
-type ModelKey = 'local_model' | 'openai_model' | 'bedrock_model';
 
 /**
  * Advanced > Models: the model mail analysis uses for each way it can run.
- * A field saves only its own model with mail_save_settings; the processing
- * mode and its consent stay where they are set. Mail needs a model named
+ * A field saves only its own model with mail_save_settings, merged over the
+ * mail settings read again just before (mergeMailSetting), so a mode that
+ * choose_ai changed meanwhile is kept. `reloadKey` changes after a choice on
+ * this page, so "In use for mail" follows it. Mail needs a model named
  * (mail/analysis.rs validate_model), so an empty one is refused here, and the
  * Bedrock picker works as in the mail form, with its own Save.
  */
-export default function MailModels({ catalog, bedrock }: { catalog: AiModelCatalog; bedrock: { list: BedrockListState; reload: () => void } }) {
+export default function MailModels({ catalog, bedrock, reloadKey }: { catalog: AiModelCatalog; bedrock: { list: BedrockListState; reload: () => void }; reloadKey: number }) {
   const { text } = useUiLocale();
   const row = useRow();
   const [settings, setSettings] = useState<MailSettings | null>(null);
@@ -32,7 +33,7 @@ export default function MailModels({ catalog, bedrock }: { catalog: AiModelCatal
     setLoadError(false);
     try { setSettings((await mailWorkspace()).settings); } catch { setLoadError(true); }
   }
-  useEffect(() => { void load(); }, []);
+  useEffect(() => { void load(); }, [reloadKey]);
 
   /** Saves one model; rejects so the field keeps its draft. */
   async function save(key: ModelKey, value: string) {
@@ -43,8 +44,10 @@ export default function MailModels({ catalog, bedrock }: { catalog: AiModelCatal
       throw new Error('no model');
     }
     try {
-      await mailSaveSettings({ ...settings, [key]: value });
-      setSettings(s => (s ? { ...s, [key]: value } : s));
+      const fresh = (await mailWorkspace()).settings;
+      const next = mergeMailSetting(fresh, key, value);
+      await mailSaveSettings(next);
+      setSettings(next);
     } catch (e) {
       setFailed({ key, line: text(`Could not save: ${String(e)}`, `無法儲存：${String(e)}`) });
       throw e;

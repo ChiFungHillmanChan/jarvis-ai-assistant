@@ -36,7 +36,7 @@ export default function ProviderOrder({ editor, catalog, bedrock }: ProviderOrde
   return (
     <SettingGroup title={text('Provider order', '供應商次序')}>
       <SettingRow {...row('chain-order')} control={null}>
-        <p className="ui-hint">{text('JARVIS uses the first enabled provider, and only that one. When it cannot answer, the error card offers the other services that have a saved key; JARVIS never switches on its own.', 'JARVIS 只會使用第一個已啟用的供應商。它未能回覆時，錯誤卡會列出其他已儲存金鑰的服務供你選擇；JARVIS 不會自行更換。')}</p>
+        <p className="ui-hint">{text('JARVIS uses the first enabled provider, and only that one. When it cannot answer, the error card offers the other services that have a saved key; JARVIS never switches on its own.', 'JARVIS 只會使用第一個已啟用的供應商。它未能回覆時，錯誤卡會列出其他已儲存密鑰的服務供你選擇；JARVIS 不會自行更換。')}</p>
         {chain.length === 0
           ? <p className="ui-hint" role="status">{text('No order is saved. JARVIS uses the default provider below.', '尚未儲存次序。JARVIS 會使用下方的預設供應商。')}</p>
           : <ol className="settings-chain-list">
@@ -71,9 +71,9 @@ export default function ProviderOrder({ editor, catalog, bedrock }: ProviderOrde
       </SettingRow>
 
       <SettingRow {...row('chain-bedrock-model')} control={null}>
-        {!hasBedrock && <p className="ui-hint">{text('Add Bedrock to the order to choose its model. AWS keys and region are in Cloud providers.', '將 Bedrock 加入次序後即可選擇其模型。AWS 金鑰及地區在「雲端服務」中設定。')}</p>}
+        {!hasBedrock && <p className="ui-hint">{text('Add Bedrock to the order to choose its model. AWS keys and region are in Cloud providers.', '將 Bedrock 加入次序後即可選擇其模型。AWS 密鑰及地區在「雲端服務」中設定。')}</p>}
         {chain.map((entry, i) => entry.provider_type === 'bedrock' && (
-          <BedrockModelPicker key={i} place="settings" saved={entry.model_id ?? ''} fallback={defaults.bedrock} listState={bedrock.list} onReload={bedrock.reload}
+          <BedrockModelPicker key={i} place="settings" credentialsIn="cloud-providers" saved={entry.model_id ?? ''} fallback={defaults.bedrock} listState={bedrock.list} onReload={bedrock.reload}
             onSave={model => save(setEntryModel(chain, i, model), true)} styles={PLAIN} />
         ))}
       </SettingRow>

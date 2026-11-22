@@ -47,7 +47,7 @@ export default function SecretField({ saved, onSave, onRemove, label, placeholde
     try {
       await onRemove?.();
     } catch {
-      setFailed(text('Could not remove the key. Try again.', '無法移除金鑰，請再試一次。'));
+      setFailed(text('Could not remove the key. Try again.', '無法移除密鑰，請再試一次。'));
     }
   }
 

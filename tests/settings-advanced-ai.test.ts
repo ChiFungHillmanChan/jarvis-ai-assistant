@@ -6,6 +6,9 @@ import { ROWS } from '../src/settings/rows.ts';
 import type { SettingsSectionId } from '../src/settings/sections.ts';
 import type { ProviderChainEntry } from '../src/lib/types.ts';
 import { activePreset, addEntry, moveEntry, removeEntry, setEntryModel, toggleEntry, withoutEndpoint } from '../src/settings/advanced-chain.ts';
+import { mergeMailSetting } from '../src/settings/mail-models.ts';
+import { BUILT_IN_REGION_NOTE, listStatus, type BedrockListState } from '../src/lib/bedrock-models.ts';
+import type { MailSettings } from '../src/lib/mail.ts';
 
 // Task 11: Advanced > Models, Cloud providers and Local AI. The chain edits
 // are pure and imported; the JSX cannot be imported under node, so its wiring
@@ -180,7 +183,7 @@ test('AWS uses the shared regions, and its Remove says when it fails', () => {
   const at = cloud.indexOf('clearAwsCredentials(');
   const open = cloud.lastIndexOf('<Button', at);
   assert.match(cloud.slice(open, at), /onError=\{/);
-  assert.match(cloud, /text\('Could not remove the AWS key\. Try again\.', '無法移除 AWS 金鑰，請再試一次。'\)/);
+  assert.match(cloud, /text\('Could not remove the AWS key\. Try again\.', '無法移除 AWS 密鑰，請再試一次。'\)/);
 });
 
 test('the default provider is kept, saved with update_setting so the router follows it', () => {
@@ -202,8 +205,74 @@ test('choosing a model in Advanced asks before replacing a provider order, as Yo
 
 test('the mail model fields change only the model, never the processing mode', () => {
   const mail = source(ADV + 'MailModels.tsx');
-  assert.match(mail, /mailSaveSettings\(\{ \.\.\.settings, \[key\]: value \}\)/);
   assert.doesNotMatch(mail, /processing_mode:/);
+  assert.doesNotMatch(mail, /\.\.\.settings, \[key\]/, 'never saves over the settings read when the page opened');
+});
+
+// Review fix 1: choose_ai on the same page rewrites processing_mode, so a
+// model saved from the settings read at load would put the old mode back.
+test('a mail model is merged over freshly read mail settings, so a newer processing mode stays', () => {
+  const stale = { processing_mode: 'openai', local_model: 'a', openai_model: 'b', bedrock_model: 'c' } as unknown as MailSettings;
+  const fresh = { ...stale, processing_mode: 'local' } as MailSettings;
+  const next = mergeMailSetting(fresh, 'openai_model', 'd');
+  assert.equal(next.processing_mode, 'local', 'the fresh mode is kept, not the one read at load');
+  assert.equal(next.openai_model, 'd');
+  assert.equal(next.local_model, 'a');
+  assert.equal(fresh.openai_model, 'b', 'the fresh copy is not changed in place');
+});
+
+test('the mail model save reads the mail settings again right before it saves', () => {
+  const mail = source(ADV + 'MailModels.tsx');
+  const start = mail.indexOf('async function save(');
+  const body = mail.slice(start, mail.indexOf('\n  }\n', start));
+  const read = body.indexOf('mailWorkspace()');
+  const merge = body.indexOf('mergeMailSetting(');
+  const write = body.indexOf('mailSaveSettings(');
+  assert.ok(read > 0 && merge > read && write > merge, 'mailWorkspace() then mergeMailSetting( then mailSaveSettings(');
+  // A model chosen on the same page reloads the mail rows, so "In use for mail" is current.
+  const models = source(ADV + 'Models.tsx');
+  assert.match(models, /<ChooseModel [^>]*onChosen=/);
+  assert.match(models, /<MailModels [^>]*reloadKey=/);
+  assert.match(source(ADV + 'ChooseModel.tsx'), /onChosen\(\)/);
+});
+
+// Review fix 2: inside the dialog the AWS keys are in Cloud providers, not below.
+test('the Bedrock picker in the provider order says the AWS keys are in Advanced > Cloud providers', () => {
+  const ready = (reason: string): BedrockListState => ({ status: 'ready', list: { source: 'fallback', reason, region: null, missing_permissions: [], default_model: { id: 'sample', name: null } } } as unknown as BedrockListState);
+  const en = (a: string) => a;
+  const zh = (_: string, b: string) => b;
+  assert.equal(listStatus(ready('no_credentials'), en, 'settings', 'cloud-providers'), `Built-in list: no AWS credentials are saved. Save them in Advanced → Cloud providers. ${BUILT_IN_REGION_NOTE[0]}`);
+  assert.equal(listStatus(ready('no_credentials'), zh, 'settings', 'cloud-providers'), `內置清單：尚未儲存 AWS 憑證。請在進階 → 雲端服務中儲存。${BUILT_IN_REGION_NOTE[1]}`);
+  for (const reason of ['no_credentials', 'unreadable_credentials', 'credentials_refused']) {
+    for (const t of [en, zh]) {
+      const line = listStatus(ready(reason), t, 'settings', 'cloud-providers');
+      assert.doesNotMatch(line, /below|下方/, reason);
+      assert.match(line, /Advanced → Cloud providers|進階 → 雲端服務/, reason);
+    }
+  }
+  assert.match(listStatus(ready('no_credentials'), en, 'settings'), /under AWS Bedrock below/, 'the old page keeps its own line');
+  assert.match(source(ADV + 'ProviderOrder.tsx'), /<BedrockModelPicker [^>]*credentialsIn="cloud-providers"/);
+});
+
+// Review fix 3: a remove that worked is not reported as failed when only the status reload fails.
+test('a key Remove that worked says so even when the saved-key status cannot be read again', () => {
+  const cloud = source(ADV + 'CloudProviders.tsx');
+  const fn = (name: string) => { const start = cloud.indexOf(`async function ${name}(`); return cloud.slice(start, cloud.indexOf('\n  }\n', start)); };
+  const drop = fn('dropKey');
+  assert.ok(drop.indexOf('removeApiKey(') >= 0 && drop.indexOf('refreshAfter(') > drop.indexOf('removeApiKey('), 'the status is read again after the remove');
+  assert.match(fn('refreshAfter'), /try \{\s*await readKeys\(\);\s*\} catch/, 'the reload is caught on its own');
+  assert.doesNotMatch(fn('refreshAfter'), /setLoadError/, 'a failed reload does not replace the page with an error');
+  assert.match(cloud, /text\('Removed\. Could not refresh status\.', '已移除，但未能更新狀態。'\)/);
+});
+
+// Review fix 4: 密鑰, as Your AI and LocalMailSetup say.
+test('the Advanced AI pages and the key rows say 密鑰', () => {
+  for (const file of ALL) assert.doesNotMatch(source(file), /金鑰/, file);
+  for (const id of ['key-gemini', 'key-claude', 'key-openai', 'key-typesafe']) {
+    const r = ROWS.find(x => x.id === id)!;
+    assert.match(JSON.stringify(r), /密鑰/, id);
+    assert.doesNotMatch(JSON.stringify(r), /金鑰/, id);
+  }
 });
 
 function filesUnder(dir: string): string[] {
