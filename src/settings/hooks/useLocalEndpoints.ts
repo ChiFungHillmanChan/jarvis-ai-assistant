@@ -2,6 +2,7 @@ import { useCallback, useEffect, useState } from 'react';
 import { useUiLocale } from '../../i18n';
 import { addLocalEndpoint, listEndpointModels, listLocalEndpoints, removeLocalEndpoint, testEndpointConnection } from '../../lib/commands';
 import type { EndpointHealth, LocalEndpoint, LocalModel } from '../../lib/types';
+import { recordAiError } from '../ai-error-log';
 
 /**
  * The local model endpoints (Advanced > Local AI) with the commands the old
@@ -16,6 +17,8 @@ export function useLocalEndpoints() {
   const [ready, setReady] = useState(false);
   const [loadError, setLoadError] = useState(false);
   const [error, setError] = useState('');
+  // A failure shows at its row and is kept as the session's last AI error (Advanced > Developer).
+  const fail = (message: string) => { setError(message); recordAiError(message); };
 
   const load = useCallback(async () => {
     try {
@@ -38,7 +41,7 @@ export function useLocalEndpoints() {
       added(endpoint);
       modelsLoaded(endpoint.id, await listEndpointModels(endpoint.id));
     } catch (e) {
-      setError(text(`Could not add the endpoint: ${String(e)}`, `無法新增端點：${String(e)}`));
+      fail(text(`Could not add the endpoint: ${String(e)}`, `無法新增端點：${String(e)}`));
       throw e;
     }
   }
@@ -50,7 +53,7 @@ export function useLocalEndpoints() {
       setHealth(all => ({ ...all, [id]: result }));
       modelsLoaded(id, await listEndpointModels(id));
     } catch (e) {
-      setError(text(`Could not test the endpoint: ${String(e)}`, `無法測試端點：${String(e)}`));
+      fail(text(`Could not test the endpoint: ${String(e)}`, `無法測試端點：${String(e)}`));
     }
   }
 
@@ -61,7 +64,7 @@ export function useLocalEndpoints() {
       await removeLocalEndpoint(id);
       setEndpoints(list => list.filter(e => e.id !== id));
     } catch (e) {
-      setError(text(`Could not remove the endpoint: ${String(e)}`, `無法移除端點：${String(e)}`));
+      fail(text(`Could not remove the endpoint: ${String(e)}`, `無法移除端點：${String(e)}`));
       throw e;
     }
   }

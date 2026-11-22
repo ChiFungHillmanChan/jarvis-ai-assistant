@@ -2,6 +2,7 @@ import { useCallback, useState } from 'react';
 import { updateProviderChain } from '../../lib/commands';
 import type { ProviderChainEntry } from '../../lib/types';
 import { useProviderChain } from './useProviderChain';
+import { recordAiError } from '../ai-error-log';
 
 /**
  * The saved provider order and one way to change it: `save` writes the new
@@ -23,6 +24,7 @@ export function useChainEditor() {
       await updateProviderChain(next);
       return null;
     } catch (e) {
+      recordAiError(String(e));
       if (!quiet) setSaveError(String(e));
       return String(e);
     } finally {

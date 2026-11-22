@@ -156,7 +156,7 @@ export const ROWS: RowMeta[] = [
   row('github-client-id', 'advanced-integrations', ['GitHub OAuth Client ID', 'GitHub OAuth Client ID'], ['Register a GitHub application, then save its Client ID.', '註冊 GitHub 應用程式後，儲存其 Client ID。'], ['oauth', 'application', 'register']),
   row('notion-token', 'advanced-integrations', ['Notion integration token', 'Notion 整合權杖'], undefined, ['secret', 'api key', 'notion']),
   row('github-token', 'advanced-integrations', ['GitHub personal access token', 'GitHub 個人存取權杖'], undefined, ['secret', 'pat', 'github']),
-  row('obsidian-key', 'advanced-integrations', ['Obsidian API key', 'Obsidian API 金鑰'], ['From the Local REST API plugin.', '來自 Local REST API 外掛程式。'], ['secret', 'rest api', 'obsidian']),
+  row('obsidian-key', 'advanced-integrations', ['Obsidian API key', 'Obsidian API 密鑰'], ['From the Local REST API plugin.', '來自 Local REST API 外掛程式。'], ['secret', 'rest api', 'obsidian']),
   row('obsidian-endpoint', 'advanced-integrations', ['Obsidian endpoint', 'Obsidian 端點'], ['Saved when you leave the field.', '離開欄位後儲存。'], ['base url', 'address', 'port']),
 
   // Advanced: Developer

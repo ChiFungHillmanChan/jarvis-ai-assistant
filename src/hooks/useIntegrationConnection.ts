@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useRef, useState, useSyncExternalStore } from 'react';
 import { useUiLocale } from '../i18n';
-import { openUrl } from '../lib/commands';
+import { openUrl, saveGitHubToken, saveNotionToken, saveObsidianKey } from '../lib/commands';
 import {
   cancelConnect, connectionStatuses, connectionsChanged, disconnectService,
   githubBeginConnect, githubCompleteConnect, githubSetClientId, notionConnect,
@@ -9,11 +9,16 @@ import {
 } from '../lib/connections';
 import { cancelOperation, currentOperation, finishOperation, isCurrentOperation, startOperation, subscribeOperations, type ConnectionOperation } from '../lib/connection-operation';
 
+/** The advanced credential each service takes in Settings > Advanced > Integrations, and the status method it shows as. */
+const TOKEN_SAVE = { notion: saveNotionToken, github: saveGitHubToken, obsidian: saveObsidianKey };
+export const TOKEN_METHOD = { notion: 'token', github: 'token', obsidian: 'rest' } as const;
+
 /**
  * One Notion, GitHub or Obsidian connection: its status and the connect,
  * cancel and disconnect flows. Shared by the full IntegrationConnection panel
  * and the one-line row in Settings > Connections, so both run the same flow.
- * Moved here unchanged from IntegrationConnection.tsx.
+ * Moved here from IntegrationConnection.tsx; Advanced > Integrations saves its
+ * tokens through `saveToken` and removes them through `disconnect`.
  */
 export function useIntegrationConnection(service: IntegrationService) {
   const { text } = useUiLocale();
@@ -30,10 +35,15 @@ export function useIntegrationConnection(service: IntegrationService) {
   const [device, setDevice] = useState<GitHubDevicePrompt | null>(null);
   const mounted = useRef(false);
   const revision = useRef(0);
+  // Set when this screen's own save or disconnect worked: the status read that
+  // follows, if it fails, is a note, not a failure of that action.
+  const afterAction = useRef(false);
 
   // `force` is the user asking; otherwise a recent status is reused, and a
   // known status stays on screen while it is checked again.
   const refresh = useCallback(async (force = false) => {
+    const announce = afterAction.current;
+    afterAction.current = false;
     if (currentOperation(service)) return;
     const current = ++revision.current;
     setChecking(force || statusRef.current === null);
@@ -43,7 +53,8 @@ export function useIntegrationConnection(service: IntegrationService) {
     } catch {
       if (mounted.current && revision.current === current) {
         show(null);
-        setError(previous => previous ?? text('Could not check the connection. Open JARVIS on your Mac and try again.', '未能檢查連接。請在 Mac 上開啟 JARVIS 後重試。'));
+        if (announce) setNotice(text('Done. Could not refresh the status.', '已完成，但未能更新狀態。'));
+        else setError(previous => previous ?? text('Could not check the connection. Open JARVIS on your Mac and try again.', '未能檢查連接。請在 Mac 上開啟 JARVIS 後重試。'));
       }
     } finally { if (mounted.current && revision.current === current) setChecking(false); }
   }, [service, text]);
@@ -111,18 +122,29 @@ export function useIntegrationConnection(service: IntegrationService) {
     try { await cancelConnect(service); }
     catch (e) { setError(String(e)); }
   }
-  async function disconnect() {
+  /** Resolves to whether the disconnect worked; a failure is shown as `error`. */
+  async function disconnect(): Promise<boolean> {
     const operation = startOperation(service, 'disconnect');
-    if (!operation) return;
+    if (!operation) return false;
     ownOperation.current = operation;
     revision.current++; setChecking(false); setError(null); setNotice(null);
+    let done = false;
     try {
       await disconnectService(service);
+      done = true;
       setNotice(service === 'obsidian'
         ? text('Local access removed. Your notes remain in Obsidian.', '已撤銷本機存取，Obsidian 筆記會保留。')
         : text('Access disabled on this Mac. You can also revoke the grant in the service’s account settings. Your original content remains in the service.', '已停用此 Mac 的存取權限。亦可在服務的帳戶設定撤銷授權；原始內容會保留在服務中。'));
     } catch (e) { setError(String(e)); }
-    finally { finishOperation(operation); ownOperation.current = null; connectionsChanged(); }
+    finally { finishOperation(operation); ownOperation.current = null; afterAction.current = done; connectionsChanged(); }
+    return done;
+  }
+  /** Saves the advanced token (Notion, GitHub) or REST API key (Obsidian). Rejects when the save fails. */
+  async function saveToken(value: string): Promise<void> {
+    setError(null); setNotice(null);
+    await TOKEN_SAVE[service](value.trim());
+    afterAction.current = true;
+    connectionsChanged();
   }
   async function openService() {
     try {
@@ -148,7 +170,7 @@ export function useIntegrationConnection(service: IntegrationService) {
 
   return {
     status, checking, busy, error, setError, notice, device,
-    refresh, connect, cancel, disconnect, openService, saveClient,
+    refresh, connect, cancel, disconnect, openService, saveClient, saveToken,
     missingClient, switchable, showConnect, ownConnect,
   };
 }
@@ -165,6 +187,6 @@ export function disconnectConfirm(service: IntegrationService, text: (en: string
       '是否中斷 GitHub 連接？JARVIS 會刪除此 Mac 上已儲存的 GitHub 授權及權杖。儲存庫及 Issue 會保留在 GitHub，之後可以重新連接。') };
     case 'obsidian': return { label, message: text(
       'Disconnect Obsidian? JARVIS forgets the vault it may read and deletes its saved API key on this Mac. Your notes stay in Obsidian. You can connect again later.',
-      '是否中斷 Obsidian 連接？JARVIS 會移除可讀取的資料庫，並刪除此 Mac 上已儲存的 API 金鑰。筆記會保留在 Obsidian，之後可以重新連接。') };
+      '是否中斷 Obsidian 連接？JARVIS 會移除可讀取的資料庫，並刪除此 Mac 上已儲存的 API 密鑰。筆記會保留在 Obsidian，之後可以重新連接。') };
   }
 }
