@@ -9,6 +9,7 @@ import { applyTestedMailSettings, cancelLocalSetup, prepareLocalAi, probeLocalSe
 import { useAiModels } from '../lib/ai-models';
 import { mailSetupModels } from '../lib/ai-catalog';
 import Select from '../ui/Select';
+import Button from '../ui/Button';
 
 /**
  * Preparing Ollama and an approved model on this Mac: check the Mac, start
@@ -111,7 +112,12 @@ export function useLocalSetup({ onReady, onBusyChange, applyToMail = true }: { o
   return { probe, model, setModel, stage, stageLabel, bytes, error, setError, ready, setReady, checking, busy, refresh, prepare, cancel: () => operation.current?.abort() };
 }
 
-export default function LocalMailSetup({ onReady, onBusyChange }: { onReady?: () => void | Promise<void>; onBusyChange?: (busy: boolean) => void }) {
+/**
+ * `confirmPrepare`: ask before "Prepare and use for mail", which replaces the
+ * mail processing mode (Settings > Advanced > Local AI). Onboarding passes none
+ * and keeps the plain button.
+ */
+export default function LocalMailSetup({ onReady, onBusyChange, confirmPrepare }: { onReady?: () => void | Promise<void>; onBusyChange?: (busy: boolean) => void; confirmPrepare?: { message: string; label?: string } }) {
   const { text } = useUiLocale();
   // The approved models, sizes and RAM come from ai/models.rs.
   const choices = mailSetupModels(useAiModels());
@@ -126,7 +132,8 @@ export default function LocalMailSetup({ onReady, onBusyChange }: { onReady?: ()
     <div className="setup-actions">
       <button type="button" disabled={busy || checking} onClick={() => void refresh()}>{checking ? text('Checking…', '檢查中…') : text('Check again', '重新檢查')}</button>
       {probe && !probe.ollamaInstalled && !probe.ollamaRunning && <button type="button" disabled={busy} onClick={() => void openUrl('https://ollama.com/download/mac').catch(() => setError(text('Could not open the official download page.', '未能開啟官方下載頁。')))}>{text('Install Ollama', '安裝 Ollama')}</button>}
-      <button type="button" className="setup-primary" disabled={busy || checking || !probe || !model} onClick={() => void prepare()}>{text('Prepare and use for mail', '準備並用於電郵')}</button>
+      {confirmPrepare ? <Button kind="danger" confirm={confirmPrepare} disabled={busy || checking || !probe || !model} onClick={prepare}>{text('Prepare and use for mail', '準備並用於電郵')}</Button>
+        : <button type="button" className="setup-primary" disabled={busy || checking || !probe || !model} onClick={() => void prepare()}>{text('Prepare and use for mail', '準備並用於電郵')}</button>}
       {busy && <button type="button" disabled={stage === 'applying'} onClick={cancel}>{text('Cancel', '取消')}</button>}
     </div>
     {busy && <div role="status" aria-live="polite"><p>{stageLabel}</p>{bytes && <><progress max={bytes.total} value={Math.min(bytes.done, bytes.total)} /><span> {(bytes.done / 1e9).toFixed(2)} / {(bytes.total / 1e9).toFixed(2)} GB</span></>}</div>}

@@ -93,6 +93,11 @@ export async function updateSetting(key: string, value: string): Promise<void> {
 export async function setApiKey(provider: string, value: string): Promise<void> {
   return invoke("set_api_key", { provider, value });
 }
+// Deleting a saved key is its own form of set_api_key: a blank value is
+// refused unless `remove` is set. Works for gemini, claude, openai and typesafe.
+export async function removeApiKey(provider: string): Promise<void> {
+  return invoke("set_api_key", { provider, value: "", remove: true });
+}
 export async function getApiKeyStatus(): Promise<Record<string, boolean>> {
   return invoke("get_api_key_status");
 }

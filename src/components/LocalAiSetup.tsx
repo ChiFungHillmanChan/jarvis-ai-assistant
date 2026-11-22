@@ -28,11 +28,16 @@ interface LocalAiSetupProps {
   onAddToChain: (providerType: string, endpointId?: string, modelId?: string) => void;
 }
 
-type BackendTab = "ollama" | "vllm" | "generic";
+export type BackendTab = "ollama" | "vllm" | "generic";
 
-export default function LocalAiSetup({ endpoints, onEndpointAdded, onModelsLoaded, onAddToChain }: LocalAiSetupProps) {
+/**
+ * The engine setup this panel shows: this Mac's hardware, the chosen
+ * backend's prerequisites, Ollama's recommended models and their download,
+ * and connecting a vLLM or generic server. Shared with Settings > Advanced >
+ * Local AI, which lays the same steps out as rows.
+ */
+export function useLocalEngines({ endpoints, onEndpointAdded, onModelsLoaded }: Omit<LocalAiSetupProps, "onAddToChain">) {
   const { text } = useUiLocale();
-  const [mailSetupBusy, setMailSetupBusy] = useState(false);
   const [system, setSystem] = useState<SystemCompatibility | null>(null);
   const [tab, setTab] = useState<BackendTab>("ollama");
   const [checks, setChecks] = useState<PrerequisiteCheck[]>([]);
@@ -141,6 +146,20 @@ export default function LocalAiSetup({ endpoints, onEndpointAdded, onModelsLoade
     : system?.gpu.has_cuda
     ? `NVIDIA (CUDA ${system.gpu.cuda_version || ""})`
     : text("No GPU acceleration", "未提供 GPU 加速");
+
+  return {
+    system, gpuLabel, tab, setTab, checks, checkingPrereqs, refreshPrereqs: handleRefreshPrereqs, models, pulling, pull: handlePull,
+    vllmUrl, setVllmUrl, genericUrl, setGenericUrl, connect: handleConnect, connectBusy, error,
+  };
+}
+
+export default function LocalAiSetup({ endpoints, onEndpointAdded, onModelsLoaded, onAddToChain }: LocalAiSetupProps) {
+  const { text } = useUiLocale();
+  const [mailSetupBusy, setMailSetupBusy] = useState(false);
+  const {
+    system, gpuLabel, tab, setTab, checks, checkingPrereqs, refreshPrereqs: handleRefreshPrereqs, models, pulling, pull: handlePull,
+    vllmUrl, setVllmUrl, genericUrl, setGenericUrl, connect: handleConnect, connectBusy, error,
+  } = useLocalEngines({ endpoints, onEndpointAdded, onModelsLoaded });
 
   return (
     <div className="panel" style={styles.panel}>
