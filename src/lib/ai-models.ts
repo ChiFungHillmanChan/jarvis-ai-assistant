@@ -9,7 +9,8 @@ import { listen } from '@tauri-apps/api/event';
  * frontend.
  */
 /** `whisper` is the on-device speech model; its file is `<id>.bin`. */
-export interface AiModelDefaults { openai: string; claude: string; gemini_flash: string; gemini_pro: string; bedrock: string; whisper: string }
+/** `gemini_mail_sort` is what Gemini sorts mail with when no model is picked. */
+export interface AiModelDefaults { openai: string; claude: string; gemini_flash: string; gemini_pro: string; gemini_mail_sort: string; bedrock: string; whisper: string }
 /** US$ per 1M tokens. */
 export interface ModelPrice { input_per_million: number; output_per_million: number; cache_read_per_million: number; cache_write_per_million: number }
 /** `active` models are offered as choices; the others stay listed so their usage is still priced. */

@@ -312,6 +312,8 @@ pub struct Defaults {
     pub claude: String,
     pub gemini_flash: String,
     pub gemini_pro: String,
+    /// What Gemini sorts mail with when no model is picked (Settings > Your AI).
+    pub gemini_mail_sort: String,
     pub bedrock: String,
     /// The on-device speech model; its file is `<id>.bin` (voice/model_manager.rs).
     pub whisper: String,
@@ -398,6 +400,7 @@ pub fn ai_models() -> Catalog {
             claude: registry.default_model("chat", "claude"),
             gemini_flash: registry.default_model("chat", "gemini"),
             gemini_pro: registry.default_model("premium", "gemini"),
+            gemini_mail_sort: registry.default_model("mail_sort", "gemini"),
             bedrock: registry.default_model("chat", "bedrock"),
             whisper: registry.default_model("stt", "whisper"),
         },
@@ -464,6 +467,18 @@ mod tests {
         let catalog = ai_models();
         assert_eq!(catalog.defaults.openai, "gpt-5.6-luna");
         assert!(catalog.cloud.iter().any(|m| m.id == "gpt-5.6-luna" && m.label == "Renamed"));
+    }
+
+    /// Settings > Your AI preselects Gemini's mail sort default, which the
+    /// catalog reads from the registry's mail_sort feature, not chat's.
+    #[test]
+    fn the_catalog_carries_the_gemini_mail_sort_default() {
+        let _registry = registry::test_override::with(|r| {
+            r.features.get_mut("mail_sort").unwrap().insert("gemini".into(), "gemini-3.6-flash".into());
+        });
+        let catalog = ai_models();
+        assert_eq!(catalog.defaults.gemini_mail_sort, "gemini-3.6-flash");
+        assert_eq!(catalog.defaults.gemini_flash, registry::current().default_model("chat", "gemini"));
     }
 
     /// What the frontend lists (presets, setup, compatible services and the
