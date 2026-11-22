@@ -37,7 +37,8 @@ impl TtsRouter {
         if req.mode == TtsMode::Ack {
             let voice = match req.language.as_str() {
                 "yue" => read("tts_voice_yue"),
-                _     => read("tts_voice_en"),
+                // The old Settings page saved the English voice as `tts_voice` only.
+                _     => Some(read("tts_voice_en")).filter(|v| !v.is_empty()).unwrap_or_else(|| read("tts_voice")),
             };
             let voice = if voice.is_empty() { "Samantha".into() } else { voice };
             return Ok(TtsProvider::MacSay { voice });
@@ -118,6 +119,23 @@ mod tests {
             text: "Done".into(), mode: TtsMode::Ack, language: "en".into(),
         }).unwrap();
         assert_eq!(p, TtsProvider::MacSay { voice: "Samantha".into() });
+    }
+
+    /// The old Settings page saved the English voice as `tts_voice` only, so
+    /// it is the fallback when `tts_voice_en` is empty.
+    #[test]
+    fn ack_voice_falls_back_to_tts_voice() {
+        let conn = Connection::open_in_memory().expect("open in-memory db");
+        conn.execute_batch(
+            "CREATE TABLE user_preferences (key TEXT PRIMARY KEY, value TEXT NOT NULL);
+             INSERT INTO user_preferences (key, value) VALUES ('tts_voice', 'Daniel');"
+        ).expect("seed prefs");
+        let db = Arc::new(Database { conn: Mutex::new(conn) });
+        let ack = TtsRequest { text: "Done".into(), mode: TtsMode::Ack, language: "en".into() };
+        let r = TtsRouter::new(db.clone());
+        assert_eq!(r.select_provider(&ack).unwrap(), TtsProvider::MacSay { voice: "Daniel".into() });
+        db.conn.lock().unwrap().execute("INSERT INTO user_preferences (key, value) VALUES ('tts_voice_en', 'Karen')", []).unwrap();
+        assert_eq!(r.select_provider(&ack).unwrap(), TtsProvider::MacSay { voice: "Karen".into() });
     }
 
     /// Content is spoken by a cloud voice only when the registry marks its
