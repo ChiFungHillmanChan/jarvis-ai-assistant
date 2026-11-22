@@ -174,8 +174,19 @@ test('the wallpaper row says how to bring JARVIS back', () => {
 // Final review I2: spec 6.3 lists sign out among the controls that ask first.
 test('Sign out asks first, and the question says what it clears and keeps', () => {
   const panel = source('../src/components/AccountPanel.tsx');
-  assert.match(panel, /const signOut = async \(\) => \{\s*if \(!\(await confirmAction\(t\("signOutConfirm"\), t\("signOut"\)\)\)\) return;\s*await endSession\(\);\s*\};/);
+  // One shared question, used by both places that sign out.
+  const confirm = source('../src/components/ConfirmDialog.tsx');
+  assert.match(confirm, /export function confirmSignOut\(t: \(key: MessageKey\) => string\): Promise<boolean> \{\s*return confirmAction\(t\('signOutConfirm'\), t\('signOut'\)\);\s*\}/);
+  assert.match(panel, /const signOut = async \(\) => \{\s*if \(!\(await confirmSignOut\(t\)\)\) return;\s*await endSession\(\);\s*\};/);
   assert.match(panel, /onClick=\{\(\) => void signOut\(\)\}>\{t\("signOut"\)\}/);
+  // The sidebar account menu asks the same question before it signs out.
+  const sidebar = source('../src/components/SidebarAccount.tsx');
+  const asks = sidebar.indexOf('if (signedIn && !(await confirmSignOut(t))) return;');
+  assert.ok(asks > 0, 'the sidebar menu asks first');
+  assert.ok(asks < sidebar.indexOf('if (signedIn) await accountSignOut();'), 'before it signs out');
+  // No other copy of the question or of a sign-out without it.
+  const callers = ['components/AccountPanel.tsx', 'components/SidebarAccount.tsx', 'components/PaywallGate.tsx'].filter(f => source(`../src/${f}`).includes('signOutConfirm'));
+  assert.deepEqual(callers, [], 'the text lives only in confirmSignOut');
   const catalog = source('../src/i18n/catalog.ts');
   // account_sign_out removes the refresh token and cached plan, then opens the
   // hosted logout page (auth/cognito.rs sign_out); AI keys, mail and chats stay.

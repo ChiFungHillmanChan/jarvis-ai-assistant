@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState } from 'react';
-import { useUiLocale } from '../i18n';
+import { useUiLocale, type MessageKey } from '../i18n';
 
 interface ConfirmRequest {
   message: string;
@@ -19,6 +19,17 @@ export function confirmAction(message: string, confirmLabel?: string): Promise<b
     if (!openConfirm) { resolve(false); return; }
     openConfirm({ message, confirmLabel, resolve });
   });
+}
+
+/**
+ * Spec 6.3: sign out asks first, wherever it is offered (Settings > General's
+ * account panel and the sidebar account menu), with one question. Sign out
+ * ends the account session (the refresh token and cached plan in the
+ * Keychain) and opens the browser logout page; nothing else on this Mac is
+ * removed, which is what the question says.
+ */
+export function confirmSignOut(t: (key: MessageKey) => string): Promise<boolean> {
+  return confirmAction(t('signOutConfirm'), t('signOut'));
 }
 
 export default function ConfirmDialog() {
