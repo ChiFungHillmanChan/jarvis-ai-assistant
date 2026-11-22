@@ -1,6 +1,7 @@
 import { memo, useState } from "react";
 import { useTauriCommand } from "../hooks/useTauriCommand";
 import { useUiLocale } from "../i18n";
+import Select from "../ui/Select";
 import {
   GROUP_BYS, PERIODS, emptyPeriodLine, expensiveHeading, expensiveRequests, formatUsd, groupByLabel, groupColumnLabel,
   groupRows, historyLine, perDayLine, periodLabel, tokenFigures, unpricedNote, usageHeadline,
@@ -27,20 +28,10 @@ export default memo(function CostPanel() {
 
   const controls = (
     <div style={styles.controls}>
-      <label style={styles.control}>
-        <span style={styles.controlLabel}>{text("Period", "期間")}</span>
-        <select style={styles.select} aria-label={text("Period", "期間")} value={String(days)}
-          onChange={(e) => setDays(Number(e.target.value) as PeriodDays)}>
-          {PERIODS.map((period) => <option key={period} value={String(period)}>{periodLabel(period, text)}</option>)}
-        </select>
-      </label>
-      <label style={styles.control}>
-        <span style={styles.controlLabel}>{text("Group by", "分組方式")}</span>
-        <select style={styles.select} aria-label={text("Group by", "分組方式")} value={groupBy}
-          onChange={(e) => setGroupBy(e.target.value as GroupBy)}>
-          {GROUP_BYS.map((by) => <option key={by} value={by}>{groupByLabel(by, text)}</option>)}
-        </select>
-      </label>
+      <Select label={text("Period", "期間")} showLabel value={String(days)} onChange={(v) => setDays(Number(v) as PeriodDays)}
+        options={PERIODS.map((period) => ({ value: String(period), label: periodLabel(period, text) }))} />
+      <Select label={text("Group by", "分組方式")} showLabel value={groupBy} onChange={(v) => setGroupBy(v as GroupBy)}
+        options={GROUP_BYS.map((by) => ({ value: by, label: groupByLabel(by, text) }))} />
     </div>
   );
   const history = data && <div style={styles.note}>{historyLine(data.per_request_days, text)}</div>;
@@ -154,9 +145,6 @@ const styles: Record<string, React.CSSProperties> = {
     color: "var(--text-primary)",
   },
   controls: { display: "flex", flexWrap: "wrap", gap: 16, marginBottom: 14 },
-  control: { display: "flex", flexDirection: "column", gap: 4 },
-  controlLabel: { fontSize: 12, color: "var(--text-secondary)" },
-  select: { maxWidth: "100%", background: "var(--bg-primary)", border: "1px solid var(--border-primary)", borderRadius: 6, padding: "8px 10px", color: "var(--text-primary)", fontSize: 13, fontFamily: "inherit" },
   subheader: { fontSize: 12, color: "var(--text-secondary)", marginTop: 16, marginBottom: 6 },
   note: { fontSize: 12, color: "var(--text-secondary)", marginTop: 10, lineHeight: 1.5 },
   kpiRow: { display: "flex", flexWrap: "wrap", gap: 20 },

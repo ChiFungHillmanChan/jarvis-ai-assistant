@@ -1,6 +1,7 @@
-import { Fragment, useEffect, useId, useReducer, type CSSProperties } from "react";
+import { useEffect, useId, useReducer, type CSSProperties } from "react";
 import { useUiLocale } from "../i18n";
-import { OTHER_MODEL, formPickerOptions, formRegionNote, groupLabel, groupedOptions, initialPicker, listStatus, otherIdHelp, pickerOptions, pickerReducer, selectValue, type BedrockListState, type PickerPlace } from "../lib/bedrock-models";
+import Select from "../ui/Select";
+import { OTHER_MODEL, formPickerOptions, formRegionNote, groupLabel, initialPicker, listStatus, otherIdHelp, pickerOptions, pickerReducer, selectValue, type BedrockListState, type PickerPlace } from "../lib/bedrock-models";
 
 /** Each place keeps its own look: Settings its classes and inline styles, the forms theirs. */
 const LOOK: Record<PickerPlace, { field: string; help: string }> = {
@@ -88,16 +89,8 @@ export default function BedrockModelPicker(props: Props) {
   }
   return (
     <div className={LOOK[place].field}>
-      <label>
-        <span>{text("Bedrock model", "Bedrock 模型")}</span>
-        <select value={selectValue(state, saved)} disabled={busy} aria-describedby={statusId} onChange={(e) => choose(e.target.value)} required={form} style={look?.select}>
-          {groupedOptions(options).map((run, index) => {
-            const heading = groupLabel(run.group, text);
-            const items = run.options.map((option) => <option key={option.value} value={option.value} disabled={option.disabled}>{option.label}</option>);
-            return heading ? <optgroup key={index} label={heading}>{items}</optgroup> : <Fragment key={index}>{items}</Fragment>;
-          })}
-        </select>
-      </label>
+      <Select label={text("Bedrock model", "Bedrock 模型")} showLabel value={selectValue(state, saved)} disabled={busy} describedBy={statusId} onChange={choose} required={form}
+        options={options.map((option) => ({ value: option.value, label: option.label, disabled: option.disabled, group: groupLabel(option.group, text) ?? undefined }))} />
       <button type="button" disabled={listState.status === "loading" || busy} onClick={onReload} style={look?.button}>
         {listState.status === "idle" ? text("Load the list", "載入清單") : text("Load the list again", "重新載入清單")}
       </button>

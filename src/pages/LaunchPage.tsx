@@ -1,6 +1,7 @@
 import { useEffect, useMemo, useState } from "react";
 import { getLaunchReadiness, saveBetaTester, submitBetaFeedback } from "../lib/commands";
 import type { LaunchReadiness } from "../lib/types";
+import Select from "../ui/Select";
 
 export default function LaunchPage() {
   const [readiness, setReadiness] = useState<LaunchReadiness | null>(null);
@@ -127,12 +128,8 @@ export default function LaunchPage() {
           <form onSubmit={handleBetaSubmit} style={styles.form}>
             <input value={name} onChange={(e) => setName(e.target.value)} placeholder="Name" style={styles.input} />
             <input value={email} onChange={(e) => setEmail(e.target.value)} placeholder="Email" style={styles.input} />
-            <select value={segment} onChange={(e) => setSegment(e.target.value)} style={styles.input}>
-              <option>Founder</option>
-              <option>Operator</option>
-              <option>Developer</option>
-              <option>Team lead</option>
-            </select>
+            <Select label="Segment" value={segment} onChange={setSegment}
+              options={["Founder", "Operator", "Developer", "Team lead"].map((value) => ({ value, label: value }))} />
             <textarea value={useCase} onChange={(e) => setUseCase(e.target.value)} placeholder="What should JARVIS save time on first?" rows={4} style={styles.textarea} />
             <button type="submit" style={styles.actionBtn}>SAVE BETA TESTER</button>
           </form>
@@ -141,12 +138,8 @@ export default function LaunchPage() {
         <section className="panel" style={styles.panel}>
           <div className="label" style={styles.sectionTitle}>TEST FEEDBACK</div>
           <form onSubmit={handleFeedbackSubmit} style={styles.form}>
-            <select value={category} onChange={(e) => setCategory(e.target.value)} style={styles.input}>
-              <option value="activation">Activation</option>
-              <option value="aws">AWS setup</option>
-              <option value="workflow">Workflow reliability</option>
-              <option value="pricing">Pricing</option>
-            </select>
+            <Select label="Category" value={category} onChange={setCategory}
+              options={[{ value: "activation", label: "Activation" }, { value: "aws", label: "AWS setup" }, { value: "workflow", label: "Workflow reliability" }, { value: "pricing", label: "Pricing" }]} />
             <input type="number" min={1} max={5} value={rating} onChange={(e) => setRating(Number(e.target.value))} style={styles.input} />
             <textarea value={feedback} onChange={(e) => setFeedback(e.target.value)} placeholder="What broke, what saved time, or what would make this worth paying for?" rows={6} style={styles.textarea} />
             <button type="submit" style={styles.actionBtn}>SAVE FEEDBACK</button>

@@ -93,6 +93,7 @@ test('Select is a native select with optgroup, a label and a described-by hint',
   assert.match(s, /groupOptions\(/);
   assert.match(s, /aria-describedby/);
   assert.match(s, /aria-label/);
+  assert.match(s, /required=\{required\}/, 'a required select stays required');
 });
 
 test('Switch is a role=switch button with aria-checked', () => {

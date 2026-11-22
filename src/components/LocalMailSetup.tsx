@@ -8,6 +8,7 @@ import { followJob } from '../lib/setup-flow';
 import { applyTestedMailSettings, cancelLocalSetup, prepareLocalAi, probeLocalSetup, setupError, testMailAiConnection, type LocalSetupProbe, type LocalSetupProgress } from '../lib/setup';
 import { useAiModels } from '../lib/ai-models';
 import { mailSetupModels } from '../lib/ai-catalog';
+import Select from '../ui/Select';
 
 export default function LocalMailSetup({ onReady, onBusyChange }: { onReady?: () => void | Promise<void>; onBusyChange?: (busy: boolean) => void }) {
   const { text } = useUiLocale();
@@ -100,10 +101,8 @@ export default function LocalMailSetup({ onReady, onBusyChange }: { onReady?: ()
     <h3>{text('Local AI, without an API key', '本機 AI，無須 API 密鑰')}</h3>
     <p>{text('Prepare Ollama, download a model, test it, then use it for mail. First installation needs your confirmation. Existing mail settings change only after a successful test.', '準備 Ollama、下載模型並完成測試後，即可套用至電郵工作區。首次安裝需要確認；只有測試成功後才會變更現有電郵設定。')}</p>
     {probe && <p>{probe.os} {probe.macosVersion} · {probe.totalRamGb.toFixed(0)} GB RAM · {probe.availableDiskGb === null ? text('Free disk unknown', '未能取得磁碟餘額') : `${probe.availableDiskGb.toFixed(1)} GB ${text('free disk', '磁碟餘額')}`}</p>}
-    <label>{text('Model to download', '要下載的模型')}<select value={model} disabled={busy} onChange={event => { setModel(event.target.value); setReady(false); }}>
-      <option value="">{text('Choose a model', '選擇模型')}</option>
-      {choices.map(item => <option key={item.id} value={item.id} disabled={probe ? probe.totalRamGb < item.min_ram_gb : false}>{item.id} · {item.download_gb} GB · {item.min_ram_gb} GB RAM {text('suggested', '建議')}{probe?.recommendedTag === item.id ? text(' · recommended', ' · 推薦') : ''}</option>)}
-    </select></label>
+    <Select label={text('Model to download', '要下載的模型')} showLabel value={model} disabled={busy} onChange={value => { setModel(value); setReady(false); }}
+      options={[{ value: '', label: text('Choose a model', '選擇模型') }, ...choices.map(item => ({ value: item.id, label: `${item.id} · ${item.download_gb} GB · ${item.min_ram_gb} GB RAM ${text('suggested', '建議')}${probe?.recommendedTag === item.id ? text(' · recommended', ' · 推薦') : ''}`, disabled: probe ? probe.totalRamGb < item.min_ram_gb : false }))]} />
     <p className="setup-hint">{text('No cloud token fees; disk space, electricity and performance depend on your Mac. Small models may fail mail citation checks. If citations are invalid or content is too long, analysis stops and you can choose another model; mail will not switch to cloud.', '沒有雲端 token 費用；磁碟用量、電費及效能取決於 Mac 規格。小型模型可能無法提供有效的郵件引用。引用或容量檢查失敗時，分析會停止，可另選模型；系統不會自動轉用雲端。')}</p>
     <div className="setup-actions">
       <button type="button" disabled={busy || checking} onClick={() => void refresh()}>{checking ? text('Checking…', '檢查中…') : text('Check again', '重新檢查')}</button>

@@ -13,9 +13,10 @@ interface SelectProps<V extends string> {
   width?: number | string;
   id?: string;
   describedBy?: string;
+  required?: boolean;
 }
 
-export default function Select<V extends string>({ value, options, onChange, label, showLabel, disabled, disabledReason, width, id, describedBy }: SelectProps<V>) {
+export default function Select<V extends string>({ value, options, onChange, label, showLabel, disabled, disabledReason, width, id, describedBy, required }: SelectProps<V>) {
   const generated = useId();
   const selectId = id ?? generated;
   const reasonId = `${selectId}-reason`;
@@ -30,6 +31,7 @@ export default function Select<V extends string>({ value, options, onChange, lab
           className="ui-select"
           value={value}
           disabled={disabled}
+          required={required}
           aria-label={showLabel ? undefined : label}
           aria-describedby={described}
           onChange={e => onChange(e.target.value as V)}
