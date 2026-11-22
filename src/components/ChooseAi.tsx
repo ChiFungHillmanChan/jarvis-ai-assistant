@@ -71,7 +71,7 @@ export function openAiRegionNote(text: Text): string {
 /** The line shown once a choice answered and was saved. */
 export function chosenNotice(chosen: CurrentAi, text: Text): string {
   return text(`${chosen.label} answered. JARVIS now uses only ${chosen.label}.`, `${chosen.label} 已回覆。JARVIS 現在只會使用 ${chosen.label}。`)
-    + (chosen.provider === 'gemini' ? '' : text(' Voice input uses a speech model on this Mac; download it in Settings → Speech.', '語音輸入會使用此 Mac 上的語音模型，可在「設定 → 語音」下載。'));
+    + (chosen.provider === 'gemini' ? '' : text(' Voice input uses a speech model on this Mac; download it in Settings → Voice.', '語音輸入會使用此 Mac 上的語音模型，可在「設定 → 語音」下載。'));
 }
 
 /**

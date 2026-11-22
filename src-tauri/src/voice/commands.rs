@@ -270,6 +270,8 @@ pub fn get_voice_settings(db: State<Arc<Database>>) -> Result<VoiceSettings, Str
     Ok(VoiceSettings {
         enabled: get("voice_enabled", "true") == "true",
         tts_voice: get("tts_voice", "Samantha"),
+        // The same default as TextToSpeech::from_db, which speaks with it.
+        tts_voice_yue: get("tts_voice_yue", "Sinji"),
         tts_rate: get("tts_rate", "200").parse().unwrap_or(200),
         tts_enabled: get("tts_enabled", "true") == "true",
         keep_recordings: get(super::recordings::KEEP_PREFERENCE, "true") != "false",
@@ -329,6 +331,7 @@ pub async fn list_tts_voices() -> Result<Vec<String>, String> {
 pub struct VoiceSettings {
     pub enabled: bool,
     pub tts_voice: String,
+    pub tts_voice_yue: String,
     pub tts_rate: u32,
     pub tts_enabled: bool,
     pub keep_recordings: bool,

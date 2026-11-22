@@ -12,6 +12,10 @@ import { searchRows } from './search';
 import LegacySection from './LegacySection';
 import General from './sections/General';
 import YourAi from './sections/YourAi';
+import Usage from './sections/Usage';
+import Mail from './sections/Mail';
+import Briefing from './sections/Briefing';
+import Voice from './sections/Voice';
 import Connections from './sections/Connections';
 import Privacy from './sections/Privacy';
 import SetupGuide from './sections/SetupGuide';
@@ -19,6 +23,8 @@ import About from './sections/About';
 import Models from './sections/advanced/Models';
 import CloudProviders from './sections/advanced/CloudProviders';
 import LocalAi from './sections/advanced/LocalAi';
+import Integrations from './sections/advanced/Integrations';
+import Developer from './sections/advanced/Developer';
 import { isBackdropClick } from './settings-dialog-state';
 import './settings.css';
 
@@ -27,6 +33,10 @@ import './settings.css';
 const SECTION_VIEWS: Partial<Record<SettingsSectionId, ComponentType>> = {
   general: General,
   ai: YourAi,
+  usage: Usage,
+  mail: Mail,
+  briefing: Briefing,
+  voice: Voice,
   connections: Connections,
   privacy: Privacy,
   setup: SetupGuide,
@@ -34,6 +44,8 @@ const SECTION_VIEWS: Partial<Record<SettingsSectionId, ComponentType>> = {
   'advanced-models': Models,
   'advanced-cloud': CloudProviders,
   'advanced-local': LocalAi,
+  'advanced-integrations': Integrations,
+  'advanced-developer': Developer,
 };
 
 export default function SettingsDialog() {

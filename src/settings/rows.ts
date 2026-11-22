@@ -59,9 +59,9 @@ export const ROWS: RowMeta[] = [
 
   // Usage
   row('usage-period', 'usage', ['Period', '期間'], ['30 days, 90 days or 1 year.', '30 日、90 日或 1 年。'], ['range', 'days', 'history']),
-  row('usage-spent', 'usage', ['Spent', '已花費'], ['US$, with HK$ beside it.', '美元，旁附港元。'], ['cost', 'money', 'price', 'bill', 'hkd']),
-  row('usage-mail-requests', 'usage', ['AI requests for mail', '郵件的 AI 請求'], undefined, ['mail sorting', 'triage', 'count']),
-  row('usage-chat-requests', 'usage', ['AI requests in chat', '對話中的 AI 請求'], undefined, ['chat', 'voice', 'tools', 'count']),
+  row('usage-spent', 'usage', ['Spent', '已花費'], ['HK$ at 7.8 per US$, with US$ beside it.', '港元（按 1 美元兌 7.8 港元），旁附美元。'], ['cost', 'money', 'price', 'bill', 'hkd']),
+  row('usage-mail-requests', 'usage', ['AI requests for mail', '郵件 AI 請求'], undefined, ['mail sorting', 'triage', 'count']),
+  row('usage-chat-requests', 'usage', ['AI requests in chat', '對話 AI 請求'], undefined, ['chat', 'voice', 'tools', 'count']),
   row('usage-daily', 'usage', ['Cost per day', '每日費用'], undefined, ['chart', 'daily', 'bar']),
   row('usage-breakdown', 'usage', ['Where it went', '費用去向'], ['Cost by feature.', '按功能劃分的費用。'], ['feature', 'chart', 'group by']),
   row('usage-unpriced', 'usage', ['Requests with no price', '沒有價格的請求'], ['Counted, but not added to the money total.', '會計入數量，但不計入總費用。'], ['unpriced', 'free', 'local']),
@@ -156,7 +156,7 @@ export const ROWS: RowMeta[] = [
   row('github-client-id', 'advanced-integrations', ['GitHub OAuth Client ID', 'GitHub OAuth Client ID'], ['Register a GitHub application, then save its Client ID.', '註冊 GitHub 應用程式後，儲存其 Client ID。'], ['oauth', 'application', 'register']),
   row('notion-token', 'advanced-integrations', ['Notion integration token', 'Notion 整合權杖'], undefined, ['secret', 'api key', 'notion']),
   row('github-token', 'advanced-integrations', ['GitHub personal access token', 'GitHub 個人存取權杖'], undefined, ['secret', 'pat', 'github']),
-  row('obsidian-key', 'advanced-integrations', ['Obsidian API key', 'Obsidian API 金鑰'], ['From the Local REST API plugin.', '來自 Local REST API 外掛程式。'], ['secret', 'rest api', 'obsidian']),
+  row('obsidian-key', 'advanced-integrations', ['Obsidian API key', 'Obsidian API 密鑰'], ['From the Local REST API plugin.', '來自 Local REST API 外掛程式。'], ['secret', 'rest api', 'obsidian']),
   row('obsidian-endpoint', 'advanced-integrations', ['Obsidian endpoint', 'Obsidian 端點'], ['Saved when you leave the field.', '離開欄位後儲存。'], ['base url', 'address', 'port']),
 
   // Advanced: Developer

@@ -108,7 +108,7 @@ export default function Connections() {
       <IntegrationRow {...row('obsidian')} service="obsidian" />
       <IntegrationRow {...row('github')} service="github" />
       <p className="ui-hint">
-        {text('Tokens, API keys and addresses for these tools are in Advanced.', '這些工具的權杖、API 金鑰及地址位於「進階」。')}{' '}
+        {text('Tokens, API keys and addresses for these tools are in Advanced.', '這些工具的權杖、API 密鑰及地址位於「進階」。')}{' '}
         <Button kind="quiet" onClick={() => openSettings('advanced-integrations')}>{text('Go to Advanced → Integrations', '前往「進階 → 整合」')}</Button>
       </p>
     </SettingGroup>

@@ -7,9 +7,10 @@ import { schedulerText } from "../lib/cron-runs";
 /**
  * Settings > Background: open at login, keep awake on mains power, and the
  * scheduled daily briefing. Every control shows what the backend reports
- * after a change, never just what was clicked.
+ * after a change, never just what was clicked. `show="startup"` leaves out
+ * the briefing, which the settings dialog shows in its own section.
  */
-export default function BackgroundSettings() {
+export default function BackgroundSettings({ show = 'all' }: { show?: 'all' | 'startup' } = {}) {
   const { t, text } = useUiLocale();
   const [openAtLogin, setOpenAtLoginState] = useState<boolean | null>(null);
   const [keepAwake, setKeepAwakeState] = useState<KeepAwakeView | null>(null);
@@ -20,13 +21,13 @@ export default function BackgroundSettings() {
 
   useEffect(() => {
     let current = true;
-    Promise.all([getOpenAtLogin(), getKeepAwake(), getDailyBriefingSettings()])
-      .then(([login, awake, brief]) => { if (current) { setOpenAtLoginState(login); setKeepAwakeState(awake); setBriefing(brief); setTime(brief.time); } })
+    Promise.all([getOpenAtLogin(), getKeepAwake(), show === 'all' ? getDailyBriefingSettings() : null])
+      .then(([login, awake, brief]) => { if (current) { setOpenAtLoginState(login); setKeepAwakeState(awake); if (brief) { setBriefing(brief); setTime(brief.time); } } })
       .catch(e => { if (current) setError(String(e)); });
     // "In effect now" follows the power cable, so it is re-read while the page is open.
     const timer = setInterval(() => { if (!document.hidden) void getKeepAwake().then(view => { if (current) setKeepAwakeState(view); }).catch(() => {}); }, 5000);
     return () => { current = false; clearInterval(timer); };
-  }, []);
+  }, [show]);
 
   async function change<T>(action: () => Promise<T>, apply: (value: T) => void) {
     if (busy) return;
@@ -62,7 +63,7 @@ export default function BackgroundSettings() {
       {keepAwake?.enabled && <p role="status" style={styles.hint}>{keepAwake.active ? t("keepAwakeActive") : t("keepAwakeOnBattery")}</p>}
       <p style={styles.hint}>{t("keepAwakeHint")}</p>
     </div>
-    <div className="settings-panel">
+    {show === 'all' && <div className="settings-panel">
       <h2 className="settings-heading">{t("dailyBriefingTitle")}</h2>
       <label style={styles.option}>
         <input type="checkbox" checked={briefing?.enabled ?? false} disabled={!briefing || busy} style={styles.checkbox}
@@ -85,7 +86,7 @@ export default function BackgroundSettings() {
         ? <p role="status" style={styles.hint}>{t("dailyBriefingSpeechOff")}</p>
         : <p style={styles.hint}>{t("dailyBriefingNeedsSpeech")}</p>}
       <p style={styles.hint}>{t("dailyBriefingVoiceHint")}</p>
-    </div>
+    </div>}
   </>;
 }
 

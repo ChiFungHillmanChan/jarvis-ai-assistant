@@ -1,4 +1,4 @@
-import type { MailAnalysis, MailMessage } from './mail';
+import type { MailAnalysis, MailMessage, MailTriageStatus } from './mail';
 import { dateFormat } from './date-format.ts';
 
 export function mailSourceUrl(message: Pick<MailMessage, 'provider_id' | 'account_email'>): string | null {
@@ -61,6 +61,15 @@ export function decodeEntities(value: string): string {
 }
 
 export type Text = (en: string, zh: string) => string;
+/** Which AI sorts the mail, shown on the Mail page and in Settings > Mail and follow-ups. */
+export function sortedByText(triage: Pick<MailTriageStatus, 'typesafe_key' | 'chosen_ai'> | undefined, text: Text): string {
+  const chosenAi = triage?.chosen_ai ?? null;
+  return triage?.typesafe_key
+    ? text(`TypeSafe Jev decides the category and whether it needs you; ${chosenAi ?? "no AI yet"} writes a summary and finds dates only for the emails that need one.`, `TypeSafe Jev 判斷分類及是否需要你處理；只有需要摘要或含日期的郵件，才交由${chosenAi ? ` ${chosenAi} ` : "（尚未選擇 AI）"}撰寫摘要及找出日期。`)
+    : chosenAi
+    ? text(`${chosenAi}, the AI you chose, decides the category, writes a summary and finds dates.`, `由你選擇的 ${chosenAi} 判斷分類、撰寫摘要及找出日期。`)
+    : text("Choose your AI in Settings → Your AI first.", "請先到「設定 → 你的 AI」選擇 AI。");
+}
 export const MAIL_CATEGORIES = ['work', 'jobs', 'finance', 'schedule', 'account', 'personal', 'promotions'] as const;
 export type Category = typeof MAIL_CATEGORIES[number];
 

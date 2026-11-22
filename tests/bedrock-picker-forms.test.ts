@@ -450,17 +450,21 @@ test('a form gets the form options, Settings gets its own', () => {
   assert.match(picker, /const options = props\.place === "settings"\s*\? pickerOptions\(list, props\.saved, fallback, text\)\s*: formPickerOptions\(list, state\.other \? null : props\.value, props\.stored, fallback, text\);/);
 });
 
-// Requirements 4, 5 and 7 in the Mail dialog. Breaks if the list is asked
-// for with the dialog closed or another processing choice, the picker saves
-// by itself, or Save no longer needs a model with Bedrock.
-test('the Mail dialog: asked only while Bedrock is chosen in the open dialog; Save needs a model', () => {
-  const email = source('../src/pages/EmailPage.tsx');
-  assert.match(email, /const tabActive = useIsActiveTab\(\);\s*const bedrockList = useBedrockModelList\(tabActive && editor\?\.type === "settings" && editor\.input\.processing_mode === "bedrock"\);/);
-  assert.match(email, /<BedrockModelPicker place="mail" value=\{editor\.input\.bedrock_model\} stored=\{workspace\?\.settings\.bedrock_model \?\? ""\} fallback=\{models\?\.defaults\.bedrock \?\? ""\} listState=\{bedrockList\.list\} onReload=\{bedrockList\.reload\} onChange=\{model => setEditor\(\{ \.\.\.editor, input: \{ \.\.\.editor\.input, bedrock_model: model \} \}\)\} \/>/);
-  assert.match(email, /\|\| \(editor\.type === "settings" && editor\.input\.processing_mode === "bedrock" && !modelChosen\(editor\.input\.bedrock_model\)\)\}>\{busy \?/);
+// Requirements 4, 5 and 7, moved with the Mail dialog (Task 13): the mail
+// Bedrock picker is in Settings > Advanced > Models, and Settings > Mail and
+// follow-ups keeps the consent box and the Save rule. Breaks if Mail gets its
+// own picker or list request, Save no longer needs a model with Bedrock, or
+// Save stops writing through mailSaveSettings.
+test('the Mail settings: the picker lives in Advanced > Models; Save needs a model with Bedrock', () => {
+  const mailSection = source('../src/settings/sections/Mail.tsx');
+  const hook = source('../src/settings/hooks/useMailSettings.ts');
+  const models = source('../src/settings/sections/advanced/MailModels.tsx');
+  assert.match(models, /<BedrockModelPicker place="mail" /);
+  assert.doesNotMatch(mailSection + hook, /BedrockModelPicker|useBedrockModelList/, 'no second picker in Mail');
+  assert.match(hook, /\(i\.processingMode !== 'bedrock' \|\| modelChosen\(i\.bedrockModel\)\)/);
   // The consent box and the save path are as before.
-  assert.match(email, /<label className="mail-consent"><input type="checkbox" required checked=\{editor\.consent\} onChange=\{e => setEditor\(\{ \.\.\.editor, consent: e\.target\.checked \}\)\} \/>\{text\("I understand that analysis sends the group's emails, instructions and active memories to AWS Bedrock\."/);
-  assert.match(email, /if \(draft\.type === "settings"\) \{\s*await mail\.mailSaveSettings\(draft\.input\);/);
+  assert.match(mailSection, /text\("I understand that analysis sends the group's emails, instructions and active memories to AWS Bedrock\."/);
+  assert.match(hook, /await mailSaveSettings\(next\);/);
 });
 
 // Requirements 4, 5, 7 and 8 in the setup guide. Breaks if the list is

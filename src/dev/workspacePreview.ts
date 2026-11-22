@@ -24,7 +24,8 @@ export function installWorkspacePreview() {
   ];
   const messages = samples.map(([subject, sender, category, summary, importance, attention, due], index) => ({ id: index + 1, account_id: 'sample-account', account_email: 'alex@example.com', provider_id: `sample${index}`, thread_id: null, subject, sender, snippet: 'Here are the details for our next review. Please check the timeline and proposed next steps.', body: `Hi Alex,\n\nHere are the details for our next review. The proposal is ready for your feedback.\n\nCould we review the timeline on Friday?\n\nThanks,\nSam`, is_read: index > 2, is_inbox: true, received_at: new Date(now.getTime() - index * 5 * 3600_000).toISOString(), attachments: index === 0 ? [{ filename: 'Review timeline.pdf', mime_type: 'application/pdf', size: 184320 }] : index === 1 ? [] : null, next_due: due, triage: { category, category_confidence: index === 3 ? 0.42 : 0.86, needs_reply: attention ? 0.9 : 0.05, action_required: attention ? 0.85 : 0.2, has_date: due ? 0.9 : 0.1, importance, sent_by_owner: false, attention, summary: summary || null, decided_by: index === 3 ? 'luna' : 'jev' } }));
   let mailItems = samples.flatMap(([subject, sender, , , , , due, evidence], index) => evidence ? [{ id: index + 1, message_id: index + 1, kind: index === 1 || index === 7 ? 'reply' : index === 4 ? 'event' : index === 2 ? 'event' : 'deadline', title: index === 0 ? '確認檢討時間表' : index === 1 ? '回覆報價' : index === 2 ? '產品工程師面試' : index === 4 ? '乘火車前往 Manchester' : '回覆媽媽', due_date: due, due_time: index === 2 ? '15:00' : index === 4 ? '12:15' : null, end_time: index === 2 ? '15:45' : null, location: null, evidence, evidence_verified: index !== 2, status: 'open', remind_at: null as string | null, reminded_at: null, calendar_event_id: null as string | null, subject, sender }] : []);
-  const triageStatus = () => ({ enabled: true, typesafe_key: true, openai_key: true, chosen_ai: "OpenAI", untriaged: 3, attention: messages.filter(m => m.triage.attention).length, open_items: mailItems.filter(i => i.status === 'open').length, categories: ['work', 'jobs', 'finance', 'schedule', 'account', 'personal', 'promotions'].map(c => [c, messages.filter(m => m.triage.category === c).length]) });
+  let triageEnabled = true;
+  const triageStatus = () => ({ enabled: triageEnabled, typesafe_key: true, openai_key: true, chosen_ai: "OpenAI", untriaged: 3, attention: messages.filter(m => m.triage.attention).length, open_items: mailItems.filter(i => i.status === 'open').length, categories: ['work', 'jobs', 'finance', 'schedule', 'account', 'personal', 'promotions'].map(c => [c, messages.filter(m => m.triage.category === c).length]) });
   let tasks = [['Reply to the proposal', -1], ['Send the review notes', 0], ['Confirm Friday planning', 2], ['Quarterly review', 10]].map(([title, days], index) => ({ id: index + 1, title: title as string, description: null, deadline: shift(days as number), priority: 1, status: 'pending', source: 'manual', created_at: null }));
   const events = [{ id: 1, google_id: 'sample-event', summary: 'Customer onboarding review', description: 'Review the rollout plan and answer open questions.', location: 'Meeting room 2', start_time: day + 'T14:00:00Z', end_time: day + 'T14:45:00Z', attendees: '', status: 'confirmed', account: null }];
   // A realistic week around today for the Calendar views: overlaps, all-day, multi-day and cross-midnight.
@@ -41,6 +42,9 @@ export function installWorkspacePreview() {
   const jobs = [{ id: 1, name: 'Morning briefing', schedule: '0 0 9 * * MON-FRI', action_type: 'briefing', status: 'active', last_run: day + ' 09:00:00', next_run: null, description: 'Review my calendar every weekday at 9 am.' }, { id: 2, name: 'Weekly project review', schedule: '0 0 16 * * FRI', action_type: 'summary', status: 'paused', last_run: null, next_run: null, description: 'Summarize project progress on Friday.' }];
   const runs = [{ id: 1, job_id: 1, started_at: day + ' 09:00:00', finished_at: day + ' 09:00:12', status: 'success', result: 'Your calendar has one customer review today.\n\nPrepare the rollout plan before the meeting.', error: null }];
   let wakeOn = false;
+  // Settings > Voice (Task 14). Nothing is spoken or downloaded.
+  const voiceSettings: Record<string, unknown> = { enabled: true, tts_voice: 'Samantha', tts_voice_yue: 'Sinji', tts_rate: 200, tts_enabled: true, keep_recordings: true };
+  const voiceFields: Record<string, string> = { tts_voice: 'tts_voice', tts_voice_yue: 'tts_voice_yue', tts_enabled: 'tts_enabled', keep_voice_recordings: 'keep_recordings' };
   let openAtLogin = false, keepAwake = false;
   let briefing = { enabled: false, time: '08:30', voice: true, speech_enabled: false };
   // Settings > Connections, Privacy and data, Setup guide and About (Task 7).
@@ -55,7 +59,7 @@ export function installWorkspacePreview() {
   const sampleModel = (provider: string, id: string, label: string, input: number, output: number) => ({ provider, id, label, family: false, status: 'active', max_output_tokens: null, price: { input_per_million: input, output_per_million: output, cache_read_per_million: 0, cache_write_per_million: 0 } });
   const sampleSetup = (id: string, en: string, model: string, keyPage: string | null) => ({ id, name: { en, 'zh-HK': en }, hint: { en: `Sample ${en} hint.`, 'zh-HK': `${en} 示範說明。` }, key_page: keyPage, model });
   const catalog = {
-    defaults: { openai: 'sample-luna', claude: 'sample-haiku', gemini_flash: 'sample-flash', gemini_pro: '', gemini_mail_sort: 'sample-lite', bedrock: '', whisper: '' },
+    defaults: { openai: 'sample-luna', claude: 'sample-haiku', gemini_flash: 'sample-flash', gemini_pro: '', gemini_mail_sort: 'sample-lite', bedrock: '', whisper: 'sample-whisper' },
     cloud: [sampleModel('gemini', 'sample-lite', 'Gemini Flash-Lite (sample)', 0.25, 1.5), sampleModel('gemini', 'sample-flash', 'Gemini Flash (sample)', 0.75, 3.75), sampleModel('gemini', 'sample-smart', 'Gemini Smart (sample)', 1.5, 7.5), sampleModel('gemini', 'sample-pro', 'Gemini Pro (sample)', 2, 12), sampleModel('openai', 'sample-luna', 'GPT Luna (sample)', 0.1, 0.5), sampleModel('claude', 'sample-haiku', 'Claude Haiku (sample)', 0.1, 0.5)],
     local: [], registry: { version: 7, issued_at: day + 'T00:00:00Z', source: 'bundled' }, registry_updates: false, app_version: '0.5.13 (preview)',
     presets: [{ id: 'sample_primary', label: { en: 'Gemini (sample preset)', 'zh-HK': 'Gemini（示範預設）' } }, { id: 'sample_local', label: { en: 'Local first (sample preset)', 'zh-HK': '本機優先（示範預設）' } }], default_preset: 'sample_primary',
@@ -71,6 +75,27 @@ export function installWorkspacePreview() {
   const keyStatus: Record<string, boolean> = { gemini: false, claude: true, openai: true };
   let aws: { configured: boolean; region: string | null } = { configured: true, region: 'ap-southeast-1' };
   let currentAiValue: { provider: string; label: string; model: string | null; base_url: string | null } = { provider: 'openai', label: 'OpenAI', model: null, base_url: null };
+  // Settings > Usage (Task 12). Sample figures; add &usage-empty to the URL for the empty state.
+  const usageEmpty = new URLSearchParams(location.search).has('usage-empty');
+  const featureSplit: [string, number, number][] = [['mail_sort', 0.55, 0.62], ['chat', 0.22, 0.2], ['tools', 0.06, 0.09], ['briefing', 0.1, 0.06], ['mail_analysis', 0.07, 0.03]];
+  const usageGroup = (key: string, provider: string | null, requests: number, usd: number, unpriced = 0) => ({ key, provider, requests, input_tokens: requests * 1650, output_tokens: requests * 210, cache_read_tokens: 0, cache_write_tokens: 0, usd_cost: usd, price_unknown_requests: unpriced, speech_characters: 0, from_day: null as string | null });
+  const usageTotals = (days: number) => {
+    // Newest first, as the backend returns the time grouping; a few days have no usage.
+    const list = usageEmpty ? [] : Array.from({ length: days }, (_, i) => ({ i, key: new Date(now.getTime() - i * 86_400_000).toISOString().slice(0, 10), requests: 18 + (i * 13) % 17, usd: Math.round((0.03 + ((i * 7) % 11) * 0.011) * 10_000) / 10_000 })).filter(d => d.i % 9 !== 4);
+    return { list, requests: list.reduce((s, d) => s + d.requests, 0), usd: list.reduce((s, d) => s + d.usd, 0), unpriced: list.length ? 3 : 0 };
+  };
+  const usageGroups = (days: number, by: string) => {
+    const { list, requests, usd, unpriced } = usageTotals(days);
+    if (!list.length) return [];
+    if (by === 'time') {
+      const keyed = new Map<string, { r: number; u: number; x: number }>();
+      list.forEach((d, n) => { const k = days > 90 ? d.key.slice(0, 7) : d.key; const m = keyed.get(k) ?? { r: 0, u: 0, x: 0 }; m.r += d.requests + (n ? 0 : unpriced); m.u += d.usd; m.x += n ? 0 : unpriced; keyed.set(k, m); });
+      return [...keyed].map(([k, m]) => usageGroup(k, null, m.r, m.u, m.x));
+    }
+    if (by === 'feature') return [...featureSplit.map(([key, r, u]) => usageGroup(key, null, Math.round(requests * r), usd * u)), usageGroup('other', null, unpriced, 0, unpriced)];
+    if (by === 'provider') return [usageGroup('openai', null, requests, usd), usageGroup('unknown', null, unpriced, 0, unpriced)];
+    return [usageGroup('sample-luna', 'openai', requests, usd), usageGroup('sample-unpriced', 'compat:Sample service', unpriced, 0, unpriced)];
+  };
   mockIPC(async (command, raw) => {
     const args = (raw || {}) as Record<string, any>;
     if (command.startsWith('plugin:')) return null;
@@ -138,6 +163,7 @@ export function installWorkspacePreview() {
       case 'clear_aws_credentials': throw 'Preview: the sample AWS key is not removed.';
       case 'list_bedrock_models': return { source: 'fallback', region: aws.region, reason: 'no_credentials', missing_permissions: [], default_model: { id: 'sample-bedrock', name: 'Sample Bedrock model' }, models: [] };
       case 'mail_save_settings': Object.assign(mailSettings, args.input); return null;
+      case 'mail_set_auto_triage': triageEnabled = args.enabled; return null;
       case 'add_local_endpoint': { const ep = { ...endpoints[0], id: `sample-${endpoints.length + 1}`, name: args.name, url: args.url, backend_type: args.backendType ?? 'generic', last_health_status: false }; endpoints = [...endpoints, ep]; return ep; }
       case 'remove_local_endpoint': endpoints = endpoints.filter(e => e.id !== args.id); return null;
       case 'test_endpoint_connection': return { reachable: true, model_count: 1, latency_ms: 42 };
@@ -152,12 +178,15 @@ export function installWorkspacePreview() {
       case 'get_aws_credentials_status': return { ...aws };
       case 'list_local_endpoints': return endpoints;
       case 'get_provider_chain': return chain;
-      case 'list_tts_voices': return [];
+      case 'list_tts_voices': return ['Daniel', 'Karen', 'Samantha', 'Sinji'];
       case 'get_wake_word_status': return { enabled: wakeOn, running: wakeOn, model_downloaded: true, voice_state: wakeOn ? 'WakeWordListening' : 'Idle' };
       case 'enable_wake_word': case 'disable_wake_word': wakeOn = command === 'enable_wake_word'; void emit('voice-state', wakeOn ? 'WakeWordListening' : 'Idle'); return null;
-      case 'get_voice_settings': return null;
+      case 'get_voice_settings': return { ...voiceSettings };
+      case 'set_voice_setting': { const field = voiceFields[args.key]; if (field) voiceSettings[field] = field === 'tts_enabled' || field === 'keep_recordings' ? args.value === 'true' : args.value; return null; }
+      case 'cloud_speech': return null;
+      case 'download_model': throw 'Preview: the speech model is not downloaded.';
       case 'get_preference': return '';
-      case 'is_model_downloaded': return false;
+      case 'is_model_downloaded': return true;
       case 'stop_speaking': return null;
       case 'google_accounts': return { main: { state: 'connected', name: 'Alex Chan', email: 'alex@example.com', gmail: true, calendar: true }, others: [] };
       case 'current_ai': return currentAiValue;
@@ -169,12 +198,28 @@ export function installWorkspacePreview() {
       case 'list_ai_consents': return consents;
       case 'revoke_ai_consent': consents = consents.filter(c => c.provider !== args.provider); void emit('ai-consent-changed'); return null;
       case 'notion_connection_status': case 'github_connection_status': case 'obsidian_connection_status': return integrations[command.split('_')[0]];
-      case 'notion_disconnect': case 'github_disconnect': case 'obsidian_disconnect': integrations[command.split('_')[0]].status = 'not_connected'; return null;
+      case 'notion_disconnect': case 'github_disconnect': case 'obsidian_disconnect': Object.assign(integrations[command.split('_')[0]], { status: 'not_connected', identity: null, method: null }); return null;
+      // Advanced > Integrations: the preview keeps no token, it only shows the method as saved.
+      // A blank Notion token or Obsidian key removes it, as the backend does; GitHub rejects a blank token.
+      case 'save_notion_token': case 'save_github_token': case 'save_obsidian_key': {
+        const service = command.split('_')[1], value = String(args.token ?? args.key ?? '').trim();
+        if (!value && service === 'github') throw '請輸入有效的 GitHub 存取權杖。';
+        Object.assign(integrations[service], value ? { status: 'configured', identity: null, method: service === 'obsidian' ? 'rest' : 'token', message: null } : { status: 'not_connected', identity: null, method: null, message: null });
+        return null;
+      }
+      case 'github_set_client_id': integrations.github.oauth_ready = true; return null;
       case 'get_storage_usage': return { ...storage };
       case 'set_retention_policy': storage.retentionDays = args.days; storage.retentionEnabled = args.enabled; return null;
       case 'run_storage_sweep': return { mailBodiesCleared: 0, conversationsDeleted: 0, emailsDeleted: 0, usageRowsRolledUp: 0, briefingsDeleted: 0 };
       case 'purge_storage': throw 'Preview: nothing is deleted from sample data.';
       case 'delete_all_data': throw 'Preview: nothing is deleted from sample data.';
+      case 'get_cost_stats': {
+        const { list, requests, usd, unpriced } = usageTotals(args.days);
+        const top = list.slice(0, 3).map((d, i) => ({ ts: Math.floor(now.getTime() / 1000) - d.i * 86_400, provider: 'openai', model_id: 'sample-luna', workload: 'chat', feature: 'tools', input_tokens: 42_000 - i * 9_000, output_tokens: 1_800, cache_read_tokens: 0, cache_write_tokens: 0, usd_cost: 0.0052 - i * 0.001, price_unknown: false, latency_ms: 2_400 }));
+        return { days: args.days, total_requests: requests + unpriced, total_usd: usd, avg_usd_per_request: requests ? usd / requests : 0, local_requests: 0, local_share_pct: 0, price_unknown_requests: unpriced, per_request_days: 30, expensive_days: 30, top_expensive: top };
+      }
+      case 'get_blended_cost': { const { list, usd, unpriced } = usageTotals(args.days); return { total_usd: usd, active_days: list.length, usd_per_active_day: list.length ? usd / list.length : 0, price_unknown_requests: unpriced }; }
+      case 'get_usage_groups': return usageGroups(args.days, args.groupBy);
       case 'ai_models': return catalog;
       default: throw new Error(`Preview: ${command} is not connected to a service.`);
     }

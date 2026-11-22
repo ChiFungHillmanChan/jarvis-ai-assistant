@@ -37,7 +37,7 @@ impl TtsRouter {
         if req.mode == TtsMode::Ack {
             let voice = match req.language.as_str() {
                 "yue" => read("tts_voice_yue"),
-                _     => read("tts_voice_en"),
+                _     => english_voice(&read),
             };
             let voice = if voice.is_empty() { "Samantha".into() } else { voice };
             return Ok(TtsProvider::MacSay { voice });
@@ -56,12 +56,21 @@ impl TtsRouter {
             _ => {
                 let voice = match req.language.as_str() {
                     "yue" => read("tts_voice_yue"),
-                    _     => read("tts_voice_en"),
+                    _     => english_voice(&read),
                 };
                 Ok(TtsProvider::MacSay { voice: if voice.is_empty() { "Samantha".into() } else { voice } })
             }
         }
     }
+}
+
+/// The English voice: `tts_voice` first, because the old Settings page
+/// saved the chosen voice only there, while V14 seeds `tts_voice_en` with
+/// Samantha for everyone; then `tts_voice_en`. Empty means the caller's
+/// default. Settings > Voice writes both keys with the same value.
+fn english_voice(read: &dyn Fn(&str) -> String) -> String {
+    let voice = read("tts_voice");
+    if voice.is_empty() { read("tts_voice_en") } else { voice }
 }
 
 /// Whether the registry marks `provider`'s data terms safe now. A provider
@@ -118,6 +127,39 @@ mod tests {
             text: "Done".into(), mode: TtsMode::Ack, language: "en".into(),
         }).unwrap();
         assert_eq!(p, TtsProvider::MacSay { voice: "Samantha".into() });
+    }
+
+    fn set_pref(db: &Database, key: &str, value: &str) {
+        db.conn.lock().unwrap().execute(
+            "INSERT INTO user_preferences (key, value) VALUES (?1, ?2) ON CONFLICT(key) DO UPDATE SET value = ?2",
+            rusqlite::params![key, value],
+        ).unwrap();
+    }
+
+    /// The V14 seed puts Samantha in `tts_voice_en` for everyone, while the
+    /// old Settings page saved the chosen English voice as `tts_voice`: the
+    /// chosen voice wins over the seed.
+    #[test]
+    fn ack_voice_falls_back_to_tts_voice() {
+        let db = fresh_db_with_prefs();
+        let r = TtsRouter::new(db.clone());
+        let ack = TtsRequest { text: "Done".into(), mode: TtsMode::Ack, language: "en".into() };
+        assert_eq!(r.select_provider(&ack).unwrap(), TtsProvider::MacSay { voice: "Samantha".into() });
+        set_pref(&db, "tts_voice", "Daniel");
+        assert_eq!(r.select_provider(&ack).unwrap(), TtsProvider::MacSay { voice: "Daniel".into() });
+        set_pref(&db, "tts_voice", "Karen");
+        set_pref(&db, "tts_voice_en", "Karen");
+        assert_eq!(r.select_provider(&ack).unwrap(), TtsProvider::MacSay { voice: "Karen".into() });
+    }
+
+    /// The briefing read aloud uses the same English voice as acks.
+    #[test]
+    fn content_uses_the_same_english_voice_as_acks() {
+        let db = fresh_db_with_prefs();
+        set_pref(&db, "tts_voice", "Daniel");
+        let r = TtsRouter::new(db);
+        let content = TtsRequest { text: "Your 3pm moved.".into(), mode: TtsMode::Content, language: "en".into() };
+        assert_eq!(r.select_provider(&content).unwrap(), TtsProvider::MacSay { voice: "Daniel".into() });
     }
 
     /// Content is spoken by a cloud voice only when the registry marks its
