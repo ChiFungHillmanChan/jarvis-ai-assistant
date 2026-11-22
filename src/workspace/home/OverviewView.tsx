@@ -2,12 +2,11 @@ import { useState, type ReactNode } from 'react';
 import Button from '../../ui/Button';
 import { useUiLocale } from '../../i18n';
 import { updateTask } from '../../lib/commands';
-import type { MailItem } from '../../lib/mail';
+import { mailUpdateItem, type MailItem } from '../../lib/mail';
 import { parseSender } from '../../lib/mail-presentation';
-import { localDate } from '../../lib/follow-ups';
-import type { CalendarEventView, CronJobView, Task } from '../../lib/types';
+import type { CalendarEventView, CronJobView } from '../../lib/types';
 import type { WorkspaceView } from '../model';
-import { runningSummary } from './home-items';
+import { runningSummary, type FollowUpRow } from './home-items';
 import DayList from './DayList';
 
 const SHOWN = 3;
@@ -16,7 +15,8 @@ export interface OverviewProps {
   replies: MailItem[];
   /** False when Google is connected without Gmail: the column says where to turn it on. */
   gmail: boolean;
-  followUps: Task[];
+  /** Task follow-ups and mail tasks due today or overdue, overdue first (overviewFollowUps). */
+  followUps: FollowUpRow[];
   events: CalendarEventView[] | null;
   jobs: CronJobView[];
   setup: ReactNode;
@@ -39,19 +39,22 @@ function Column({ title, count, children, seeAll, onSeeAll }: { title: string; c
 /** Overview: what needs a reply, what is due, and today's calendar, side by side. */
 export default function OverviewView({ replies, gmail, followUps, events, jobs, setup, askBar, open, onSeeFollowUps, onConnectGmail, onDraftReply, onChanged }: OverviewProps) {
   const { text } = useUiLocale();
-  const [completing, setCompleting] = useState<number | null>(null);
+  const [completing, setCompleting] = useState<string | null>(null);
   const [error, setError] = useState('');
-  const today = localDate(new Date());
   const running = runningSummary(jobs, text);
 
-  async function complete(task: Task) {
-    if (task.id === null || completing !== null) return;
-    setCompleting(task.id); setError('');
-    try { await updateTask(task.id, 'completed'); onChanged(); }
+  // A task follow-up is completed as the old home did; a mail task as Mail's own checkbox does.
+  async function complete(row: FollowUpRow) {
+    if (completing !== null) return;
+    setCompleting(`${row.source}:${row.id}`); setError('');
+    try {
+      if (row.item) await mailUpdateItem(row.item.id, 'done', row.item.remind_at);
+      else await updateTask(row.id, 'completed');
+      onChanged();
+    }
     catch (e) { setError(text(`Could not mark it done: ${String(e)}`, `未能標為完成：${String(e)}`)); }
     finally { setCompleting(null); }
   }
-  const dueLabel = (deadline: string) => deadline.slice(0, 10) < today ? text('Overdue', '已逾期') : text('Today', '今天');
 
   return <div className="home-overview">
     {setup}
@@ -72,11 +75,11 @@ export default function OverviewView({ replies, gmail, followUps, events, jobs, 
         </Column>
         <Column title={text('Follow-ups due', '到期的待跟進事項')} count={followUps.length} seeAll={text('See all follow-ups', '查看所有待跟進事項')} onSeeAll={onSeeFollowUps}>
           {!followUps.length ? <p className="home-empty">{text('No follow-ups due today.', '今天沒有到期的待跟進事項。')}</p>
-          : <ul className="home-rows">{followUps.slice(0, SHOWN).map(task => <li key={task.id} className="home-check">
-            <input type="checkbox" checked={false} disabled={completing !== null} onChange={() => void complete(task)}
-              aria-label={text(`Mark "${task.title}" done`, `將「${task.title}」標為完成`)} />
-            <span>{task.title}</span>
-            <span className={task.deadline!.slice(0, 10) < today ? 'home-due is-overdue' : 'home-due'}>{dueLabel(task.deadline!)}</span>
+          : <ul className="home-rows">{followUps.slice(0, SHOWN).map(row => <li key={`${row.source}:${row.id}`} className="home-check">
+            <input type="checkbox" checked={false} disabled={completing !== null} onChange={() => void complete(row)}
+              aria-label={text(`Mark "${row.title}" done`, `將「${row.title}」標為完成`)} />
+            <span>{row.title}{row.item && <small>{parseSender(row.item.sender).name || row.item.subject}</small>}</span>
+            <span className={row.overdue ? 'home-due is-overdue' : 'home-due'}>{row.overdue ? text('Overdue', '已逾期') : text('Today', '今天')}</span>
           </li>)}</ul>}
         </Column>
         <Column title={text('Today', '今天')} seeAll={text('Open calendar', '開啟日曆')} onSeeAll={() => open('calendar')}>

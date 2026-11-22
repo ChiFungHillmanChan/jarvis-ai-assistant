@@ -1,7 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
-import { briefingSummary, focusItems, homeState, homeView } from '../src/workspace/home/home-logic.ts';
+import { briefingSummary, focusItems, focusTotal, homeState, homeView } from '../src/workspace/home/home-logic.ts';
 import type { FocusItem } from '../src/workspace/home/home-logic.ts';
 import type { DailyBrief } from '../src/lib/types.ts';
 
@@ -36,6 +36,18 @@ test('focusItems: overdue follow-ups, then replies, then tasks, max 3', () => {
     tasks: [item('task', 20, TODAY)],
   }, TODAY);
   assert.deepEqual(out.map(i => `${i.kind}:${i.id}`), ['follow-up:1', 'follow-up:2', 'reply:10']);
+});
+
+test('focusTotal counts every item focusItems chooses from, uncapped and de-duplicated', () => {
+  const input = {
+    followUps: [item('follow-up', 1, '2026-11-19'), item('follow-up', 2, '2026-11-20'), item('follow-up', 3, TODAY), item('follow-up', 4, null)],
+    replies: [item('reply', 10, null), item('reply', 11, '2026-11-25'), item('reply', 10, null)],
+    tasks: [item('task', 20, TODAY), item('task', 21, '2026-11-18'), item('task', 22, '2026-11-23'), item('task', 23, null)],
+  };
+  // follow-ups 1, 2 (overdue only); replies 10, 11 (10 once); tasks 20, 21 (due or overdue).
+  assert.equal(focusTotal(input, TODAY), 6);
+  assert.equal(focusItems(input, TODAY).length, 3);
+  assert.equal(focusTotal({ followUps: [], replies: [], tasks: [] }, TODAY), 0);
 });
 
 test('focusItems: empty input gives an empty list, never padded', () => {

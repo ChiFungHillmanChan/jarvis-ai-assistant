@@ -13,8 +13,8 @@ import { useWorkspace } from './WorkspaceContext';
 import { useChatContext } from '../hooks/ChatContext';
 import { useSettingsDialog } from '../settings/SettingsContext';
 import { useUiLocale } from '../i18n';
-import { focusItems, homeState, homeView, type HomeView } from './home/home-logic';
-import { draftReplyPrompt, filedCount, focusInputs, followUpsDue, openReplies } from './home/home-items';
+import { focusItems, focusTotal, homeState, homeView, type HomeView } from './home/home-logic';
+import { draftReplyPrompt, filedCount, focusInputs, openReplies, overviewFollowUps } from './home/home-items';
 import HomeHeader from './home/HomeHeader';
 import BriefingLine from './home/BriefingLine';
 import AskBar from './home/AskBar';
@@ -108,9 +108,11 @@ export default function AutomationOverview({ activity, onVoice, listening, voice
     const ask = pending.current;
     if (!ask || chat.sessionId !== ask.id) return;
     pending.current = null;
-    void chat.send(ask.prompt, 'tools');
+    // send() refuses while another run is going; keep the text as this task's draft instead.
+    if (chat.busy) writeValue(`task:${ask.id}`, 'assistantDraft', ask.prompt);
+    else void chat.send(ask.prompt, 'tools');
     dispatch({ type: 'open', view: 'chat', id: `task:${ask.id}`, sessionId: ask.id, title: ask.prompt.slice(0, 50) });
-  }, [chat.sessionId, chat.send, dispatch]);
+  }, [chat.sessionId, chat.busy, chat.send, dispatch, writeValue]);
 
   const openEmail = (item: MailItem) => { writeValue('tool:email', 'mailMessageId', item.message_id); open('email'); };
   const seeFollowUps = () => { writeValue('tool:email', 'mailView', 'due'); open('email'); };
@@ -120,21 +122,23 @@ export default function AutomationOverview({ activity, onVoice, listening, voice
   // An unread reading counts as ready: a failed check never shows a wrong setup card.
   const state = homeState({ googleConnected: !data.googleRead || data.google?.main.state === 'connected', aiReady: data.aiReady ?? true });
   const ready = state === 'ready';
-  const items = useMemo(() => focusItems(focusInputs(data.tasks, data.items, today, now), today), [data.tasks, data.items, today]);
+  const inputs = useMemo(() => focusInputs(data.tasks, data.items, today, now), [data.tasks, data.items, today]);
+  const items = focusItems(inputs, today);
+  const total = focusTotal(inputs, today);
   const taskMap = useMemo(() => new Map(data.tasks.filter(t => t.id !== null).map(t => [t.id!, t])), [data.tasks]);
   const mailMap = useMemo(() => new Map(data.items.map(i => [i.id, i])), [data.items]);
-  const setup = ready ? null : <HomeSetupCard state={state} />;
+  const setup = ready ? null : <HomeSetupCard state={state} aiReady={data.aiReady ?? true} />;
   const askBar = <AskBar onAsk={startTask} onVoice={onVoice} listening={listening} voiceState={voiceState} activity={activity}
     placeholder={view === 'focus' ? text('Anything else? Ask JARVIS…', '還有其他事情嗎？向 JARVIS 提問…') : text('Ask JARVIS to reply, schedule or find something…', '請 JARVIS 回覆、安排或尋找資料…')} />;
 
   return <div className="home" data-view={view}>
-    <HomeHeader name={name} view={view} onView={setView} needCount={ready ? items.length : null} />
+    <HomeHeader name={name} view={view} onView={setView} needCount={ready ? total : null} />
     <BriefingLine brief={brief} />
     {failed && <div className="workspace-error" role="alert">{text('Part of your home page could not be refreshed.', '部分主頁內容未能更新。')}<button className="text-button" onClick={() => void load()}><RefreshCw size={14} />{text('Retry', '重試')}</button></div>}
     {view === 'focus'
-      ? <FocusView items={items} tasks={taskMap} mail={mailMap} events={data.events} filed={filedCount(data.triage)} setup={setup} askBar={askBar}
+      ? <FocusView items={items} total={total} tasks={taskMap} mail={mailMap} events={data.events} filed={filedCount(data.triage)} setup={setup} askBar={askBar}
           onChanged={() => void load()} onDraftReply={item => startTask(draftReplyPrompt(item, text))} onOpenEmail={openEmail} onReviewMail={() => open('email')} />
-      : <OverviewView replies={openReplies(data.items, now)} gmail={data.google?.main.gmail ?? true} followUps={followUpsDue(data.tasks, today)} events={data.events} jobs={data.jobs}
+      : <OverviewView replies={openReplies(data.items, now)} gmail={data.google?.main.gmail ?? true} followUps={overviewFollowUps(data.tasks, data.items, today, now)} events={data.events} jobs={data.jobs}
           setup={setup} askBar={askBar} open={open} onSeeFollowUps={seeFollowUps} onConnectGmail={() => openSettings('connections')}
           onDraftReply={item => startTask(draftReplyPrompt(item, text))} onChanged={() => void load()} />}
   </div>;

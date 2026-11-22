@@ -14,6 +14,8 @@ type Text = (en: string, zh: string) => string;
 
 export interface FocusProps {
   items: FocusItem[];
+  /** All that need the user today; items holds the top three. */
+  total: number;
   tasks: Map<number, Task>;
   mail: Map<number, MailItem>;
   events: CalendarEventView[] | null;
@@ -66,7 +68,7 @@ function FocusCard({ n, focus, task, item, onChanged, onDraftReply, onOpenEmail 
   } else if (focus.kind === 'task' && item) {
     meta = [due, from(item, text)].filter(Boolean).join(' · ');
     actions = <>
-      <Button kind="primary" disabled={pending} onClick={() => act(() => mailUpdateItem(item.id, 'done', null))}>{text('Mark done', '標為完成')}</Button>
+      <Button kind="primary" disabled={pending} onClick={() => act(() => mailUpdateItem(item.id, 'done', item.remind_at))}>{text('Mark done', '標為完成')}</Button>
       {item.due_date && !item.calendar_event_id && <Button kind="secondary" disabled={pending} onClick={() => act(() => mailItemToCalendar(item.id))}>{text('Add to calendar', '加入日曆')}</Button>}
     </>;
   }
@@ -83,7 +85,7 @@ function FocusCard({ n, focus, task, item, onChanged, onDraftReply, onOpenEmail 
 }
 
 /** Focus: up to three things that need the user today, and the day beside them. */
-export default function FocusView({ items, tasks, mail, events, filed, setup, askBar, onChanged, onDraftReply, onOpenEmail, onReviewMail }: FocusProps) {
+export default function FocusView({ items, total, tasks, mail, events, filed, setup, askBar, onChanged, onDraftReply, onOpenEmail, onReviewMail }: FocusProps) {
   const { text } = useUiLocale();
   return <div className="home-focus">
     <div className="home-focus-main">
@@ -95,6 +97,7 @@ export default function FocusView({ items, tasks, mail, events, filed, setup, as
             <h2>{text('Nothing needs you today', '今天沒有需要你處理的事項')}</h2>
             {filed !== null && <p>{canWaitLine(filed, text)}</p>}
           </section>)}
+      {!setup && total > items.length && <p className="home-more">{text(`Showing the top 3 of ${total}`, `顯示最重要的 3 項，共 ${total} 項`)}</p>}
       {askBar}
     </div>
     {!setup && <aside className="home-focus-side">

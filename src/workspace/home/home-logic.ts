@@ -32,6 +32,18 @@ const FOCUS_MAX = 3;
  * date, is therefore not an overdue follow-up.
  */
 export function focusItems(i: { followUps: FocusItem[]; replies: FocusItem[]; tasks: FocusItem[] }, today: string): FocusItem[] {
+  return candidates(i, today).slice(0, FOCUS_MAX);
+}
+
+/**
+ * How many items focusItems chooses from, before the cap of three: the same
+ * groups, filters and de-duplication. The header shows this number.
+ */
+export function focusTotal(i: { followUps: FocusItem[]; replies: FocusItem[]; tasks: FocusItem[] }, today: string): number {
+  return candidates(i, today).length;
+}
+
+function candidates(i: { followUps: FocusItem[]; replies: FocusItem[]; tasks: FocusItem[] }, today: string): FocusItem[] {
   const isOverdue = (item: FocusItem) => item.due !== null && item.due < today;
   const withFlag = (item: FocusItem): FocusItem => ({ ...item, overdue: isOverdue(item) });
   const ordered = [
@@ -46,7 +58,6 @@ export function focusItems(i: { followUps: FocusItem[]; replies: FocusItem[]; ta
     if (seen.has(key)) continue;
     seen.add(key);
     out.push(withFlag(item));
-    if (out.length === FOCUS_MAX) break;
   }
   return out;
 }
