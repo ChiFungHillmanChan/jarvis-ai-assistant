@@ -9,14 +9,18 @@ interface SecretFieldProps {
   onRemove?: () => Promise<void>;
   label: string;
   placeholder?: string;
+  /** The save button's label; "Save" when not given. */
+  saveLabel?: string;
+  /** The line shown when `onSave` rejects; "Could not save. Try again." when not given. */
+  errorFor?(e: unknown): string;
 }
 
 /** Takes a secret once and hands it to `onSave`. It never receives the saved value back. */
-export default function SecretField({ saved, onSave, onRemove, label, placeholder }: SecretFieldProps) {
+export default function SecretField({ saved, onSave, onRemove, label, placeholder, saveLabel, errorFor }: SecretFieldProps) {
   const { text } = useUiLocale();
   const [draft, setDraft] = useState('');
   const [busy, setBusy] = useState(false);
-  const [failed, setFailed] = useState(false);
+  const [failed, setFailed] = useState<string | boolean>(false);
 
   async function save() {
     const secret = draft.trim();
@@ -26,8 +30,8 @@ export default function SecretField({ saved, onSave, onRemove, label, placeholde
     try {
       await onSave(secret);
       setDraft('');
-    } catch {
-      setFailed(true);
+    } catch (e) {
+      setFailed(errorFor ? errorFor(e) : true);
     } finally {
       setBusy(false);
     }
@@ -42,7 +46,7 @@ export default function SecretField({ saved, onSave, onRemove, label, placeholde
     }
   }
 
-  const failure = failed && <span className="ui-secret-error" role="alert">{text('Could not save. Try again.', '無法儲存，請再試一次。')}</span>;
+  const failure = failed && <span className="ui-secret-error" role="alert">{failed === true ? text('Could not save. Try again.', '無法儲存，請再試一次。') : failed}</span>;
 
   if (saved) {
     return (
@@ -78,7 +82,7 @@ export default function SecretField({ saved, onSave, onRemove, label, placeholde
           onChange={e => setDraft(e.target.value)}
           onKeyDown={e => { if (e.key === 'Enter') void save(); }}
         />
-        <Button kind="secondary" busy={busy} disabled={!draft.trim()} onClick={save}>{text('Save', '儲存')}</Button>
+        <Button kind="secondary" busy={busy} disabled={!draft.trim()} onClick={save}>{saveLabel ?? text('Save', '儲存')}</Button>
       </div>
       {failure}
     </div>

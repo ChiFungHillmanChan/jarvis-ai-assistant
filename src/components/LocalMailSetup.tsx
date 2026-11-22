@@ -10,10 +10,14 @@ import { useAiModels } from '../lib/ai-models';
 import { mailSetupModels } from '../lib/ai-catalog';
 import Select from '../ui/Select';
 
-export default function LocalMailSetup({ onReady, onBusyChange }: { onReady?: () => void | Promise<void>; onBusyChange?: (busy: boolean) => void }) {
+/**
+ * Preparing Ollama and an approved model on this Mac: check the Mac, start
+ * or install Ollama, download the model, test it on sample mail, then use it
+ * for mail. Shared by this panel (onboarding) and Settings > Your AI.
+ * Unmounting cancels a run that is still going.
+ */
+export function useLocalSetup({ onReady, onBusyChange }: { onReady?: () => void | Promise<void>; onBusyChange?: (busy: boolean) => void }) {
   const { text } = useUiLocale();
-  // The approved models, sizes and RAM come from ai/models.rs.
-  const choices = mailSetupModels(useAiModels());
   const [probe, setProbe] = useState<LocalSetupProbe | null>(null);
   const [model, setModel] = useState('');
   const [stage, setStage] = useState('');
@@ -97,6 +101,15 @@ export default function LocalMailSetup({ onReady, onBusyChange }: { onReady?: ()
     complete: text('Download complete; preparing test…', '下載完成，準備測試…'),
     testing: text('Testing with synthetic mail…', '正在使用合成郵件測試…'), applying: text('Applying to mail…', '套用到電郵工作區…'),
   };
+  const stageLabel = labels[stage] || text('Preparing…', '準備中…');
+  return { probe, model, setModel, stage, stageLabel, bytes, error, setError, ready, setReady, checking, busy, refresh, prepare, cancel: () => operation.current?.abort() };
+}
+
+export default function LocalMailSetup({ onReady, onBusyChange }: { onReady?: () => void | Promise<void>; onBusyChange?: (busy: boolean) => void }) {
+  const { text } = useUiLocale();
+  // The approved models, sizes and RAM come from ai/models.rs.
+  const choices = mailSetupModels(useAiModels());
+  const { probe, model, setModel, stage, stageLabel, bytes, error, setError, ready, setReady, checking, busy, refresh, prepare, cancel } = useLocalSetup({ onReady, onBusyChange });
   return <section className="setup-local" aria-label={text('Local AI for mail', '電郵本機 AI')}>
     <h3>{text('Local AI, without an API key', '本機 AI，無須 API 密鑰')}</h3>
     <p>{text('Prepare Ollama, download a model, test it, then use it for mail. First installation needs your confirmation. Existing mail settings change only after a successful test.', '準備 Ollama、下載模型並完成測試後，即可套用至電郵工作區。首次安裝需要確認；只有測試成功後才會變更現有電郵設定。')}</p>
@@ -108,9 +121,9 @@ export default function LocalMailSetup({ onReady, onBusyChange }: { onReady?: ()
       <button type="button" disabled={busy || checking} onClick={() => void refresh()}>{checking ? text('Checking…', '檢查中…') : text('Check again', '重新檢查')}</button>
       {probe && !probe.ollamaInstalled && !probe.ollamaRunning && <button type="button" disabled={busy} onClick={() => void openUrl('https://ollama.com/download/mac').catch(() => setError(text('Could not open the official download page.', '未能開啟官方下載頁。')))}>{text('Install Ollama', '安裝 Ollama')}</button>}
       <button type="button" className="setup-primary" disabled={busy || checking || !probe || !model} onClick={() => void prepare()}>{text('Prepare and use for mail', '準備並用於電郵')}</button>
-      {busy && <button type="button" disabled={stage === 'applying'} onClick={() => operation.current?.abort()}>{text('Cancel', '取消')}</button>}
+      {busy && <button type="button" disabled={stage === 'applying'} onClick={cancel}>{text('Cancel', '取消')}</button>}
     </div>
-    {busy && <div role="status" aria-live="polite"><p>{labels[stage] || text('Preparing…', '準備中…')}</p>{bytes && <><progress max={bytes.total} value={Math.min(bytes.done, bytes.total)} /><span> {(bytes.done / 1e9).toFixed(2)} / {(bytes.total / 1e9).toFixed(2)} GB</span></>}</div>}
+    {busy && <div role="status" aria-live="polite"><p>{stageLabel}</p>{bytes && <><progress max={bytes.total} value={Math.min(bytes.done, bytes.total)} /><span> {(bytes.done / 1e9).toFixed(2)} / {(bytes.total / 1e9).toFixed(2)} GB</span></>}</div>}
     {ready && <p role="status">{text('The sample passed. Mail now uses this local model. Assistant and voice settings have their own setup.', '示範測試通過，電郵已改用此本機模型。AI 助理與語音需另行設定。')}</p>}
     {error && <p role="alert" className="setup-error">{error}</p>}
   </section>;
