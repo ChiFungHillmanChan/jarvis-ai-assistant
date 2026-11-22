@@ -1,6 +1,6 @@
 {
-  "version": 8,
-  "issued_at": "2026-11-22T01:17:08Z",
+  "version": 9,
+  "issued_at": "2026-11-22T16:51:07Z",
   "min_app_version": "0.5.11",
   "providers": [
     {
@@ -2318,7 +2318,7 @@
     "chat": {
       "openai": "gpt-6-luna",
       "claude": "claude-sonnet-5-5",
-      "gemini": "gemini-4-hydrogen",
+      "gemini": "gemini-3.8-flash",
       "bedrock": "global.anthropic.claude-sonnet-4-6",
       "jarvis_ai": "jarvis-ai"
     },
@@ -2331,7 +2331,7 @@
     "mail_analysis": {
       "openai": "gpt-6-luna",
       "claude": "claude-sonnet-5-5",
-      "gemini": "gemini-4-hydrogen",
+      "gemini": "gemini-3.8-flash",
       "bedrock": "global.anthropic.claude-sonnet-4-6",
       "jarvis_ai": "jarvis-ai"
     },
@@ -2346,13 +2346,13 @@
     "briefing": {
       "openai": "gpt-6-luna",
       "claude": "claude-sonnet-5-5",
-      "gemini": "gemini-4-hydrogen",
+      "gemini": "gemini-3.8-flash",
       "bedrock": "global.anthropic.claude-sonnet-4-6"
     },
     "memory": {
       "openai": "gpt-6-luna",
       "claude": "claude-sonnet-5-5",
-      "gemini": "gemini-4-hydrogen",
+      "gemini": "gemini-3.8-flash",
       "bedrock": "global.anthropic.claude-sonnet-4-6"
     },
     "stt": {
@@ -2399,8 +2399,8 @@
     "chains": {
       "gemini_primary": {
         "label": {
-          "en": "Gemini 4 Hydrogen, with Gemini 3.1 Pro to pick if it fails",
-          "zh-HK": "Gemini 4 Hydrogen；失敗時可改用 Gemini 3.1 Pro"
+          "en": "Gemini recommended (3.8 Flash for chat, 3.1 Flash-Lite for sorting mail), with Gemini 3.1 Pro to pick if it fails",
+          "zh-HK": "Gemini 建議設定（對話用 3.8 Flash，整理郵件用 3.1 Flash-Lite）；失敗時可改用 Gemini 3.1 Pro"
         },
         "entries": [
           {
