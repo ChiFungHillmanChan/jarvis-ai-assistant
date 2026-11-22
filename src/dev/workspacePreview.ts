@@ -41,6 +41,8 @@ export function installWorkspacePreview() {
   const jobs = [{ id: 1, name: 'Morning briefing', schedule: '0 0 9 * * MON-FRI', action_type: 'briefing', status: 'active', last_run: day + ' 09:00:00', next_run: null, description: 'Review my calendar every weekday at 9 am.' }, { id: 2, name: 'Weekly project review', schedule: '0 0 16 * * FRI', action_type: 'summary', status: 'paused', last_run: null, next_run: null, description: 'Summarize project progress on Friday.' }];
   const runs = [{ id: 1, job_id: 1, started_at: day + ' 09:00:00', finished_at: day + ' 09:00:12', status: 'success', result: 'Your calendar has one customer review today.\n\nPrepare the rollout plan before the meeting.', error: null }];
   let wakeOn = false;
+  let openAtLogin = false, keepAwake = false;
+  let briefing = { enabled: false, time: '08:30', voice: true, speech_enabled: false };
   mockIPC(async (command, raw) => {
     const args = (raw || {}) as Record<string, any>;
     if (command.startsWith('plugin:')) return null;
@@ -48,7 +50,15 @@ export function installWorkspacePreview() {
       case 'check_onboarding_status': return true;
       case 'account_status': return { available: false, signed_in: false, email: null, tier: null, subscription_status: null, trial_ends_at: null, period_ends_at: null, cancel_at_period_end: false };
       case 'get_settings': return { values: { ai_provider: 'gemini_primary', google_email: 'alex@example.com', ...saved } };
-      case 'update_setting': saved[args.key] = args.value; localStorage.setItem('jarvis-workspace-preview', JSON.stringify(saved)); return null;
+      case 'update_setting': case 'set_user_preference': saved[args.key] = args.value; localStorage.setItem('jarvis-workspace-preview', JSON.stringify(saved)); return null;
+      case 'get_user_preference': if (args.key in saved) return saved[args.key]; throw 'db read: Query returned no rows';
+      case 'enable_wallpaper': case 'disable_wallpaper': return null;
+      case 'get_open_at_login': return openAtLogin;
+      case 'set_open_at_login': openAtLogin = args.enabled; return openAtLogin;
+      case 'get_keep_awake': return { enabled: keepAwake, active: keepAwake };
+      case 'set_keep_awake': keepAwake = args.enabled; return { enabled: keepAwake, active: keepAwake };
+      case 'get_daily_briefing_settings': return briefing;
+      case 'set_daily_briefing_settings': briefing = { ...briefing, enabled: args.enabled, time: args.time, voice: args.voice }; return briefing;
       case 'get_conversations': return conversations[args.sessionId || 'legacy'] || [];
       case 'list_chat_sessions': return Object.entries(conversations).map(([id, entries]) => ({ id, title: entries[0]?.content.slice(0, 60) || 'Task', updated_at: now.toISOString() }));
       case 'send_message': {

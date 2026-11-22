@@ -61,6 +61,10 @@
 .settings-dialog .settings-embedded .settings-content { overflow: visible; padding: 0; }
 .settings-dialog .settings-embedded .settings-content > * { max-width: none; }
 
+/* General: the reply language does not match the menus (users from before the follow rule). */
+.settings-general-notice { display: flex; flex-wrap: wrap; align-items: center; gap: 8px 12px; margin: 0 0 20px; padding: 12px 14px; border: 1px solid var(--ui-control-border); border-radius: 8px; background: var(--accent-wash); }
+.settings-general-notice p { flex: 1 1 240px; margin: 0; color: var(--text-primary); font-size: 13px; }
+
 /* Under 640 px of dialog width the nav becomes a select above the pane. */
 @container (max-width: 639px) {
   .settings-dialog-inner { flex-direction: column; }

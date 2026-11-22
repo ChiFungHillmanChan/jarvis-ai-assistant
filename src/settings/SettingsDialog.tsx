@@ -10,12 +10,15 @@ import { ADVANCED_SECTIONS, NAV_GROUPS, advancedGroupLabel, sectionLabel, type S
 import { ROWS, rowText, type RowMeta } from './rows';
 import { searchRows } from './search';
 import LegacySection from './LegacySection';
+import General from './sections/General';
 import { isBackdropClick } from './settings-dialog-state';
 import './settings.css';
 
 // The one place a section maps to its component. A section without an entry
 // shows the old page's body through LegacySection until it is rebuilt.
-const SECTION_VIEWS: Partial<Record<SettingsSectionId, ComponentType>> = {};
+const SECTION_VIEWS: Partial<Record<SettingsSectionId, ComponentType>> = {
+  general: General,
+};
 
 export default function SettingsDialog() {
   const { locale, text } = useUiLocale();
