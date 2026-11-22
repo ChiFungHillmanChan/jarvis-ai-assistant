@@ -12,6 +12,8 @@ import { cancelOperation, currentOperation, finishOperation, isCurrentOperation,
 /** The advanced credential each service takes in Settings > Advanced > Integrations, and the status method it shows as. */
 const TOKEN_SAVE = { notion: saveNotionToken, github: saveGitHubToken, obsidian: saveObsidianKey };
 export const TOKEN_METHOD = { notion: 'token', github: 'token', obsidian: 'rest' } as const;
+/** 'busy': nothing was done because another connect or disconnect of the service is running. */
+export type ActionResult = 'done' | 'busy' | 'failed';
 
 /**
  * One Notion, GitHub or Obsidian connection: its status and the connect,
@@ -122,10 +124,10 @@ export function useIntegrationConnection(service: IntegrationService) {
     try { await cancelConnect(service); }
     catch (e) { setError(String(e)); }
   }
-  /** Resolves to whether the disconnect worked; a failure is shown as `error`. */
-  async function disconnect(): Promise<boolean> {
+  /** A failure is shown as `error`. */
+  async function disconnect(): Promise<ActionResult> {
     const operation = startOperation(service, 'disconnect');
-    if (!operation) return false;
+    if (!operation) return 'busy';
     ownOperation.current = operation;
     revision.current++; setChecking(false); setError(null); setNotice(null);
     let done = false;
@@ -137,14 +139,21 @@ export function useIntegrationConnection(service: IntegrationService) {
         : text('Access disabled on this Mac. You can also revoke the grant in the service’s account settings. Your original content remains in the service.', '已停用此 Mac 的存取權限。亦可在服務的帳戶設定撤銷授權；原始內容會保留在服務中。'));
     } catch (e) { setError(String(e)); }
     finally { finishOperation(operation); ownOperation.current = null; afterAction.current = done; connectionsChanged(); }
-    return done;
+    return done ? 'done' : 'failed';
   }
-  /** Saves the advanced token (Notion, GitHub) or REST API key (Obsidian). Rejects when the save fails. */
-  async function saveToken(value: string): Promise<void> {
+  /**
+   * Saves the advanced token (Notion, GitHub) or REST API key (Obsidian). A
+   * blank value is passed on as it is: for Notion and Obsidian the backend
+   * then deletes only that token or key (GitHub rejects a blank token).
+   * Does nothing while a connect or disconnect runs; rejects when the save fails.
+   */
+  async function saveToken(value: string): Promise<'done' | 'busy'> {
+    if (currentOperation(service)) return 'busy';
     setError(null); setNotice(null);
     await TOKEN_SAVE[service](value.trim());
     afterAction.current = true;
     connectionsChanged();
+    return 'done';
   }
   async function openService() {
     try {

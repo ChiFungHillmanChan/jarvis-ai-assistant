@@ -35,6 +35,11 @@ const DEVELOPER = ADV + 'Developer.tsx';
 // - Only relative imports are followed; packages are not app commands.
 //   Static imports, `import * as x` (its `x.member` uses) and `import('...')`
 //   all count.
+// - A shared hook (or any non-lib file) counts as a whole: once one section
+//   uses useIntegrationConnection, every command that hook can call counts for
+//   the new side, whichever section actually reaches it. So this test shows a
+//   command is still callable, not that the right section calls it; the
+//   targeted per-section assertions further down are required as well.
 // ---------------------------------------------------------------------------
 
 const INVOKE = /\b(?:invoke|useTauriCommand)(?:<[^(]*?>)?\(\s*(['"`])((?:(?!\1).)+)\1/g;
@@ -266,6 +271,41 @@ test('every token or key Remove asks first and says what stops working, in en an
   }
   assert.match(code, /This cannot be undone\./);
   assert.match(code, /此操作無法復原。/);
+  // Notion's Remove keeps an earlier official sign-in, and says so.
+  const notion = stops[0];
+  assert.match(notion[1], /official Notion sign-in is not deleted/);
+  assert.match(notion[2], /Notion 官方授權不會被刪除/);
+});
+
+test('each Remove makes the call that deletes only that token or key', () => {
+  const code = source(INTEGRATIONS);
+  // Notion and Obsidian: a blank save deletes only the token or key
+  // (save_rest_token / save_obsidian_key with ''). GitHub rejects a blank token,
+  // so it disconnects; its one stored item is the token itself.
+  assert.match(code, /\{ service: 'notion', remove: 'blank',/);
+  assert.match(code, /\{ service: 'github', remove: 'disconnect',/);
+  assert.match(code, /\{ service: 'obsidian', remove: 'blank',/);
+  const remove = code.slice(code.indexOf('async function removeToken('), code.indexOf('const tokenSaved'));
+  assert.match(remove, /if \(k\.remove === 'blank'\) \{\s*try \{ result = await connection\.saveToken\(''\); \}/);
+  assert.match(remove, /\} else result = await connection\.disconnect\(\);/);
+  assert.match(code, /onRemove=\{\(\) => removeToken\(k\)\}/);
+  // The blank value reaches the command: saveToken only trims it.
+  const hook = source('src/hooks/useIntegrationConnection.ts');
+  const save = hook.slice(hook.indexOf('async function saveToken('), hook.indexOf('async function openService('));
+  assert.match(save, /await TOKEN_SAVE\[service\]\(value\.trim\(\)\);/);
+  assert.doesNotMatch(save, /if \(!value|value\.trim\(\) === ''|!value\.trim\(\)/, 'a blank value is not stopped before the command');
+});
+
+test('a Remove or save that cannot run, or fails, says so at its row', () => {
+  const code = source(INTEGRATIONS);
+  assert.match(code, /text\('Another change is still running\. Try again in a moment\.', '另一項更改仍在進行，請稍後再試。'\)/);
+  assert.match(code, /text\('Could not remove: ', '無法移除：'\)/);
+  assert.match(code, /result === 'busy' \? 'busy' : 'failed'/);
+  assert.match(code, /e === BUSY \? busyText/);
+  const hook = source('src/hooks/useIntegrationConnection.ts');
+  assert.match(hook, /if \(!operation\) return 'busy';/);
+  assert.match(hook, /if \(currentOperation\(service\)\) return 'busy';/);
+  assert.match(hook, /return done \? 'done' : 'failed';/);
 });
 
 test('a failed status read after a save or remove is a neutral note, not a failure', () => {

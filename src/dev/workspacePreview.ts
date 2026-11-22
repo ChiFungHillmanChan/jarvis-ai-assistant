@@ -200,8 +200,13 @@ export function installWorkspacePreview() {
       case 'notion_connection_status': case 'github_connection_status': case 'obsidian_connection_status': return integrations[command.split('_')[0]];
       case 'notion_disconnect': case 'github_disconnect': case 'obsidian_disconnect': Object.assign(integrations[command.split('_')[0]], { status: 'not_connected', identity: null, method: null }); return null;
       // Advanced > Integrations: the preview keeps no token, it only shows the method as saved.
-      case 'save_notion_token': case 'save_github_token': Object.assign(integrations[command.split('_')[1]], { status: 'configured', identity: null, method: 'token', message: null }); return null;
-      case 'save_obsidian_key': Object.assign(integrations.obsidian, { status: 'configured', identity: null, method: 'rest', message: null }); return null;
+      // A blank Notion token or Obsidian key removes it, as the backend does; GitHub rejects a blank token.
+      case 'save_notion_token': case 'save_github_token': case 'save_obsidian_key': {
+        const service = command.split('_')[1], value = String(args.token ?? args.key ?? '').trim();
+        if (!value && service === 'github') throw '請輸入有效的 GitHub 存取權杖。';
+        Object.assign(integrations[service], value ? { status: 'configured', identity: null, method: service === 'obsidian' ? 'rest' : 'token', message: null } : { status: 'not_connected', identity: null, method: null, message: null });
+        return null;
+      }
       case 'github_set_client_id': integrations.github.oauth_ready = true; return null;
       case 'get_storage_usage': return { ...storage };
       case 'set_retention_policy': storage.retentionDays = args.days; storage.retentionEnabled = args.enabled; return null;
