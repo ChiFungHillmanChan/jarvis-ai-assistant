@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { ADVANCED_SECTIONS, NAV_GROUPS, legacySectionFor, sectionLabel, type SettingsSectionId } from '../src/settings/sections.ts';
+import { ADVANCED_SECTIONS, NAV_GROUPS, legacySectionsFor, sectionLabel, type SettingsSectionId } from '../src/settings/sections.ts';
 import { ROWS, ROWS_BY_ID, rowText } from '../src/settings/rows.ts';
 import { searchRows } from '../src/settings/search.ts';
 
@@ -38,15 +38,21 @@ test('every section has an English and a Traditional Chinese label', () => {
   assert.equal(sectionLabel('advanced-cloud', zh), '雲端服務');
 });
 
-test('legacySectionFor returns an old Settings section id or null', () => {
+test('legacySectionsFor returns old Settings section ids, never account', () => {
   for (const id of ALL) {
-    const legacy = legacySectionFor(id);
-    assert.ok(legacy === null || OLD_SECTIONS.includes(legacy), `${id} -> ${legacy}`);
+    const legacy = legacySectionsFor(id);
+    assert.ok(Array.isArray(legacy), id);
+    for (const old of legacy) assert.ok(OLD_SECTIONS.includes(old), `${id} -> ${old}`);
+    assert.ok(!legacy.includes('account'), `${id} must not map to account`);
+    assert.equal(new Set(legacy).size, legacy.length, id);
   }
-  assert.equal(legacySectionFor('setup'), null);
-  assert.equal(legacySectionFor('mail'), null);
-  assert.equal(legacySectionFor('ai'), 'ai');
-  assert.equal(legacySectionFor('privacy'), 'storage');
+  assert.deepEqual(legacySectionsFor('setup'), []);
+  assert.deepEqual(legacySectionsFor('mail'), []);
+  assert.deepEqual(legacySectionsFor('general'), ['assistant', 'appearance', 'background']);
+  assert.deepEqual(legacySectionsFor('connections'), ['google', 'notion', 'github', 'obsidian']);
+  assert.deepEqual(legacySectionsFor('advanced-cloud'), ['keys', 'ai']);
+  assert.deepEqual(legacySectionsFor('advanced-integrations'), ['notion', 'github', 'obsidian']);
+  assert.deepEqual(legacySectionsFor('privacy'), ['storage']);
 });
 
 test('every row id is unique', () => {
@@ -58,7 +64,7 @@ test('every row belongs to a valid section', () => {
   for (const row of ROWS) assert.ok(ALL.includes(row.section), `${row.id}: ${row.section}`);
 });
 
-test('every section except setup has at least one row, and rows of a section stay together', () => {
+test('every section has at least one row, and rows of a section stay together', () => {
   for (const id of ALL) assert.ok(ROWS.some((row) => row.section === id), id);
   const order = ROWS.map((row) => row.section).filter((s, i, all) => i === 0 || all[i - 1] !== s);
   assert.equal(new Set(order).size, order.length, 'rows of one section must be contiguous');
@@ -88,12 +94,33 @@ test('removed rows are not registered', () => {
   assert.ok(!ROWS.some((row) => row.id === 'display-name'));
 });
 
+test('required rows exist', () => {
+  const required = [
+    'account', 'language', 'purge-cache', 'purge-backups', 'purge-models', 'purge-mail-bodies', 'purge-conversations',
+    'delete-everything', 'ai-consents', 'chain-order', 'local-endpoints', 'key-gemini', 'key-claude', 'key-openai',
+    'key-typesafe', 'aws-secret-key', 'google-other-accounts', 'keep-recordings',
+  ];
+  for (const id of required) assert.ok(ROWS_BY_ID[id], id);
+});
+
+test('disconnect and remove find the rows that have those actions', () => {
+  const ids = (q: string) => searchRows(q, ROWS, 'en').flatMap((g) => g.rows.map((r) => r.id));
+  assert.ok(ids('disconnect').includes('google-other-accounts'));
+  assert.ok(ids('remove').includes('google-other-accounts'));
+  assert.ok(ids('remove').includes('key-typesafe'));
+  assert.ok(searchRows('移除', ROWS, 'zh-HK').flatMap((g) => g.rows.map((r) => r.id)).includes('key-typesafe'));
+  assert.ok(searchRows('中斷連接', ROWS, 'zh-HK').flatMap((g) => g.rows.map((r) => r.id)).includes('google-other-accounts'));
+});
+
 test('zh-HK copy is written Chinese, never colloquial Cantonese', () => {
+  const colloquial = /[嘅咗唔係冇啲喺嚟]/;
+  const emoji = /[\u{1F300}-\u{1FAFF}\u{2600}-\u{27BF}]/u;
   for (const row of ROWS) {
-    const text = [row.title[1], row.description?.[1] ?? ''].join('');
-    assert.doesNotMatch(text, /[嘅咗唔係冇啲]/, row.id);
-    assert.doesNotMatch(row.title.concat(row.description ?? []).join(''), /[\u{1F300}-\u{1FAFF}\u{2600}-\u{27BF}]/u, row.id);
+    const zhText = [row.title[1], row.description?.[1] ?? '', ...(row.keywords ?? [])].join('\n');
+    assert.doesNotMatch(zhText, colloquial, row.id);
+    assert.doesNotMatch([...row.title, ...(row.description ?? []), ...(row.keywords ?? [])].join(''), emoji, row.id);
   }
+  for (const id of ALL) assert.doesNotMatch(sectionLabel(id, zh), colloquial, id);
 });
 
 test('searching "lang" lists General first and finds the language row', () => {
