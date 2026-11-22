@@ -252,7 +252,7 @@ test('Settings asks for the list only with a Bedrock row on screen, once per ope
 test('the picker is labelled, described by its status line, and clears its refusal on change', () => {
   const field = source('../src/components/BedrockModelPicker.tsx');
   assert.match(field, /<Select label=\{text\("Bedrock model", "Bedrock 模型"\)\} showLabel value=\{selectValue\(state, saved\)\} disabled=\{busy\} describedBy=\{statusId\} onChange=\{choose\}/);
-  assert.match(field, /<p id=\{statusId\} role="status" className=\{LOOK\[place\]\.help\}>\{listStatus\(listState, text, place\)\}<\/p>/);
+  assert.match(field, /<p id=\{statusId\} role="status" className=\{LOOK\[place\]\.help\}>\{listStatus\(listState, text, place, credentialsIn\)\}<\/p>/);
   assert.match(field, /settings: \{ field: "settings-bedrock-model", help: "settings-help" \}/, 'Settings keeps its classes');
   assert.match(field, /dispatch\(\{ type: "choose", value, saved \}\);\s*if \(value !== OTHER_MODEL && value !== saved\) void save\(value\);/);
   assert.match(field, /onChange=\{\(e\) => type\(e\.target\.value\)\}/);

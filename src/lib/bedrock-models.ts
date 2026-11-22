@@ -172,7 +172,14 @@ function allowed(permissions: string[], text: Text): string {
  * why. AWS's list is what AWS lists for the region; nothing in it says the
  * account has access to a model, so this line does not say so either.
  */
-export function listStatus(state: BedrockListState, text: Text, place: PickerPlace = 'settings'): string {
+/**
+ * Where Settings keeps the AWS keys: the old page has them in its AWS Bedrock
+ * panel below the picker; the Settings dialog has them in Advanced > Cloud
+ * providers.
+ */
+export type CredentialsIn = 'below' | 'cloud-providers';
+
+export function listStatus(state: BedrockListState, text: Text, place: PickerPlace = 'settings', credentialsIn: CredentialsIn = 'below'): string {
   if (state.status === 'idle') return text('The model list has not been loaded yet.', '尚未載入模型清單。');
   if (state.status === 'loading') return text('Loading the model list…', '正在載入模型清單……');
   if (state.status === 'error') return text('JARVIS could not load the model list. Load it again to retry.', 'JARVIS 未能載入模型清單，可重新載入再試。');
@@ -190,7 +197,7 @@ export function listStatus(state: BedrockListState, text: Text, place: PickerPla
         `清單來自你的 AWS 帳戶（地區：${region}）。如帳戶未獲某個模型的存取權限，即使該模型在清單中，AWS 仍可能拒絕。`,
       );
   }
-  return `${fallbackReason(list, text, place)}${text(` ${BUILT_IN_REGION_NOTE[0]}`, BUILT_IN_REGION_NOTE[1])}`;
+  return `${fallbackReason(list, text, place, credentialsIn)}${text(` ${BUILT_IN_REGION_NOTE[0]}`, BUILT_IN_REGION_NOTE[1])}`;
 }
 
 /**
@@ -203,18 +210,18 @@ export const BUILT_IN_REGION_NOTE = ['AWS may not offer every model in this list
 /**
  * Where the saved credentials are fixed, for the three reasons about them.
  * Settings has them in its AWS Bedrock panel below the picker; the Mail
- * dialog does not, they are in Settings → Models; the setup guide takes new
+ * dialog does not, they are in Settings → Advanced → Cloud providers; the setup guide takes new
  * keys above the picker and saves them with its test button.
  */
 function credentialsReason(reason: 'no_credentials' | 'unreadable_credentials' | 'credentials_refused', place: Exclude<PickerPlace, 'settings'>, text: Text): string {
   if (place === 'mail') {
     switch (reason) {
       case 'no_credentials':
-        return text('Built-in list: no AWS credentials are saved. Save them in Settings → Models, under AWS Bedrock, to load the list from your AWS account.', '內置清單：尚未儲存 AWS 憑證。請在設定的「模型」頁面「AWS Bedrock」部分儲存憑證，即可從你的 AWS 帳戶載入清單。');
+        return text('Built-in list: no AWS credentials are saved. Save them in Settings → Advanced → Cloud providers to load the list from your AWS account.', '內置清單：尚未儲存 AWS 憑證。請在「設定 → 進階 → 雲端服務」儲存憑證，即可從你的 AWS 帳戶載入清單。');
       case 'unreadable_credentials':
-        return text('Built-in list: JARVIS could not read your saved AWS credentials. Save them again in Settings → Models, under AWS Bedrock.', '內置清單：JARVIS 未能讀取已儲存的 AWS 憑證，請在設定的「模型」頁面「AWS Bedrock」部分重新儲存。');
+        return text('Built-in list: JARVIS could not read your saved AWS credentials. Save them again in Settings → Advanced → Cloud providers.', '內置清單：JARVIS 未能讀取已儲存的 AWS 憑證，請在「設定 → 進階 → 雲端服務」重新儲存。');
       case 'credentials_refused':
-        return text('Built-in list: AWS did not accept the saved AWS credentials. Check them in Settings → Models, under AWS Bedrock.', '內置清單：AWS 不接受已儲存的 AWS 憑證，請在設定的「模型」頁面「AWS Bedrock」部分檢查。');
+        return text('Built-in list: AWS did not accept the saved AWS credentials. Check them in Settings → Advanced → Cloud providers.', '內置清單：AWS 不接受已儲存的 AWS 憑證，請在「設定 → 進階 → 雲端服務」檢查。');
     }
   }
   switch (reason) {
@@ -227,9 +234,19 @@ function credentialsReason(reason: 'no_credentials' | 'unreadable_credentials' |
   }
 }
 
-function fallbackReason(list: BedrockModelList, text: Text, place: PickerPlace): string {
+function fallbackReason(list: BedrockModelList, text: Text, place: PickerPlace, credentialsIn: CredentialsIn): string {
   if (place !== 'settings' && (list.reason === 'no_credentials' || list.reason === 'unreadable_credentials' || list.reason === 'credentials_refused')) {
     return credentialsReason(list.reason, place, text);
+  }
+  if (credentialsIn === 'cloud-providers') {
+    switch (list.reason) {
+      case 'no_credentials':
+        return text('Built-in list: no AWS credentials are saved. Save them in Advanced → Cloud providers.', '內置清單：尚未儲存 AWS 憑證。請在進階 → 雲端服務中儲存。');
+      case 'unreadable_credentials':
+        return text('Built-in list: JARVIS could not read your saved AWS credentials. Save them again in Advanced → Cloud providers.', '內置清單：JARVIS 未能讀取已儲存的 AWS 憑證，請在進階 → 雲端服務中重新儲存。');
+      case 'credentials_refused':
+        return text('Built-in list: AWS did not accept the saved AWS credentials. Check them in Advanced → Cloud providers.', '內置清單：AWS 不接受已儲存的 AWS 憑證，請在進階 → 雲端服務中檢查。');
+    }
   }
   switch (list.reason) {
     case 'no_credentials':

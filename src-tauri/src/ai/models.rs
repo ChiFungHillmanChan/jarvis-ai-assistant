@@ -171,6 +171,9 @@ pub struct CloudModel {
     pub label: String,
     /// A family pattern ("gemini-flash") rather than a model a user can pick.
     pub family: bool,
+    /// Only an active model is offered as a choice; the rest stay listed so
+    /// their usage is still priced.
+    pub status: registry::doc::Status,
     pub price: Price,
     pub long_context: Option<LongContext>,
     /// The most output tokens (thinking included) one request may ask for.
@@ -309,6 +312,8 @@ pub struct Defaults {
     pub claude: String,
     pub gemini_flash: String,
     pub gemini_pro: String,
+    /// What Gemini sorts mail with when no model is picked (Settings > Your AI).
+    pub gemini_mail_sort: String,
     pub bedrock: String,
     /// The on-device speech model; its file is `<id>.bin` (voice/model_manager.rs).
     pub whisper: String,
@@ -376,6 +381,7 @@ fn cloud_models(registry: &registry::Registry) -> Vec<CloudModel> {
                 id: m.id.clone(),
                 label: if m.kind == registry::doc::Kind::Family { m.id.clone() } else { m.display_name.en.clone() },
                 family: m.kind == registry::doc::Kind::Family,
+                status: m.status,
                 price: price(p.input, p.output, p.cache_read, p.cache_write),
                 long_context: p.tiers.first().map(|t| LongContext { above: t.above_input_tokens, price: price(t.input, t.output, t.cache_read, t.cache_write) }),
                 max_output_tokens: m.max_output,
@@ -394,6 +400,7 @@ pub fn ai_models() -> Catalog {
             claude: registry.default_model("chat", "claude"),
             gemini_flash: registry.default_model("chat", "gemini"),
             gemini_pro: registry.default_model("premium", "gemini"),
+            gemini_mail_sort: registry.default_model("mail_sort", "gemini"),
             bedrock: registry.default_model("chat", "bedrock"),
             whisper: registry.default_model("stt", "whisper"),
         },
@@ -460,6 +467,18 @@ mod tests {
         let catalog = ai_models();
         assert_eq!(catalog.defaults.openai, "gpt-5.6-luna");
         assert!(catalog.cloud.iter().any(|m| m.id == "gpt-5.6-luna" && m.label == "Renamed"));
+    }
+
+    /// Settings > Your AI preselects Gemini's mail sort default, which the
+    /// catalog reads from the registry's mail_sort feature, not chat's.
+    #[test]
+    fn the_catalog_carries_the_gemini_mail_sort_default() {
+        let _registry = registry::test_override::with(|r| {
+            r.features.get_mut("mail_sort").unwrap().insert("gemini".into(), "gemini-3.6-flash".into());
+        });
+        let catalog = ai_models();
+        assert_eq!(catalog.defaults.gemini_mail_sort, "gemini-3.6-flash");
+        assert_eq!(catalog.defaults.gemini_flash, registry::current().default_model("chat", "gemini"));
     }
 
     /// What the frontend lists (presets, setup, compatible services and the
@@ -575,7 +594,7 @@ mod tests {
     #[test]
     fn every_default_model_has_a_real_price() {
         for registry in [registry::fixture(), registry::bundled()] {
-            for (feature, provider) in [("chat", "openai"), ("chat", "claude"), ("chat", "gemini"), ("premium", "gemini"), ("chat", "bedrock"), ("mail_sort", "typesafe")] {
+            for (feature, provider) in [("chat", "openai"), ("chat", "claude"), ("chat", "gemini"), ("premium", "gemini"), ("mail_sort", "gemini"), ("chat", "bedrock"), ("mail_sort", "typesafe")] {
                 let id = registry.default_model(feature, provider);
                 assert!(registry.find_priced(&id).is_some(), "{id} has no price in registry version {}", registry.version);
             }

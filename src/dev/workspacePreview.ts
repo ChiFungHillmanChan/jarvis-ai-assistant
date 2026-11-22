@@ -51,7 +51,26 @@ export function installWorkspacePreview() {
     obsidian: { status: 'not_connected', identity: null, method: null, message: null },
   };
   const storage = { databaseBytes: 48_200_000, walBytes: 1_200_000, modelsBytes: 148_000_000, cacheBytes: 12_400_000, backupsBytes: 96_000_000, totalBytes: 305_800_000, mailMessageCount: 412, mailBodyBytes: 8_600_000, conversationCount: 37, retentionDays: 90, retentionEnabled: true, dataDir: '/Users/alex/Library/Application Support/jarvis' };
-  const catalog = { defaults: { openai: '', claude: '', gemini_flash: '', gemini_pro: '', bedrock: '', whisper: '' }, cloud: [], local: [], registry: { version: 7, issued_at: day + 'T00:00:00Z', source: 'bundled' }, registry_updates: false, app_version: '0.5.13 (preview)', presets: [], default_preset: '', setup: [], compatible: [] };
+  // Settings > Your AI (Task 10). Sample ids, never a real model id; prices are the registry's.
+  const sampleModel = (provider: string, id: string, label: string, input: number, output: number) => ({ provider, id, label, family: false, status: 'active', max_output_tokens: null, price: { input_per_million: input, output_per_million: output, cache_read_per_million: 0, cache_write_per_million: 0 } });
+  const sampleSetup = (id: string, en: string, model: string, keyPage: string | null) => ({ id, name: { en, 'zh-HK': en }, hint: { en: `Sample ${en} hint.`, 'zh-HK': `${en} 示範說明。` }, key_page: keyPage, model });
+  const catalog = {
+    defaults: { openai: 'sample-luna', claude: 'sample-haiku', gemini_flash: 'sample-flash', gemini_pro: '', gemini_mail_sort: 'sample-lite', bedrock: '', whisper: '' },
+    cloud: [sampleModel('gemini', 'sample-lite', 'Gemini Flash-Lite (sample)', 0.25, 1.5), sampleModel('gemini', 'sample-flash', 'Gemini Flash (sample)', 0.75, 3.75), sampleModel('gemini', 'sample-smart', 'Gemini Smart (sample)', 1.5, 7.5), sampleModel('gemini', 'sample-pro', 'Gemini Pro (sample)', 2, 12), sampleModel('openai', 'sample-luna', 'GPT Luna (sample)', 0.1, 0.5), sampleModel('claude', 'sample-haiku', 'Claude Haiku (sample)', 0.1, 0.5)],
+    local: [], registry: { version: 7, issued_at: day + 'T00:00:00Z', source: 'bundled' }, registry_updates: false, app_version: '0.5.13 (preview)',
+    presets: [{ id: 'sample_primary', label: { en: 'Gemini (sample preset)', 'zh-HK': 'Gemini（示範預設）' } }, { id: 'sample_local', label: { en: 'Local first (sample preset)', 'zh-HK': '本機優先（示範預設）' } }], default_preset: 'sample_primary',
+    setup: [sampleSetup('ollama', 'Ollama', 'required', null), sampleSetup('openai', 'OpenAI', 'optional', 'https://platform.openai.com/api-keys'), sampleSetup('gemini', 'Google Gemini', 'optional', 'https://aistudio.google.com/apikey'), sampleSetup('claude', 'Anthropic Claude', 'optional', 'https://console.anthropic.com/settings/keys'), sampleSetup('kimi', 'Kimi', 'required', null), sampleSetup('qwen', 'Qwen', 'required', null)],
+    compatible: [
+      { id: 'kimi', name: 'Kimi', regions: [{ id: 'global', base_url: 'https://api.moonshot.ai/v1', key_page: 'https://platform.moonshot.ai/console/api-keys' }, { id: 'china', base_url: 'https://api.moonshot.cn/v1', key_page: 'https://platform.moonshot.cn/console/api-keys' }], host_suffixes: ['moonshot.ai', 'moonshot.cn'] },
+      { id: 'qwen', name: 'Qwen', regions: [{ id: 'global', base_url: 'https://dashscope-intl.aliyuncs.com/compatible-mode/v1', key_page: 'https://www.alibabacloud.com/help/en/model-studio/get-api-key' }], host_suffixes: ['aliyuncs.com'] },
+    ],
+  };
+  // Settings > Advanced (Task 11). Nothing reaches a service; keys are never kept.
+  let chain: { position: number; provider_type: string; endpoint_id?: string; model_id?: string; enabled: boolean; base_url?: string | null }[] = [{ position: 0, provider_type: 'openai', enabled: true }, { position: 1, provider_type: 'gemini', model_id: 'sample-flash', enabled: true }];
+  let endpoints = [{ id: 'sample-ollama', name: 'Ollama', url: 'http://127.0.0.1:11434', backend_type: 'ollama', use_tls: false, connection_timeout_ms: 5000, keep_alive_minutes: 5, is_active: true, last_health_status: true }];
+  const keyStatus: Record<string, boolean> = { gemini: false, claude: true, openai: true };
+  let aws: { configured: boolean; region: string | null } = { configured: true, region: 'ap-southeast-1' };
+  let currentAiValue: { provider: string; label: string; model: string | null; base_url: string | null } = { provider: 'openai', label: 'OpenAI', model: null, base_url: null };
   mockIPC(async (command, raw) => {
     const args = (raw || {}) as Record<string, any>;
     if (command.startsWith('plugin:')) return null;
@@ -112,11 +131,28 @@ export function installWorkspacePreview() {
       case 'mail_triage_run': return { triaged: 3, summarized: 2, items: 1, failed: 0, remaining: 0, jev_input_tokens: 4200, luna_input_tokens: 2600, luna_output_tokens: 300, cost_usd: 0.0006, price_unknown: false, warning: null };
       case 'mail_get_message': return messages.find(m => m.id === args.messageId);
       case 'mail_analyze_group': return { text: 'Two customer conversations need follow-up.\n\n- Confirm the project review date.\n- Send feedback on the proposal.', mode: 'local', model: 'Preview only', source_ids: [1, 2], omitted_messages: 0 };
-      case 'get_api_key_status': return { gemini: false, claude: false, openai: false };
+      case 'get_api_key_status': return { ...keyStatus };
+      case 'set_api_key': if (args.provider === 'typesafe') return null; keyStatus[args.provider] = !args.remove; return null;
+      case 'update_provider_chain': chain = args.chain; return null;
+      case 'set_aws_credentials': aws = { configured: true, region: args.region }; return null;
+      case 'clear_aws_credentials': throw 'Preview: the sample AWS key is not removed.';
+      case 'list_bedrock_models': return { source: 'fallback', region: aws.region, reason: 'no_credentials', missing_permissions: [], default_model: { id: 'sample-bedrock', name: 'Sample Bedrock model' }, models: [] };
+      case 'mail_save_settings': Object.assign(mailSettings, args.input); return null;
+      case 'add_local_endpoint': { const ep = { ...endpoints[0], id: `sample-${endpoints.length + 1}`, name: args.name, url: args.url, backend_type: args.backendType ?? 'generic', last_health_status: false }; endpoints = [...endpoints, ep]; return ep; }
+      case 'remove_local_endpoint': endpoints = endpoints.filter(e => e.id !== args.id); return null;
+      case 'test_endpoint_connection': return { reachable: true, model_count: 1, latency_ms: 42 };
+      case 'list_endpoint_models': return [{ id: 'sample-local', endpoint_id: args.endpointId, context_length: 8192, supports_tools: 'native' }];
+      case 'check_system_compatibility': return { os: 'macos', arch: 'aarch64', total_ram_gb: 16, available_ram_gb: 9, gpu: { has_metal: true, has_cuda: false, cuda_version: null }, ollama: {}, vllm: {}, recommended_max_params: '8B' };
+      case 'check_backend_prerequisites': return args.backendType === 'ollama' ? [{ name: 'Ollama installed', description: '', passed: true, required: true }, { name: 'Ollama running', description: '', passed: false, required: true, fix_command: 'ollama serve' }] : [{ name: 'Server reachable', description: '', passed: false, required: true, fix_label: 'Start the server, then check again.' }];
+      case 'get_recommended_models': return [{ id: 'sample-local', name: 'Sample local model', param_size: '8B', download_size_gb: 5.2, min_ram_gb: 16, tool_capable: true, description: 'A sample model for the preview.', already_pulled: true }, { id: 'sample-local-small', name: 'Sample small model', param_size: '3B', download_size_gb: 2, min_ram_gb: 8, tool_capable: false, description: 'A smaller sample.', already_pulled: false }];
+      case 'pull_model': throw 'Preview: models are not downloaded.';
+      case 'cancel_model_pull': return null;
       case 'google_status': return true;
       case 'get_google_account': return 'alex@example.com';
-      case 'get_aws_credentials_status': return { configured: false, region: null };
-      case 'list_local_endpoints': case 'get_provider_chain': case 'list_tts_voices': return [];
+      case 'get_aws_credentials_status': return { ...aws };
+      case 'list_local_endpoints': return endpoints;
+      case 'get_provider_chain': return chain;
+      case 'list_tts_voices': return [];
       case 'get_wake_word_status': return { enabled: wakeOn, running: wakeOn, model_downloaded: true, voice_state: wakeOn ? 'WakeWordListening' : 'Idle' };
       case 'enable_wake_word': case 'disable_wake_word': wakeOn = command === 'enable_wake_word'; void emit('voice-state', wakeOn ? 'WakeWordListening' : 'Idle'); return null;
       case 'get_voice_settings': return null;
@@ -124,7 +160,12 @@ export function installWorkspacePreview() {
       case 'is_model_downloaded': return false;
       case 'stop_speaking': return null;
       case 'google_accounts': return { main: { state: 'connected', name: 'Alex Chan', email: 'alex@example.com', gmail: true, calendar: true }, others: [] };
-      case 'current_ai': return { provider: 'openai', label: 'OpenAI', model: null, base_url: null };
+      case 'current_ai': return currentAiValue;
+      // Nothing is sent or saved: the preview answers as if the test passed and keeps no key.
+      case 'choose_ai': { const c = args.choice; const label = c.provider === 'compatible' ? 'Sample service' : c.provider === 'ollama' ? 'Ollama' : c.provider === 'gemini' ? 'Gemini' : c.provider === 'claude' ? 'Claude' : 'OpenAI'; currentAiValue = { provider: c.provider, label, model: c.model ?? null, base_url: c.baseUrl ?? null }; return currentAiValue; }
+      case 'list_ai_models': return ['sample-chat', 'sample-chat-long'];
+      case 'ai_consent_needed': case 'ai_google_content_note': return null;
+      case 'probe_local_setup': return { os: 'macos', arch: 'aarch64', macosVersion: '15.2', totalRamGb: 16, availableDiskGb: 120, ollamaInstalled: false, ollamaRunning: false, recommendedTag: 'sample-local', downloadUrl: 'https://ollama.com/download/mac', installedModels: [] };
       case 'list_ai_consents': return consents;
       case 'revoke_ai_consent': consents = consents.filter(c => c.provider !== args.provider); void emit('ai-consent-changed'); return null;
       case 'notion_connection_status': case 'github_connection_status': case 'obsidian_connection_status': return integrations[command.split('_')[0]];

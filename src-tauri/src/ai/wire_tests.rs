@@ -36,9 +36,10 @@ pub(crate) fn is_loopback(base: &str) -> bool {
 }
 
 /// Lets this thread's requests reach the providers' own addresses until
-/// dropped; the drop puts back what was there before. Made only in `live`,
-/// by [`live_key`], for a test that holds a JARVIS_LIVE_<PROVIDER>_KEY value.
-struct Outside {
+/// dropped; the drop puts back what was there before. Made only by
+/// [`live_key`], for a live test (`live` here, or another module's) that
+/// holds a JARVIS_LIVE_<PROVIDER>_KEY value.
+pub(crate) struct Outside {
     before: bool,
 }
 
@@ -50,7 +51,7 @@ impl Drop for Outside {
 
 /// The value of `name` (a JARVIS_LIVE_<PROVIDER>_KEY variable) and, when it
 /// is set, the opt-in that lets this thread reach the providers.
-fn live_key(name: &str) -> Option<(String, Outside)> {
+pub(crate) fn live_key(name: &str) -> Option<(String, Outside)> {
     assert!(name.starts_with("JARVIS_LIVE_") && name.ends_with("_KEY"), "only a live key opts in: {name}");
     let key = std::env::var(name).ok().map(|value| value.trim().to_string()).filter(|value| !value.is_empty())?;
     let before = OUTSIDE.with(|allowed| allowed.replace(true));

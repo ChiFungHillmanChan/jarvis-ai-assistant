@@ -135,10 +135,10 @@ export const ROWS: RowMeta[] = [
   row('mail-bedrock-model', 'advanced-models', ['Mail: Bedrock model', '郵件：Bedrock 模型'], undefined, ['mail', 'aws', 'bedrock']),
 
   // Advanced: Cloud providers
-  row('key-gemini', 'advanced-cloud', ['Google Gemini API key', 'Google Gemini API 金鑰'], ['Stored in the Keychain.', '儲存於鑰匙圈。'], ['api key', 'secret', 'remove', 'gemini']),
-  row('key-claude', 'advanced-cloud', ['Anthropic Claude API key', 'Anthropic Claude API 金鑰'], ['Stored in the Keychain.', '儲存於鑰匙圈。'], ['api key', 'secret', 'remove', 'anthropic']),
-  row('key-openai', 'advanced-cloud', ['OpenAI API key', 'OpenAI API 金鑰'], ['Stored in the Keychain.', '儲存於鑰匙圈。'], ['api key', 'secret', 'remove', 'gpt']),
-  row('key-typesafe', 'advanced-cloud', ['TypeSafe API key', 'TypeSafe API 金鑰'], ['Optional. Cheaper mail sorting.', '可選。令郵件整理成本更低。'], ['typesafe', 'mail', 'sorting', 'api key', 'remove', '移除']),
+  row('key-gemini', 'advanced-cloud', ['Google Gemini API key', 'Google Gemini API 密鑰'], ['Stored in the Keychain.', '儲存於鑰匙圈。'], ['api key', 'secret', 'remove', 'gemini']),
+  row('key-claude', 'advanced-cloud', ['Anthropic Claude API key', 'Anthropic Claude API 密鑰'], ['Stored in the Keychain.', '儲存於鑰匙圈。'], ['api key', 'secret', 'remove', 'anthropic']),
+  row('key-openai', 'advanced-cloud', ['OpenAI API key', 'OpenAI API 密鑰'], ['Stored in the Keychain.', '儲存於鑰匙圈。'], ['api key', 'secret', 'remove', 'gpt']),
+  row('key-typesafe', 'advanced-cloud', ['TypeSafe API key', 'TypeSafe API 密鑰'], ['Optional. Cheaper mail sorting.', '可選。令郵件整理成本更低。'], ['typesafe', 'mail', 'sorting', 'api key', 'remove', '移除']),
   row('aws-access-key', 'advanced-cloud', ['AWS Access Key ID', 'AWS Access Key ID'], ['For Bedrock. Stored in the Keychain.', '供 Bedrock 使用，儲存於鑰匙圈。'], ['bedrock', 'credentials']),
   row('aws-secret-key', 'advanced-cloud', ['AWS Secret Access Key', 'AWS Secret Access Key'], undefined, ['bedrock', 'credentials', 'remove key']),
   row('aws-region', 'advanced-cloud', ['AWS region', 'AWS 地區'], ['Where Bedrock requests run.', 'Bedrock 請求執行的地區。'], ['bedrock', 'singapore', 'tokyo', 'london', 'us east']),

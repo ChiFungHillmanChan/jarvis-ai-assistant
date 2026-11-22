@@ -10,6 +10,7 @@ import { parseAiError, problemText } from '../lib/ai-error';
 import BedrockModelPicker from '../components/BedrockModelPicker';
 import { useBedrockModelList } from '../hooks/useBedrockModelList';
 import { modelChosen } from '../lib/bedrock-models';
+import { AWS_REGIONS } from '../lib/aws-regions';
 import { useAiModels } from '../lib/ai-models';
 import WindowControls from '../components/WindowControls';
 import ReadableContent from '../components/content/ReadableContent';
@@ -164,7 +165,7 @@ export default function OnboardingWizard({ onComplete }: { onComplete: () => voi
             <p>{text('Your company administrator provides these credentials. Model availability depends on the region and account. Start with a text model approved by your company.', '憑證由公司管理員提供；可用模型取決於地區及帳戶。請先使用公司批准的文字模型。')}</p>
             <label>Access Key ID<input autoComplete="off" value={accessKey} onChange={event => { setAccessKey(event.target.value); setCredentialDirty(true); }} placeholder={text('Leave both keys blank to reuse saved credentials', '兩個欄位都留空會沿用已儲存憑證')} /></label>
             <label>Secret Access Key<input type="password" autoComplete="off" value={secretKey} onChange={event => { setSecretKey(event.target.value); setCredentialDirty(true); }} /></label>
-            <Select label={text('Region for new credentials', '新憑證使用的地區')} showLabel value={region} onChange={setRegion} options={[{ value: 'us-east-1', label: 'us-east-1 — US' }, { value: 'ap-southeast-1', label: 'ap-southeast-1 — Singapore' }, { value: 'ap-northeast-1', label: 'ap-northeast-1 — Tokyo' }, { value: 'eu-west-2', label: 'eu-west-2 — London' }]} />
+            <Select label={text('Region for new credentials', '新憑證使用的地區')} showLabel value={region} onChange={setRegion} options={AWS_REGIONS.map(item => ({ value: item.id, label: item.label }))} />
             <BedrockModelPicker place="setup" value={settings.bedrock_model} stored={workspace.settings.bedrock_model} fallback={models?.defaults.bedrock ?? ''} listState={bedrockList.list} onReload={bedrockList.reload} onChange={model => changeSettings({ ...settings, processing_mode: 'bedrock', bedrock_model: model })} />
             <label className="setup-checkbox"><input type="checkbox" checked={consent} onChange={event => setConsent(event.target.checked)} />{text('The test sends synthetic text and may incur a small charge. Later mail analysis sends selected mail content, instructions and valid memories to this provider.', '測試會傳送合成文字，可能產生少量費用。之後分析郵件時，所選郵件內容、指示及有效記憶會傳送至此供應商。')}</label>
             <button type="button" className="setup-primary" disabled={!consent || settings.processing_mode !== 'bedrock' || !modelChosen(settings.bedrock_model)} onClick={() => void testAndSave()}>{text('Test and use Bedrock for mail', '測試並以 Bedrock 處理電郵')}</button>

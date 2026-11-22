@@ -8,7 +8,8 @@ pub mod db;
 pub mod integration_keys;
 pub mod integrations;
 pub mod mail;
-#[cfg(feature = "native-qa")]
+// Tests reuse its 120 synthetic emails (mail::triage, the Gemini default test).
+#[cfg(any(test, feature = "native-qa"))]
 mod native_qa;
 pub mod payments;
 pub mod scheduler;

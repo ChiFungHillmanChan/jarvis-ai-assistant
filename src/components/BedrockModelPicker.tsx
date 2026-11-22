@@ -1,7 +1,7 @@
 import { useEffect, useId, useReducer, type CSSProperties } from "react";
 import { useUiLocale } from "../i18n";
 import Select from "../ui/Select";
-import { OTHER_MODEL, formPickerOptions, formRegionNote, groupLabel, initialPicker, listStatus, otherIdHelp, pickerOptions, pickerReducer, selectValue, type BedrockListState, type PickerPlace } from "../lib/bedrock-models";
+import { OTHER_MODEL, formPickerOptions, formRegionNote, groupLabel, initialPicker, listStatus, otherIdHelp, pickerOptions, pickerReducer, selectValue, type BedrockListState, type CredentialsIn, type PickerPlace } from "../lib/bedrock-models";
 
 /** Each place keeps its own look: Settings its classes and inline styles, the forms theirs. */
 const LOOK: Record<PickerPlace, { field: string; help: string }> = {
@@ -25,6 +25,8 @@ type Props = Shared & (
     /** Saves the id at once; resolves to the refusal, or null. */
     onSave: (model: string) => Promise<string | null>;
     styles: { select: CSSProperties; button: CSSProperties; input: CSSProperties };
+    /** Where the status line sends someone for the AWS keys; the old page's panel below by default. */
+    credentialsIn?: CredentialsIn;
   }
   | {
     place: "mail" | "setup";
@@ -54,6 +56,7 @@ export default function BedrockModelPicker(props: Props) {
   const { text } = useUiLocale();
   const form = props.place !== "settings";
   const look = props.place === "settings" ? props.styles : undefined;
+  const credentialsIn = props.place === "settings" ? props.credentialsIn : undefined;
   /**
    * The id the picker holds, which the reducer calls saved: the row's saved
    * id in Settings, the form's id in the forms.
@@ -94,7 +97,7 @@ export default function BedrockModelPicker(props: Props) {
       <button type="button" disabled={listState.status === "loading" || busy} onClick={onReload} style={look?.button}>
         {listState.status === "idle" ? text("Load the list", "載入清單") : text("Load the list again", "重新載入清單")}
       </button>
-      <p id={statusId} role="status" className={LOOK[place].help}>{listStatus(listState, text, place)}</p>
+      <p id={statusId} role="status" className={LOOK[place].help}>{listStatus(listState, text, place, credentialsIn)}</p>
       {props.place !== "settings" && !state.other && <p className={LOOK[place].help}>{formRegionNote(props.place, text)}</p>}
       {state.other && (<>
         <label>

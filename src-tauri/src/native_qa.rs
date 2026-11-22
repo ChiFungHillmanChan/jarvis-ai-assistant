@@ -1,12 +1,15 @@
 //! Explicit native QA build. IPC and storage are the production implementation.
 //! Only startup fixtures, database location and credential storage differ.
 
-#[cfg(not(debug_assertions))]
+// Tests also compile this module (lib.rs), including `cargo test --release`.
+#[cfg(all(feature = "native-qa", not(debug_assertions)))]
 compile_error!("native-qa is for debug builds only; never package it for release");
 
 use rusqlite::{params, Connection};
+#[cfg(feature = "native-qa")]
 use std::path::PathBuf;
 
+#[cfg(feature = "native-qa")]
 pub fn directory() -> Result<PathBuf, Box<dyn std::error::Error>> {
     let path = PathBuf::from(std::env::var("JARVIS_NATIVE_QA_DIR")?);
     if !path.is_absolute() {

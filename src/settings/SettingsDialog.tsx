@@ -11,10 +11,14 @@ import { ROWS, rowText, type RowMeta } from './rows';
 import { searchRows } from './search';
 import LegacySection from './LegacySection';
 import General from './sections/General';
+import YourAi from './sections/YourAi';
 import Connections from './sections/Connections';
 import Privacy from './sections/Privacy';
 import SetupGuide from './sections/SetupGuide';
 import About from './sections/About';
+import Models from './sections/advanced/Models';
+import CloudProviders from './sections/advanced/CloudProviders';
+import LocalAi from './sections/advanced/LocalAi';
 import { isBackdropClick } from './settings-dialog-state';
 import './settings.css';
 
@@ -22,10 +26,14 @@ import './settings.css';
 // shows the old page's body through LegacySection until it is rebuilt.
 const SECTION_VIEWS: Partial<Record<SettingsSectionId, ComponentType>> = {
   general: General,
+  ai: YourAi,
   connections: Connections,
   privacy: Privacy,
   setup: SetupGuide,
   about: About,
+  'advanced-models': Models,
+  'advanced-cloud': CloudProviders,
+  'advanced-local': LocalAi,
 };
 
 export default function SettingsDialog() {
