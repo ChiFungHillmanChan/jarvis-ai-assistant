@@ -70,6 +70,7 @@ import { sweepSummary } from "../lib/storage-report";
 import BackgroundSettings from "../components/BackgroundSettings";
 import { UserRound } from "lucide-react";
 import { useIsActiveTab, useWorkspace, useWorkspaceValue } from "../workspace/WorkspaceContext";
+import { useSettingsDialog } from "../settings/SettingsContext";
 import type { BedrockListState } from "../lib/bedrock-models";
 import BedrockModelPicker from "../components/BedrockModelPicker";
 import { useUserHasActed } from "../lib/user-activity";
@@ -101,6 +102,7 @@ export default function Settings({ embedded }: { embedded?: { sections: string[]
   // (ai_models), never from this file.
   const models = useAiModels();
   const { appearance, setAppearance, open } = useWorkspace();
+  const { closeSettings } = useSettingsDialog();
   const { locale, setLocale, saveError: localeSaveError, retrySave: retryLocaleSave, t, text } = useUiLocale();
   // The saved preset; empty means the registry's default preset.
   const [aiProvider, setAiProvider] = useState("");
@@ -841,7 +843,7 @@ export default function Settings({ embedded }: { embedded?: { sections: string[]
         {shows("ai") && (<>
           <div className="settings-info-row">
             <p>{text('The AI you choose here answers the assistant and analyses mail. Mail analysis can use a different AI in its own settings.', '你在此選擇的 AI 會處理助手對話及電郵分析。電郵分析亦可在其設定中另選 AI。')}</p>
-            <button style={styles.saveBtn} onClick={() => open("email")}>{text('Mail analysis settings', '郵件分析設定')}</button>
+            <button style={styles.saveBtn} onClick={() => { if (embedded) closeSettings(); open("email"); }}>{text('Mail analysis settings', '郵件分析設定')}</button>
           </div>
           {llmError && <p role="alert" style={styles.errorText}>{llmError}</p>}
           <div className="settings-panel">

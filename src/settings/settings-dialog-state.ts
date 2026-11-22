@@ -39,3 +39,22 @@ export function settingsDialogReducer(state: SettingsDialogState, action: Settin
 export function isSettingsShortcut(e: { metaKey: boolean; key: string }): boolean {
   return e.metaKey && e.key === ',';
 }
+
+/**
+ * A click closes the dialog only when it both started and ended on the
+ * dialog element itself, outside its box: that is the backdrop. A drag that
+ * starts in a field and is released over the backdrop fires click on the
+ * dialog (the common ancestor) and must not close it, nor may a click on the
+ * dialog's own border.
+ */
+export function isBackdropClick(
+  downTarget: unknown,
+  clickTarget: unknown,
+  dialog: unknown,
+  rect: { left: number; top: number; right: number; bottom: number },
+  x: number,
+  y: number,
+): boolean {
+  if (!dialog || downTarget !== dialog || clickTarget !== dialog) return false;
+  return x < rect.left || x > rect.right || y < rect.top || y > rect.bottom;
+}

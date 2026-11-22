@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState, type ComponentType } from 'react';
+import { useCallback, useEffect, useRef, useState, type ComponentType } from 'react';
 import { X } from 'lucide-react';
 import ConfirmDialog from '../components/ConfirmDialog';
 import ErrorBoundary from '../components/ErrorBoundary';
@@ -10,6 +10,7 @@ import { ADVANCED_SECTIONS, NAV_GROUPS, advancedGroupLabel, sectionLabel, type S
 import { ROWS, rowText, type RowMeta } from './rows';
 import { searchRows } from './search';
 import LegacySection from './LegacySection';
+import { isBackdropClick } from './settings-dialog-state';
 import './settings.css';
 
 // The one place a section maps to its component. A section without an entry
@@ -23,21 +24,42 @@ export default function SettingsDialog() {
   const restoreFocus = useRef<HTMLElement | null>(null);
   const confirmEscape = useRef(false);
   const scrollTarget = useRef<string | null>(null);
+  const pointerDown = useRef<EventTarget | null>(null);
   const [query, setQuery] = useState('');
+
+  // Runs on every close, however it happened. The ref is cleared before
+  // focusing, so the state close and the native close event focus once.
+  const finishClose = useCallback(() => {
+    setQuery('');
+    const target = restoreFocus.current;
+    restoreFocus.current = null;
+    target?.focus();
+  }, []);
 
   useEffect(() => {
     const el = dialog.current;
     if (!el) return;
-    if (open && !el.open) {
-      restoreFocus.current = document.activeElement as HTMLElement | null;
-      el.showModal();
-    } else if (!open && el.open) {
-      el.close();
-      setQuery('');
-      restoreFocus.current?.focus();
-      restoreFocus.current = null;
+    if (open) {
+      if (!el.open) {
+        restoreFocus.current = document.activeElement as HTMLElement | null;
+        el.showModal();
+      }
+    } else {
+      if (el.open) el.close();
+      finishClose();
     }
-  }, [open]);
+  }, [open, finishClose]);
+
+  // A close that did not go through closeSettings (for example the browser
+  // closing the dialog itself on a repeated Esc) still updates the state, so
+  // Settings can open again.
+  useEffect(() => {
+    const el = dialog.current;
+    if (!el) return;
+    function onClose() { closeSettings(); finishClose(); }
+    el.addEventListener('close', onClose);
+    return () => el.removeEventListener('close', onClose);
+  }, [closeSettings, finishClose]);
 
   // Esc arrives as the native cancel event. The dialog closes through state,
   // so the native close is always prevented. An Esc that answers a
@@ -92,7 +114,11 @@ export default function SettingsDialog() {
       ref={dialog}
       className="settings-dialog"
       aria-labelledby="settings-dialog-title"
-      onClick={e => { if (e.target === dialog.current) closeSettings(); }}
+      onPointerDown={e => { pointerDown.current = e.target; }}
+      onClick={e => {
+        if (dialog.current && isBackdropClick(pointerDown.current, e.target, dialog.current, dialog.current.getBoundingClientRect(), e.clientX, e.clientY)) closeSettings();
+        pointerDown.current = null;
+      }}
       onKeyDown={e => { if (e.key === 'Escape') confirmEscape.current = !!dialog.current?.querySelector('.confirm-backdrop'); }}
     >
       {open && <>

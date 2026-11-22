@@ -2,7 +2,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import { readFileSync, readdirSync } from 'node:fs';
 import { join } from 'node:path';
-import { initialSettingsDialog, isSettingsShortcut, settingsDialogReducer, type SettingsDialogState } from '../src/settings/settings-dialog-state.ts';
+import { initialSettingsDialog, isBackdropClick, isSettingsShortcut, settingsDialogReducer, type SettingsDialogState } from '../src/settings/settings-dialog-state.ts';
 
 // Task 5: the settings dialog shell. The open/close/section logic is a pure
 // reducer tested here; the JSX files cannot be imported under node, so their
@@ -61,7 +61,8 @@ test('the dialog uses showModal, the native cancel event and a labelled close bu
   assert.match(dialog, /aria-current=/);
   assert.match(dialog, /<Select\b/, 'the narrow nav is the shared Select');
   assert.match(dialog, /searchRows\(/);
-  assert.match(dialog, /e\.target === dialog\.current/, 'a click on the backdrop closes');
+  assert.match(dialog, /onPointerDown=\{e => \{ pointerDown\.current = e\.target; \}\}/);
+  assert.match(dialog, /isBackdropClick\(pointerDown\.current, e\.target, dialog\.current, dialog\.current\.getBoundingClientRect\(\), e\.clientX, e\.clientY\)/, 'a click on the backdrop closes');
 });
 
 test('Cmd+, is registered once, in the provider', () => {
@@ -119,4 +120,52 @@ test('closing never cancels a pending save', () => {
   assert.doesNotMatch(source('../src/settings/SettingsDialog.tsx'), /AbortController/);
   const offenders = files('src/settings').filter(file => readFileSync(file, 'utf8').includes('abort('));
   assert.deepEqual(offenders, []);
+});
+
+// Fix round 1.
+const dialogEl = { tag: 'dialog' };
+const input = { tag: 'input' };
+const rect = { left: 100, top: 100, right: 900, bottom: 700 };
+
+test('a press and release on the backdrop closes', () => {
+  assert.equal(isBackdropClick(dialogEl, dialogEl, dialogEl, rect, 50, 50), true);
+  assert.equal(isBackdropClick(dialogEl, dialogEl, dialogEl, rect, 950, 400), true);
+  assert.equal(isBackdropClick(dialogEl, dialogEl, dialogEl, rect, 400, 750), true);
+});
+
+test('a drag from inside released over the backdrop does not close', () => {
+  // The click lands on the common ancestor, the dialog, outside its box.
+  assert.equal(isBackdropClick(input, dialogEl, dialogEl, rect, 50, 50), false);
+});
+
+test('a press that starts on the backdrop and ends inside does not close', () => {
+  assert.equal(isBackdropClick(dialogEl, input, dialogEl, rect, 400, 400), false);
+});
+
+test('a click on the dialog itself inside its box (border, padding) does not close', () => {
+  assert.equal(isBackdropClick(dialogEl, dialogEl, dialogEl, rect, 100, 400), false);
+  assert.equal(isBackdropClick(dialogEl, dialogEl, dialogEl, rect, 400, 700), false);
+});
+
+test('no recorded press or no dialog never closes', () => {
+  assert.equal(isBackdropClick(null, dialogEl, dialogEl, rect, 50, 50), false);
+  assert.equal(isBackdropClick(dialogEl, dialogEl, null, rect, 50, 50), false);
+});
+
+test('a native close updates the dialog state, and focus is restored once', () => {
+  const dialog = source('../src/settings/SettingsDialog.tsx');
+  assert.match(dialog, /el\.addEventListener\('close', onClose\)/);
+  assert.match(dialog, /function onClose\(\) \{ closeSettings\(\); finishClose\(\); \}/);
+  assert.match(dialog, /const target = restoreFocus\.current;\s*restoreFocus\.current = null;\s*target\?\.focus\(\);/, 'the ref is cleared before focusing, so a second run does nothing');
+  assert.match(dialog, /\} else \{\s*if \(el\.open\) el\.close\(\);\s*finishClose\(\);\s*\}/, 'the close branch resets even when the element is already closed');
+});
+
+test('the bridge closes the dialog before opening Mail; the old tab does not', () => {
+  const settings = source('../src/pages/Settings.tsx');
+  assert.match(settings, /onClick=\{\(\) => \{ if \(embedded\) closeSettings\(\); open\("email"\); \}\}/);
+});
+
+test('App documents that only one ConfirmDialog is mounted at a time', () => {
+  const app = source('../src/App.tsx');
+  assert.match(app, /Only one ConfirmDialog may be mounted at a time/);
 });
