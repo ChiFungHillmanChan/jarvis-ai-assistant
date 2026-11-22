@@ -152,6 +152,7 @@
 .settings-usage-fill { display: block; height: 100%; min-width: 2px; border-radius: 5px; background: var(--ui-focus); }
 .settings-usage-split-amount { color: var(--text-secondary); font-variant-numeric: tabular-nums; white-space: nowrap; }
 .settings-usage-note { margin: 0 0 16px; color: var(--text-secondary); font-size: 12px; }
+.settings-usage-about { margin: 0 0 16px; max-width: 72ch; }
 .settings-usage-details > summary { display: flex; flex-wrap: wrap; align-items: baseline; gap: 4px 10px; padding: 6px 0; color: var(--text-primary); font-size: 13px; font-weight: 600; cursor: pointer; }
 .settings-usage-details > summary::-webkit-details-marker { display: none; }
 .settings-usage-details > summary::before { content: ''; align-self: center; width: 6px; height: 6px; margin-right: 2px; border-right: 1.5px solid currentColor; border-bottom: 1.5px solid currentColor; transform: rotate(-45deg); transition: transform .15s; }

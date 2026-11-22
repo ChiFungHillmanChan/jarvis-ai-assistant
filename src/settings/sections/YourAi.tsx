@@ -16,6 +16,7 @@ import GeminiCard from '../ai/GeminiCard';
 import LocalCard from '../ai/LocalCard';
 import OtherServiceCard from '../ai/OtherServiceCard';
 import { CANCELLED, type TestAndUse } from '../ai/save';
+import { useRow } from './advanced/useRow';
 
 type Card = 'jarvis' | 'gemini' | 'local' | 'other';
 interface Face { id: Card; name: string; blurb: string; cost: string; disabled?: boolean }
@@ -40,6 +41,7 @@ function cardFor(current: CurrentAi | null): Card | null {
 export default function YourAi() {
   const { text } = useUiLocale();
   const { openSettings } = useSettingsDialog();
+  const row = useRow();
   const catalog = useAiModels();
   const { chain, current, ready, error, reload } = useProviderChain();
   const { consentNeeded, setConsentNeeded, googleNote } = useAiConsent(current);
@@ -122,6 +124,10 @@ export default function YourAi() {
     {card === 'other' && <OtherServiceCard catalog={catalog} current={current} busy={busy} onTestAndUse={testAndUse} />}
 
     {notice && <p className="settings-ai-notice" role="status">{notice}</p>}
+    <p id="ai-mail-link" className="settings-ai-footer">
+      {text('The AI you choose here answers you in chat and sorts your mail. Mail analysis can use a different AI in its own settings.', '你在此選擇的 AI 會在對話中回覆你，並整理你的郵件。郵件分析亦可在其設定中另選 AI。')}{' '}
+      <Button kind="quiet" onClick={() => openSettings('mail')}>{row('ai-mail-link').title}</Button>
+    </p>
     <p className="settings-ai-footer">
       {text('Bedrock, custom addresses, provider order and every model are in Advanced.', 'Bedrock、自訂位址、供應商次序及所有模型都在進階設定中。')}{' '}
       <Button kind="quiet" onClick={() => openSettings('advanced-models')}>{text('Open Advanced → Models', '開啟「進階 → 模型」')}</Button>

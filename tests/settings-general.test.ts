@@ -162,3 +162,11 @@ test('the one reply-language select records a direct choice; Voice has no second
   const voice = source('../src/settings/sections/Voice.tsx') + source('../src/settings/hooks/useVoiceSettings.ts');
   assert.doesNotMatch(voice, /['"]language['"]\s*[,\]]/, 'Voice does not write the reply language');
 });
+
+// Inventory row 135: wallpaper mode says how to bring JARVIS back, in both languages.
+test('the wallpaper row says how to bring JARVIS back', () => {
+  const general = source('../src/settings/sections/General.tsx');
+  const wallpaper = general.slice(general.indexOf("<SettingRow {...row('wallpaper')}"), general.indexOf("<SettingGroup title={text('Startup'"));
+  assert.match(wallpaper, /To bring it back later, say Hey Jarvis, click the tray icon, or press Cmd\+Shift\+W\. Closing the window sends it back to the background\./);
+  assert.match(wallpaper, /之後可說出「Hey Jarvis」、按選單列圖示，或按 Cmd\+Shift\+W 重新開啟。關閉視窗會將 JARVIS 移回背景。/);
+});

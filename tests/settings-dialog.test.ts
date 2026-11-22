@@ -158,6 +158,17 @@ test('a native close updates the dialog state, and focus is restored once', () =
   assert.match(dialog, /\} else \{\s*if \(el\.open\) el\.close\(\);\s*finishClose\(\);\s*\}/, 'the close branch resets even when the element is already closed');
 });
 
+test('Your AI links to the mail analysis settings inside the dialog', () => {
+  // The old page's "Mail analysis settings" opened the Mail tab (closing the
+  // dialog first when bridged). Those settings now live in Mail and
+  // follow-ups, so the link moves within the dialog and closes nothing.
+  const ai = source('../src/settings/sections/YourAi.tsx');
+  assert.match(ai, /<p id="ai-mail-link" className="settings-ai-footer">/);
+  assert.match(ai, /onClick=\{\(\) => openSettings\('mail'\)\}>\{row\('ai-mail-link'\)\.title\}<\/Button>/);
+  assert.match(ai, /text\('The AI you choose here answers you in chat and sorts your mail\. Mail analysis can use a different AI in its own settings\.', '你在此選擇的 AI 會在對話中回覆你，並整理你的郵件。郵件分析亦可在其設定中另選 AI。'\)/);
+  assert.doesNotMatch(ai, /open\('email'\)|closeSettings/);
+});
+
 test('App documents that only one ConfirmDialog is mounted at a time', () => {
   const app = source('../src/App.tsx');
   assert.match(app, /Only one ConfirmDialog may be mounted at a time/);

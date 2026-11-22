@@ -92,3 +92,13 @@ test('the Settings button that adds the Gemini premium default is named from the
   const button = between(order, "add({ provider_type: 'gemini', model_id: defaults.gemini_pro })}", '</Button>');
   assert.match(button, />\{addModelLabel\(catalog, defaults\.gemini_pro\)\}$/);
 });
+
+// Inventory row 61: the old Usage panel said what is recorded and that the
+// figures are estimates; the provider's bill is the final figure.
+test('Usage says what is recorded and that the bill is the final figure', () => {
+  const usage = source('../src/settings/sections/Usage.tsx');
+  assert.match(usage, /<p className="ui-hint settings-usage-about">\{text\(/);
+  assert.match(usage, /recorded only on this Mac\. Costs are worked out from list prices where JARVIS knows them, so your provider's bill is the final figure\./);
+  assert.match(usage, /只記錄在此 Mac。費用按 JARVIS 已知的公開價目計算，實際收費以供應商帳單為準。/);
+  assert.match(usage, /your AWS bill is the final figure\./);
+});
