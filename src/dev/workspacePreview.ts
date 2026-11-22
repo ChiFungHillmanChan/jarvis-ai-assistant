@@ -49,7 +49,7 @@ export function installWorkspacePreview() {
   const homeBrief = { date: shift(0), shown_at: day + ' 08:30:00', trigger: 'scheduled', local: [now.toDateString(), 'Meetings: 4 today', '  09:30　Standup', '  11:00　Evoke pilot check-in', 'Tasks: 1 overdue, 1 due today', 'Mail: 3 unread'].join('\n'), summary: 'Four meetings today. **Reply to Jordan about the quote** before the onboarding review.', summary_pending: false, summary_error: null };
   // Settings > Voice (Task 14). Nothing is spoken or downloaded.
   const voiceSettings: Record<string, unknown> = { enabled: true, tts_voice: 'Samantha', tts_voice_yue: 'Sinji', tts_rate: 200, tts_enabled: true, keep_recordings: true };
-  const voiceFields: Record<string, string> = { tts_voice: 'tts_voice', tts_voice_yue: 'tts_voice_yue', tts_enabled: 'tts_enabled', keep_voice_recordings: 'keep_recordings' };
+  const voiceFields: Record<string, string> = { tts_voice: 'tts_voice', tts_voice_yue: 'tts_voice_yue', tts_enabled: 'tts_enabled', tts_rate: 'tts_rate', keep_voice_recordings: 'keep_recordings' };
   let openAtLogin = false, keepAwake = false;
   let briefing = { enabled: false, time: '08:30', voice: true, speech_enabled: false };
   // Settings > Connections, Privacy and data, Setup guide and About (Task 7).
@@ -186,11 +186,16 @@ export function installWorkspacePreview() {
       case 'get_aws_credentials_status': return { ...aws };
       case 'list_local_endpoints': return endpoints;
       case 'get_provider_chain': return chain;
-      case 'list_tts_voices': return ['Daniel', 'Karen', 'Samantha', 'Sinji'];
+      case 'list_tts_voices': return [
+        { name: 'Daniel (English (UK))', locale: 'en_GB' }, { name: 'Eddy (English (US))', locale: 'en_US' }, { name: 'Karen', locale: 'en_AU' },
+        { name: 'Samantha (English (US))', locale: 'en_US' }, { name: 'Samantha (English (US))', locale: 'en_US' }, { name: 'Bad News', locale: 'en_US' },
+        { name: 'Sinji (Chinese (Hong Kong))', locale: 'zh_HK' }, { name: 'Tingting', locale: 'zh_CN' },
+      ];
+      case 'preview_tts_voice': return null;
       case 'get_wake_word_status': return { enabled: wakeOn, running: wakeOn, model_downloaded: true, voice_state: wakeOn ? 'WakeWordListening' : 'Idle' };
       case 'enable_wake_word': case 'disable_wake_word': wakeOn = command === 'enable_wake_word'; void emit('voice-state', wakeOn ? 'WakeWordListening' : 'Idle'); return null;
       case 'get_voice_settings': return { ...voiceSettings };
-      case 'set_voice_setting': { const field = voiceFields[args.key]; if (field) voiceSettings[field] = field === 'tts_enabled' || field === 'keep_recordings' ? args.value === 'true' : args.value; return null; }
+      case 'set_voice_setting': { const field = voiceFields[args.key]; if (field) voiceSettings[field] = field === 'tts_enabled' || field === 'keep_recordings' ? args.value === 'true' : field === 'tts_rate' ? Number(args.value) : args.value; return null; }
       case 'cloud_speech': return null;
       case 'download_model': throw 'Preview: the speech model is not downloaded.';
       case 'get_preference': return '';

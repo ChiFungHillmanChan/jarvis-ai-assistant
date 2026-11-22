@@ -173,7 +173,10 @@ export async function toggleMute(): Promise<boolean> { return invoke("toggle_mut
 export async function getVoiceSettings(): Promise<VoiceSettings> { return invoke("get_voice_settings"); }
 export async function getVoiceRecording(conversationId: number): Promise<ArrayBuffer> { return invoke("get_voice_recording", { conversationId }); }
 export async function setVoiceSetting(key: string, value: string): Promise<void> { return invoke("set_voice_setting", { key, value }); }
-export async function listTtsVoices(): Promise<string[]> { return invoke("list_tts_voices"); }
+/** A macOS voice: the full name `say -v` accepts and its locale, e.g. en_GB. */
+export interface TtsVoice { name: string; locale: string }
+export async function listTtsVoices(): Promise<TtsVoice[]> { return invoke("list_tts_voices"); }
+export async function previewTtsVoice(voice: string, rate: number, cantonese: boolean): Promise<void> { return invoke("preview_tts_voice", { voice, rate, cantonese }); }
 export async function getWakeWordStatus(): Promise<WakeWordStatus> { return invoke("get_wake_word_status"); }
 export async function enableWakeWord(): Promise<void> { return invoke("enable_wake_word"); }
 export async function disableWakeWord(): Promise<void> { return invoke("disable_wake_word"); }

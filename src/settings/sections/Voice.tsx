@@ -1,6 +1,6 @@
 import { useState } from 'react';
 import { confirmAction } from '../../components/ConfirmDialog';
-import { downloadModel } from '../../lib/commands';
+import { downloadModel, previewTtsVoice } from '../../lib/commands';
 import { canSwitchListening } from '../../lib/always-listening';
 import { useUiLocale } from '../../i18n';
 import { runAction } from '../../ui/actions';
@@ -8,10 +8,11 @@ import SettingGroup from '../../ui/SettingGroup';
 import SettingRow from '../../ui/SettingRow';
 import Select from '../../ui/Select';
 import Switch from '../../ui/Switch';
+import Segmented from '../../ui/Segmented';
 import Button from '../../ui/Button';
 import { ROWS_BY_ID, rowText } from '../rows';
 import { useVoiceSettings } from '../hooks/useVoiceSettings';
-import { ENGLISH_VOICE_KEYS, downloadPercent, voiceAvailabilityLine, wakePrivacyLine, wakeStatusLine } from '../voice';
+import { ENGLISH_VOICE_KEYS, SPEECH_RATES, downloadPercent, speechRateChoice, voiceAvailabilityLine, voiceChoices, wakePrivacyLine, wakeStatusLine, type SpeechRate } from '../voice';
 
 type Failure = { message: string } | null;
 
@@ -62,7 +63,13 @@ export default function Voice() {
     }
   }
 
-  const voiceOptions = (saved: string) => (v.voices.includes(saved) ? v.voices : [saved, ...v.voices]).map(name => ({ value: name, label: name }));
+  const voiceOptions = (language: 'en' | 'yue', saved: string) => voiceChoices(v.voices, language, saved, text);
+  // Play sample speaks one fixed sentence in the shown voice and speed.
+  const sample = (id: string, voice: string, cantonese: boolean) =>
+    <Button kind="secondary" disabled={!settings.tts_enabled || !voice} onClick={() => previewTtsVoice(voice, settings.tts_rate, cantonese)}
+      onError={e => fail(`${id}-sample`, e)}>{text('Play sample', '試聽')}</Button>;
+  const sampleFailure = (id: string) => failed[`${id}-sample`] && <span className="ui-secret-error" role="alert">{text('Could not play this voice.', '無法播放這個聲音。')}</span>;
+  const ttsOff = !settings.tts_enabled;
   const noVoices = v.voices.length === 0 ? text('No voices found on this Mac.', '在此 Mac 上找不到可用的聲音。') : undefined;
 
   const changeKeep = (next: boolean) => attempt('keep-recordings', () => runAction(next ? 'secondary' : 'danger',
@@ -102,30 +109,44 @@ export default function Voice() {
       </SettingRow>
     </SettingGroup>
 
-    <SettingGroup title={text('Spoken replies and recordings', '語音朗讀與錄音')}>
+    <SettingGroup title={text('Spoken replies', '語音朗讀')}>
       <SettingRow {...row('tts-enabled')} control={
         <Switch checked={settings.tts_enabled} label={row('tts-enabled').title}
           onChange={next => attempt('tts-enabled', () => v.saveVoice('tts_enabled', next, [['tts_enabled', String(next)]]))} />
       }>{saveFailure('tts-enabled')}</SettingRow>
 
+      <SettingRow {...row('tts-voice')} control={
+        <div style={{ display: 'flex', gap: 8, alignItems: 'center' }}>
+          <Select value={settings.tts_voice} options={voiceOptions('en', settings.tts_voice)} label={row('tts-voice').title} width={300}
+            disabled={ttsOff || !!noVoices} disabledReason={noVoices}
+            onChange={next => attempt('tts-voice', () => v.saveVoice('tts_voice', next, ENGLISH_VOICE_KEYS.map(key => [key, next] as [string, string])))} />
+          {sample('tts-voice', settings.tts_voice, false)}
+        </div>
+      }>{saveFailure('tts-voice')}{sampleFailure('tts-voice')}</SettingRow>
+
+      <SettingRow {...row('tts-voice-yue')} control={
+        <div style={{ display: 'flex', gap: 8, alignItems: 'center' }}>
+          <Select value={settings.tts_voice_yue} options={voiceOptions('yue', settings.tts_voice_yue)} label={row('tts-voice-yue').title} width={300}
+            disabled={ttsOff || !!noVoices} disabledReason={noVoices}
+            onChange={next => attempt('tts-voice-yue', () => v.saveVoice('tts_voice_yue', next, [['tts_voice_yue', next]]))} />
+          {sample('tts-voice-yue', settings.tts_voice_yue, true)}
+        </div>
+      }>{saveFailure('tts-voice-yue')}{sampleFailure('tts-voice-yue')}</SettingRow>
+
+      <SettingRow {...row('tts-rate')} control={
+        <Segmented<SpeechRate> value={speechRateChoice(settings.tts_rate)} label={row('tts-rate').title} disabled={ttsOff}
+          options={[{ value: 'slow', label: text('Slow', '慢') }, { value: 'normal', label: text('Normal', '正常') }, { value: 'fast', label: text('Fast', '快') }]}
+          onChange={next => attempt('tts-rate', () => v.saveVoice('tts_rate', SPEECH_RATES[next], [['tts_rate', String(SPEECH_RATES[next])]]))} />
+      }>{saveFailure('tts-rate')}</SettingRow>
+    </SettingGroup>
+
+    <SettingGroup title={text('Recordings', '錄音')}>
       <SettingRow {...row('keep-recordings')} control={
         <Switch checked={settings.keep_recordings} label={row('keep-recordings').title} onChange={changeKeep} />
       }>
         <div className="ui-hint">{text('Lets you play a voice request back from the chat. The kept copy is stored only in the encrypted database on this Mac and is deleted with its message. Transcription is unchanged: when it uses a cloud service, the audio is still sent there to be transcribed.', '可在對話中重播語音請求。保存的錄音只存於此 Mac 的加密資料庫，並隨訊息一併刪除。語音轉錄方式不變：使用雲端辨識時，語音仍會傳送至該服務轉錄。')}</div>
         {saveFailure('keep-recordings')}
       </SettingRow>
-
-      <SettingRow {...row('tts-voice')} control={
-        <Select value={settings.tts_voice} options={voiceOptions(settings.tts_voice)} label={row('tts-voice').title} width={200}
-          disabled={!!noVoices} disabledReason={noVoices}
-          onChange={next => attempt('tts-voice', () => v.saveVoice('tts_voice', next, ENGLISH_VOICE_KEYS.map(key => [key, next] as [string, string])))} />
-      }>{saveFailure('tts-voice')}</SettingRow>
-
-      <SettingRow {...row('tts-voice-yue')} control={
-        <Select value={settings.tts_voice_yue} options={voiceOptions(settings.tts_voice_yue)} label={row('tts-voice-yue').title} width={200}
-          disabled={!!noVoices} disabledReason={noVoices}
-          onChange={next => attempt('tts-voice-yue', () => v.saveVoice('tts_voice_yue', next, [['tts_voice_yue', next]]))} />
-      }>{saveFailure('tts-voice-yue')}</SettingRow>
     </SettingGroup>
 
     <SettingGroup title={text('Wake word', '喚醒詞')}>

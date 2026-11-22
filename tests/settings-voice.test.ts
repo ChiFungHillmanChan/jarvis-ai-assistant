@@ -2,7 +2,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 import { ROWS } from '../src/settings/rows.ts';
-import { ENGLISH_VOICE_KEYS, downloadPercent, voiceAvailabilityLine, wakePrivacyLine, wakeStatusLine } from '../src/settings/voice.ts';
+import { ENGLISH_VOICE_KEYS, HIDDEN_VOICES, SPEECH_RATES, downloadPercent, speechRateChoice, voiceAvailabilityLine, voiceChoices, voiceValue, wakePrivacyLine, wakeStatusLine } from '../src/settings/voice.ts';
 import { normalizeBriefingTime } from '../src/settings/briefing.ts';
 
 // Task 14: Settings > Daily briefing and Voice. The helpers are pure and
@@ -27,7 +27,7 @@ test('the dialog shows Daily briefing and Voice through their own components', (
 
 for (const [section, file, expected] of [
   ['briefing', BRIEFING, ['briefing-enabled', 'briefing-time', 'briefing-aloud']],
-  ['voice', VOICE, ['stt-language', 'voice-input-status', 'speech-model', 'tts-enabled', 'keep-recordings', 'tts-voice', 'tts-voice-yue', 'wake-word', 'wake-status', 'wake-privacy']],
+  ['voice', VOICE, ['stt-language', 'voice-input-status', 'speech-model', 'tts-enabled', 'tts-voice', 'tts-voice-yue', 'tts-rate', 'keep-recordings', 'wake-word', 'wake-status', 'wake-privacy']],
 ] as const) {
   test(`${section} renders its rows, in order, by row id`, () => {
     const code = source(file);
@@ -154,7 +154,7 @@ test('ChooseAi points at Settings → Voice', () => {
 
 test('the preview answers every voice command these sections call', () => {
   const preview = source('../src/dev/workspacePreview.ts');
-  for (const command of ['get_voice_settings', 'set_voice_setting', 'list_tts_voices', 'cloud_speech', 'download_model', 'get_wake_word_status', 'current_ai']) {
+  for (const command of ['get_voice_settings', 'set_voice_setting', 'list_tts_voices', 'preview_tts_voice', 'cloud_speech', 'download_model', 'get_wake_word_status', 'current_ai']) {
     assert.ok(preview.includes(`case '${command}'`), command);
   }
   assert.doesNotMatch(preview, /case 'get_voice_settings': return null/);
@@ -170,4 +170,57 @@ test('Briefing and Voice use the shared controls and written Chinese', () => {
 
 test('each new file stays small', () => {
   for (const file of [VOICE, BRIEFING, HOOK, PURE]) assert.ok(source(file).split('\n').length <= 250, file);
+});
+
+// Voice lists: say -v ? names a voice once per language and the old list kept
+// only the first word, so "Eddy" showed 14 times and "Bad News" as "Bad".
+const MAC_VOICES = [
+  { name: 'Bad News', locale: 'en_US' }, { name: 'Daniel (English (UK))', locale: 'en_GB' },
+  { name: 'Eddy (English (UK))', locale: 'en_GB' }, { name: 'Eddy (English (US))', locale: 'en_US' }, { name: 'Eddy (Chinese (Taiwan))', locale: 'zh_TW' },
+  { name: 'Karen', locale: 'en_AU' }, { name: 'Samantha (English (US))', locale: 'en_US' }, { name: 'Samantha (English (US))', locale: 'en_US' },
+  { name: 'Sinji (Chinese (Hong Kong))', locale: 'zh_HK' }, { name: 'Tingting', locale: 'zh_CN' }, { name: 'Ava (Premium)', locale: 'en_US' },
+  { name: 'Anna', locale: 'de_DE' },
+];
+
+test('a voice is saved by the name say accepts: the language suffix goes, other brackets stay', () => {
+  assert.equal(voiceValue('Daniel (English (UK))'), 'Daniel');
+  assert.equal(voiceValue('Sinji (Chinese (Hong Kong))'), 'Sinji');
+  assert.equal(voiceValue('Ava (Premium)'), 'Ava (Premium)');
+  assert.equal(voiceValue('Bad News'), 'Bad News');
+});
+
+test('the English list shows English voices once, without novelty or per-language voices, with accent and gender', () => {
+  const en = voiceChoices(MAC_VOICES, 'en', 'Samantha', zh);
+  assert.deepEqual(en.map(o => o.value), ['Ava (Premium)', 'Daniel', 'Karen', 'Samantha']);
+  assert.equal(en.find(o => o.value === 'Samantha')!.label, 'Samantha（美式英語，女聲）');
+  assert.equal(en.find(o => o.value === 'Daniel')!.label, 'Daniel（英式英語，男聲）');
+  assert.equal(voiceChoices(MAC_VOICES, 'en', 'Samantha', en => en).find(o => o.value === 'Karen')!.label, 'Karen (Australian English, female)');
+  assert.ok(HIDDEN_VOICES.has('Eddy') && HIDDEN_VOICES.has('Bad News'));
+});
+
+test('the Cantonese list shows only Hong Kong voices', () => {
+  assert.deepEqual(voiceChoices(MAC_VOICES, 'yue', 'Sinji', zh).map(o => o.label), ['Sinji（廣東話，女聲）']);
+});
+
+test('a saved voice that the list hides or lacks stays first, so it never disappears', () => {
+  assert.deepEqual(voiceChoices(MAC_VOICES, 'en', 'Eddy', zh)[0], { value: 'Eddy', label: 'Eddy' });
+  assert.deepEqual(voiceChoices([], 'yue', 'Sinji', zh), [{ value: 'Sinji', label: 'Sinji' }]);
+});
+
+test('speaking speed: three choices, 200 is normal, any saved rate maps to the nearest', () => {
+  assert.deepEqual(SPEECH_RATES, { slow: 160, normal: 200, fast: 240 });
+  assert.equal(speechRateChoice(200), 'normal');
+  assert.equal(speechRateChoice(150), 'slow');
+  assert.equal(speechRateChoice(300), 'fast');
+  assert.equal(speechRateChoice(185), 'normal');
+});
+
+test('Voice: speech on/off sits above the voices, the voice controls grey out when it is off, and each voice has Play sample', () => {
+  const code = source(VOICE);
+  assert.ok(code.indexOf("row('tts-enabled')") < code.indexOf("row('tts-voice')"));
+  assert.match(code, /disabled=\{ttsOff \|\| !!noVoices\}/);
+  assert.match(code, /disabled=\{ttsOff\}/);
+  assert.equal(code.split('previewTtsVoice(').length - 1, 1);
+  assert.match(code, /text\('Play sample', '試聽'\)/);
+  assert.match(code, /\['tts_rate', String\(SPEECH_RATES\[next\]\)\]/);
 });
