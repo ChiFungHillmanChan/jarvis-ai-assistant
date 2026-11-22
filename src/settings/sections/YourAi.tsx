@@ -102,11 +102,11 @@ export default function YourAi() {
 
   return <>
     <p className="settings-ai-intro">{text('JARVIS needs an AI to read your mail and answer you. Pick one. You can change it any time.', 'JARVIS 需要一個 AI 來閱讀你的郵件並回覆你。請選擇一個，之後可隨時更換。')}</p>
-    {current && <p className="ui-hint" role="status">{text(`Now using ${current.label}${current.model ? ` · ${current.model}` : ''}. Only one AI is used at a time.`, `目前使用 ${current.label}${current.model ? `・${current.model}` : ''}。每次只會使用一個 AI。`)}</p>}
-    {current && consentNeeded && <ConsentCard request={consentNeeded} onAgreed={() => setConsentNeeded(null)} />}
-    {current && googleNote && <p className="ui-hint" role="note">{googleNote}</p>}
+    {current && <p id="ai-current" className="ui-hint" role="status">{text(`Now using ${current.label}${current.model ? ` · ${current.model}` : ''}. Only one AI is used at a time.`, `目前使用 ${current.label}${current.model ? `・${current.model}` : ''}。每次只會使用一個 AI。`)}</p>}
+    {current && consentNeeded && <div id="ai-consent"><ConsentCard request={consentNeeded} onAgreed={() => setConsentNeeded(null)} /></div>}
+    {current && googleNote && <p id="ai-google-note" className="ui-hint" role="note">{googleNote}</p>}
 
-    <div className="settings-ai-cards" role="radiogroup" aria-label={text('Your AI', '你的 AI')}>
+    <div id="ai-choice" className="settings-ai-cards" role="radiogroup" aria-label={text('Your AI', '你的 AI')}>
       {faces.map((face, i) => (
         <button key={face.id} ref={el => { cards.current[i] = el; }} type="button" role="radio" className="settings-ai-card"
           aria-checked={card === face.id} tabIndex={card === face.id ? 0 : -1} disabled={face.disabled || busy}

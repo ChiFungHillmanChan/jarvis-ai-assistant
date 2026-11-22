@@ -15,10 +15,12 @@ interface SecretFieldProps {
   errorFor?(e: unknown): string;
   /** The Remove confirmation: what is lost and whether it can be undone. A generic line when not given. */
   removeConfirm?: string;
+  /** Keeps Save (and Enter) off, for example until a consent tick is on. */
+  saveDisabled?: boolean;
 }
 
 /** Takes a secret once and hands it to `onSave`. It never receives the saved value back. */
-export default function SecretField({ saved, onSave, onRemove, label, placeholder, saveLabel, errorFor, removeConfirm }: SecretFieldProps) {
+export default function SecretField({ saved, onSave, onRemove, label, placeholder, saveLabel, errorFor, removeConfirm, saveDisabled }: SecretFieldProps) {
   const { text } = useUiLocale();
   const [draft, setDraft] = useState('');
   const [busy, setBusy] = useState(false);
@@ -28,7 +30,7 @@ export default function SecretField({ saved, onSave, onRemove, label, placeholde
 
   async function save() {
     const secret = draft.trim();
-    if (!secret || busy) return;
+    if (!secret || busy || saveDisabled) return;
     setBusy(true);
     setFailed(false);
     try {
@@ -88,7 +90,7 @@ export default function SecretField({ saved, onSave, onRemove, label, placeholde
           onChange={e => setDraft(e.target.value)}
           onKeyDown={e => { if (e.key === 'Enter') void save(); }}
         />
-        <Button kind="secondary" busy={busy} disabled={!draft.trim()} onClick={save}>{saveLabel ?? text('Save', '儲存')}</Button>
+        <Button kind="secondary" busy={busy} disabled={saveDisabled || !draft.trim()} onClick={save}>{saveLabel ?? text('Save', '儲存')}</Button>
         {replacing && <Button kind="quiet" disabled={busy} onClick={() => { setDraft(''); setFailed(false); setReplacing(false); }}>{text('Cancel', '取消')}</Button>}
       </div>
       {failure}

@@ -182,3 +182,42 @@ test('Other services carries the OpenAI region warning from ChooseAi', () => {
   assert.match(other, /service === 'openai' && <p className="ui-hint" role="note">\{openAiRegionNote\(text\)\}/);
   assert.equal((other.match(/Hong Kong/g) ?? []).length, 0, 'the text lives in ChooseAi only');
 });
+
+// Review fix (Task 19, inventory row 26): the test-message consent is a tick,
+// as in ChooseAi, and Test stays disabled until it is on. One component in
+// ChooseAi renders it everywhere, so the copy and behaviour stay in sync.
+test('the test consent is one shared tick from ChooseAi', () => {
+  assert.match(chooseAi, /export function TestConsent\(/);
+  assert.match(chooseAi, /<label id=\{id\} className="setup-checkbox"><input type="checkbox" checked=\{consent\} disabled=\{disabled\} onChange=\{e => onChange\(e\.target\.checked\)\} \/>\{testDisclosure\(option, name, text\)\}<\/label>/);
+  assert.match(chooseAi, /<TestConsent option=\{option\} name=\{name\} consent=\{consent\} disabled=\{!!busy\} onChange=\{setConsent\} \/>/);
+  assert.match(chooseAi, /const ready = !!provider && consent && /);
+  for (const [card, code] of [['Gemini', gemini], ['Other', other], ['Local', local]] as const) {
+    assert.match(code, /<TestConsent id="ai-test-consent" /, `${card}: the tick carries the row id`);
+    assert.doesNotMatch(code, /<p className="ui-hint">\{testDisclosure\(/, `${card}: no bare statement`);
+  }
+});
+
+test('each Your AI card keeps Test and save disabled without the tick', () => {
+  // Gemini: the key field's Test and save, and "Use this model with the saved key".
+  assert.match(gemini, /saveDisabled=\{!consent\}/);
+  assert.match(gemini, /<Button kind="secondary" busy=\{busy\} disabled=\{!consent\} onClick=/);
+  // Another service: OpenAI and Claude test from the key field; Kimi and Qwen
+  // load models from it (not a test, as in ChooseAi) and test from the button.
+  assert.match(other, /saveDisabled=\{!named && !consent\}/);
+  assert.match(other, /<Button kind="primary" busy=\{busy\} disabled=\{!model \|\| !consent\} onClick=\{\(\) => save\(pending\.current\)\}/);
+  assert.match(other, /function pick\(next: Service\) \{[^}]*setConsent\(false\);/, 'a new service needs the tick again');
+  // On this Mac.
+  assert.match(local, /disabled=\{!chosen \|\| setup\.busy \|\| !consent\}/);
+  // A successful test clears the tick, as in ChooseAi.
+  for (const code of [gemini, other, local]) assert.match(code, /setConsent\(false\)/);
+  // SecretField honours saveDisabled on the button and on Enter.
+  const field = source('../src/ui/SecretField.tsx');
+  assert.match(field, /if \(!secret \|\| busy \|\| saveDisabled\) return;/);
+  assert.match(field, /disabled=\{saveDisabled \|\| !draft\.trim\(\)\}/);
+});
+
+test('every Your AI row has its DOM id, so a search hit scrolls to it', () => {
+  const all = yourAi + gemini + other + local;
+  for (const id of ['ai-current', 'ai-consent', 'ai-google-note', 'ai-choice', 'ai-region', 'ai-key', 'ai-model', 'ai-ollama', 'ai-test-consent', 'ai-test-use', 'ai-mail-link'])
+    assert.match(all, new RegExp(`id="${id}"`), id);
+});

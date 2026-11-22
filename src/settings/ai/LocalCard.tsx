@@ -3,7 +3,7 @@ import { useUiLocale } from '../../i18n';
 import { openUrl } from '../../lib/commands';
 import { setupError } from '../../lib/setup';
 import type { CurrentAi } from '../../lib/ai-choice';
-import { testDisclosure } from '../../components/ChooseAi';
+import { TestConsent } from '../../components/ChooseAi';
 import type { useLocalSetup } from '../../components/LocalMailSetup';
 import Button from '../../ui/Button';
 import Select from '../../ui/Select';
@@ -29,6 +29,8 @@ export default function LocalCard({ setup, unavailable, current, busy, onTestAnd
   const installed = probe?.installedModels ?? [];
   const [model, setModel] = useState(current?.provider === 'ollama' && current.model ? current.model : '');
   const [error, setError] = useState('');
+  // The test sends a message, so it waits for the tick (as ChooseAi does).
+  const [consent, setConsent] = useState(false);
   const chosen = installed.includes(model) ? model : installed.includes(setup.model) ? setup.model : installed[0] ?? '';
 
   if (unavailable) {
@@ -41,7 +43,7 @@ export default function LocalCard({ setup, unavailable, current, busy, onTestAnd
   return <div className="settings-ai-detail">
     <h3>{text('Run the AI on this Mac', '在此 Mac 上執行 AI')}</h3>
     <p className="ui-hint">{text('Free, and nothing leaves your Mac. Replies are slower than Gemini.', '免費，所有資料都留在此 Mac，但回覆比 Gemini 慢。')}</p>
-    <ol className="settings-ai-steps">
+    <ol id="ai-ollama" className="settings-ai-steps">
       <li>
         <span className="settings-ai-step-number" aria-hidden="true">1</span>
         <div className="settings-ai-step-body">
@@ -63,10 +65,11 @@ export default function LocalCard({ setup, unavailable, current, busy, onTestAnd
       </li>
       {installed.length > 0 && <li>
         <span className="settings-ai-step-number" aria-hidden="true">3</span>
-        <div className="settings-ai-step-body">
+        <div id="ai-test-use" className="settings-ai-step-body">
           <Select label={text('Model on this Mac', '此 Mac 上的模型')} showLabel value={chosen} disabled={busy} width={260} onChange={setModel}
             options={installed.map(m => ({ value: m, label: m }))} />
-          <Button kind="primary" busy={busy} disabled={!chosen || setup.busy} onClick={() => { setError(''); return onTestAndUse({ provider: 'ollama', model: chosen }); }}
+          <TestConsent id="ai-test-consent" option="ollama" name="Ollama" consent={consent} disabled={busy} onChange={setConsent} />
+          <Button kind="primary" busy={busy} disabled={!chosen || setup.busy || !consent} onClick={async () => { setError(''); await onTestAndUse({ provider: 'ollama', model: chosen }); setConsent(false); }}
             onError={e => setError(saveErrorLine(e, text))}>{busy ? text('Testing…', '測試中…') : text(TEST_AND_SAVE.en, TEST_AND_SAVE.zh)}</Button>
         </div>
       </li>}
@@ -74,7 +77,6 @@ export default function LocalCard({ setup, unavailable, current, busy, onTestAnd
     {setup.busy && <div role="status" aria-live="polite"><p className="ui-hint">{setup.stageLabel}</p>
       {setup.bytes && <progress max={setup.bytes.total} value={Math.min(setup.bytes.done, setup.bytes.total)} />}</div>}
     {setup.ready && <p className="ui-hint" role="status">{text(`The model is downloaded. Choose it above and press "${TEST_AND_SAVE.en}": JARVIS tests it, then uses it for chat and mail.`, `模型已下載。請在上方選擇該模型並按「${TEST_AND_SAVE.zh}」：JARVIS 會先測試，然後用於聊天及郵件。`)}</p>}
-    <p className="ui-hint">{testDisclosure('ollama', 'Ollama', text)}</p>
     <p className="ui-hint">{text('Other local servers, and a local model for mail only, are in Advanced.', '其他本機伺服器，以及只用於郵件的本機模型，都在進階設定中。')}{' '}
       <Button kind="quiet" onClick={() => openSettings('advanced-local')}>{text('Open Advanced → Local AI', '開啟「進階 → 本機 AI」')}</Button></p>
     {(setup.error || error) && <p className="ui-secret-error" role="alert">{setup.error || error}</p>}

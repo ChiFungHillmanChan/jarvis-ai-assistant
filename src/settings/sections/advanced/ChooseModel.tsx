@@ -5,7 +5,7 @@ import { chooseAi, listAiModels, type AiChoice } from '../../../lib/ai-choice';
 import { formatRate, serviceLabel } from '../../../lib/ai-catalog';
 import { errorLine } from '../../../lib/ai-error';
 import { confirmAction } from '../../../components/ConfirmDialog';
-import { chosenNotice, testDisclosure } from '../../../components/ChooseAi';
+import { TestConsent, chosenNotice } from '../../../components/ChooseAi';
 import Button from '../../../ui/Button';
 import Select from '../../../ui/Select';
 import SettingGroup from '../../../ui/SettingGroup';
@@ -36,6 +36,9 @@ export default function ChooseModel({ editor, catalog, onChosen }: { editor: Cha
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<{ place: 'url' | 'model'; line: string } | null>(null);
   const [notice, setNotice] = useState('');
+  // Each test sends a message, so it waits for its tick; a new service needs it again (as ChooseAi does).
+  const [urlConsent, setUrlConsent] = useState(false);
+  const [modelConsent, setModelConsent] = useState(false);
   const running = useRef(false);
 
   async function run(place: 'url' | 'model', choice: AiChoice) {
@@ -47,7 +50,7 @@ export default function ChooseModel({ editor, catalog, onChosen }: { editor: Cha
       setBusy(true);
       const chosen = await chooseAi(choice);
       setNotice(chosenNotice(chosen, text));
-      if (place === 'url') setApiKey('');
+      if (place === 'url') { setApiKey(''); setUrlConsent(false); } else setModelConsent(false);
       void editor.reload();
       onChosen();
     } catch (e) {
@@ -97,13 +100,13 @@ export default function ChooseModel({ editor, catalog, onChosen }: { editor: Cha
             {listed && listed.length > 0 && <>
               <Select label={text('Model', '模型')} value={listedModel} disabled={busy} width={260} onChange={setListedModel}
                 options={[{ value: '', label: text('Choose a model', '選擇模型') }, ...listed.map(m => ({ value: m, label: m }))]} />
-              <Button kind="secondary" busy={busy} disabled={!listedModel} onClick={() => run('url', { provider: 'compatible', apiKey: apiKey.trim() || undefined, baseUrl: url, model: listedModel })}>
+              <Button kind="secondary" busy={busy} disabled={!listedModel || !urlConsent} onClick={() => run('url', { provider: 'compatible', apiKey: apiKey.trim() || undefined, baseUrl: url, model: listedModel })}>
                 {text('Test and save', '測試並儲存')}
               </Button>
             </>}
           </span>
           {listed && listed.length === 0 && <p className="ui-hint" role="status">{text('The service listed no models.', '該服務沒有列出任何模型。')}</p>}
-          <p className="ui-hint">{testDisclosure('other', serviceName, text)}</p>
+          <TestConsent option="other" name={serviceName} consent={urlConsent} disabled={busy} onChange={setUrlConsent} />
         </div>
         {failure('url')}
       </SettingRow>
@@ -111,12 +114,12 @@ export default function ChooseModel({ editor, catalog, onChosen }: { editor: Cha
       <SettingRow {...row('ai-model-choose')} control={null}>
         <div className="settings-advanced-form">
           <span className="settings-row-actions settings-row-actions-start">
-            <Select label={text('Service', '服務')} value={provider} options={CLOUDS} disabled={busy} width={200} onChange={v => { setProvider(v); setModel(''); }} />
+            <Select label={text('Service', '服務')} value={provider} options={CLOUDS} disabled={busy} width={200} onChange={v => { setProvider(v); setModel(''); setModelConsent(false); }} />
             <Select label={text('Model', '模型')} value={model} options={modelOptions} disabled={busy} width={340} onChange={setModel} />
-            <Button kind="secondary" busy={busy} onClick={() => run('model', { provider, model: model || undefined })}>{text('Test and use', '測試並使用')}</Button>
+            <Button kind="secondary" busy={busy} disabled={!modelConsent} onClick={() => run('model', { provider, model: model || undefined })}>{text('Test and use', '測試並使用')}</Button>
           </span>
           <p className="ui-hint">{text(`Uses the ${name} key saved in Cloud providers. Every listed model is offered here, including the expensive ones Your AI leaves out.`, `使用在「雲端服務」中儲存的 ${name} 密鑰。這裡列出所有模型，包括「你的 AI」未列出的高價模型。`)}</p>
-          <p className="ui-hint">{testDisclosure(provider, name, text)}</p>
+          <TestConsent option={provider} name={name} consent={modelConsent} disabled={busy} onChange={setModelConsent} />
         </div>
         {failure('model')}
       </SettingRow>

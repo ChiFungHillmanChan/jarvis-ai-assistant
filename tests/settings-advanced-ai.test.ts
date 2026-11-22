@@ -320,3 +320,15 @@ test('each new file stays at about 250 lines or fewer', () => {
     assert.ok(lines <= 250, `${file} has ${lines} lines`);
   }
 });
+
+// Review fix (Task 19, inventory row 26): Advanced > Models tests through
+// choose_ai too, so both of its Test buttons wait for the same tick.
+test('Advanced > Models keeps both Test buttons disabled without the tick', () => {
+  const code = readFileSync(new URL('../src/settings/sections/advanced/ChooseModel.tsx', import.meta.url), 'utf8');
+  assert.match(code, /<TestConsent option="other" name=\{serviceName\} consent=\{urlConsent\} disabled=\{busy\} onChange=\{setUrlConsent\} \/>/);
+  assert.match(code, /<TestConsent option=\{provider\} name=\{name\} consent=\{modelConsent\} disabled=\{busy\} onChange=\{setModelConsent\} \/>/);
+  assert.match(code, /disabled=\{!listedModel \|\| !urlConsent\}/);
+  assert.match(code, /<Button kind="secondary" busy=\{busy\} disabled=\{!modelConsent\} onClick=\{\(\) => run\('model'/);
+  assert.match(code, /onChange=\{v => \{ setProvider\(v\); setModel\(''\); setModelConsent\(false\); \}\}/, 'a new service needs the tick again');
+  assert.doesNotMatch(code, /<p className="ui-hint">\{testDisclosure\(/);
+});

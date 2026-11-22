@@ -63,6 +63,16 @@ export function testDisclosure(option: Option, name: string, text: Text): string
         : text(`Testing sends one short message to ${name}. After that, your chats, voice requests and the mail you ask JARVIS to analyse or sort are sent to ${name} with your key, and ${name}'s charges apply.`, `測試會向${zhName}傳送一句簡短訊息。之後你的對話、語音指令，以及你要求 JARVIS 分析或整理的郵件，會以你的密鑰傳送至${zhName.trimEnd()}，並按${zhName}的收費計算。`);
 }
 
+/**
+ * The tick that lets Test send its short message, with the testDisclosure
+ * copy. Test stays disabled until it is on. Shared by this panel, the Your AI
+ * cards and Advanced > Models, so the copy and the rule stay the same.
+ */
+export function TestConsent({ option, name, consent, disabled, onChange, id }: { option: Option; name: string; consent: boolean; disabled?: boolean; onChange(next: boolean): void; id?: string }) {
+  const { text } = useUiLocale();
+  return <label id={id} className="setup-checkbox"><input type="checkbox" checked={consent} disabled={disabled} onChange={e => onChange(e.target.checked)} />{testDisclosure(option, name, text)}</label>;
+}
+
 /** OpenAI does not list Hong Kong as a supported API region. */
 export function openAiRegionNote(text: Text): string {
   return text('Hong Kong is not on the OpenAI API supported list. Use an eligible account, or choose another AI.', 'OpenAI API 支援地區清單未列出香港。請使用合資格帳戶，或選擇其他 AI。');
@@ -208,7 +218,7 @@ export default function ChooseAi({ onChosen, onBusyChange }: { onChosen?: (ai: C
           <button type="button" disabled={!!busy} onClick={() => void loadModels('ollama')}>{text('Load installed models', '載入已安裝的模型')}</button>
         </>}
       </>}
-      <label className="setup-checkbox"><input type="checkbox" checked={consent} disabled={!!busy} onChange={e => setConsent(e.target.checked)} />{testDisclosure(option, name, text)}</label>
+      <TestConsent option={option} name={name} consent={consent} disabled={!!busy} onChange={setConsent} />
       <button type="button" className="setup-primary" disabled={!ready || !!busy} onClick={testAndUse}>{text('Test and use this AI', '測試並使用這個 AI')}</button>
     </div>}
     {busy && <p role="status">{busy}…</p>}
