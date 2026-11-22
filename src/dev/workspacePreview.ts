@@ -71,6 +71,27 @@ export function installWorkspacePreview() {
   const keyStatus: Record<string, boolean> = { gemini: false, claude: true, openai: true };
   let aws: { configured: boolean; region: string | null } = { configured: true, region: 'ap-southeast-1' };
   let currentAiValue: { provider: string; label: string; model: string | null; base_url: string | null } = { provider: 'openai', label: 'OpenAI', model: null, base_url: null };
+  // Settings > Usage (Task 12). Sample figures; add &usage-empty to the URL for the empty state.
+  const usageEmpty = new URLSearchParams(location.search).has('usage-empty');
+  const featureSplit: [string, number, number][] = [['mail_sort', 0.55, 0.62], ['chat', 0.22, 0.2], ['tools', 0.06, 0.09], ['briefing', 0.1, 0.06], ['mail_analysis', 0.07, 0.03]];
+  const usageGroup = (key: string, provider: string | null, requests: number, usd: number, unpriced = 0) => ({ key, provider, requests, input_tokens: requests * 1650, output_tokens: requests * 210, cache_read_tokens: 0, cache_write_tokens: 0, usd_cost: usd, price_unknown_requests: unpriced, speech_characters: 0, from_day: null as string | null });
+  const usageTotals = (days: number) => {
+    // Newest first, as the backend returns the time grouping; a few days have no usage.
+    const list = usageEmpty ? [] : Array.from({ length: days }, (_, i) => ({ i, key: new Date(now.getTime() - i * 86_400_000).toISOString().slice(0, 10), requests: 18 + (i * 13) % 17, usd: Math.round((0.03 + ((i * 7) % 11) * 0.011) * 10_000) / 10_000 })).filter(d => d.i % 9 !== 4);
+    return { list, requests: list.reduce((s, d) => s + d.requests, 0), usd: list.reduce((s, d) => s + d.usd, 0), unpriced: list.length ? 3 : 0 };
+  };
+  const usageGroups = (days: number, by: string) => {
+    const { list, requests, usd, unpriced } = usageTotals(days);
+    if (!list.length) return [];
+    if (by === 'time') {
+      const keyed = new Map<string, { r: number; u: number; x: number }>();
+      list.forEach((d, n) => { const k = days > 90 ? d.key.slice(0, 7) : d.key; const m = keyed.get(k) ?? { r: 0, u: 0, x: 0 }; m.r += d.requests + (n ? 0 : unpriced); m.u += d.usd; m.x += n ? 0 : unpriced; keyed.set(k, m); });
+      return [...keyed].map(([k, m]) => usageGroup(k, null, m.r, m.u, m.x));
+    }
+    if (by === 'feature') return [...featureSplit.map(([key, r, u]) => usageGroup(key, null, Math.round(requests * r), usd * u)), usageGroup('other', null, unpriced, 0, unpriced)];
+    if (by === 'provider') return [usageGroup('openai', null, requests, usd), usageGroup('unknown', null, unpriced, 0, unpriced)];
+    return [usageGroup('sample-luna', 'openai', requests, usd), usageGroup('sample-unpriced', 'compat:Sample service', unpriced, 0, unpriced)];
+  };
   mockIPC(async (command, raw) => {
     const args = (raw || {}) as Record<string, any>;
     if (command.startsWith('plugin:')) return null;
@@ -175,6 +196,13 @@ export function installWorkspacePreview() {
       case 'run_storage_sweep': return { mailBodiesCleared: 0, conversationsDeleted: 0, emailsDeleted: 0, usageRowsRolledUp: 0, briefingsDeleted: 0 };
       case 'purge_storage': throw 'Preview: nothing is deleted from sample data.';
       case 'delete_all_data': throw 'Preview: nothing is deleted from sample data.';
+      case 'get_cost_stats': {
+        const { list, requests, usd, unpriced } = usageTotals(args.days);
+        const top = list.slice(0, 3).map((d, i) => ({ ts: Math.floor(now.getTime() / 1000) - d.i * 86_400, provider: 'openai', model_id: 'sample-luna', workload: 'chat', feature: 'tools', input_tokens: 42_000 - i * 9_000, output_tokens: 1_800, cache_read_tokens: 0, cache_write_tokens: 0, usd_cost: 0.0052 - i * 0.001, price_unknown: false, latency_ms: 2_400 }));
+        return { days: args.days, total_requests: requests + unpriced, total_usd: usd, avg_usd_per_request: requests ? usd / requests : 0, local_requests: 0, local_share_pct: 0, price_unknown_requests: unpriced, per_request_days: 30, expensive_days: 30, top_expensive: top };
+      }
+      case 'get_blended_cost': { const { list, usd, unpriced } = usageTotals(args.days); return { total_usd: usd, active_days: list.length, usd_per_active_day: list.length ? usd / list.length : 0, price_unknown_requests: unpriced }; }
+      case 'get_usage_groups': return usageGroups(args.days, args.groupBy);
       case 'ai_models': return catalog;
       default: throw new Error(`Preview: ${command} is not connected to a service.`);
     }

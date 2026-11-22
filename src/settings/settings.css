@@ -134,3 +134,34 @@
 .settings-dialog .settings-bedrock-model-error { margin: 0; color: var(--ui-danger-text); font-size: 12px; }
 /* LocalMailSetup's panel styles every button; its danger confirm keeps the danger look. */
 .settings-dialog .setup-local .ui-button-danger { padding: 6px 14px; border-color: var(--ui-danger-border); background: var(--ui-danger-bg); color: var(--ui-danger-text); font-size: 13px; }
+
+/* Usage (Task 12): tiles and hand-built charts. Spend is the accent; the track and axis are the control border. */
+.settings-dialog .visually-hidden { position: absolute; width: 1px; height: 1px; overflow: hidden; clip-path: inset(50%); white-space: nowrap; }
+.settings-usage-period { margin: 0 0 16px; }
+.settings-usage-empty { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; margin: 0; color: var(--text-secondary); font-size: 13px; }
+.settings-usage-tiles { display: grid; grid-template-columns: repeat(auto-fit, minmax(180px, 1fr)); gap: 12px; margin: 0 0 24px; }
+.settings-usage-tile { display: flex; flex-direction: column; gap: 4px; padding: 14px 16px; border: 1px solid var(--settings-border); border-radius: 12px; }
+.settings-usage-tile-label { color: var(--text-secondary); font-size: 12px; }
+.settings-usage-tile-value { color: var(--text-primary); font-size: 22px; font-weight: 600; font-variant-numeric: tabular-nums; }
+.settings-usage-tile-detail { color: var(--text-secondary); font-size: 13px; font-weight: 400; }
+.settings-usage-block { margin: 0 0 24px; }
+.settings-usage-block > .ui-hint { margin: -4px 0 10px; }
+.settings-usage-chart { position: relative; }
+.settings-usage-scale { color: var(--text-muted); font-size: 11px; font-variant-numeric: tabular-nums; margin-bottom: 4px; }
+.settings-usage-bars { display: flex; align-items: flex-end; gap: 2px; border-bottom: 1px solid var(--ui-control-border); }
+.settings-usage-bar { flex: 1 1 0; min-width: 0; border-radius: 3px 3px 0 0; background: var(--ui-focus); }
+.settings-usage-dates { display: flex; justify-content: space-between; margin-top: 4px; color: var(--text-muted); font-size: 11px; }
+.settings-usage-split { display: flex; flex-direction: column; gap: 8px; }
+.settings-usage-split-row { display: grid; grid-template-columns: minmax(120px, 180px) minmax(0, 1fr) auto; align-items: center; gap: 12px; font-size: 13px; }
+.settings-usage-split-label { color: var(--text-primary); overflow-wrap: anywhere; }
+.settings-usage-track { display: block; height: 10px; border-radius: 5px; background: var(--ui-control-border); overflow: hidden; }
+.settings-usage-fill { display: block; height: 100%; min-width: 2px; border-radius: 5px; background: var(--ui-focus); }
+.settings-usage-split-amount { color: var(--text-secondary); font-variant-numeric: tabular-nums; white-space: nowrap; }
+.settings-usage-note { margin: 0 0 16px; color: var(--text-secondary); font-size: 12px; }
+.settings-usage-details > summary { display: flex; flex-wrap: wrap; align-items: baseline; gap: 4px 10px; padding: 6px 0; color: var(--text-primary); font-size: 13px; font-weight: 600; cursor: pointer; }
+.settings-usage-details > summary::-webkit-details-marker { display: none; }
+.settings-usage-details > summary::before { content: ''; align-self: center; width: 6px; height: 6px; margin-right: 2px; border-right: 1.5px solid currentColor; border-bottom: 1.5px solid currentColor; transform: rotate(-45deg); transition: transform .15s; }
+.settings-usage-details[open] > summary::before { transform: rotate(45deg); }
+.settings-usage-details > summary .ui-hint { font-weight: 400; }
+.settings-usage-details > summary:focus-visible { outline: none; border-radius: 6px; box-shadow: 0 0 0 3px var(--ui-focus-glow); }
+.settings-usage-details[open] > summary { margin-bottom: 10px; }

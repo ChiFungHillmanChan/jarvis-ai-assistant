@@ -17,10 +17,16 @@ import {
  * rows; single completions are one row per request everywhere (lib/usage.ts
  * CostStats). "Requests" counts rows. Money is shown only where the price is
  * known.
+ *
+ * The period is the panel's own unless a parent passes `days` and
+ * `onDaysChange` (Settings > Usage, where the panel is "Show details" and
+ * shares the page's period).
  */
-export default memo(function CostPanel() {
+export default memo(function CostPanel(props: { days?: PeriodDays; onDaysChange?(days: PeriodDays): void }) {
   const { text } = useUiLocale();
-  const [days, setDays] = useState<PeriodDays>(30);
+  const [ownDays, setOwnDays] = useState<PeriodDays>(30);
+  const days = props.days ?? ownDays;
+  const setDays = props.onDaysChange ?? setOwnDays;
   const [groupBy, setGroupBy] = useState<GroupBy>("model");
   const { data, error, loading } = useTauriCommand<CostStats>("get_cost_stats", { days });
   const { data: blended, error: blendedError } = useTauriCommand<BlendedCost>("get_blended_cost", { days });
