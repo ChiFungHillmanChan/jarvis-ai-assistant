@@ -31,6 +31,8 @@ import { shouldFocusResult, viewName, displayTabTitle, type WorkspaceTab, type W
 import { resultIdentity, resultTitle, validResult } from './workspace/results';
 import './styles/workspace.css';
 import { keepUiLocaleInUse, useUiLocale } from './i18n';
+import { SettingsProvider, useSettingsDialog } from './settings/SettingsContext';
+import SettingsDialog from './settings/SettingsDialog';
 const Settings = lazy(() => import('./pages/Settings'));
 const CronDashboard = lazy(() => import('./pages/CronDashboard'));
 const EmailPage = lazy(() => import('./pages/EmailPage'));
@@ -58,6 +60,7 @@ const ToolPage = memo(function ToolPage({ view, onSetup }: { view: Exclude<Works
 function CommandPicker({ onClose }: { onClose: () => void }) {
   const { locale, text } = useUiLocale();
   const { state, dispatch, open, newTask } = useWorkspace();
+  const { openSettings } = useSettingsDialog();
   const [query, setQuery] = useState('');
   const [savedTasks, setSavedTasks] = useState<{ id: string; title: string }[]>([]);
   const [historyError, setHistoryError] = useState(false);
@@ -67,7 +70,8 @@ function CommandPicker({ onClose }: { onClose: () => void }) {
   const restoreFocus = useRef(document.activeElement as HTMLElement | null);
   const choices = [
     { id: 'new', title: text('New task', '新增工作'), hint: '⌘N', action: () => newTask() },
-    ...(['home', 'email', 'calendar', 'notion', 'github', 'cron', 'connections', 'settings'] as WorkspaceView[]).map(view => ({ id: view, title: viewName(view, locale), hint: text('Workspace', '工作區'), action: () => open(view) })),
+    ...(['home', 'email', 'calendar', 'notion', 'github', 'cron', 'connections'] as WorkspaceView[]).map(view => ({ id: view, title: viewName(view, locale), hint: text('Workspace', '工作區'), action: () => open(view) })),
+    { id: 'settings', title: viewName('settings', locale), hint: text('Workspace', '工作區'), action: () => openSettings() },
     { id: 'legacy', title: text('Voice and earlier conversations', '語音及較早對話'), hint: text('History', '紀錄'), action: () => dispatch({ type: 'open' as const, view: 'chat', id: 'task:legacy', sessionId: 'legacy', title: 'Voice and earlier conversations' }) },
     ...savedTasks.filter(t => t.id !== 'legacy' && ![...state.tabs, ...state.history].some(tab => tab.sessionId === t.id && tab.view === 'chat')).map(t => ({ id: `saved:${t.id}`, title: t.title, hint: text('Saved task', '已儲存工作'), action: () => dispatch({ type: 'open' as const, view: 'chat', id: `task:${t.id}`, sessionId: t.id, title: t.title }) })),
     ...[...state.tabs, ...state.history].filter(t => t.view === 'chat' || t.view === 'result').map(t => ({ id: t.id, title: displayTabTitle(t, locale), hint: t.view === 'chat' ? text('Task', '工作') : text('Result', '結果'), action: () => dispatch({ type: 'open' as const, view: t.view, id: t.id, sessionId: t.sessionId, title: t.title }) })),
@@ -82,8 +86,7 @@ function CommandPicker({ onClose }: { onClose: () => void }) {
 
 function AppShell() {
   const { text } = useUiLocale();
-  const [setupOpen, setSetupOpen] = useState(false);
-  const openSetup = useCallback(() => setSetupOpen(true), []);
+  const { open: settingsOpen, setupOpen, openSetupGuide, closeSetupGuide } = useSettingsDialog();
   const { state, ready, saveError, dispatch, writeValue, readValue } = useWorkspace();
   const chat = useChatContext();
   const activity = useAssistantActivity();
@@ -157,20 +160,22 @@ function AppShell() {
     switch (tab.view) {
       case 'home': return <AutomationOverview activity={activity} onVoice={toggleVoice} listening={listening} voiceState={voice.state} />;
       case 'chat': return chat.sessionId === tab.sessionId ? <AssistantPanel full onVoice={toggleVoice} /> : <div className="workspace-loading">{text("Opening task…", "正在開啟工作…")}</div>;
-      default: return <ToolPage view={tab.view} onSetup={openSetup} />;
+      default: return <ToolPage view={tab.view} onSetup={openSetupGuide} />;
     }
   }
-  if (setupOpen) return <OnboardingWizard onComplete={() => { setSetupOpen(false); dispatch({ type: 'open', view: 'email' }); }} />;
+  if (setupOpen) return <OnboardingWizard onComplete={() => { closeSetupGuide(); dispatch({ type: 'open', view: 'email' }); }} />;
   if (!ready) return <div className="workspace-loading" role="status">{text("Restoring your workspace…", "正在還原工作區…")}</div>;
   return <div className="workspace-app">
-    <header className="workspace-titlebar" data-tauri-drag-region><WindowControls /><span data-tauri-drag-region>{text("JARVIS Workspace", "JARVIS 工作區")}</span><div><button className="workspace-button" onClick={() => setSetupOpen(true)}>{text('Set up', '設定導引')}</button>{wallpaper && raised && <button className="icon-button" aria-label={text("Return to desktop", "返回桌面")} onClick={() => void invoke('lower_wallpaper')}><Minimize2 size={15} /></button>}<button className="icon-button" aria-label={text("Search workspaces", "搜尋工作區")} onClick={() => setSearch(true)}><Search size={16} /></button><button className="workspace-button assistant-toggle" aria-pressed={assistant || activeTab.view === 'chat'} disabled={activeTab.view === 'chat'} onClick={() => { if (!assistant && chat.sessionId === 'legacy') chat.selectSession(crypto.randomUUID()); setAssistant(v => !v); }}><MessageSquare size={15} />{text('Assistant', 'AI 助理')}</button></div></header>
+    <header className="workspace-titlebar" data-tauri-drag-region><WindowControls /><span data-tauri-drag-region>{text("JARVIS Workspace", "JARVIS 工作區")}</span><div>{wallpaper && raised && <button className="icon-button" aria-label={text("Return to desktop", "返回桌面")} onClick={() => void invoke('lower_wallpaper')}><Minimize2 size={15} /></button>}<button className="icon-button" aria-label={text("Search workspaces", "搜尋工作區")} onClick={() => setSearch(true)}><Search size={16} /></button><button className="workspace-button assistant-toggle" aria-pressed={assistant || activeTab.view === 'chat'} disabled={activeTab.view === 'chat'} onClick={() => { if (!assistant && chat.sessionId === 'legacy') chat.selectSession(crypto.randomUUID()); setAssistant(v => !v); }}><MessageSquare size={15} />{text('Assistant', 'AI 助理')}</button></div></header>
     <div className="workspace-body">{sidebar && <Sidebar onSearch={() => setSearch(true)} onCollapse={() => setSidebar(false)} />}<main className="workspace-main"><WorkspaceTabs sidebarVisible={sidebar} onShowSidebar={() => setSidebar(true)} />{saveError && <p className="workspace-error" role="alert">{saveError}</p>}<div className="workspace-content"><div className="workspace-pages">{state.tabs.map(tab => {
       const active = tab.id === state.activeId;
       // The sphere and task composer exist only in their active view. Tool work stays mounted.
       if ((tab.view === 'home' || tab.view === 'chat') && !active) return null;
       return <section className={`workspace-page view-${tab.view}`} key={tab.id} id={`page-${tab.id}`} role="tabpanel" aria-labelledby={`tab-${tab.id}`} hidden={!active}><WorkspaceTabScope id={tab.id}><ErrorBoundary><Suspense fallback={<div className="workspace-loading">{text("Opening workspace…", "正在開啟工作區…")}</div>}>{render(tab)}</Suspense></ErrorBoundary></WorkspaceTabScope></section>;
     })}</div>{assistant && activeTab.view !== 'chat' && <div className="workspace-assistant-dock"><WorkspaceTabScope key={chat.sessionId} id={`task:${chat.sessionId}`}><AssistantPanel onClose={() => setAssistant(false)} onVoice={toggleVoice} /></WorkspaceTabScope></div>}</div><footer className="workspace-statusbar"><span className={`status-dot ${chat.busy || listening ? 'is-working' : ''}`} /><span>{listening ? text('Listening · Press ⌘⇧J to finish', '聆聽中 · 按 ⌘⇧J 完成') : chat.busy ? (activity.state === 'speaking' ? text('Reading the reply aloud · Press Esc to stop', '正在朗讀回覆 · 按 Esc 停止') : text('Assistant working · You can keep using your tools', 'AI 助理處理中 · 可繼續使用其他工具')) : awaitingWakeWord ? text('Listening for "Hey Jarvis"', '正在等候「Hey Jarvis」') : text('Ready', '就緒')}</span>{chat.busy && <button className="text-button" onClick={() => dispatch({ type: 'open', view: 'chat', id: `task:${chat.runningSessionId}`, sessionId: chat.runningSessionId!, title: 'Assistant' })}>{text("View task", "查看工作")}</button>}<span className="grow" /><button className="text-button" onClick={() => { void reportProblem(text).catch(() => showToast(text(`Could not open your email app. Please write to ${SUPPORT_EMAIL}.`, `未能開啟電郵程式，請電郵至 ${SUPPORT_EMAIL}。`), 'error')); }}>{text('Report a problem', '回報問題')}</button><button className="text-button" onClick={() => setSearch(true)}><Command size={12} />{text("K Search", "K 搜尋")}</button></footer></main></div>
-    {search && <CommandPicker onClose={() => setSearch(false)} />}<ToastContainer /><ModelPullToast /><UpdateToast /><UnencryptedNotice /><ToolApproval /><ModelDisabledNotice /><AiNotices /><ConfirmDialog />
+    {search && <CommandPicker onClose={() => setSearch(false)} />}<ToastContainer /><ModelPullToast /><UpdateToast /><UnencryptedNotice /><ToolApproval /><ModelDisabledNotice /><AiNotices />
+    {/* Only one ConfirmDialog may be mounted at a time (it owns a single module-level slot); the settings dialog mounts its own copy while open. */}
+    {!settingsOpen && <ConfirmDialog />}<SettingsDialog />
   </div>;
 }
 function AppGate() {
@@ -198,7 +203,7 @@ function AppGate() {
     screen === 'welcome' ? <WelcomeGuide onComplete={setScreen} />
       : screen === 'quick' ? <QuickSetup onDone={() => { setScreen('workspace'); open('calendar'); }} onMailSetup={() => setScreen('setup')} />
       : screen === 'setup' ? <OnboardingWizard onComplete={() => { setScreen('workspace'); open('email'); }} />
-      : <AppShell />
+      : <SettingsProvider><AppShell /></SettingsProvider>
   }</PaywallGate>;
 }
 

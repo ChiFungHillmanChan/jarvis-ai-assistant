@@ -2,13 +2,15 @@ import { useCallback, useEffect, useRef, useState } from 'react';
 import { LogIn, LogOut, Plug, Settings2 } from 'lucide-react';
 import { accountSignIn, accountSignOut, accountStatus, getSettings } from '../lib/commands';
 import type { AccountStatus } from '../lib/types';
-import { DISPLAY_NAME_KEY, SIGN_IN_CANCELLED, accountChanged, accountLabel, onAccountChanged, onDisplayNameChanged, isAccountSessionChanging, onAccountSessionChange, tierKey } from '../lib/account';
+import { SIGN_IN_CANCELLED, accountChanged, accountLabel, onAccountChanged, onDisplayNameChanged, isAccountSessionChanging, onAccountSessionChange, tierKey } from '../lib/account';
 import { useUiLocale } from '../i18n';
+import { nameToShow } from '../lib/user-name';
 import { createAccountMonitor } from '../lib/account-monitor';
 import type { WorkspaceView } from '../workspace/model';
+import { useSettingsDialog } from '../settings/SettingsContext';
 
 /**
- * The bottom row of the sidebar: the name from Settings (or the signed-in account's email), with 連接服務, 設定 and sign-in tucked into a menu above it.
+ * The bottom row of the sidebar: the user's name (nameToShow: what JARVIS calls you, then a typed display name, then the Google name) or the signed-in account's email, with 連接服務, 設定 and sign-in tucked into a menu above it.
  *
  * Hover opens the menu, but hover is never the only way in -- click toggles it
  * and the trigger is a real button, so the two destinations stay reachable by
@@ -61,7 +63,7 @@ export default function SidebarAccount({ active, onNavigate }: { active: Workspa
   const load = useCallback(async () => {
     try {
       const settings = await getSettings();
-      setName(settings.values[DISPLAY_NAME_KEY] ?? null);
+      setName(nameToShow(settings.values));
     } catch {
       // An unreadable settings row is not worth an error state here; the row
       // simply shows its 設定 fallback and the menu still works.
@@ -124,6 +126,7 @@ export default function SidebarAccount({ active, onNavigate }: { active: Workspa
     setOpen(false);
     onNavigate(view);
   };
+  const { openSettings } = useSettingsDialog();
 
   return (
     <div
@@ -138,7 +141,7 @@ export default function SidebarAccount({ active, onNavigate }: { active: Workspa
           <button role="menuitem" className="sidebar-item" aria-current={active === 'connections' ? 'page' : undefined} onClick={() => go('connections')}>
             <Plug size={16} /><span>{t('navConnections')}</span>
           </button>
-          <button role="menuitem" className="sidebar-item" aria-current={active === 'settings' ? 'page' : undefined} onClick={() => go('settings')}>
+          <button role="menuitem" className="sidebar-item" aria-current={active === 'settings' ? 'page' : undefined} onClick={() => { setOpen(false); openSettings(); }}>
             <Settings2 size={16} /><span>{t('navSettings')}</span>
           </button>
           {account?.available && (

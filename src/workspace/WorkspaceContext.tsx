@@ -14,7 +14,8 @@ interface WorkspaceContextValue {
   writeValue: (tab: string, key: string, value: unknown) => void;
   subscribe: (callback: () => void) => () => void;
   appearance: string;
-  setAppearance: (value: string) => void;
+  /** Shows the theme at once; on a failed save puts the previous one back, sets saveError and rejects. */
+  setAppearance: (value: string) => Promise<void>;
 }
 const WorkspaceContext = createContext<WorkspaceContextValue | null>(null);
 const TabContext = createContext('automation');
@@ -88,9 +89,18 @@ export function WorkspaceProvider({ children }: { children: ReactNode }) {
     subscribers.current.forEach(fn => fn());
     dispatch({ type: 'forget', sessionId });
   }, []);
-  const setAppearance = useCallback((value: string) => {
+  const appearanceRef = useRef(appearance);
+  appearanceRef.current = appearance;
+  const setAppearance = useCallback(async (value: string) => {
+    const previous = appearanceRef.current;
     setAppearanceValue(value);
-    updateSetting('workspace_appearance', value).catch(() => setSaveError('Could not save appearance.'));
+    try {
+      await updateSetting('workspace_appearance', value);
+    } catch (e) {
+      setAppearanceValue(previous);
+      setSaveError('Could not save appearance.');
+      throw e;
+    }
   }, []);
   return <WorkspaceContext.Provider value={{ state, dispatch, ready, saveError, open, newTask, forgetSession, readValue, writeValue, subscribe, appearance, setAppearance }}>{children}</WorkspaceContext.Provider>;
 }

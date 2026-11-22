@@ -41,6 +41,17 @@ export function installWorkspacePreview() {
   const jobs = [{ id: 1, name: 'Morning briefing', schedule: '0 0 9 * * MON-FRI', action_type: 'briefing', status: 'active', last_run: day + ' 09:00:00', next_run: null, description: 'Review my calendar every weekday at 9 am.' }, { id: 2, name: 'Weekly project review', schedule: '0 0 16 * * FRI', action_type: 'summary', status: 'paused', last_run: null, next_run: null, description: 'Summarize project progress on Friday.' }];
   const runs = [{ id: 1, job_id: 1, started_at: day + ' 09:00:00', finished_at: day + ' 09:00:12', status: 'success', result: 'Your calendar has one customer review today.\n\nPrepare the rollout plan before the meeting.', error: null }];
   let wakeOn = false;
+  let openAtLogin = false, keepAwake = false;
+  let briefing = { enabled: false, time: '08:30', voice: true, speech_enabled: false };
+  // Settings > Connections, Privacy and data, Setup guide and About (Task 7).
+  let consents = [{ provider: 'openai', base_url: '', label: 'OpenAI', terms: 'needs_billing_confirmation', terms_now: 'needs_billing_confirmation', registry_version: 7, consented_at: day + 'T09:00:00Z', holds: true }];
+  const integrations: Record<string, { status: string; identity: string | null; method: string | null; message: string | null; oauth_ready?: boolean }> = {
+    notion: { status: 'connected', identity: 'Alex workspace', method: 'mcp', message: null },
+    github: { status: 'not_connected', identity: null, method: null, message: null, oauth_ready: true },
+    obsidian: { status: 'not_connected', identity: null, method: null, message: null },
+  };
+  const storage = { databaseBytes: 48_200_000, walBytes: 1_200_000, modelsBytes: 148_000_000, cacheBytes: 12_400_000, backupsBytes: 96_000_000, totalBytes: 305_800_000, mailMessageCount: 412, mailBodyBytes: 8_600_000, conversationCount: 37, retentionDays: 90, retentionEnabled: true, dataDir: '/Users/alex/Library/Application Support/jarvis' };
+  const catalog = { defaults: { openai: '', claude: '', gemini_flash: '', gemini_pro: '', bedrock: '', whisper: '' }, cloud: [], local: [], registry: { version: 7, issued_at: day + 'T00:00:00Z', source: 'bundled' }, registry_updates: false, app_version: '0.5.13 (preview)', presets: [], default_preset: '', setup: [], compatible: [] };
   mockIPC(async (command, raw) => {
     const args = (raw || {}) as Record<string, any>;
     if (command.startsWith('plugin:')) return null;
@@ -48,7 +59,15 @@ export function installWorkspacePreview() {
       case 'check_onboarding_status': return true;
       case 'account_status': return { available: false, signed_in: false, email: null, tier: null, subscription_status: null, trial_ends_at: null, period_ends_at: null, cancel_at_period_end: false };
       case 'get_settings': return { values: { ai_provider: 'gemini_primary', google_email: 'alex@example.com', ...saved } };
-      case 'update_setting': saved[args.key] = args.value; localStorage.setItem('jarvis-workspace-preview', JSON.stringify(saved)); return null;
+      case 'update_setting': case 'set_user_preference': saved[args.key] = args.value; localStorage.setItem('jarvis-workspace-preview', JSON.stringify(saved)); return null;
+      case 'get_user_preference': if (args.key in saved) return saved[args.key]; throw 'db read: Query returned no rows';
+      case 'enable_wallpaper': case 'disable_wallpaper': return null;
+      case 'get_open_at_login': return openAtLogin;
+      case 'set_open_at_login': openAtLogin = args.enabled; return openAtLogin;
+      case 'get_keep_awake': return { enabled: keepAwake, active: keepAwake };
+      case 'set_keep_awake': keepAwake = args.enabled; return { enabled: keepAwake, active: keepAwake };
+      case 'get_daily_briefing_settings': return briefing;
+      case 'set_daily_briefing_settings': briefing = { ...briefing, enabled: args.enabled, time: args.time, voice: args.voice }; return briefing;
       case 'get_conversations': return conversations[args.sessionId || 'legacy'] || [];
       case 'list_chat_sessions': return Object.entries(conversations).map(([id, entries]) => ({ id, title: entries[0]?.content.slice(0, 60) || 'Task', updated_at: now.toISOString() }));
       case 'send_message': {
@@ -104,6 +123,18 @@ export function installWorkspacePreview() {
       case 'get_preference': return '';
       case 'is_model_downloaded': return false;
       case 'stop_speaking': return null;
+      case 'google_accounts': return { main: { state: 'connected', name: 'Alex Chan', email: 'alex@example.com', gmail: true, calendar: true }, others: [] };
+      case 'current_ai': return { provider: 'openai', label: 'OpenAI', model: null, base_url: null };
+      case 'list_ai_consents': return consents;
+      case 'revoke_ai_consent': consents = consents.filter(c => c.provider !== args.provider); void emit('ai-consent-changed'); return null;
+      case 'notion_connection_status': case 'github_connection_status': case 'obsidian_connection_status': return integrations[command.split('_')[0]];
+      case 'notion_disconnect': case 'github_disconnect': case 'obsidian_disconnect': integrations[command.split('_')[0]].status = 'not_connected'; return null;
+      case 'get_storage_usage': return { ...storage };
+      case 'set_retention_policy': storage.retentionDays = args.days; storage.retentionEnabled = args.enabled; return null;
+      case 'run_storage_sweep': return { mailBodiesCleared: 0, conversationsDeleted: 0, emailsDeleted: 0, usageRowsRolledUp: 0, briefingsDeleted: 0 };
+      case 'purge_storage': throw 'Preview: nothing is deleted from sample data.';
+      case 'delete_all_data': throw 'Preview: nothing is deleted from sample data.';
+      case 'ai_models': return catalog;
       default: throw new Error(`Preview: ${command} is not connected to a service.`);
     }
   }, { shouldMockEvents: true });

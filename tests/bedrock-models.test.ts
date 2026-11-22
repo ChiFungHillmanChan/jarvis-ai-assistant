@@ -234,7 +234,7 @@ test('Settings asks for the list only with a Bedrock row on screen, once per ope
   const settings = source('../src/pages/Settings.tsx');
   assert.equal(settings.split('listBedrockModels()').length, 2, 'one call');
   const effect = between(settings, 'const tabActive = useIsActiveTab();', '}, [bedrockOnScreen, userActed, bedrockAsk]);');
-  assert.match(effect, /const bedrockOnScreen = tabActive && section === "ai" && chain\.some\(\(entry\) => entry\.provider_type === "bedrock"\);/);
+  assert.match(effect, /const bedrockOnScreen = \(embedded \? shows\("ai"\) : tabActive && section === "ai"\) && chain\.some\(\(entry\) => entry\.provider_type === "bedrock"\);/);
   assert.match(effect, /if \(!bedrockOnScreen\) \{\s*bedrockAsked\.current = null;\s*bedrockRequest\.current \+= 1;\s*setBedrockList\(\{ status: "idle" \}\);\s*return;\s*\}/, 'leaving the section forgets the list');
   assert.match(effect, /if \(!userActed \|\| bedrockAsked\.current === bedrockAsk\) return;\s*bedrockAsked\.current = bedrockAsk;/, 'once per opening');
   assert.match(effect, /listBedrockModels\(\)\s*\.then\(\(list\) => \{ if \(bedrockRequest\.current === request\) setBedrockList/);
