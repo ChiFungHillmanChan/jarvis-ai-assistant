@@ -1229,6 +1229,7 @@ export default function Settings({ embedded }: { embedded?: { sections: string[]
               <select aria-label={text("Response language", "回覆語言")} value={language} style={styles.select} onChange={async (e) => {
                 const v = e.target.value;
                 setLanguage(v);
+                await setPreference("language_follows_ui", "false");
                 await setPreference("language", v);
               }}>
                 <option value="en">English</option>

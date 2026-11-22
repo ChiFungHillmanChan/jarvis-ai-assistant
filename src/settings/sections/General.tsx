@@ -16,7 +16,7 @@ import Switch from '../../ui/Switch';
 import TextField from '../../ui/TextField';
 import Button from '../../ui/Button';
 import { ROWS_BY_ID, rowText } from '../rows';
-import { followsUi, replyLanguageAfterUiChange, replyLanguageForUi, type ReplyLanguage } from '../language';
+import { followsUi, replyLanguageForUi, replyLanguageOnLocaleChange, type ReplyLanguage } from '../language';
 import { useSettingsValues, useWallpaper } from '../hooks/useSettingsValues';
 
 type Write = [key: string, value: string];
@@ -58,7 +58,7 @@ export default function General() {
 
   async function changeUiLocale(next: UiLocale) {
     if (next === locale || !(await setLocale(next))) return;
-    const reply = replyLanguageAfterUiChange(next, values);
+    const reply = replyLanguageOnLocaleChange(locale, next, values);
     if (reply) await save('language', ['language', reply], ['language_follows_ui', 'true']);
   }
 
@@ -66,7 +66,7 @@ export default function General() {
   const replyLabel = (v: ReplyLanguage) => v === 'en' ? 'English' : v === 'yue' ? text('Traditional Chinese (written)', '繁體書面語') : text('Bilingual (code-mix)', '雙語混合');
   const uiReply = replyLanguageForUi(locale);
   // Users from before the follow rule whose reply language differs from the menus: say so once, fix in one click.
-  const mismatch = ready && values.language_follows_ui == null && !followsUi(values, locale);
+  const mismatch = values.language_follows_ui == null && !followsUi(values, locale);
   const persona = (key: PersonaKey) => personaValue(key, values[key] ?? null);
   const personaOptions = (key: PersonaKey) => PERSONA_CHOICES[key].map(value => ({ value: value as string, label: personaLabel(value, text) }));
   const personaSelect = (key: PersonaKey, label: string) => (
@@ -80,6 +80,9 @@ export default function General() {
       </p>
     );
   }
+
+  // A change made before the saved values arrive could be overwritten by them, or judged against the wrong reply language.
+  if (!ready) return <p className="ui-hint" role="status">{text('Loading settings…', '正在載入設定…')}</p>;
 
   return <>
     {mismatch && (
@@ -104,7 +107,7 @@ export default function General() {
       </SettingRow>
       <SettingRow {...row('reply-language')} control={
         <Select value={reply} options={REPLY_LANGUAGES.map(v => ({ value: v, label: replyLabel(v) }))} label={row('reply-language').title} width={220}
-          onChange={v => { void save('reply-language', ['language', v], ['language_follows_ui', 'false']); }} />
+          onChange={v => { void save('reply-language', ['language_follows_ui', 'false'], ['language', v]); }} />
       }>{failure('reply-language')}</SettingRow>
       {reply !== 'en' && (
         <SettingRow {...row('chinese-replies')} control={
@@ -116,9 +119,12 @@ export default function General() {
 
     <SettingGroup title={text('Appearance', '外觀')}>
       <SettingRow {...row('theme')} control={
-        <Segmented value={appearance} label={row('theme').title} onChange={setAppearance}
+        <Segmented value={appearance} label={row('theme').title} onChange={v => {
+          setFailed(f => ({ ...f, theme: false }));
+          setAppearance(v).catch(e => { console.error(e); setFailed(f => ({ ...f, theme: true })); });
+        }}
           options={[{ value: 'light', label: text('Light', '淺色') }, { value: 'dark', label: text('Dark', '深色') }, { value: 'system', label: text('System', '系統') }]} />
-      } />
+      }>{failure('theme')}</SettingRow>
     </SettingGroup>
 
     <SettingGroup title={text('How JARVIS replies', 'JARVIS 的回覆方式')}>

@@ -26,3 +26,14 @@ export function followsUi(saved: SavedLanguage, ui: UiLanguage): boolean {
 export function replyLanguageAfterUiChange(next: UiLanguage, saved: SavedLanguage): ReplyLanguage | null {
   return followsUi(saved, next) ? replyLanguageForUi(next) : null;
 }
+
+/**
+ * The reply language to save when the interface changes from `current` to
+ * `next`, or null to leave it. A missing flag is first settled against the
+ * interface in use before the change (spec 6.3), so a seeded `en` follows an
+ * English user who switches to 繁體中文.
+ */
+export function replyLanguageOnLocaleChange(current: UiLanguage, next: UiLanguage, saved: SavedLanguage): ReplyLanguage | null {
+  const flag = saved.language_follows_ui ?? String(followsUi(saved, current));
+  return replyLanguageAfterUiChange(next, { ...saved, language_follows_ui: flag });
+}

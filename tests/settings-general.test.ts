@@ -2,7 +2,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 import { nameToShow } from '../src/lib/user-name.ts';
-import { followsUi, replyLanguageAfterUiChange, replyLanguageForUi } from '../src/settings/language.ts';
+import { followsUi, replyLanguageAfterUiChange, replyLanguageForUi, replyLanguageOnLocaleChange } from '../src/settings/language.ts';
 import { ROWS } from '../src/settings/rows.ts';
 
 // Task 6: the one-name helper, the reply-language rule and the General
@@ -55,6 +55,21 @@ test('changing the UI language moves a following reply language and leaves a cho
   assert.equal(replyLanguageAfterUiChange('zh-HK', {}), 'yue');
 });
 
+// Fix round 1: with the flag missing, whether the reply language follows is
+// judged against the interface language in use BEFORE the change (spec 6.3).
+test('a missing flag is judged against the current UI, so seeded en replies follow an en user to zh-HK', () => {
+  assert.equal(replyLanguageOnLocaleChange('en', 'zh-HK', { language: 'en' }), 'yue');
+  assert.equal(replyLanguageOnLocaleChange('zh-HK', 'en', { language: 'en' }), null);
+  assert.equal(replyLanguageOnLocaleChange('zh-HK', 'en', { language: 'yue' }), 'en');
+  assert.equal(replyLanguageOnLocaleChange('en', 'zh-HK', { language: 'bilingual' }), null);
+  assert.equal(replyLanguageOnLocaleChange('en', 'zh-HK', {}), 'yue');
+});
+
+test('a saved flag wins over the current UI', () => {
+  assert.equal(replyLanguageOnLocaleChange('en', 'zh-HK', { language: 'en', language_follows_ui: 'false' }), null);
+  assert.equal(replyLanguageOnLocaleChange('zh-HK', 'en', { language: 'en', language_follows_ui: 'true' }), 'en');
+});
+
 test('the pure helpers import no React and no .tsx', () => {
   for (const path of ['../src/lib/user-name.ts', '../src/settings/language.ts']) {
     const code = source(path);
@@ -96,7 +111,7 @@ test('General keeps the reply-language flag and applies the UI rule', () => {
   const general = source('../src/settings/sections/General.tsx');
   assert.match(general, /'language_follows_ui', 'false'/);
   assert.match(general, /'language_follows_ui', 'true'/);
-  assert.match(general, /replyLanguageAfterUiChange\(/);
+  assert.match(general, /replyLanguageOnLocaleChange\(locale, next, values\)/);
   assert.match(general, /accountSectionVisible\(/);
   assert.match(general, /<BackgroundSettings \/>/);
 });
@@ -118,4 +133,28 @@ test('the sidebar shows nameToShow from the three saved names', () => {
   const sidebar = source('../src/components/SidebarAccount.tsx');
   assert.match(sidebar, /nameToShow\(/);
   assert.doesNotMatch(sidebar, /DISPLAY_NAME_KEY/);
+});
+
+test('a direct reply-language change writes the flag first, then the language', () => {
+  const general = source('../src/settings/sections/General.tsx');
+  assert.match(general, /save\('reply-language', \['language_follows_ui', 'false'\], \['language', v\]\)/);
+});
+
+test('General shows a loading line, not the controls, until the values are loaded', () => {
+  const general = source('../src/settings/sections/General.tsx');
+  assert.match(general, /if \(!ready\)/);
+  assert.match(general, /text\('Loading settings…', '正在載入設定…'\)/);
+});
+
+test('a failed theme save shows at the theme row and the theme rolls back', () => {
+  const general = source('../src/settings/sections/General.tsx');
+  assert.match(general, /setAppearance\(v\)[\s\S]{0,120}theme: true/);
+  const workspace = source('../src/workspace/WorkspaceContext.tsx');
+  assert.match(workspace, /setAppearance: \(value: string\) => Promise<void>/);
+  assert.match(workspace, /setAppearanceValue\(previous\)/);
+});
+
+test('the old Voice reply-language select also records a direct choice', () => {
+  const old = source('../src/pages/Settings.tsx');
+  assert.match(old, /await setPreference\("language_follows_ui", "false"\);\s*await setPreference\("language", v\);/);
 });
