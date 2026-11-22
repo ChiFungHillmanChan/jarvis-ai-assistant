@@ -6,6 +6,7 @@ import { DISPLAY_NAME_KEY, SIGN_IN_CANCELLED, accountChanged, accountLabel, onAc
 import { useUiLocale } from '../i18n';
 import { createAccountMonitor } from '../lib/account-monitor';
 import type { WorkspaceView } from '../workspace/model';
+import { useSettingsDialog } from '../settings/SettingsContext';
 
 /**
  * The bottom row of the sidebar: the name from Settings (or the signed-in account's email), with 連接服務, 設定 and sign-in tucked into a menu above it.
@@ -124,6 +125,7 @@ export default function SidebarAccount({ active, onNavigate }: { active: Workspa
     setOpen(false);
     onNavigate(view);
   };
+  const { openSettings } = useSettingsDialog();
 
   return (
     <div
@@ -138,7 +140,7 @@ export default function SidebarAccount({ active, onNavigate }: { active: Workspa
           <button role="menuitem" className="sidebar-item" aria-current={active === 'connections' ? 'page' : undefined} onClick={() => go('connections')}>
             <Plug size={16} /><span>{t('navConnections')}</span>
           </button>
-          <button role="menuitem" className="sidebar-item" aria-current={active === 'settings' ? 'page' : undefined} onClick={() => go('settings')}>
+          <button role="menuitem" className="sidebar-item" aria-current={active === 'settings' ? 'page' : undefined} onClick={() => { setOpen(false); openSettings(); }}>
             <Settings2 size={16} /><span>{t('navSettings')}</span>
           </button>
           {account?.available && (

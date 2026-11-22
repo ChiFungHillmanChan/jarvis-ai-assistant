@@ -5,6 +5,7 @@ import { googleStatus } from "../lib/commands";
 import { connectionsChanged } from "../lib/connections";
 import { mailWorkspace, type MailAccount } from "../lib/mail";
 import { useWorkspace } from "./WorkspaceContext";
+import { useSettingsDialog } from "../settings/SettingsContext";
 import "../pages/settings-workspace.css";
 
 function syncLabel(value: string | null, locale: string): string {
@@ -16,10 +17,10 @@ function syncLabel(value: string | null, locale: string): string {
 
 export default function ConnectionsPage() {
   const { locale, text } = useUiLocale();
-  const { open, state, writeValue } = useWorkspace();
-  // Settings reopens on whichever section was last shown, so name the one
-  // this button is about instead of landing on Models.
-  const openSettings = (section: "google" | "ai") => { writeValue("tool:settings", "section", section); open("settings"); };
+  const { open, state } = useWorkspace();
+  const settings = useSettingsDialog();
+  // Open Settings on the section this button is about.
+  const openSettings = (section: "google" | "ai") => settings.openSettings(section === 'google' ? 'connections' : 'ai');
   const [accounts, setAccounts] = useState<MailAccount[] | null>(null);
   const [assistantGoogle, setAssistantGoogle] = useState<boolean | null>(null);
   const [mailError, setMailError] = useState(false);
