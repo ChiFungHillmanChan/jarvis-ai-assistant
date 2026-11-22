@@ -12,7 +12,9 @@ import { listen } from '@tauri-apps/api/event';
 export interface AiModelDefaults { openai: string; claude: string; gemini_flash: string; gemini_pro: string; bedrock: string; whisper: string }
 /** US$ per 1M tokens. */
 export interface ModelPrice { input_per_million: number; output_per_million: number; cache_read_per_million: number; cache_write_per_million: number }
-export interface CloudModel { provider: string; id: string; label: string; family: boolean; price: ModelPrice; max_output_tokens: number | null }
+/** `active` models are offered as choices; the others stay listed so their usage is still priced. */
+export type ModelStatus = 'active' | 'deprecated' | 'disabled';
+export interface CloudModel { provider: string; id: string; label: string; family: boolean; status: ModelStatus; price: ModelPrice; max_output_tokens: number | null }
 /** Set for the models offered in one-click setup and approved for mail. */
 export interface LocalSetup { disk_reserve_gb: number; context_cap: number; think_off: boolean }
 export interface LocalModel { id: string; label: string; param_size: string; download_gb: number; min_ram_gb: number; tool_capable: boolean; description: string; setup: LocalSetup | null }

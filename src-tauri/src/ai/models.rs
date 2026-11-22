@@ -171,6 +171,9 @@ pub struct CloudModel {
     pub label: String,
     /// A family pattern ("gemini-flash") rather than a model a user can pick.
     pub family: bool,
+    /// Only an active model is offered as a choice; the rest stay listed so
+    /// their usage is still priced.
+    pub status: registry::doc::Status,
     pub price: Price,
     pub long_context: Option<LongContext>,
     /// The most output tokens (thinking included) one request may ask for.
@@ -376,6 +379,7 @@ fn cloud_models(registry: &registry::Registry) -> Vec<CloudModel> {
                 id: m.id.clone(),
                 label: if m.kind == registry::doc::Kind::Family { m.id.clone() } else { m.display_name.en.clone() },
                 family: m.kind == registry::doc::Kind::Family,
+                status: m.status,
                 price: price(p.input, p.output, p.cache_read, p.cache_write),
                 long_context: p.tiers.first().map(|t| LongContext { above: t.above_input_tokens, price: price(t.input, t.output, t.cache_read, t.cache_write) }),
                 max_output_tokens: m.max_output,

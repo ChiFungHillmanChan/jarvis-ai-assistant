@@ -5,7 +5,7 @@ import { addModelLabel, cloudModelFor, formatRate, mailSetupModels, registrySour
 import type { AiModelCatalog, CloudModel, LocalModel } from '../src/lib/ai-models.ts';
 
 const price = (input: number) => ({ input_per_million: input, output_per_million: input * 4, cache_read_per_million: 0, cache_write_per_million: 0 });
-const cloud = (id: string, input: number): CloudModel => ({ provider: 'openai', id, label: id, family: false, price: price(input), max_output_tokens: null });
+const cloud = (id: string, input: number): CloudModel => ({ provider: 'openai', id, label: id, family: false, status: 'active', price: price(input), max_output_tokens: null });
 const local = (id: string, setup: boolean): LocalModel => ({
   id, label: id, param_size: '', download_gb: 3.4, min_ram_gb: 16, tool_capable: true, description: '',
   setup: setup ? { disk_reserve_gb: 10, context_cap: 4096, think_off: true } : null,
