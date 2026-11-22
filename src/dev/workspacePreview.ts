@@ -13,7 +13,7 @@ export function installWorkspacePreview() {
   const shift = (days: number) => { const d = new Date(now); d.setDate(d.getDate() + days); return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`; };
   // Synthetic mail with the triage shape the backend returns (mail/triage.rs).
   const samples: [string, string, string, string, number, boolean, string | null, string | null][] = [
-    ['September project review', 'Sam Taylor <sam@example.com>', 'work', 'Sam 需要你在週五前確認檢討時間表，並就建議書提出意見。', 2.4, true, shift(2), 'Could we review the timeline on Friday?'],
+    ['September project review', 'Sam Taylor <sam@example.com>', 'work', 'Sam 需要你今天確認檢討時間表，並就建議書提出意見。', 2.4, true, shift(0), 'Could we confirm the review timeline today?'],
     ['Proposal: next steps', 'Jordan Lee <jordan@example.com>', 'work', 'Jordan 已附上建議書，等待你回覆是否同意報價。', 2.1, true, null, 'Please let me know if the quote works for you.'],
     ['Interview invitation: Product Engineer', 'Talent Team <talent@acme.example>', 'jobs', '邀請你於下週二下午 3 時進行 45 分鐘視像面試，請確認時段。', 2.6, true, shift(4), 'Tuesday at 3:00 PM'],
     ['Your invoice INV-2041 is due', 'Billing <billing@cloud.example>', 'finance', '雲端服務帳單 US$48.00 將於下月 1 日到期，會自動扣款。', 1.2, false, null, null],
@@ -23,7 +23,7 @@ export function installWorkspacePreview() {
     ['晚飯時間', 'Mum <mum@example.hk>', 'personal', '媽媽問你星期日是否回家吃晚飯。', 1.7, true, null, '星期日返唔返嚟食飯？'],
   ];
   const messages = samples.map(([subject, sender, category, summary, importance, attention, due], index) => ({ id: index + 1, account_id: 'sample-account', account_email: 'alex@example.com', provider_id: `sample${index}`, thread_id: null, subject, sender, snippet: 'Here are the details for our next review. Please check the timeline and proposed next steps.', body: `Hi Alex,\n\nHere are the details for our next review. The proposal is ready for your feedback.\n\nCould we review the timeline on Friday?\n\nThanks,\nSam`, is_read: index > 2, is_inbox: true, received_at: new Date(now.getTime() - index * 5 * 3600_000).toISOString(), attachments: index === 0 ? [{ filename: 'Review timeline.pdf', mime_type: 'application/pdf', size: 184320 }] : index === 1 ? [] : null, next_due: due, triage: { category, category_confidence: index === 3 ? 0.42 : 0.86, needs_reply: attention ? 0.9 : 0.05, action_required: attention ? 0.85 : 0.2, has_date: due ? 0.9 : 0.1, importance, sent_by_owner: false, attention, summary: summary || null, decided_by: index === 3 ? 'luna' : 'jev' } }));
-  let mailItems = samples.flatMap(([subject, sender, , , , , due, evidence], index) => evidence ? [{ id: index + 1, message_id: index + 1, kind: index === 1 || index === 7 ? 'reply' : index === 4 ? 'event' : index === 2 ? 'event' : 'deadline', title: index === 0 ? '確認檢討時間表' : index === 1 ? '回覆報價' : index === 2 ? '產品工程師面試' : index === 4 ? '乘火車前往 Manchester' : '回覆媽媽', due_date: due, due_time: index === 2 ? '15:00' : index === 4 ? '12:15' : null, end_time: index === 2 ? '15:45' : null, location: null, evidence, evidence_verified: index !== 2, status: 'open', remind_at: null as string | null, reminded_at: null, calendar_event_id: null as string | null, subject, sender }] : []);
+  let mailItems = samples.flatMap(([subject, sender, , , , , due, evidence], index) => evidence ? [{ id: index + 1, message_id: index + 1, kind: index === 1 || index === 7 ? 'reply' : index === 4 ? 'event' : index === 2 ? 'event' : 'deadline', title: index === 0 ? '確認檢討時間表' : index === 1 ? '回覆報價' : index === 2 ? '產品工程師面試' : index === 4 ? '乘火車前往 Manchester' : '回覆媽媽', due_date: due, due_time: index === 2 ? '15:00' : index === 4 ? '12:15' : null, end_time: index === 2 ? '15:45' : null, location: null, evidence, evidence_verified: index !== 2, status: 'open', remind_at: null as string | null, reminded_at: null, calendar_event_id: null as string | null, subject, sender, superseded_by: null as number | null }] : []);
   let triageEnabled = true;
   const triageStatus = () => ({ enabled: triageEnabled, typesafe_key: true, openai_key: true, chosen_ai: "OpenAI", untriaged: 3, attention: messages.filter(m => m.triage.attention).length, open_items: mailItems.filter(i => i.status === 'open').length, categories: ['work', 'jobs', 'finance', 'schedule', 'account', 'personal', 'promotions'].map(c => [c, messages.filter(m => m.triage.category === c).length]) });
   let tasks = [['Reply to the proposal', -1], ['Send the review notes', 0], ['Confirm Friday planning', 2], ['Quarterly review', 10]].map(([title, days], index) => ({ id: index + 1, title: title as string, description: null, deadline: shift(days as number), priority: 1, status: 'pending', source: 'manual', created_at: null }));
@@ -42,6 +42,11 @@ export function installWorkspacePreview() {
   const jobs = [{ id: 1, name: 'Morning briefing', schedule: '0 0 9 * * MON-FRI', action_type: 'briefing', status: 'active', last_run: day + ' 09:00:00', next_run: null, description: 'Review my calendar every weekday at 9 am.' }, { id: 2, name: 'Weekly project review', schedule: '0 0 16 * * FRI', action_type: 'summary', status: 'paused', last_run: null, next_run: null, description: 'Summarize project progress on Friday.' }];
   const runs = [{ id: 1, job_id: 1, started_at: day + ' 09:00:00', finished_at: day + ' 09:00:12', status: 'success', result: 'Your calendar has one customer review today.\n\nPrepare the rollout plan before the meeting.', error: null }];
   let wakeOn = false;
+  // Home (Task 17). Add &home-needs-google or &home-needs-ai to the URL for the setup card.
+  const homeFlags = new URLSearchParams(location.search);
+  const homeNeedsGoogle = homeFlags.has('home-needs-google'), homeNeedsAi = homeFlags.has('home-needs-ai');
+  const localDay = (iso: string) => { const d = new Date(iso); return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`; };
+  const homeBrief = { date: shift(0), shown_at: day + ' 08:30:00', trigger: 'scheduled', local: [now.toDateString(), 'Meetings: 4 today', '  09:30　Standup', '  11:00　Evoke pilot check-in', 'Tasks: 1 overdue, 1 due today', 'Mail: 3 unread'].join('\n'), summary: 'Four meetings today. **Reply to Jordan about the quote** before the onboarding review.', summary_pending: false, summary_error: null };
   // Settings > Voice (Task 14). Nothing is spoken or downloaded.
   const voiceSettings: Record<string, unknown> = { enabled: true, tts_voice: 'Samantha', tts_voice_yue: 'Sinji', tts_rate: 200, tts_enabled: true, keep_recordings: true };
   const voiceFields: Record<string, string> = { tts_voice: 'tts_voice', tts_voice_yue: 'tts_voice_yue', tts_enabled: 'tts_enabled', keep_voice_recordings: 'keep_recordings' };
@@ -137,7 +142,10 @@ export function installWorkspacePreview() {
       case 'get_tasks': return tasks;
       case 'update_task': tasks = tasks.map(t => t.id === args.id ? { ...t, status: args.status } : t); return null;
       case 'get_emails': case 'mail_list_memories': return [];
-      case 'get_events': case 'get_todays_events': return [...events, ...weekEvents];
+      case 'get_events': return [...events, ...weekEvents];
+      // Today only, as calendar.rs todays_events_query: the home page's Today column and Your day.
+      case 'get_todays_events': return [...events, ...weekEvents].filter(e => e.start_time.includes('T') ? shift(0) === localDay(e.start_time) : e.start_time === day);
+      case 'get_daily_briefing': return homeBrief;
       case 'get_github_items': return github;
       case 'get_notion_pages': return notes;
       case 'get_cron_jobs': return jobs.map(j => ({ ...j }));
@@ -188,8 +196,8 @@ export function installWorkspacePreview() {
       case 'get_preference': return '';
       case 'is_model_downloaded': return true;
       case 'stop_speaking': return null;
-      case 'google_accounts': return { main: { state: 'connected', name: 'Alex Chan', email: 'alex@example.com', gmail: true, calendar: true }, others: [] };
-      case 'current_ai': return currentAiValue;
+      case 'google_accounts': return { main: { state: homeNeedsGoogle ? 'not_connected' : 'connected', name: 'Alex Chan', email: 'alex@example.com', gmail: !homeNeedsGoogle, calendar: !homeNeedsGoogle }, others: [] };
+      case 'current_ai': return homeNeedsAi ? null : currentAiValue;
       // Nothing is sent or saved: the preview answers as if the test passed and keeps no key.
       case 'choose_ai': { const c = args.choice; const label = c.provider === 'compatible' ? 'Sample service' : c.provider === 'ollama' ? 'Ollama' : c.provider === 'gemini' ? 'Gemini' : c.provider === 'claude' ? 'Claude' : 'OpenAI'; currentAiValue = { provider: c.provider, label, model: c.model ?? null, base_url: c.baseUrl ?? null }; return currentAiValue; }
       case 'list_ai_models': return ['sample-chat', 'sample-chat-long'];
