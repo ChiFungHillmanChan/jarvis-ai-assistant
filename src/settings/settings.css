@@ -88,3 +88,28 @@
 .settings-checklist li { display: flex; align-items: center; gap: 12px; padding: 8px 0; }
 .settings-checklist li + li { border-top: 1px solid var(--border-primary); }
 .settings-checklist-title { flex: 1; min-width: 0; color: var(--text-primary); font-size: 13px; }
+
+/* Your AI (Task 10): the choice cards, then the chosen card's steps. */
+.settings-ai-intro { margin: 0 0 12px; color: var(--text-secondary); font-size: 13px; }
+.settings-ai-cards { display: grid; grid-template-columns: repeat(auto-fit, minmax(200px, 1fr)); gap: 12px; margin: 16px 0 20px; }
+.settings-ai-card { display: flex; flex-direction: column; gap: 6px; padding: 16px; border: 2px solid var(--settings-border); border-radius: 12px; background: var(--ui-control-bg); color: var(--text-primary); font: inherit; text-align: left; cursor: pointer; }
+.settings-ai-card:hover:not(:disabled) { border-color: var(--ui-control-border-hover); }
+.settings-ai-card[aria-checked="true"] { border-color: var(--ui-focus); background: var(--accent-wash); }
+.settings-ai-card:focus-visible { outline: none; box-shadow: 0 0 0 3px var(--ui-focus-glow); }
+.settings-ai-card:disabled { cursor: not-allowed; opacity: .6; }
+.settings-ai-card-name { display: flex; align-items: center; gap: 8px; font-size: 14px; font-weight: 600; }
+.settings-ai-card-blurb { color: var(--text-secondary); font-size: 12px; }
+.settings-ai-card-cost { margin-top: auto; color: var(--text-muted); font-size: 12px; font-variant-numeric: tabular-nums; }
+.settings-ai-detail { display: flex; flex-direction: column; gap: 10px; padding: 16px 18px; border: 1px solid var(--settings-border); border-radius: 12px; }
+.settings-ai-detail h3 { margin: 0; font-size: 15px; font-weight: 600; }
+.settings-ai-detail p { margin: 0; }
+.settings-ai-steps { display: flex; flex-direction: column; gap: 12px; margin: 4px 0; padding: 0; list-style: none; }
+.settings-ai-steps li { display: flex; align-items: flex-start; gap: 12px; }
+.settings-ai-step-number { flex: 0 0 24px; height: 24px; border: 1px solid var(--ui-control-border); border-radius: 999px; color: var(--text-secondary); font-size: 12px; line-height: 22px; text-align: center; }
+.settings-ai-step-body { flex: 1; display: flex; flex-wrap: wrap; align-items: center; gap: 6px 10px; min-width: 0; font-size: 13px; }
+.settings-ai-step-body > .ui-field { flex: 1 1 100%; }
+.settings-ai-model { display: flex; flex-wrap: wrap; align-items: flex-end; gap: 8px 12px; }
+.settings-ai-model > .ui-hint, .settings-ai-model > p { flex: 1 1 100%; }
+.settings-ai-cost { color: var(--text-primary); font-size: 13px; font-variant-numeric: tabular-nums; }
+.settings-ai-notice { margin: 12px 0 0; color: var(--ui-good); font-size: 13px; }
+.settings-ai-footer { margin: 20px 0 0; color: var(--text-secondary); font-size: 12px; }

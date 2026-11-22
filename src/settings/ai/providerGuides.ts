@@ -9,6 +9,10 @@ export interface ProviderGuide {
   steps: { en: string; zh: string; link?: string }[];
 }
 
+/** The save button's label in Your AI. The guides' last step names it, so both come from here. */
+export const TEST_AND_SAVE = { en: 'Test and save', zh: '測試並儲存' };
+const pasteStep = { en: `Paste the key here, then press "${TEST_AND_SAVE.en}".`, zh: `把密鑰貼到這裡，然後按「${TEST_AND_SAVE.zh}」。` };
+
 export const PROVIDER_GUIDES: ProviderGuide[] = [
   {
     id: 'gemini',
@@ -20,7 +24,7 @@ export const PROVIDER_GUIDES: ProviderGuide[] = [
         zh: '為專案開啟帳單。未開啟帳單的密鑰只會用於聊天，不會用於郵件或日曆。',
         link: 'https://ai.google.dev/gemini-api/docs/billing',
       },
-      { en: 'Paste the key here, then press "Test and save".', zh: '把密鑰貼到這裡，然後按「測試並儲存」。' },
+      pasteStep,
     ],
   },
   {
@@ -28,7 +32,7 @@ export const PROVIDER_GUIDES: ProviderGuide[] = [
     steps: [
       { en: 'Open the OpenAI API keys page and sign in.', zh: '開啟 OpenAI 的 API 密鑰頁面並登入。', link: 'https://platform.openai.com/api-keys' },
       { en: 'Create a new secret key and copy it.', zh: '建立新的密鑰並複製。' },
-      { en: 'Paste the key here, then press "Test and save".', zh: '把密鑰貼到這裡，然後按「測試並儲存」。' },
+      pasteStep,
     ],
   },
   {
@@ -36,7 +40,7 @@ export const PROVIDER_GUIDES: ProviderGuide[] = [
     steps: [
       { en: 'Open the Anthropic Console keys page and sign in.', zh: '開啟 Anthropic Console 的密鑰頁面並登入。', link: 'https://console.anthropic.com/settings/keys' },
       { en: 'Create a new API key and copy it.', zh: '建立新的 API 密鑰並複製。' },
-      { en: 'Paste the key here, then press "Test and save".', zh: '把密鑰貼到這裡，然後按「測試並儲存」。' },
+      pasteStep,
     ],
   },
   {
@@ -44,7 +48,7 @@ export const PROVIDER_GUIDES: ProviderGuide[] = [
     steps: [
       { en: 'Open the Moonshot AI platform key page and sign in.', zh: '開啟 Moonshot AI 平台的密鑰頁面並登入。', link: 'https://platform.moonshot.ai/console/api-keys' },
       { en: 'Create a new API key and copy it.', zh: '建立新的 API 密鑰並複製。' },
-      { en: 'Paste the key here, then press "Test and save".', zh: '把密鑰貼到這裡，然後按「測試並儲存」。' },
+      pasteStep,
     ],
   },
   {
@@ -52,7 +56,7 @@ export const PROVIDER_GUIDES: ProviderGuide[] = [
     steps: [
       { en: 'Open the Alibaba Cloud Model Studio guide to getting an API key and sign in.', zh: '開啟阿里雲百煉（Model Studio）的取得密鑰說明並登入。', link: 'https://www.alibabacloud.com/help/en/model-studio/get-api-key' },
       { en: 'Create a new API key and copy it.', zh: '建立新的 API 密鑰並複製。' },
-      { en: 'Paste the key here, then press "Test and save".', zh: '把密鑰貼到這裡，然後按「測試並儲存」。' },
+      pasteStep,
     ],
   },
 ];

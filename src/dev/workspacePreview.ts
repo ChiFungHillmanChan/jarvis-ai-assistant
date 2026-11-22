@@ -51,7 +51,20 @@ export function installWorkspacePreview() {
     obsidian: { status: 'not_connected', identity: null, method: null, message: null },
   };
   const storage = { databaseBytes: 48_200_000, walBytes: 1_200_000, modelsBytes: 148_000_000, cacheBytes: 12_400_000, backupsBytes: 96_000_000, totalBytes: 305_800_000, mailMessageCount: 412, mailBodyBytes: 8_600_000, conversationCount: 37, retentionDays: 90, retentionEnabled: true, dataDir: '/Users/alex/Library/Application Support/jarvis' };
-  const catalog = { defaults: { openai: '', claude: '', gemini_flash: '', gemini_pro: '', bedrock: '', whisper: '' }, cloud: [], local: [], registry: { version: 7, issued_at: day + 'T00:00:00Z', source: 'bundled' }, registry_updates: false, app_version: '0.5.13 (preview)', presets: [], default_preset: '', setup: [], compatible: [] };
+  // Settings > Your AI (Task 10). Sample ids, never a real model id; prices are the registry's.
+  const sampleModel = (provider: string, id: string, label: string, input: number, output: number) => ({ provider, id, label, family: false, status: 'active', max_output_tokens: null, price: { input_per_million: input, output_per_million: output, cache_read_per_million: 0, cache_write_per_million: 0 } });
+  const sampleSetup = (id: string, en: string, model: string, keyPage: string | null) => ({ id, name: { en, 'zh-HK': en }, hint: { en: `Sample ${en} hint.`, 'zh-HK': `${en} 示範說明。` }, key_page: keyPage, model });
+  const catalog = {
+    defaults: { openai: 'sample-luna', claude: 'sample-haiku', gemini_flash: 'sample-flash', gemini_pro: '', gemini_mail_sort: 'sample-lite', bedrock: '', whisper: '' },
+    cloud: [sampleModel('gemini', 'sample-lite', 'Gemini Flash-Lite (sample)', 0.25, 1.5), sampleModel('gemini', 'sample-flash', 'Gemini Flash (sample)', 0.75, 3.75), sampleModel('gemini', 'sample-smart', 'Gemini Smart (sample)', 1.5, 7.5), sampleModel('gemini', 'sample-pro', 'Gemini Pro (sample)', 2, 12), sampleModel('openai', 'sample-luna', 'GPT Luna (sample)', 0.1, 0.5), sampleModel('claude', 'sample-haiku', 'Claude Haiku (sample)', 0.1, 0.5)],
+    local: [], registry: { version: 7, issued_at: day + 'T00:00:00Z', source: 'bundled' }, registry_updates: false, app_version: '0.5.13 (preview)', presets: [], default_preset: '',
+    setup: [sampleSetup('ollama', 'Ollama', 'required', null), sampleSetup('openai', 'OpenAI', 'optional', 'https://platform.openai.com/api-keys'), sampleSetup('gemini', 'Google Gemini', 'optional', 'https://aistudio.google.com/apikey'), sampleSetup('claude', 'Anthropic Claude', 'optional', 'https://console.anthropic.com/settings/keys'), sampleSetup('kimi', 'Kimi', 'required', null), sampleSetup('qwen', 'Qwen', 'required', null)],
+    compatible: [
+      { id: 'kimi', name: 'Kimi', regions: [{ id: 'global', base_url: 'https://api.moonshot.ai/v1', key_page: 'https://platform.moonshot.ai/console/api-keys' }, { id: 'china', base_url: 'https://api.moonshot.cn/v1', key_page: 'https://platform.moonshot.cn/console/api-keys' }], host_suffixes: ['moonshot.ai', 'moonshot.cn'] },
+      { id: 'qwen', name: 'Qwen', regions: [{ id: 'global', base_url: 'https://dashscope-intl.aliyuncs.com/compatible-mode/v1', key_page: 'https://www.alibabacloud.com/help/en/model-studio/get-api-key' }], host_suffixes: ['aliyuncs.com'] },
+    ],
+  };
+  let currentAiValue: { provider: string; label: string; model: string | null; base_url: string | null } = { provider: 'openai', label: 'OpenAI', model: null, base_url: null };
   mockIPC(async (command, raw) => {
     const args = (raw || {}) as Record<string, any>;
     if (command.startsWith('plugin:')) return null;
@@ -124,7 +137,12 @@ export function installWorkspacePreview() {
       case 'is_model_downloaded': return false;
       case 'stop_speaking': return null;
       case 'google_accounts': return { main: { state: 'connected', name: 'Alex Chan', email: 'alex@example.com', gmail: true, calendar: true }, others: [] };
-      case 'current_ai': return { provider: 'openai', label: 'OpenAI', model: null, base_url: null };
+      case 'current_ai': return currentAiValue;
+      // Nothing is sent or saved: the preview answers as if the test passed and keeps no key.
+      case 'choose_ai': { const c = args.choice; const label = c.provider === 'compatible' ? 'Sample service' : c.provider === 'ollama' ? 'Ollama' : c.provider === 'gemini' ? 'Gemini' : c.provider === 'claude' ? 'Claude' : 'OpenAI'; currentAiValue = { provider: c.provider, label, model: c.model ?? null, base_url: c.baseUrl ?? null }; return currentAiValue; }
+      case 'list_ai_models': return ['sample-chat', 'sample-chat-long'];
+      case 'ai_consent_needed': case 'ai_google_content_note': return null;
+      case 'probe_local_setup': return { os: 'macos', arch: 'aarch64', macosVersion: '15.2', totalRamGb: 16, availableDiskGb: 120, ollamaInstalled: false, ollamaRunning: false, recommendedTag: 'sample-local', downloadUrl: 'https://ollama.com/download/mac', installedModels: [] };
       case 'list_ai_consents': return consents;
       case 'revoke_ai_consent': consents = consents.filter(c => c.provider !== args.provider); void emit('ai-consent-changed'); return null;
       case 'notion_connection_status': case 'github_connection_status': case 'obsidian_connection_status': return integrations[command.split('_')[0]];
