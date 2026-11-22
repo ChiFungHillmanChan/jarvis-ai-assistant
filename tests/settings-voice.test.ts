@@ -59,8 +59,10 @@ test('the Cantonese voice is read through get_voice_settings, never through a pr
   assert.match(source('../src/lib/types.ts'), /tts_voice_yue: string;/);
 });
 
-test('the English voice is written to the key the router reads and to the one the engine reads', () => {
-  assert.deepEqual([...ENGLISH_VOICE_KEYS].sort(), ['tts_voice', 'tts_voice_en']);
+test('the English voice is written to tts_voice_en first and tts_voice last', () => {
+  // The router reads tts_voice first, and the engine and the shown value follow
+  // tts_voice: a failed first write leaves all three on the old voice.
+  assert.deepEqual([...ENGLISH_VOICE_KEYS], ['tts_voice_en', 'tts_voice']);
   assert.match(source(VOICE), /ENGLISH_VOICE_KEYS/);
 });
 
@@ -131,6 +133,16 @@ test('General shows only the startup part of BackgroundSettings; the old page st
   const background = source('../src/components/BackgroundSettings.tsx');
   assert.match(background, /show = 'all'/);
   assert.match(source('../src/pages/Settings.tsx'), /<BackgroundSettings \/>/);
+});
+
+test('Briefing says so when a change is still saving, and shows a normalised time as saved', () => {
+  const code = source(BRIEFING);
+  assert.match(code, /Still saving the last change\. Try again in a moment\./);
+  assert.match(code, /仍在儲存上一項更改，請稍後再試。/);
+  assert.doesNotMatch(code, /throw new Error\('not ready'\)/);
+  // "8:30" when 08:30 is saved: nothing to save, but the field shows 08:30.
+  assert.match(code, /key=\{timeShown\}/);
+  assert.match(code, /setTimeShown\(/);
 });
 
 test('ChooseAi points at Settings → Voice', () => {

@@ -24,6 +24,8 @@ export default function Briefing() {
   const [loadError, setLoadError] = useState(false);
   const [busy, setBusy] = useState(false);
   const [errors, setErrors] = useState<Record<string, string | null>>({});
+  // Bumped to show the saved time again when a typed one means the same ("8:30" for 08:30).
+  const [timeShown, setTimeShown] = useState(0);
 
   const load = useCallback(() => {
     setLoadError(false);
@@ -36,7 +38,12 @@ export default function Briefing() {
 
   // Rejects on failure, so the time field keeps the draft for another try.
   async function save(id: string, change: Change) {
-    if (!briefing || busy) throw new Error('not ready');
+    if (!briefing) return;
+    if (busy) {
+      const message = text('Still saving the last change. Try again in a moment.', '仍在儲存上一項更改，請稍後再試。');
+      setErrors(e => ({ ...e, [id]: message }));
+      throw new Error(message);
+    }
     const next = { enabled: briefing.enabled, time: briefing.time, voice: briefing.voice, ...change };
     setBusy(true);
     setErrors(e => ({ ...e, [id]: null }));
@@ -57,7 +64,8 @@ export default function Briefing() {
       setErrors(e => ({ ...e, 'briefing-time': text('Enter a time as HH:MM, for example 08:00.', '請以 HH:MM 格式輸入時間，例如 08:00。') }));
       throw new Error('invalid briefing time');
     }
-    if (time !== briefing?.time) await save('briefing-time', { time });
+    if (time === briefing?.time) setTimeShown(n => n + 1);
+    else await save('briefing-time', { time });
   }
 
   if (loadError) {
@@ -82,7 +90,7 @@ export default function Briefing() {
 
       <SettingRow {...row('briefing-time')} control={
         <div style={{ width: 120 }}>
-          <TextField value={briefing.time} label={row('briefing-time').title} placeholder="08:00" maxLength={5} onCommit={commitTime} />
+          <TextField key={timeShown} value={briefing.time} label={row('briefing-time').title} placeholder="08:00" maxLength={5} onCommit={commitTime} />
         </div>
       }>{error('briefing-time')}</SettingRow>
 

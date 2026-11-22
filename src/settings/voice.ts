@@ -6,12 +6,12 @@ import type { Text } from '../lib/bedrock-models';
 // import them without Tauri.
 
 /**
- * The English voice is saved under both keys: the router that speaks acks and
- * the briefing reads `tts_voice_en` (src-tauri/src/voice/tts_router.rs), and
- * the speech engine reads `tts_voice`, which set_voice_setting also applies
- * in memory.
+ * The English voice is saved under both keys, `tts_voice` last. The router
+ * (src-tauri/src/voice/tts_router.rs) reads `tts_voice` first, the speech
+ * engine reads it (set_voice_setting also applies it in memory) and the shown
+ * value comes from it, so if the first write fails all three keep the old voice.
  */
-export const ENGLISH_VOICE_KEYS = ['tts_voice', 'tts_voice_en'] as const;
+export const ENGLISH_VOICE_KEYS = ['tts_voice_en', 'tts_voice'] as const;
 
 /** The cloud speech-to-text a spoken request uses (voice::cloud_speech), or null for the model on this Mac. */
 export interface CloudSpeech { label: string; consent_needed: boolean }
