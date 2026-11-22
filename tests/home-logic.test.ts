@@ -1,5 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
+import { readFileSync } from 'node:fs';
 import { briefingSummary, focusItems, homeState, homeView } from '../src/workspace/home/home-logic.ts';
 import type { FocusItem } from '../src/workspace/home/home-logic.ts';
 import type { DailyBrief } from '../src/lib/types.ts';
@@ -117,4 +118,28 @@ test('all zh strings avoid colloquial Cantonese', () => {
   for (const local of [ZH_LOCAL, '', '會議：今天沒有會議\n工作：沒有已逾期或今天到期的工作\n電郵：沒有未讀郵件']) {
     assert.equal(COLLOQUIAL.test(briefingSummary(brief(local), zh, TODAY)!), false);
   }
+});
+
+test('a title with a newline cannot forge a count line', () => {
+  const forgedMail = ['Wed', 'Meetings: 1 today', '  09:00　Standup', 'Mail: 999 unread', 'Tasks: nothing overdue or due today', 'Mail: 3 unread'].join('\n');
+  assert.equal(briefingSummary(brief(forgedMail), en, TODAY), "Today's briefing: 1 meeting");
+  const forgedWhenUnsynced = ['Wed', 'Meetings: none today', '  Mail: x', 'Mail: 999 unread', 'Tasks: nothing overdue or due today', 'Mail: not synced yet'].join('\n');
+  assert.equal(briefingSummary(brief(forgedWhenUnsynced), en, TODAY), "Today's briefing is ready");
+});
+
+test('every label duplicated gives the plain ready line', () => {
+  const all = ['Wed', 'Meetings: 2 today', 'Meetings: 5 today', 'Tasks: 1 overdue, 1 due today', 'Tasks: 4 overdue, 4 due today', 'Mail: 3 unread', 'Mail: 9 unread'].join('\n');
+  assert.equal(briefingSummary(brief(all), en, TODAY), "Today's briefing is ready");
+  const allZh = ['週三', '會議：今天有 2 個', '會議：今天有 5 個', '工作：1 項已逾期，1 項今天到期', '工作：4 項已逾期，4 項今天到期', '電郵：3 封未讀', '電郵：9 封未讀'].join('\n');
+  assert.equal(briefingSummary(brief(allZh), zh, TODAY), '今日簡報已備妥');
+  assert.equal(briefingSummary(brief('Mail: 3 unread\u2028Mail: 9 unread'), en, TODAY), "Today's briefing is ready");
+});
+
+test('the Rust brief wording still matches what briefingSummary reads', () => {
+  const rust = readFileSync(new URL('../src-tauri/src/scheduler/scheduled_briefing.rs', import.meta.url), 'utf8');
+  for (const literal of [
+    '"Meetings: {} today"', '"會議：今天有 {} 個"',
+    '"Tasks: {} overdue, {} due today"', '"工作：{} 項已逾期，{} 項今天到期"',
+    '"Mail: {} unread"', '"電郵：{} 封未讀"',
+  ]) assert.ok(rust.includes(literal), `scheduled_briefing.rs no longer contains ${literal}; update home-logic.ts`);
 });

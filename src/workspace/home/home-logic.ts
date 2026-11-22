@@ -54,18 +54,23 @@ export function focusItems(i: { followUps: FocusItem[]; replies: FocusItem[]; ta
 // A DailyBrief carries no structured counts, only the text the backend wrote
 // (`local`, in the UI language of the day it was made: scheduled_briefing.rs,
 // LocalBrief::text). The counts are read back from those lines, in either
-// language, so the summary line follows the language the user sees now. A line
-// that does not match (unsynced, "none today") contributes nothing.
-const MEETINGS = [/^Meetings: (\d+) today/m, /^會議：今天有 (\d+) 個/m];
-const TASKS = [/^Tasks: (\d+) overdue, (\d+) due today/m, /^工作：(\d+) 項已逾期，(\d+) 項今天到期/m];
-const UNREAD = [/^Mail: (\d+) unread/m, /^電郵：(\d+) 封未讀/m];
+// language, so the summary line follows the language the user sees now.
+// tests/home-logic.test.ts checks the Rust wording still matches.
+//
+// Meeting and task titles are written into `local` too, so a title with a
+// newline can forge a line. Real label lines are unindented and each label
+// appears once; if a label appears more than once the part is unreadable and
+// left out. A line that does not match (none, unsynced) contributes nothing.
+interface Part { labels: string[]; pattern: RegExp }
+const MEETINGS: Part = { labels: ['Meetings:', '會議：'], pattern: /^(?:Meetings: (\d+) today|會議：今天有 (\d+) 個)/ };
+const TASKS: Part = { labels: ['Tasks:', '工作：'], pattern: /^(?:Tasks: (\d+) overdue, (\d+) due today|工作：(\d+) 項已逾期，(\d+) 項今天到期)/ };
+const UNREAD: Part = { labels: ['Mail:', '電郵：'], pattern: /^(?:Mail: (\d+) unread|電郵：(\d+) 封未讀)/ };
 
-function numbers(local: string, patterns: RegExp[]): number[] | null {
-  for (const pattern of patterns) {
-    const match = pattern.exec(local);
-    if (match) return match.slice(1).map(Number);
-  }
-  return null;
+function numbers(lines: string[], part: Part): number[] | null {
+  const own = lines.filter(line => part.labels.some(label => line.startsWith(label)));
+  if (own.length !== 1) return null;
+  const match = part.pattern.exec(own[0]);
+  return match ? match.slice(1).filter(x => x !== undefined).map(Number) : null;
 }
 
 /**
@@ -75,10 +80,13 @@ function numbers(local: string, patterns: RegExp[]): number[] | null {
  * out; with none left, a plain "ready" line.
  */
 export function briefingSummary(brief: DailyBrief | null, text: Text, today: string): string | null {
+  // The counts are a snapshot from briefing time, not live. The mail figure is
+  // unread mail, not replies needed.
   if (!brief || brief.date !== today) return null;
-  const meetings = numbers(brief.local, MEETINGS)?.[0] ?? 0;
-  const tasks = (numbers(brief.local, TASKS) ?? [0, 0]).reduce((a, b) => a + b, 0);
-  const unread = numbers(brief.local, UNREAD)?.[0] ?? 0;
+  const lines = brief.local.split(/\r\n|[\n\r\u2028\u2029]/);
+  const meetings = numbers(lines, MEETINGS)?.[0] ?? 0;
+  const tasks = (numbers(lines, TASKS) ?? [0, 0]).reduce((a, b) => a + b, 0);
+  const unread = numbers(lines, UNREAD)?.[0] ?? 0;
   const parts: string[] = [];
   if (meetings > 0) parts.push(text(`${meetings} ${meetings === 1 ? 'meeting' : 'meetings'}`, `${meetings} 個會議`));
   if (tasks > 0) parts.push(text(`${tasks} ${tasks === 1 ? 'task' : 'tasks'} due`, `${tasks} 項工作到期`));
