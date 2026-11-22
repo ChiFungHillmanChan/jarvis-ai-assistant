@@ -6,7 +6,7 @@ import { consentStatus, type GivenConsent } from '../lib/ai-error';
 import Button from '../ui/Button';
 
 /**
- * Settings → Your AI: the data terms the user agreed to on the consent
+ * Settings > Privacy and data: the data terms the user agreed to on the consent
  * card (ai::consent::list_ai_consents), and Withdraw for each. Withdrawing
  * holds email and calendar content back from that AI again. `bare`: the
  * Settings > Privacy and data row, which has its own title, so only the list

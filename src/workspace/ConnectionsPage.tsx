@@ -119,7 +119,7 @@ export default function ConnectionsPage() {
             {assistantGoogle === null ? text("Loading Google status…", "正在載入 Google 狀態…") : assistantGoogle ? text("Google is connected for Assistant and Calendar.", "Google 已連接至助手及日曆。") : text("Google is not connected for Assistant and Calendar.", "Google 尚未連接至助手及日曆。")}
           </p>
         )}
-        <p className="connections-message">{text('Choose Assistant Google in Settings to connect, switch or disconnect this account.', '請在設定頁的「助手 Google」連接、切換或中斷帳戶連接。')}</p>
+        <p className="connections-message">{text('Open Settings → Connections to connect, switch or disconnect this account.', '請在「設定 → 連接」連接、切換或中斷此帳戶。')}</p>
       </section>
 
       <section className="connections-section" aria-labelledby="connections-tools-title">

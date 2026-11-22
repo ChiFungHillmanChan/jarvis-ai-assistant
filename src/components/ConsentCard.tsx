@@ -9,7 +9,7 @@ import { consentCopy, type ConsentRequest } from '../lib/ai-error';
  * the user's agreement to an AI provider's data terms: inline in the chat,
  * on the Email page, in setup and Settings, and as the notice for a job in
  * the background. One click agrees (give_ai_consent); it is stored for this
- * provider and address, and can be withdrawn in Settings → Your AI.
+ * provider and address, and can be withdrawn in Settings → Privacy and data.
  */
 export default function ConsentCard({ request, onAgreed, onClose }: { request: ConsentRequest; onAgreed?: () => void; onClose?: () => void }) {
   const { text, locale } = useUiLocale();
@@ -38,6 +38,6 @@ export default function ConsentCard({ request, onAgreed, onClose }: { request: C
       <button type="button" className="update-toast-action" disabled={busy} onClick={() => void agree()}>{copy.confirm}</button>
       {onClose && <button type="button" className="tool-approval-decline" disabled={busy} onClick={onClose}>{text('Not now', '稍後')}</button>}
     </div>
-    <small>{text('You can withdraw this in Settings → Your AI.', '可在「設定 → 你的 AI」撤回。')}</small>
+    <small>{text('You can withdraw this in Settings → Privacy and data.', '可在「設定 → 私隱與資料」撤回。')}</small>
   </div>;
 }

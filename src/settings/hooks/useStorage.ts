@@ -5,8 +5,8 @@ import type { StorageScope, StorageUsage } from '../../lib/types';
 import type { Text } from '../../lib/bedrock-models';
 import { sweepSummary } from '../../lib/storage-report';
 
-/// Decimal units, matching what Finder reports. The same formatter as the old
-/// Storage page (src/pages/Settings.tsx), which is deleted with it.
+/// Decimal units, matching what Finder reports. The same formatter the old
+/// Storage page used (src/pages/Settings.tsx, deleted in PR 6).
 export function formatBytes(bytes: number): string {
   if (!Number.isFinite(bytes) || bytes <= 0) return '0 MB';
   const units = ['B', 'KB', 'MB', 'GB', 'TB'];

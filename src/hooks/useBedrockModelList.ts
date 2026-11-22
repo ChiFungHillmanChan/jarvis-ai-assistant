@@ -1,6 +1,6 @@
 // The Bedrock model picker's list for the Mail dialog and the setup guide
 // (lib/bedrock-models.ts, components/BedrockModelPicker.tsx), asked for by
-// the same rule as in Settings > Models: only while the picker is on screen,
+// the same rule as in Settings > Advanced > Models: only while the picker is on screen,
 // only after someone has clicked or pressed a key in this window
 // (lib/user-activity.ts), once per opening, and again when `reload` is
 // called (the "Load the list again" button, and the setup guide after it has

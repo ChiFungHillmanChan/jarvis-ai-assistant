@@ -1,7 +1,7 @@
 import type { Text } from './mail-presentation';
 
 /**
- * Settings -> Personalisation. Mirrors CHOICES in src-tauri/src/ai/persona.rs,
+ * Settings > General. Mirrors CHOICES in src-tauri/src/ai/persona.rs,
  * which validates every value again before it reaches the prompt. The first
  * value is the default.
  */

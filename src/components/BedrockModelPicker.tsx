@@ -44,7 +44,7 @@ type Props = Shared & (
  * (lib/bedrock-models.ts): AWS's list for the saved region, or the built-in
  * list, with a line saying which. "Other (enter an ID)" shows the ID field.
  * An id saved earlier that the list does not hold stays the current choice.
- * In Settings > Models a listed model or the default is saved at once, and
+ * In Settings > Advanced > Models a listed model or the default is saved at once, and
  * a typed id with "Save model". In the Mail dialog and the setup guide a
  * choice changes the form only, a model is required, the form's own button
  * saves it, and a line (or, under "Other", the ID field's help) says that a
