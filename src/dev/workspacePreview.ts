@@ -42,6 +42,9 @@ export function installWorkspacePreview() {
   const jobs = [{ id: 1, name: 'Morning briefing', schedule: '0 0 9 * * MON-FRI', action_type: 'briefing', status: 'active', last_run: day + ' 09:00:00', next_run: null, description: 'Review my calendar every weekday at 9 am.' }, { id: 2, name: 'Weekly project review', schedule: '0 0 16 * * FRI', action_type: 'summary', status: 'paused', last_run: null, next_run: null, description: 'Summarize project progress on Friday.' }];
   const runs = [{ id: 1, job_id: 1, started_at: day + ' 09:00:00', finished_at: day + ' 09:00:12', status: 'success', result: 'Your calendar has one customer review today.\n\nPrepare the rollout plan before the meeting.', error: null }];
   let wakeOn = false;
+  // Settings > Voice (Task 14). Nothing is spoken or downloaded.
+  const voiceSettings: Record<string, unknown> = { enabled: true, tts_voice: 'Samantha', tts_voice_yue: 'Sinji', tts_rate: 200, tts_enabled: true, keep_recordings: true };
+  const voiceFields: Record<string, string> = { tts_voice: 'tts_voice', tts_voice_yue: 'tts_voice_yue', tts_enabled: 'tts_enabled', keep_voice_recordings: 'keep_recordings' };
   let openAtLogin = false, keepAwake = false;
   let briefing = { enabled: false, time: '08:30', voice: true, speech_enabled: false };
   // Settings > Connections, Privacy and data, Setup guide and About (Task 7).
@@ -175,10 +178,13 @@ export function installWorkspacePreview() {
       case 'get_aws_credentials_status': return { ...aws };
       case 'list_local_endpoints': return endpoints;
       case 'get_provider_chain': return chain;
-      case 'list_tts_voices': return [];
+      case 'list_tts_voices': return ['Daniel', 'Karen', 'Samantha', 'Sinji'];
       case 'get_wake_word_status': return { enabled: wakeOn, running: wakeOn, model_downloaded: true, voice_state: wakeOn ? 'WakeWordListening' : 'Idle' };
       case 'enable_wake_word': case 'disable_wake_word': wakeOn = command === 'enable_wake_word'; void emit('voice-state', wakeOn ? 'WakeWordListening' : 'Idle'); return null;
-      case 'get_voice_settings': return null;
+      case 'get_voice_settings': return { ...voiceSettings };
+      case 'set_voice_setting': { const field = voiceFields[args.key]; if (field) voiceSettings[field] = field === 'tts_enabled' || field === 'keep_recordings' ? args.value === 'true' : args.value; return null; }
+      case 'cloud_speech': return null;
+      case 'download_model': throw 'Preview: the speech model is not downloaded.';
       case 'get_preference': return '';
       case 'is_model_downloaded': return false;
       case 'stop_speaking': return null;

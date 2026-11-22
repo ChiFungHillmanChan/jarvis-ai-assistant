@@ -14,6 +14,8 @@ import General from './sections/General';
 import YourAi from './sections/YourAi';
 import Usage from './sections/Usage';
 import Mail from './sections/Mail';
+import Briefing from './sections/Briefing';
+import Voice from './sections/Voice';
 import Connections from './sections/Connections';
 import Privacy from './sections/Privacy';
 import SetupGuide from './sections/SetupGuide';
@@ -31,6 +33,8 @@ const SECTION_VIEWS: Partial<Record<SettingsSectionId, ComponentType>> = {
   ai: YourAi,
   usage: Usage,
   mail: Mail,
+  briefing: Briefing,
+  voice: Voice,
   connections: Connections,
   privacy: Privacy,
   setup: SetupGuide,

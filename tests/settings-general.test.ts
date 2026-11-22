@@ -113,7 +113,7 @@ test('General keeps the reply-language flag and applies the UI rule', () => {
   assert.match(general, /'language_follows_ui', 'true'/);
   assert.match(general, /replyLanguageOnLocaleChange\(locale, next, values\)/);
   assert.match(general, /accountSectionVisible\(/);
-  assert.match(general, /<BackgroundSettings \/>/);
+  assert.match(general, /<BackgroundSettings show="startup" \/>/);
 });
 
 test('a failed save is shown in both languages', () => {

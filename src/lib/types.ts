@@ -240,6 +240,8 @@ export interface ToolCallPayload {
 export interface VoiceSettings {
   enabled: boolean;
   tts_voice: string;
+  /** The Cantonese voice (get_voice_settings). */
+  tts_voice_yue: string;
   tts_rate: number;
   tts_enabled: boolean;
   keep_recordings: boolean;

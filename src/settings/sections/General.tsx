@@ -156,7 +156,7 @@ export default function General() {
 
     <SettingGroup title={text('Startup', '啟動')}>
       {/* Open at login and keep awake are BackgroundSettings' own controls; these ids let search land here. */}
-      <div id="open-at-login"><span id="keep-awake" /><BackgroundSettings /></div>
+      <div id="open-at-login"><span id="keep-awake" /><BackgroundSettings show="startup" /></div>
     </SettingGroup>
   </>;
 }
