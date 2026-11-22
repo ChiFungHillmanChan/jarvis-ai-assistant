@@ -226,24 +226,31 @@ function between(text: string, start: string, end: string): string {
   return text.slice(from, to);
 }
 
-// Requirement 8 in Settings: the list is asked for only from this effect,
-// only with a Bedrock row on screen in the active tab's Models section and
-// after someone used the window, once per opening. Breaks if a condition is
-// dropped or another caller appears.
+// Requirement 8 in Settings: the list is asked for only from the shared
+// hook, only with a Bedrock row on screen in Advanced > Models (the dialog
+// renders one section, and only while it is open) and after someone used the
+// window, once per opening. Breaks if a condition is dropped or another caller
+// appears.
 test('Settings asks for the list only with a Bedrock row on screen, once per opening', () => {
-  const settings = source('../src/pages/Settings.tsx');
-  assert.equal(settings.split('listBedrockModels()').length, 2, 'one call');
-  const effect = between(settings, 'const tabActive = useIsActiveTab();', '}, [bedrockOnScreen, userActed, bedrockAsk]);');
-  assert.match(effect, /const bedrockOnScreen = \(embedded \? shows\("ai"\) : tabActive && section === "ai"\) && chain\.some\(\(entry\) => entry\.provider_type === "bedrock"\);/);
-  assert.match(effect, /if \(!bedrockOnScreen\) \{\s*bedrockAsked\.current = null;\s*bedrockRequest\.current \+= 1;\s*setBedrockList\(\{ status: "idle" \}\);\s*return;\s*\}/, 'leaving the section forgets the list');
-  assert.match(effect, /if \(!userActed \|\| bedrockAsked\.current === bedrockAsk\) return;\s*bedrockAsked\.current = bedrockAsk;/, 'once per opening');
-  assert.match(effect, /listBedrockModels\(\)\s*\.then\(\(list\) => \{ if \(bedrockRequest\.current === request\) setBedrockList/);
+  const hook = source('../src/hooks/useBedrockModelList.ts');
+  assert.equal(hook.split('listBedrockModels()').length, 2, 'one call');
+  const models = source('../src/settings/sections/advanced/Models.tsx');
+  assert.match(models, /const list = useBedrockModelList\(asked \|\| editor\.chain\.some\(entry => entry\.provider_type === 'bedrock'\)\);/);
+  const dialog = source('../src/settings/SettingsDialog.tsx');
+  assert.match(dialog, /\{open && <>/, 'no section is mounted while the dialog is closed');
+  assert.match(dialog, /<ErrorBoundary key=\{section\}><View \/><\/ErrorBoundary>/, 'only the current section is mounted');
+  const effect = between(hook, 'useEffect(() => {', '}, [onScreen, userActed, ask]);');
+  assert.match(effect, /if \(!onScreen\) \{\s*asked\.current = null;\s*request\.current \+= 1;\s*setList\(\{ status: "idle" \}\);\s*return;\s*\}/, 'leaving the section forgets the list');
+  assert.match(effect, /if \(!userActed \|\| asked\.current === ask\) return;\s*asked\.current = ask;/, 'once per opening');
+  assert.match(effect, /listBedrockModels\(\)\s*\.then\(\(value\) => \{ if \(request\.current === current\) setList/);
   for (const file of ['../src/App.tsx', '../src/main.tsx', '../src/lib/commands.ts']) {
     assert.doesNotMatch(source(file).replace('export async function listBedrockModels', ''), /listBedrockModels\(/, `${file} does not ask`);
   }
   assert.match(source('../src/lib/commands.ts'), /return await invoke<BedrockModelList>\("list_bedrock_models"\);/);
-  // Saving or removing AWS credentials, and the button, load it again.
-  assert.equal(settings.split('setBedrockAsk((n) => n + 1)').length - 1, 3);
+  // The button loads it again. AWS credentials are saved in Cloud providers,
+  // another section, so coming back to Models is a new opening that asks again.
+  assert.match(models, /const bedrock = \{ list: list\.list, reload: \(\) => \{ setAsked\(true\); list\.reload\(\); \} \};/);
+  assert.match(source('../src/settings/sections/advanced/ProviderOrder.tsx'), /onReload=\{bedrock\.reload\}/);
 });
 
 // The select has a label and is described by the status line; the refusal

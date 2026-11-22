@@ -429,15 +429,16 @@ test('the forms use the shared picker and hook, and only they ask', () => {
 });
 
 // Review M-5.4: who may ask AWS for the list, anywhere under src/. The
-// commands module defines the call; only Settings > Models and the forms'
-// hook make it; no other file names the command. Breaks if any other file
-// imports or calls listBedrockModels, or invokes list_bedrock_models itself.
-test('only Settings and the hook call listBedrockModels, anywhere under src/', () => {
+// commands module defines the call; only the shared hook makes it (Settings >
+// Advanced > Models and the setup guide both use the hook); no other file
+// names the command. Breaks if any other file imports or calls
+// listBedrockModels, or invokes list_bedrock_models itself.
+test('only the hook calls listBedrockModels, anywhere under src/', () => {
   const root = new URL('../src/', import.meta.url);
   const files = readdirSync(root, { recursive: true }).map(String).filter((file) => /\.(ts|tsx|js|jsx)$/.test(file));
   const read = (file: string) => readFileSync(new URL(file, root), 'utf8');
   assert.ok(files.length > 50, 'the walk reaches the source tree');
-  assert.deepEqual(files.filter((file) => /\blistBedrockModels\b/.test(read(file))).sort(), ['hooks/useBedrockModelList.ts', 'lib/commands.ts', 'pages/Settings.tsx']);
+  assert.deepEqual(files.filter((file) => /\blistBedrockModels\b/.test(read(file))).sort(), ['hooks/useBedrockModelList.ts', 'lib/commands.ts']);
   // dev/workspacePreview.ts answers the command with sample data in the browser preview; it is never in the app.
   assert.deepEqual(files.filter((file) => /["'`]list_bedrock_models["'`]/.test(read(file))).sort(), ['dev/workspacePreview.ts', 'lib/commands.ts']);
 });
@@ -504,14 +505,16 @@ test('the picker in a form: changes the form only, requires a model, and its but
   assert.match(picker, /setup: \{ field: "setup-bedrock-model", help: "setup-hint" \}/);
 });
 
-// Requirement 2: Settings > Models renders the same picker with the same
-// props as merged, and keeps its own request effect. Breaks if Settings'
-// row passes anything else or loses the immediate save.
-test('Settings > Models is unchanged: same props, same save, same request effect', () => {
-  const settings = source('../src/pages/Settings.tsx');
-  assert.match(settings, /<BedrockModelPicker place="settings" saved=\{entry\.model_id \?\? ""\} fallback=\{models\?\.defaults\.bedrock \?\? ""\} listState=\{bedrockList\} onReload=\{\(\) => setBedrockAsk\(\(n\) => n \+ 1\)\} onSave=\{\(model\) => handleSetBedrockModel\(i, model\)\} styles=\{\{ select: styles\.select, button: styles\.saveBtn, input: styles\.tokenInput \}\} \/>/);
-  assert.doesNotMatch(settings, /function BedrockModelField\(/, 'no second copy of the picker');
-  assert.doesNotMatch(settings, /useBedrockModelList/, 'Settings keeps its own effect, as merged');
+// Requirement 2: Settings > Advanced > Models renders the same picker in its
+// provider order, saves a choice at once, and asks for the list through the
+// shared hook. Breaks if the row passes anything else or loses the immediate
+// save.
+test('Settings > Advanced > Models: same picker, immediate save, the shared request rule', () => {
+  const order = source('../src/settings/sections/advanced/ProviderOrder.tsx');
+  assert.match(order, /<BedrockModelPicker key=\{i\} place="settings" credentialsIn="cloud-providers" saved=\{entry\.model_id \?\? ''\} fallback=\{defaults\.bedrock\} listState=\{bedrock\.list\} onReload=\{bedrock\.reload\}\s*onSave=\{model => save\(setEntryModel\(chain, i, model\), true\)\} styles=\{PLAIN\} \/>/);
+  assert.equal(order.split('<BedrockModelPicker').length, 2, 'one picker per Bedrock row');
+  assert.doesNotMatch(order, /function BedrockModelField\(|listBedrockModels/, 'no second copy of the picker or its request');
+  assert.match(source('../src/settings/sections/advanced/Models.tsx'), /useBedrockModelList\(/, 'the shared request rule');
   const picker = source('../src/components/BedrockModelPicker.tsx');
   assert.match(picker, /pickerOptions\(list, props\.saved, fallback, text\)/, 'Settings keeps its options, the default entry included');
   assert.match(picker, /const \{ onSave \} = props;\s*dispatch\(\{ type: "saving", value \}\);/);

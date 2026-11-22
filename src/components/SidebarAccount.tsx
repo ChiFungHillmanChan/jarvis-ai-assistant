@@ -141,7 +141,7 @@ export default function SidebarAccount({ active, onNavigate }: { active: Workspa
           <button role="menuitem" className="sidebar-item" aria-current={active === 'connections' ? 'page' : undefined} onClick={() => go('connections')}>
             <Plug size={16} /><span>{t('navConnections')}</span>
           </button>
-          <button role="menuitem" className="sidebar-item" aria-current={active === 'settings' ? 'page' : undefined} onClick={() => { setOpen(false); openSettings(); }}>
+          <button role="menuitem" className="sidebar-item" onClick={() => { setOpen(false); openSettings(); }}>
             <Settings2 size={16} /><span>{t('navSettings')}</span>
           </button>
           {account?.available && (

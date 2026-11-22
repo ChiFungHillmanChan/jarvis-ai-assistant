@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { ADVANCED_SECTIONS, NAV_GROUPS, legacySectionsFor, sectionLabel, type SettingsSectionId } from '../src/settings/sections.ts';
+import { ADVANCED_SECTIONS, NAV_GROUPS, sectionLabel, type SettingsSectionId } from '../src/settings/sections.ts';
 import { ROWS, ROWS_BY_ID, rowText } from '../src/settings/rows.ts';
 import { searchRows } from '../src/settings/search.ts';
 
@@ -11,10 +11,6 @@ const en = (english: string) => english;
 const zh = (_english: string, chinese: string) => chinese;
 
 const ALL: SettingsSectionId[] = [...NAV_GROUPS.flat(), ...ADVANCED_SECTIONS];
-const OLD_SECTIONS = [
-  'account', 'ai', 'usage', 'keys', 'google', 'notion', 'github', 'obsidian',
-  'voice', 'assistant', 'background', 'appearance', 'storage', 'about',
-];
 
 test('nav groups follow the design board and advanced has five pages', () => {
   assert.deepEqual(NAV_GROUPS, [
@@ -36,23 +32,6 @@ test('every section has an English and a Traditional Chinese label', () => {
   assert.equal(sectionLabel('ai', zh), '你的 AI');
   assert.equal(sectionLabel('mail', zh), '郵件與跟進');
   assert.equal(sectionLabel('advanced-cloud', zh), '雲端服務');
-});
-
-test('legacySectionsFor returns old Settings section ids, never account', () => {
-  for (const id of ALL) {
-    const legacy = legacySectionsFor(id);
-    assert.ok(Array.isArray(legacy), id);
-    for (const old of legacy) assert.ok(OLD_SECTIONS.includes(old), `${id} -> ${old}`);
-    assert.ok(!legacy.includes('account'), `${id} must not map to account`);
-    assert.equal(new Set(legacy).size, legacy.length, id);
-  }
-  assert.deepEqual(legacySectionsFor('setup'), []);
-  assert.deepEqual(legacySectionsFor('mail'), []);
-  assert.deepEqual(legacySectionsFor('general'), ['assistant', 'appearance', 'background']);
-  assert.deepEqual(legacySectionsFor('connections'), ['google', 'notion', 'github', 'obsidian']);
-  assert.deepEqual(legacySectionsFor('advanced-cloud'), ['keys', 'ai']);
-  assert.deepEqual(legacySectionsFor('advanced-integrations'), ['notion', 'github', 'obsidian']);
-  assert.deepEqual(legacySectionsFor('privacy'), ['storage']);
 });
 
 test('every row id is unique', () => {

@@ -9,7 +9,6 @@ import { useSettingsDialog } from './SettingsContext';
 import { ADVANCED_SECTIONS, NAV_GROUPS, advancedGroupLabel, sectionLabel, type SettingsSectionId } from './sections';
 import { ROWS, rowText, type RowMeta } from './rows';
 import { searchRows } from './search';
-import LegacySection from './LegacySection';
 import General from './sections/General';
 import YourAi from './sections/YourAi';
 import Usage from './sections/Usage';
@@ -28,9 +27,9 @@ import Developer from './sections/advanced/Developer';
 import { isBackdropClick } from './settings-dialog-state';
 import './settings.css';
 
-// The one place a section maps to its component. A section without an entry
-// shows the old page's body through LegacySection until it is rebuilt.
-const SECTION_VIEWS: Partial<Record<SettingsSectionId, ComponentType>> = {
+// The one place a section maps to its component. The map is total: a section
+// without a view is a type error.
+const SECTION_VIEWS: Record<SettingsSectionId, ComponentType> = {
   general: General,
   ai: YourAi,
   usage: Usage,
@@ -107,8 +106,8 @@ export default function SettingsDialog() {
     return () => el.removeEventListener('cancel', cancel);
   }, [closeSettings]);
 
-  // After a search result opens its section, bring that row into view. Rows in
-  // rebuilt sections carry their row id as the DOM id; bridge sections do not.
+  // After a search result opens its section, bring that row into view. Rows
+  // carry their row id as the DOM id.
   useEffect(() => {
     const id = scrollTarget.current;
     if (!id || query) return;
@@ -213,7 +212,7 @@ export default function SettingsDialog() {
                       </section>
                     ))
                 ) : (
-                  <ErrorBoundary key={section}>{View ? <View /> : <LegacySection id={section} />}</ErrorBoundary>
+                  <ErrorBoundary key={section}><View /></ErrorBoundary>
                 )}
               </div>
             </div>

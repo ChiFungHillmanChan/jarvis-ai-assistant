@@ -113,7 +113,7 @@ test('General keeps the reply-language flag and applies the UI rule', () => {
   assert.match(general, /'language_follows_ui', 'true'/);
   assert.match(general, /replyLanguageOnLocaleChange\(locale, next, values\)/);
   assert.match(general, /accountSectionVisible\(/);
-  assert.match(general, /<BackgroundSettings show="startup" \/>/);
+  assert.match(general, /<BackgroundSettings \/>/);
 });
 
 test('a failed save is shown in both languages', () => {
@@ -154,7 +154,11 @@ test('a failed theme save shows at the theme row and the theme rolls back', () =
   assert.match(workspace, /setAppearanceValue\(previous\)/);
 });
 
-test('the old Voice reply-language select also records a direct choice', () => {
-  const old = source('../src/pages/Settings.tsx');
-  assert.match(old, /await setPreference\("language_follows_ui", "false"\);\s*await setPreference\("language", v\);/);
+test('the one reply-language select records a direct choice; Voice has no second one', () => {
+  // The old page also had a reply-language select under Voice. The dialog has
+  // one, in General, and it records the direct choice before the language.
+  const general = source('../src/settings/sections/General.tsx');
+  assert.match(general, /save\('reply-language', \['language_follows_ui', 'false'\], \['language', v\]\)/);
+  const voice = source('../src/settings/sections/Voice.tsx') + source('../src/settings/hooks/useVoiceSettings.ts');
+  assert.doesNotMatch(voice, /['"]language['"]\s*[,\]]/, 'Voice does not write the reply language');
 });

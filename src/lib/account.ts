@@ -15,8 +15,6 @@ export interface AccountBadge {
   isPlaceholder: boolean;
 }
 
-/** Settings key holding the name; there is no server-side profile behind it. */
-export const DISPLAY_NAME_KEY = 'display_name';
 const DISPLAY_NAME_EVENT = 'jarvis:display-name-changed';
 
 /** Tells an open sidebar to re-read the name after Settings saves it. */

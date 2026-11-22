@@ -3,10 +3,10 @@ import assert from 'node:assert/strict';
 import { readFileSync, readdirSync } from 'node:fs';
 import { join, relative } from 'node:path';
 
-// Every dropdown goes through the shared Select (src/ui/Select.tsx). The
-// allowlist is temporary: Settings is migrated section by section, and the
-// list is emptied when the last section moves over.
-const ALLOWED = new Set(['src/ui/Select.tsx', 'src/pages/Settings.tsx']);
+// Every dropdown goes through the shared Select (src/ui/Select.tsx), the one
+// file that renders the native element. The temporary allowlist for the old
+// Settings page is empty now that the page is gone.
+const ALLOWED = new Set(['src/ui/Select.tsx']);
 
 function tsxFiles(dir: string): string[] {
   return readdirSync(dir, { withFileTypes: true }).flatMap(entry => {

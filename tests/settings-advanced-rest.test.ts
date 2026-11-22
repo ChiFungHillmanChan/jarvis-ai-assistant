@@ -1,7 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { existsSync, readdirSync, readFileSync, statSync } from 'node:fs';
-import { dirname, join, relative } from 'node:path';
+import { dirname, join } from 'node:path';
 import { ROWS } from '../src/settings/rows.ts';
 import { clearAiError, lastAiError, recordAiError, subscribeAiErrors } from '../src/settings/ai-error-log.ts';
 
@@ -154,20 +154,17 @@ function filesUnder(dir: string): string[] {
   });
 }
 
-const OLD_PAGE = 'src/pages/Settings.tsx';
-const BRIDGE = 'src/settings/LegacySection.tsx';
-
-/** Old side: the page and what it renders, but not the new dialog code it reaches through SettingsContext. */
-const oldCommands = () => reachableCommands([OLD_PAGE], file => file.startsWith('src/settings/'));
-/** New side: every file under src/settings/ and what they render, never the old page or the bridge that shows it. */
-const newCommands = () => reachableCommands(filesUnder('src/settings').filter(f => f !== BRIDGE), file => file === OLD_PAGE || file === BRIDGE);
+/** New side: every file under src/settings/ and what they render. */
+const newCommands = () => reachableCommands(filesUnder('src/settings'), () => false);
 
 /**
  * The old side, snapshotted from src/pages/Settings.tsx at 001eae0 (the last
- * commit that has it), by running oldCommands() below against that file: every
- * command the old page and the components it rendered could call, sorted.
- * The page is deleted in Task 19, so the superset test compares against this
- * list instead of reading the file. Do not edit it by hand.
+ * commit that has it), by running this extraction on that file (following its
+ * imports, but not into src/settings/, the new dialog it reached through
+ * SettingsContext): every command the old page and the components it rendered
+ * could call, sorted. The page is deleted in Task 19, so the superset test
+ * compares against this list instead of reading the file. Do not edit it by
+ * hand.
  */
 const OLD_SETTINGS_COMMANDS: readonly string[] = [
   '${service}_cancel_connect', '${service}_connection_status', '${service}_disconnect', 'account_sign_in',
@@ -212,9 +209,10 @@ const OLD_SETTINGS_COMMANDS: readonly string[] = [
  */
 const ALLOWED_MISSING: Record<string, string> = {};
 
-test('the snapshot matches the old page while it still exists', () => {
-  if (!existsSync(join(root, OLD_PAGE))) return;
-  assert.deepEqual([...oldCommands()].sort(), [...OLD_SETTINGS_COMMANDS]);
+test('the snapshot is sorted, has no repeats, and the old page is gone', () => {
+  assert.equal(OLD_SETTINGS_COMMANDS.length, 94);
+  assert.deepEqual([...OLD_SETTINGS_COMMANDS], [...new Set(OLD_SETTINGS_COMMANDS)].sort());
+  assert.ok(!existsSync(join(root, 'src/pages/Settings.tsx')));
 });
 
 test('the new settings dialog calls every command the old Settings page called', () => {
@@ -232,15 +230,15 @@ test('the kept control of each removed duplicate still calls its command', () =>
 });
 
 test('the extraction finds rendered child components and lib wrappers', () => {
-  const before = oldCommands();
-  // Direct invoke in the page, lib wrappers, and a child component's own commands.
-  for (const command of ['cloud_speech', 'save_notion_token', 'save_obsidian_key', 'revoke_ai_consent', 'get_cost_stats', '${service}_disconnect', 'ai_models'])
-    assert.ok(before.has(command), command);
+  const after = newCommands();
+  // Direct invoke in a section, lib wrappers, and a child component's own
+  // commands; each was on the old side too.
+  for (const command of ['cloud_speech', 'save_notion_token', 'save_obsidian_key', 'revoke_ai_consent', 'get_cost_stats', '${service}_disconnect', 'ai_models']) {
+    assert.ok(OLD_SETTINGS_COMMANDS.includes(command), command);
+    assert.ok(after.has(command), command);
+  }
   // One wrapper does not pull in its whole file.
-  assert.ok(!before.has('get_notion_stats'), 'only imported wrappers count');
-  // The bridge is not counted for the new side.
-  assert.ok(!reachableCommands([BRIDGE], f => f === OLD_PAGE).has('save_notion_token'));
-  assert.equal(relative(root, join(root, OLD_PAGE)), OLD_PAGE);
+  assert.ok(!after.has('get_notion_stats'), 'only imported wrappers count');
 });
 
 // ---------------------------------------------------------------------------

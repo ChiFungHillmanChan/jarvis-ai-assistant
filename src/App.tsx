@@ -33,7 +33,6 @@ import './styles/workspace.css';
 import { keepUiLocaleInUse, useUiLocale } from './i18n';
 import { SettingsProvider, useSettingsDialog } from './settings/SettingsContext';
 import SettingsDialog from './settings/SettingsDialog';
-const Settings = lazy(() => import('./pages/Settings'));
 const CronDashboard = lazy(() => import('./pages/CronDashboard'));
 const EmailPage = lazy(() => import('./pages/EmailPage'));
 const CalendarPage = lazy(() => import('./pages/CalendarPage'));
@@ -51,7 +50,6 @@ const ToolPage = memo(function ToolPage({ view, onSetup }: { view: Exclude<Works
     case 'github': return <GitHubPage />;
     case 'notion': return <NotionPage />;
     case 'cron': return <CronDashboard />;
-    case 'settings': return <Settings />;
     case 'connections': return <ConnectionsPage />;
     case 'result': return <ResultWorkspace />;
   }
@@ -71,7 +69,7 @@ function CommandPicker({ onClose }: { onClose: () => void }) {
   const choices = [
     { id: 'new', title: text('New task', '新增工作'), hint: '⌘N', action: () => newTask() },
     ...(['home', 'email', 'calendar', 'notion', 'github', 'cron', 'connections'] as WorkspaceView[]).map(view => ({ id: view, title: viewName(view, locale), hint: text('Workspace', '工作區'), action: () => open(view) })),
-    { id: 'settings', title: viewName('settings', locale), hint: text('Workspace', '工作區'), action: () => openSettings() },
+    { id: 'settings', title: text('Settings', '設定'), hint: text('Workspace', '工作區'), action: () => openSettings() },
     { id: 'legacy', title: text('Voice and earlier conversations', '語音及較早對話'), hint: text('History', '紀錄'), action: () => dispatch({ type: 'open' as const, view: 'chat', id: 'task:legacy', sessionId: 'legacy', title: 'Voice and earlier conversations' }) },
     ...savedTasks.filter(t => t.id !== 'legacy' && ![...state.tabs, ...state.history].some(tab => tab.sessionId === t.id && tab.view === 'chat')).map(t => ({ id: `saved:${t.id}`, title: t.title, hint: text('Saved task', '已儲存工作'), action: () => dispatch({ type: 'open' as const, view: 'chat', id: `task:${t.id}`, sessionId: t.id, title: t.title }) })),
     ...[...state.tabs, ...state.history].filter(t => t.view === 'chat' || t.view === 'result').map(t => ({ id: t.id, title: displayTabTitle(t, locale), hint: t.view === 'chat' ? text('Task', '工作') : text('Result', '結果'), action: () => dispatch({ type: 'open' as const, view: t.view, id: t.id, sessionId: t.sessionId, title: t.title }) })),

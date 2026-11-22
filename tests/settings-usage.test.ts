@@ -2,10 +2,9 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 
-// Settings.tsx and App.tsx are JSX, which these tests cannot render, so
-// their wiring is checked in the source. A real window shows the rest.
+// The settings sections and App.tsx are JSX, which these tests cannot render,
+// so their wiring is checked in the source. A real window shows the rest.
 const source = (path: string) => readFileSync(new URL(path, import.meta.url), 'utf8');
-const settings = source('../src/pages/Settings.tsx');
 
 /** The text between two markers, so a check reads one block, not the file. */
 function between(text: string, start: string, end: string): string {
@@ -19,12 +18,13 @@ function between(text: string, start: string, end: string): string {
 // R6: the panel was once built and never shown (I1). This fails if Settings
 // stops listing the Usage section or stops rendering the panel in it.
 test('Settings lists a Usage section that shows the usage panel', () => {
-  assert.match(settings, /^import CostPanel from "\.\.\/components\/CostPanel";$/m);
-  const sections = between(settings, 'const SECTIONS', '];');
-  assert.match(sections, /\{ id: "usage", label: text\("Usage", "用量"\)/);
-  const usage = between(settings, '{shows("usage") && (', '{shows("storage")');
-  assert.match(usage, /<CostPanel \/>/);
-  assert.match(usage, /Usage recorded on this Mac/);
+  const sections = source('../src/settings/sections.ts');
+  assert.match(between(sections, 'export const NAV_GROUPS', '];'), /'usage'/);
+  assert.match(sections, /case 'usage': return text\('Usage', '用量'\);/);
+  assert.match(source('../src/settings/SettingsDialog.tsx'), /^  usage: Usage,$/m);
+  const usage = source('../src/settings/sections/Usage.tsx');
+  assert.match(usage, /^import CostPanel from '\.\.\/\.\.\/components\/CostPanel';$/m);
+  assert.match(usage, /\{detailsOpen && <CostPanel \/>\}/);
 });
 
 // R13: a refused model id is shown at the field the user just saved.
@@ -33,8 +33,11 @@ test('the Bedrock model field shows its own save error', () => {
   assert.match(field, /onSave: \(model: string\) => Promise<string \| null>/);
   assert.match(field, /dispatch\(\{ type: "saved", error: await onSave\(value\) \}\);/);
   assert.match(field, /\{state\.error && <p role="alert" className="settings-bedrock-model-error">\{state\.error\}<\/p>\}/);
-  const handler = between(settings, 'async function handleSetBedrockModel(', 'async function handleToggleChainEntry(');
-  assert.doesNotMatch(handler, /setLlmError/, 'the error is not sent to the top of the page');
+  // Provider order saves the model quietly: the error goes back to the field,
+  // not to the order's own error line.
+  assert.match(source('../src/settings/sections/advanced/ProviderOrder.tsx'), /onSave=\{model => save\(setEntryModel\(chain, i, model\), true\)\}/);
+  const handler = between(source('../src/settings/hooks/useChainEditor.ts'), 'const save = useCallback(', '}, [');
+  assert.match(handler, /if \(!quiet\) setSaveError\(String\(e\)\);/, 'the error is not sent to the top of the section');
   assert.match(handler, /return String\(e\);/);
 });
 
@@ -69,22 +72,23 @@ test('the usage panel has the period selector and the group-by control', () => {
 // The clean-up text says what happens to AI usage, in both languages, and
 // the report comes from the function its test checks.
 test('the Storage clean-up text and report say usage is kept as daily totals', () => {
-  const storage = between(settings, '{shows("storage") && (<>', 'Free up space');
-  assert.match(storage, /AI usage records are not deleted: .* combined into daily usage totals, which hold no prompts or mail and are kept for two years\./);
-  assert.match(storage, /AI 用量記錄不會被刪除：.*合併為每日用量總數；每日用量總數不含提示或郵件內容，保留兩年。/);
-  assert.doesNotMatch(storage, /related cached records|相關快取記錄/);
+  const privacy = source('../src/settings/sections/Privacy.tsx');
+  const cleanup = between(privacy, "<SettingGroup title={text('Automatic clean-up', '自動清理')}>", '</SettingGroup>');
+  assert.match(cleanup, /AI usage records are combined into daily totals after 30 days and kept for two years\./);
+  assert.match(cleanup, /AI 用量記錄會在 30 日後合併為每日用量總數，保留兩年。/);
+  assert.doesNotMatch(cleanup, /related cached records|相關快取記錄/);
   // U8.1: Settings offers no clean-up window under 30 days.
-  assert.match(storage, /after 30 days they are combined into daily usage totals/);
-  assert.doesNotMatch(storage, /if that is shorter|如清理期限較短/);
-  const sweep = between(settings, 'function handleSweep()', 'function handlePurge(');
-  assert.match(sweep, /return sweepSummary\(await runStorageSweep\(\), text\);/);
+  assert.match(privacy, /^const WINDOWS = \['30', '90', '180', '365'\] as const;$/m);
+  assert.doesNotMatch(cleanup, /if that is shorter|如清理期限較短/);
+  assert.match(source('../src/settings/hooks/useStorage.ts'), /const sweep = \(\) => run\('cleanup-now', async \(\) => sweepSummary\(await runStorageSweep\(\), text\)\);/);
 });
 
 // The button that adds the Gemini premium default shows that model's
 // registry name (addModelLabel), so its text follows the registry the app is
 // using; "+ Gemini Pro" went stale when the default became Gemini 4 Neon.
 test('the Settings button that adds the Gemini premium default is named from the registry', () => {
-  assert.match(settings, /^import \{[^}]*\baddModelLabel\b[^}]*\} from "\.\.\/lib\/ai-catalog";$/m);
-  const button = between(settings, 'handleAddToChain("gemini", undefined, models.defaults.gemini_pro)}', '</button>');
-  assert.match(button, />\{models \? addModelLabel\(models, models\.defaults\.gemini_pro\) : "\+ …"\}$/);
+  const order = source('../src/settings/sections/advanced/ProviderOrder.tsx');
+  assert.match(order, /^import \{[^}]*\baddModelLabel\b[^}]*\} from '\.\.\/\.\.\/\.\.\/lib\/ai-catalog';$/m);
+  const button = between(order, "add({ provider_type: 'gemini', model_id: defaults.gemini_pro })}", '</Button>');
+  assert.match(button, />\{addModelLabel\(catalog, defaults\.gemini_pro\)\}$/);
 });

@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { readFileSync, readdirSync } from 'node:fs';
+import { existsSync, readFileSync, readdirSync } from 'node:fs';
 import { join } from 'node:path';
 import { initialSettingsDialog, isBackdropClick, isSettingsShortcut, settingsDialogReducer, type SettingsDialogState } from '../src/settings/settings-dialog-state.ts';
 
@@ -87,7 +87,7 @@ test('the titlebar Set up button is gone and the setup guide state lives in the 
   assert.match(app, /<SettingsProvider>/);
   assert.match(app, /<SettingsDialog \/>/);
   assert.match(app, /closeSetupGuide\(\); dispatch\(\{ type: 'open', view: 'email' \}\);/, 'completing setup still opens Mail');
-  assert.match(app, /id: 'settings', title: viewName\('settings', locale\), hint: text\('Workspace', '工作區'\), action: \(\) => openSettings\(\)/);
+  assert.match(app, /id: 'settings', title: text\('Settings', '設定'\), hint: text\('Workspace', '工作區'\), action: \(\) => openSettings\(\)/);
 });
 
 test('every entry point opens the dialog', () => {
@@ -97,16 +97,14 @@ test('every entry point opens the dialog', () => {
   assert.match(connections, /openSettings\(section === 'google' \? 'connections' : 'ai'\)/);
 });
 
-test('the bridge renders the old sections a new section replaces', () => {
-  const bridge = source('../src/settings/LegacySection.tsx');
-  assert.match(bridge, /<Settings embedded=\{\{ sections \}\} \/>/);
-  assert.match(bridge, /legacySectionsFor\(id\)/);
-  assert.match(bridge, /This section moves here soon\./);
-  assert.match(bridge, /此部分即將移到這裏。/);
-  const settings = source('../src/pages/Settings.tsx');
-  assert.match(settings, /export default function Settings\(\{ embedded \}: \{ embedded\?: \{ sections: string\[\] \} \} = \{\}\)/);
-  assert.match(settings, /const shows = \(id: string\) => embedded \? embedded\.sections\.includes\(id\) : section === id;/);
-  assert.doesNotMatch(settings, /\{section === "/, 'every render condition goes through shows()');
+test('the old page and its bridge are gone; every section has its own view', () => {
+  for (const gone of ['../src/pages/Settings.tsx', '../src/settings/LegacySection.tsx']) assert.ok(!existsSync(new URL(gone, import.meta.url)), gone);
+  const dialog = source('../src/settings/SettingsDialog.tsx');
+  assert.doesNotMatch(dialog, /LegacySection|pages\/Settings/);
+  assert.match(dialog, /const SECTION_VIEWS: Record<SettingsSectionId, ComponentType> = \{/, 'a missing view is a type error');
+  assert.match(dialog, /<ErrorBoundary key=\{section\}><View \/><\/ErrorBoundary>/);
+  assert.doesNotMatch(source('../src/settings/sections.ts'), /legacySectionsFor/);
+  assert.doesNotMatch(source('../src/App.tsx'), /pages\/Settings/);
 });
 
 function files(dir: string): string[] {
@@ -158,11 +156,6 @@ test('a native close updates the dialog state, and focus is restored once', () =
   assert.match(dialog, /function onClose\(\) \{ closeSettings\(\); finishClose\(\); \}/);
   assert.match(dialog, /const target = restoreFocus\.current;\s*restoreFocus\.current = null;\s*target\?\.focus\(\);/, 'the ref is cleared before focusing, so a second run does nothing');
   assert.match(dialog, /\} else \{\s*if \(el\.open\) el\.close\(\);\s*finishClose\(\);\s*\}/, 'the close branch resets even when the element is already closed');
-});
-
-test('the bridge closes the dialog before opening Mail; the old tab does not', () => {
-  const settings = source('../src/pages/Settings.tsx');
-  assert.match(settings, /onClick=\{\(\) => \{ if \(embedded\) closeSettings\(\); open\("email"\); \}\}/);
 });
 
 test('App documents that only one ConfirmDialog is mounted at a time', () => {
