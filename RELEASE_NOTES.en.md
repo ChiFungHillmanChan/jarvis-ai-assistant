@@ -1,26 +1,22 @@
-JARVIS v0.5.13
+JARVIS v0.5.14
 
-This update sends each request only to the AI you chose. JARVIS no longer switches to another model on its own; when something fails, it tells you why and lets you pick a model to try again. Gemini's data terms become one consent card: email, calendar content and voice recordings go to Gemini only after you agree. The model list is updated to current models, and OpenAI, Claude and Gemini requests are faster or cheaper.
+This update redesigns Settings and the home page. Settings now opens in a window in the middle of the screen, grouped by topic, with language at the top. The home page has two views, Overview and Focus. Gemini's default models are now cheaper ones.
 
 New
-- Consent card: if you have not confirmed billing for Google Gemini, JARVIS shows the same card wherever you are: in the chat, on the Mail page, in setup, or as a notice for a job running in the background. Once you confirm, email, calendar content and voice recordings go to Gemini, and every feature works with it. You can withdraw it at any time in Settings > Your AI. If you had already ticked the Gemini billing confirmation, it carries over after the update.
-- New models: Gemini 4 Hydrogen, Gemini 4 Neon, Gemini 4 Carbon, Gemini 4 Argon, Gemini 3.8 Flash, Claude Fable 5.2, and OpenAI's GPT-6.2 Astra, GPT-6.2 Sol, GPT-6.1 Terra, GPT-6.1 Sol and GPT-6 Astra.
-- Settings > About shows the version, source and issue date of the model list JARVIS uses.
+- Choose Overview or Focus on the home page. Overview shows mail that needs your reply, follow-ups that are due and today's schedule side by side. Focus shows only the three things that most need you, each with a button to act on it. Your choice is remembered. The top of the home page shows today's briefing in one line; press Expand to read all of it.
+- Usage is shown as charts: the amount spent (in HK$, with US$ beside it), AI requests for mail and chat, cost per day and where it went, over 30 days, 90 days or 1 year.
+- Your AI is chosen with three cards: Google Gemini (recommended), On this Mac and Other services. Each service comes with step-by-step help to get a key. The main choices list only lower-cost models; others are in Advanced.
+- You can search Settings. The setup guide moves into Settings > Setup guide.
 
 Changed
-- No more silent model switching: each request goes only to the AI you chose. On a rate limit, a server error or a dropped connection, it is sent again once to the same model. If that still fails, an error card shows the model, the reason (with the service's own explanation when it refuses a request) and the other models you have keys for. Picking one runs that request once and leaves your settings as they are. A request that already carried out an action, such as creating an event or a draft, is never sent again. If you set up several AIs and relied on JARVIS moving to the next one, you will now see this card instead.
-- Kimi, Qwen, Ollama Cloud and custom addresses: chat works as before. JARVIS cannot confirm how these services use data, so Gmail and Calendar content is not sent to them: mail features, reading your calendar and the daily briefing need another AI. A request that needs this content shows the reason and lists the models that may receive it.
-- Speech-to-text follows your chosen AI: Settings shows which service transcribes your voice. If you have not confirmed Gemini billing, your voice is transcribed on your Mac, or goes to Gemini only after you agree. If cloud transcription fails, JARVIS uses only the Whisper model on your Mac, never another cloud service.
-- Gemini's default model is now Gemini 4 Hydrogen (if you chose a specific model, nothing changes). Gemini 4 Hydrogen costs twice as much as Gemini 3.8 Flash, so sorting mail with it costs more; to keep the cost down, choose Gemini 3.8 Flash in Settings > Models.
-- Think harder appears only when your model can use it, and not for Gemini models that already think at the highest level by default. While it is on, the line under the message box names the model that answers. If a Think harder request fails, you can send it again without Think harder.
-- With your own AWS Bedrock account, replies now appear and are spoken as they arrive.
-- OpenAI chat and general requests now go through OpenAI's Responses API, with OpenAI told not to store responses. Kimi, Qwen and other OpenAI-compatible services are unchanged.
+- Settings no longer takes over the whole page: it opens in the middle of the screen with the background still visible. Press Esc, the close button at the top right or anywhere outside the window to close it. A half-typed value is saved when you close it.
+- Gemini's default models: chat, mail analysis, the daily briefing and memory use Gemini 3.8 Flash, about half the cost of Gemini 4 Hydrogen. Sorting mail uses Gemini 3.1 Flash-Lite. In a comparison on 120 test emails, Flash-Lite missed nothing, cost about 40% less per email and was about twice as fast. If you chose a specific Gemini model, your setting is unchanged.
+- Mail models, cloud services, local AI, integrations and developer options move to Settings > Advanced.
+- Signing out, disconnecting and withdrawing consent now ask you first.
+- Removing a Notion or Obsidian key deletes only the saved key and leaves your other settings as they are.
+- Every dropdown uses the same bordered style.
 
 Fixed
-- Sorting mail with Gemini uses the lowest thinking level: in a test sorting 120 emails with Gemini 3.7 Flash, the time fell from about 22 minutes to about 6, the cost by about 70%, and the categories stayed nearly the same.
-- When you use Claude directly, or OpenAI's GPT-5.6 and later models, the fixed system prompt and tool list use prompt caching, so later requests in the same conversation cost less.
-- When a model's request for an action is cut off or incomplete, JARVIS does not carry it out and tells you why.
-- When a model returns nothing, JARVIS shows the error card and no longer shows a blank answer.
-- When Test and use this AI fails in Settings > Your AI or in the setup guide, it shows a sentence and the service's own reason instead of raw data. The key messages of Choose a model and Load models follow the interface language.
-- Model prices and model IDs are corrected to the providers' current figures; models that still work but are being retired are marked.
-- Local log files no longer contain the content of tool results, GitHub, due-date reminders, speech or automations.
+- English voice: the daily briefing and short spoken replies now use the English voice you chose in Voice.
+- A local AI model download started in Settings keeps going when you close the window.
+- Items replaced by a newer email no longer show on the home page. An item with a reminder time shows on the home page once that time arrives.
