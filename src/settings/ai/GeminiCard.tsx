@@ -6,7 +6,7 @@ import { testDisclosure } from '../../components/ChooseAi';
 import Button from '../../ui/Button';
 import SecretField from '../../ui/SecretField';
 import Select from '../../ui/Select';
-import { costRatio, geminiDefault, sortCostPer1000 } from '../ai-choice';
+import { costRatio, geminiDefault, geminiModelToSave, sortCostPer1000 } from '../ai-choice';
 import GuideSteps from './GuideSteps';
 import { TEST_AND_SAVE, guideFor } from './providerGuides';
 import { saveErrorLine, type TestAndUse } from './save';
@@ -30,12 +30,13 @@ export default function GeminiCard({ catalog, models, current, busy, onTestAndUs
   const [error, setError] = useState('');
   const chosen = catalog.cloud.find(m => m.provider === 'gemini' && m.id === model) ?? null;
   const cost = sortCostPer1000(chosen, catalog);
-  const hint = (m: CloudModel) => m.id === recommended?.id ? text('lowest cost', '最低成本')
+  const hint = (m: CloudModel) => m.id === recommended?.id ? text('Recommended', '推薦')
     : recommended ? text(`${costRatio(m, recommended)}x cost`, `${costRatio(m, recommended)} 倍成本`) : '';
   const options = models.map(m => ({ value: m.id, label: [m.label, hint(m)].filter(Boolean).join(' · ') }));
   // A saved model outside the main path (picked in Advanced) stays listed.
   if (saved && !models.some(m => m.id === saved)) options.unshift({ value: saved, label: catalog.cloud.find(m => m.id === saved)?.label ?? saved });
-  const choice = (apiKey?: string) => ({ provider: 'gemini' as const, apiKey, model: model || undefined });
+  const toSave = geminiModelToSave(model, saved, recommended?.id);
+  const choice = (apiKey?: string) => ({ provider: 'gemini' as const, apiKey, model: toSave.model });
   const saveLabel = busy ? text('Testing…', '測試中…') : text(TEST_AND_SAVE.en, TEST_AND_SAVE.zh);
 
   return <div className="settings-ai-detail">
@@ -50,9 +51,9 @@ export default function GeminiCard({ catalog, models, current, busy, onTestAndUs
     <p className="ui-hint">{testDisclosure('gemini', 'Gemini', text)}</p>
     <div className="settings-ai-model">
       <Select label={text('Model', '模型')} showLabel value={model} options={options} disabled={busy} width={320} onChange={setModel} />
-      <p className="ui-hint">{text('The lowest cost model handles mail well. Pick another only if replies feel weak.', '最低成本的模型已足以處理郵件。只有在回覆不理想時才需改選。')}</p>
+      <p className="ui-hint">{text('The recommended model handles mail well and costs little.', '推薦的模型能妥善整理郵件，費用低。')}</p>
       {cost && <p className="settings-ai-cost">{text(`About US$${cost} to sort 1,000 emails`, `整理 1,000 封郵件約 US$${cost}`)}</p>}
-      {current?.provider === 'gemini' && model !== saved && (
+      {current?.provider === 'gemini' && toSave.changed && (
         <Button kind="secondary" busy={busy} onClick={() => { setError(''); return onTestAndUse(choice()); }} onError={e => setError(saveErrorLine(e, text))}>
           {busy ? text('Testing…', '測試中…') : text('Use this model with the saved key', '以已儲存的密鑰使用此模型')}
         </Button>

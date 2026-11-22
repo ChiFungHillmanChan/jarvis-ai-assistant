@@ -52,6 +52,25 @@ export function geminiDefault(catalog: AiModelCatalog | null): CloudModel | null
   return catalog.cloud.find(model => model.provider === 'gemini' && model.id === catalog.defaults.gemini_mail_sort) ?? null;
 }
 
+/**
+ * What a Gemini save sends as the model, and whether the Select differs
+ * from what is saved. The mail sort default is sent as no model: mail then
+ * sorts with the feature default and chat keeps the registry chat default,
+ * instead of every workload being pinned to it. A saved null counts as the
+ * default.
+ */
+export function geminiModelToSave(selected: string, saved: string | null, mailSortDefault: string | undefined): { model: string | undefined; changed: boolean } {
+  const effective = (value: string | null) => (!value || value === mailSortDefault ? undefined : value);
+  const model = effective(selected);
+  return { model, changed: model !== effective(saved) };
+}
+
+/** The Gemini model in effect: the saved one, or the mail sort default when none is saved. */
+export function geminiEffectiveModel(catalog: AiModelCatalog | null, saved: string | null): CloudModel | null {
+  if (!saved) return geminiDefault(catalog);
+  return catalog?.cloud.find(model => model.provider === 'gemini' && model.id === saved) ?? null;
+}
+
 /** "1.00" for "About US$1.00 to sort 1,000 emails", rounded to 10 cents; null unless `model` is the measured one. */
 export function sortCostPer1000(model: CloudModel | null, catalog: AiModelCatalog | null): string | null {
   const measured = model && model.id === geminiDefault(catalog)?.id

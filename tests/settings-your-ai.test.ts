@@ -1,7 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
-import { GEMINI_SORT_MEASURED, costRatio, geminiDefault, localUnavailable, sortCostPer1000 } from '../src/settings/ai-choice.ts';
+import { GEMINI_SORT_MEASURED, costRatio, geminiDefault, geminiEffectiveModel, geminiModelToSave, localUnavailable, sortCostPer1000 } from '../src/settings/ai-choice.ts';
 import { PROVIDER_GUIDES, TEST_AND_SAVE } from '../src/settings/ai/providerGuides.ts';
 import type { AiModelCatalog, CloudModel } from '../src/lib/ai-models.ts';
 import type { LocalSetupProbe } from '../src/lib/setup.ts';
@@ -132,4 +132,53 @@ test('the preview answers the commands Your AI calls', () => {
     assert.match(preview, new RegExp(`case '${command}'`));
   }
   assert.match(preview, /gemini_mail_sort/);
+});
+
+// Fix round 1.
+
+test('the mail sort default is saved as no model, so chat keeps the registry chat default', () => {
+  const lite = 'gemini-3.1-flash-lite';
+  assert.deepEqual(geminiModelToSave(lite, null, lite), { model: undefined, changed: false }, 'new user or null saved: default selected');
+  assert.deepEqual(geminiModelToSave('gemini-3.8-flash', null, lite), { model: 'gemini-3.8-flash', changed: true });
+  assert.deepEqual(geminiModelToSave(lite, 'gemini-3.8-flash', lite), { model: undefined, changed: true }, 'back to the default unpins');
+  assert.deepEqual(geminiModelToSave('gemini-3.8-flash', 'gemini-3.8-flash', lite), { model: 'gemini-3.8-flash', changed: false });
+  assert.deepEqual(geminiModelToSave(lite, lite, lite), { model: undefined, changed: false }, 'a pin equal to the default is not a change');
+});
+
+test('the Gemini card sends geminiModelToSave and shows the saved-key button only on a change', () => {
+  assert.match(gemini, /geminiModelToSave\(model, saved, recommended\?\.id/);
+  assert.match(gemini, /current\?\.provider === 'gemini' && toSave\.changed &&/);
+  assert.doesNotMatch(gemini, /model: model \|\| undefined/);
+});
+
+test('the default model is labelled Recommended, never lowest cost', () => {
+  assert.doesNotMatch(gemini, /lowest|最低/i);
+  assert.match(gemini, /text\('Recommended', '推薦'\)/);
+  assert.match(gemini, /The recommended model handles mail well and costs little\./);
+  assert.match(gemini, /推薦的模型能妥善整理郵件，費用低。/);
+});
+
+test('the card face cost line follows the effective Gemini model', () => {
+  const measured = catalog(cloud, 'gemini-3.1-flash-lite');
+  assert.equal(geminiEffectiveModel(measured, null)?.id, 'gemini-3.1-flash-lite');
+  assert.equal(geminiEffectiveModel(measured, 'gemini-3.1-flash-lite')?.id, 'gemini-3.1-flash-lite');
+  assert.equal(geminiEffectiveModel(measured, 'gemini-3.8-flash')?.id, 'gemini-3.8-flash');
+  assert.equal(sortCostPer1000(geminiEffectiveModel(measured, 'gemini-3.8-flash'), measured), null);
+  assert.match(yourAi, /sortCostPer1000\(geminiEffectiveModel\(catalog, current\?\.provider === 'gemini' \? current\.model : null\), catalog\)/);
+});
+
+test('On this Mac downloads without touching mail, refreshes, and saves through Test and save', () => {
+  assert.match(yourAi, /useLocalSetup\(\{ applyToMail: false, onReady: \(\) => local\.refresh\(\) \}\)/);
+  assert.match(localMail, /applyToMail = true/);
+  assert.match(localMail, /if \(!applyToMail\)/);
+  assert.match(localMail, /useLocalSetup\(\{ onReady, onBusyChange \}\)/, 'onboarding still applies the model to mail');
+  assert.match(local, /onClick=\{setup\.refresh\}>\{text\('Check again', '重新檢查'\)\}/);
+  assert.doesNotMatch(local, /The model is ready/);
+});
+
+test('Other services carries the OpenAI region warning from ChooseAi', () => {
+  assert.match(chooseAi, /export function openAiRegionNote\(/);
+  assert.match(chooseAi, /\{openAiRegionNote\(text\)\}/);
+  assert.match(other, /service === 'openai' && <p className="ui-hint" role="note">\{openAiRegionNote\(text\)\}/);
+  assert.equal((other.match(/Hong Kong/g) ?? []).length, 0, 'the text lives in ChooseAi only');
 });

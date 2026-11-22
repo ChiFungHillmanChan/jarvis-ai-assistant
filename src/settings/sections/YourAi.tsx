@@ -9,7 +9,7 @@ import { chosenNotice, useAiConsent } from '../../components/ChooseAi';
 import { useLocalSetup } from '../../components/LocalMailSetup';
 import Button from '../../ui/Button';
 import { nextIndex } from '../../ui/keys';
-import { geminiDefault, jarvisAiAvailable, localUnavailable, mainPathModels, needsChainConfirm, sortCostPer1000 } from '../ai-choice';
+import { geminiEffectiveModel, jarvisAiAvailable, localUnavailable, mainPathModels, needsChainConfirm, sortCostPer1000 } from '../ai-choice';
 import { useProviderChain } from '../hooks/useProviderChain';
 import { useSettingsDialog } from '../SettingsContext';
 import GeminiCard from '../ai/GeminiCard';
@@ -43,7 +43,8 @@ export default function YourAi() {
   const catalog = useAiModels();
   const { chain, current, ready, error, reload } = useProviderChain();
   const { consentNeeded, setConsentNeeded, googleNote } = useAiConsent(current);
-  const local = useLocalSetup({});
+  // Downloading does not change mail; Test and save applies the choice, as the other cards do.
+  const local = useLocalSetup({ applyToMail: false, onReady: () => local.refresh() });
   const [picked, setPicked] = useState<Card | null>(null);
   const [busy, setBusy] = useState(false);
   const [notice, setNotice] = useState('');
@@ -76,7 +77,7 @@ export default function YourAi() {
   const jarvis = jarvisAiAvailable(catalog);
   const jarvisChoice = catalog.setup.find(choice => choice.id === 'jarvis_ai');
   const unavailable = local.probe ? localUnavailable(local.probe) : null;
-  const sortCost = sortCostPer1000(geminiDefault(catalog), catalog);
+  const sortCost = sortCostPer1000(geminiEffectiveModel(catalog, current?.provider === 'gemini' ? current.model : null), catalog);
   const faces: Face[] = [
     ...(jarvis && jarvisChoice ? [{ id: 'jarvis' as const, name: localized(jarvisChoice.name, text), blurb: localized(jarvisChoice.hint, text), cost: '' }] : []),
     { id: 'gemini', name: 'Google Gemini', blurb: text('Best for most people. Fast, and handles English and Chinese mail well.', '適合大多數人。速度快，能妥善處理中英文郵件。'),

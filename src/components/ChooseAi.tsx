@@ -63,6 +63,11 @@ export function testDisclosure(option: Option, name: string, text: Text): string
         : text(`Testing sends one short message to ${name}. After that, your chats, voice requests and the mail you ask JARVIS to analyse or sort are sent to ${name} with your key, and ${name}'s charges apply.`, `測試會向${zhName}傳送一句簡短訊息。之後你的對話、語音指令，以及你要求 JARVIS 分析或整理的郵件，會以你的密鑰傳送至${zhName.trimEnd()}，並按${zhName}的收費計算。`);
 }
 
+/** OpenAI does not list Hong Kong as a supported API region. */
+export function openAiRegionNote(text: Text): string {
+  return text('Hong Kong is not on the OpenAI API supported list. Use an eligible account, or choose another AI.', 'OpenAI API 支援地區清單未列出香港。請使用合資格帳戶，或選擇其他 AI。');
+}
+
 /** The line shown once a choice answered and was saved. */
 export function chosenNotice(chosen: CurrentAi, text: Text): string {
   return text(`${chosen.label} answered. JARVIS now uses only ${chosen.label}.`, `${chosen.label} 已回覆。JARVIS 現在只會使用 ${chosen.label}。`)
@@ -182,7 +187,7 @@ export default function ChooseAi({ onChosen, onBusyChange }: { onChosen?: (ai: C
       {named && named.regions.length > 1 && <Select label={text('Account region', '帳戶地區')} showLabel disabled={!!busy} value={service?.id ?? ''} onChange={v => { setRegion(v); setModels(null); setModel(''); }}
         options={named.regions.map(r => ({ value: r.id, label: r.id === 'global' ? text('International', '國際') : r.id === 'china' ? text('Mainland China', '中國內地') : r.id }))} />}
       {option === 'other' && <label>{text('API base URL (ends in /v1 for most services)', 'API 基本網址（大多以 /v1 結尾）')}<input value={otherUrl} disabled={!!busy} spellCheck={false} placeholder="https://api.deepseek.com/v1" onChange={e => { setOtherUrl(e.target.value); setModels(null); setModel(''); }} /></label>}
-      {option === 'openai' && <p className="setup-hint">{text('Hong Kong is not on the OpenAI API supported list. Use an eligible account, or choose another AI.', 'OpenAI API 支援地區清單未列出香港。請使用合資格帳戶，或選擇其他 AI。')}</p>}
+      {option === 'openai' && <p className="setup-hint">{openAiRegionNote(text)}</p>}
       {option !== 'ollama' && <>
         <label>{text(`${name} API key`, `${name} API 密鑰`)}<input type="password" autoComplete="off" spellCheck={false} disabled={!!busy} value={apiKey} onChange={e => setApiKey(e.target.value)} placeholder={optionFor(current, catalog) === option ? text('Saved. Leave blank to keep it', '已儲存，留空即沿用') : text(`Paste your ${name} API key`, `貼上你的${zhName.trimEnd()} API 密鑰`)} /></label>
         {keyPage && <button type="button" disabled={!!busy} onClick={() => void openUrl(keyPage).catch(() => setError(text('Could not open the page.', '未能開啟頁面。')))}>{text('Get a key', '取得密鑰')}</button>}

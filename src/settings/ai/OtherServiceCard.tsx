@@ -3,7 +3,7 @@ import { useUiLocale } from '../../i18n';
 import type { AiModelCatalog } from '../../lib/ai-models';
 import { listAiModels, type CurrentAi } from '../../lib/ai-choice';
 import { localized, setupOptions } from '../../lib/ai-catalog';
-import { optionFor, testDisclosure } from '../../components/ChooseAi';
+import { openAiRegionNote, optionFor, testDisclosure } from '../../components/ChooseAi';
 import Button from '../../ui/Button';
 import SecretField from '../../ui/SecretField';
 import Select from '../../ui/Select';
@@ -65,6 +65,7 @@ export default function OtherServiceCard({ catalog, current, busy, onTestAndUse 
         onChange={v => { setRegion(v); setModels(null); setModel(''); pending.current = undefined; }}
         options={named.regions.map(r => ({ value: r.id, label: r.id === 'global' ? text('International', '國際') : r.id === 'china' ? text('Mainland China', '中國內地') : r.id }))} />}
     </div>
+    {service === 'openai' && <p className="ui-hint" role="note">{openAiRegionNote(text)}</p>}
     <GuideSteps steps={steps} last={
       <SecretField key={`${service}-${place?.id ?? ''}`} saved={false} label={text(`${name} API key`, `${name} API 密鑰`)}
         saveLabel={named ? text('Load models', '載入模型') : saveLabel}

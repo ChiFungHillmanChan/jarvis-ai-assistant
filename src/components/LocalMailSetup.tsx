@@ -14,9 +14,10 @@ import Select from '../ui/Select';
  * Preparing Ollama and an approved model on this Mac: check the Mac, start
  * or install Ollama, download the model, test it on sample mail, then use it
  * for mail. Shared by this panel (onboarding) and Settings > Your AI.
- * Unmounting cancels a run that is still going.
+ * With `applyToMail: false` it stops once the model is on this Mac and
+ * leaves mail settings as they are. Unmounting cancels a run that is still going.
  */
-export function useLocalSetup({ onReady, onBusyChange }: { onReady?: () => void | Promise<void>; onBusyChange?: (busy: boolean) => void }) {
+export function useLocalSetup({ onReady, onBusyChange, applyToMail = true }: { onReady?: () => void | Promise<void>; onBusyChange?: (busy: boolean) => void; applyToMail?: boolean }) {
   const { text } = useUiLocale();
   const [probe, setProbe] = useState<LocalSetupProbe | null>(null);
   const [model, setModel] = useState('');
@@ -75,6 +76,11 @@ export function useLocalSetup({ onReady, onBusyChange }: { onReady?: () => void 
         });
         check();
         if (downloaded.status !== 'complete') throw Error('download_failed');
+      }
+      if (!applyToMail) {
+        setReady(true); setStage(''); setBytes(null);
+        try { await onReady?.(); } catch { /* the card's Check again reads the Mac again */ }
+        return;
       }
       setStage('testing'); setBytes(null);
       const candidate = { ...previous, processing_mode: 'local', local_model: model };

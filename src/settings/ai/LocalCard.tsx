@@ -56,6 +56,7 @@ export default function LocalCard({ setup, unavailable, current, busy, onTestAnd
           {setup.model && <span className="settings-chip">{setup.model}</span>}
           <Button kind="secondary" busy={setup.busy} disabled={busy || setup.checking || !probe || !setup.model} onClick={() => setup.prepare()}>{text('Download model', '下載模型')}</Button>
           {setup.busy && <Button kind="quiet" disabled={setup.stage === 'applying'} onClick={setup.cancel}>{text('Cancel', '取消')}</Button>}
+          {!setup.busy && <Button kind="quiet" disabled={setup.checking} onClick={setup.refresh}>{text('Check again', '重新檢查')}</Button>}
         </div>
       </li>
       {installed.length > 0 && <li>
@@ -70,7 +71,7 @@ export default function LocalCard({ setup, unavailable, current, busy, onTestAnd
     </ol>
     {setup.busy && <div role="status" aria-live="polite"><p className="ui-hint">{setup.stageLabel}</p>
       {setup.bytes && <progress max={setup.bytes.total} value={Math.min(setup.bytes.done, setup.bytes.total)} />}</div>}
-    {setup.ready && <p className="ui-hint" role="status">{text(`The model is ready. Press "${TEST_AND_SAVE.en}" to use it for chat and mail.`, `模型已準備好。按「${TEST_AND_SAVE.zh}」即可用於聊天及郵件。`)}</p>}
+    {setup.ready && <p className="ui-hint" role="status">{text(`The model is downloaded. Choose it above and press "${TEST_AND_SAVE.en}": JARVIS tests it, then uses it for chat and mail.`, `模型已下載。請在上方選擇該模型並按「${TEST_AND_SAVE.zh}」：JARVIS 會先測試，然後用於聊天及郵件。`)}</p>}
     <p className="ui-hint">{testDisclosure('ollama', 'Ollama', text)}</p>
     {(setup.error || error) && <p className="ui-secret-error" role="alert">{setup.error || error}</p>}
   </div>;
