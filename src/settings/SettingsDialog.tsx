@@ -13,6 +13,7 @@ import LegacySection from './LegacySection';
 import General from './sections/General';
 import YourAi from './sections/YourAi';
 import Usage from './sections/Usage';
+import Mail from './sections/Mail';
 import Connections from './sections/Connections';
 import Privacy from './sections/Privacy';
 import SetupGuide from './sections/SetupGuide';
@@ -29,6 +30,7 @@ const SECTION_VIEWS: Partial<Record<SettingsSectionId, ComponentType>> = {
   general: General,
   ai: YourAi,
   usage: Usage,
+  mail: Mail,
   connections: Connections,
   privacy: Privacy,
   setup: SetupGuide,
