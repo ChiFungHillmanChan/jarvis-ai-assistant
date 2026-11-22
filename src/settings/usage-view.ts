@@ -75,9 +75,49 @@ export function chronological(groups: UsageGroup[]): UsageGroup[] {
   return [...groups].sort((a, b) => a.key.localeCompare(b.key));
 }
 
-/** The daily (or, past 90 days, monthly) chart in one sentence, for its aria-label. */
+const KEY = /^\d{4}-\d{2}(-\d{2})?$/;
+
+function emptyGroup(key: string): UsageGroup {
+  return { key, provider: null, requests: 0, input_tokens: 0, output_tokens: 0, cache_read_tokens: 0, cache_write_tokens: 0, usd_cost: 0, price_unknown_requests: 0, speech_characters: 0, from_day: null };
+}
+
+/** The UTC day ("2026-11-13") or month ("2026-11") after `key`. */
+function nextKey(key: string): string {
+  const [year, month, day] = key.split('-').map(Number);
+  if (day) return new Date(Date.UTC(year, month - 1, day + 1)).toISOString().slice(0, 10);
+  return month === 12 ? `${year + 1}-01` : `${year}-${String(month + 1).padStart(2, '0')}`;
+}
+
+/**
+ * The time grouping, oldest first, with every UTC day (or month) between the
+ * first and the last given as a zero bar, so the axis never skips. The backend
+ * returns only the days with usage.
+ */
+export function fillDays(points: UsageGroup[]): UsageGroup[] {
+  const sorted = chronological(points);
+  if (sorted.length < 2) return sorted;
+  const first = sorted[0].key;
+  const last = sorted[sorted.length - 1].key;
+  // Mixed or unexpected keys are drawn as given rather than guessed at.
+  if (!sorted.every(p => KEY.test(p.key) && p.key.length === first.length)) return sorted;
+  const byKey = new Map(sorted.map(p => [p.key, p]));
+  const filled: UsageGroup[] = [];
+  // Two years of days at most (PERIODS); the bound only guards the loop.
+  for (let key = first; filled.length <= 800; key = nextKey(key)) {
+    filled.push(byKey.get(key) ?? emptyGroup(key));
+    if (key >= last) break;
+  }
+  return filled;
+}
+
+/** The chart's heading: its bars are days up to 90 days and months beyond (lib/usage.ts byMonth). */
+export function dailyTitle(monthly: boolean, text: Text): string {
+  return monthly ? text('Cost per month', '每月費用') : text('Cost per day', '每日費用');
+}
+
+/** The daily (or, past 90 days, monthly) chart in one sentence, for its aria-label. Filled days without usage are not counted. */
 export function dailySummary(points: UsageGroup[], text: Text, monthly = false): string {
-  const n = points.length;
+  const n = points.filter(p => p.requests > 0).length;
   const span = monthly ? text(n === 1 ? 'month' : 'months', '月份') : text(n === 1 ? 'day' : 'days', '日子');
   const total = points.reduce((sum, p) => sum + p.usd_cost, 0);
   if (total === 0) return text(`${n} ${span} with usage, none with a known cost.`, `${n} 個有用量的${span}，均沒有已知費用。`);

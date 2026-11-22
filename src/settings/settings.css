@@ -148,8 +148,8 @@
 .settings-usage-block > .ui-hint { margin: -4px 0 10px; }
 .settings-usage-chart { position: relative; }
 .settings-usage-scale { color: var(--text-muted); font-size: 11px; font-variant-numeric: tabular-nums; margin-bottom: 4px; }
-.settings-usage-bars { display: flex; align-items: flex-end; gap: 2px; border-bottom: 1px solid var(--ui-control-border); }
-.settings-usage-bar { flex: 1 1 0; min-width: 0; border-radius: 3px 3px 0 0; background: var(--ui-focus); }
+.settings-usage-bars { display: flex; align-items: flex-end; justify-content: space-between; gap: 2px; border-bottom: 1px solid var(--ui-control-border); }
+.settings-usage-bar { flex: 1 1 0; min-width: 0; max-width: 28px; border-radius: 3px 3px 0 0; background: var(--ui-focus); }
 .settings-usage-dates { display: flex; justify-content: space-between; margin-top: 4px; color: var(--text-muted); font-size: 11px; }
 .settings-usage-split { display: flex; flex-direction: column; gap: 8px; }
 .settings-usage-split-row { display: grid; grid-template-columns: minmax(120px, 180px) minmax(0, 1fr) auto; align-items: center; gap: 12px; font-size: 13px; }

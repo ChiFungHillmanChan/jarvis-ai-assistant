@@ -2,7 +2,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 import {
-  HKD_PER_USD, MAIN_PERIODS, barHeights, chronological, dailySummary, formatMoney, splitShares, splitSummary, spentFigure, toHkd, usageTiles,
+  HKD_PER_USD, MAIN_PERIODS, barHeights, chronological, dailySummary, dailyTitle, fillDays, formatMoney, splitShares, splitSummary, spentFigure, toHkd, usageTiles,
 } from '../src/settings/usage-view.ts';
 import { ROWS, ROWS_BY_ID } from '../src/settings/rows.ts';
 import type { CostStats, UsageGroup } from '../src/lib/usage.ts';
@@ -67,9 +67,36 @@ test('the time grouping comes newest first and the chart reads oldest first', ()
   assert.deepEqual(chronological([group('2026-11-21', 1), group('2026-11-20', 1)]).map(g => g.key), ['2026-11-20', '2026-11-21']);
 });
 
+test('fillDays draws every UTC day between the first and last, with zero bars for days without usage', () => {
+  const filled = fillDays([group('2026-11-10', 2, 0.2), group('2026-11-01', 1, 0.1), group('2026-11-05', 3, 0.3)]);
+  assert.equal(filled.length, 10);
+  assert.deepEqual(filled.map(g => g.key), ['2026-11-01', '2026-11-02', '2026-11-03', '2026-11-04', '2026-11-05', '2026-11-06', '2026-11-07', '2026-11-08', '2026-11-09', '2026-11-10']);
+  assert.deepEqual(filled.map(g => g.requests), [1, 0, 0, 0, 3, 0, 0, 0, 0, 2]);
+  assert.equal(filled[1].usd_cost, 0);
+  // Across a month end and a year end, in UTC.
+  assert.deepEqual(fillDays([group('2026-12-30', 1), group('2027-01-02', 1)]).map(g => g.key), ['2026-12-30', '2026-12-31', '2027-01-01', '2027-01-02']);
+  assert.deepEqual(fillDays([]), []);
+});
+
+test('fillDays fills missing months the same way, keeping each month as given', () => {
+  const months = fillDays([group('2026-11', 4, 1), group('2026-08', 2, 1), { ...group('2025-12', 1, 0.5), from_day: '2025-12-18' }]);
+  assert.deepEqual(months.map(g => g.key), ['2025-12', '2026-01', '2026-02', '2026-03', '2026-04', '2026-05', '2026-06', '2026-07', '2026-08', '2026-09', '2026-10', '2026-11']);
+  assert.equal(months[0].from_day, '2025-12-18');
+  assert.equal(months[1].requests, 0);
+});
+
+test('the chart title says day or month, matching its bars', () => {
+  assert.equal(dailyTitle(false, en), 'Cost per day');
+  assert.equal(dailyTitle(false, zh), '每日費用');
+  assert.equal(dailyTitle(true, en), 'Cost per month');
+  assert.equal(dailyTitle(true, zh), '每月費用');
+  assert.match(usage(), /dailyTitle\(monthly, text\)/);
+});
+
 test('each chart has a one-sentence summary for screen readers', () => {
   const days = [group('2026-11-20', 4, 0.5), group('2026-11-21', 6, 1.5)];
   assert.equal(dailySummary(days, en), 'Cost on 2 days with usage. Highest: HK$11.70 (US$1.50) on 21 Nov 2026. Total: HK$15.60 (US$2.00).');
+  assert.match(dailySummary(fillDays([group('2026-11-18', 4, 0.5), group('2026-11-21', 6, 1.5)]), en), /^Cost on 2 days with usage\./, 'filled days are not counted as days with usage');
   assert.match(dailySummary(days, zh), /^2 個有用量的日子/);
   const split = splitShares([group('mail_sort', 10, 3), group('chat', 3, 1)]);
   assert.equal(splitSummary(split, en), 'Mail sorting 75%, Chat 25%.');
@@ -121,19 +148,32 @@ test('Usage reads the feature and time groupings and the stats for the chosen pe
 
 test('with no requests, Usage shows one line and a link to Your AI, not the charts', () => {
   const code = usage();
-  const empty = code.slice(code.indexOf('total_requests === 0'), code.indexOf('return <>', code.indexOf('total_requests === 0')));
+  const empty = code.slice(code.indexOf('const empty = '), code.indexOf('function figures('));
   assert.match(empty, /emptyPeriodLine\(days, text\)/);
   assert.match(empty, /openSettings\('ai'\)/);
-  assert.doesNotMatch(empty, /DailyBars|SplitBars/);
+  assert.doesNotMatch(empty, /DailyBars|SplitBars|Tile/);
+  assert.match(code, /total_requests === 0 \? empty\s*:/);
 });
 
-test('Show details is the full CostPanel, sharing the period, with every period offered', () => {
+test('Show details stays mounted whatever the figures are doing, so a period change never collapses it', () => {
+  const code = usage();
+  assert.match(code, /return <>\s*\{period\}\s*\{body\}\s*<details /);
+  const component = code.slice(code.indexOf('export default function Usage'), code.indexOf('function Tile'));
+  assert.equal((component.match(/^  return /gm) ?? []).length, 1, 'one return at the component level, no early return');
+});
+
+test('Show details is the CostPanel as it is, with its own period and every period offered', () => {
   const code = usage();
   assert.match(code, /<details /);
-  assert.match(code, /<CostPanel days=\{days\} onDaysChange=\{setDays\} \/>/);
+  assert.match(code, /\{detailsOpen && <CostPanel \/>\}/);
   const panel = source('../src/components/CostPanel.tsx');
+  assert.match(panel, /export default memo\(function CostPanel\(\) \{/, 'no period props');
+  assert.match(panel, /const \[days, setDays\] = useState<PeriodDays>\(30\);/);
   assert.match(panel, /PERIODS\.map\(\(period\) =>/, 'the panel still offers 180 days and 2 years');
-  assert.match(panel, /const days = props\.days \?\? ownDays;/);
+});
+
+test('the request tiles show a dash when the features cannot load, not a spinner forever', () => {
+  assert.match(usage(), /features\.error \? '–' : features\.data \? count\(n\) : '…'/);
 });
 
 test('every chart has an aria-label summary and a visually hidden table', () => {
