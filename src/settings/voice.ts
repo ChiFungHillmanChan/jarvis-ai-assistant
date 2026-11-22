@@ -57,3 +57,71 @@ export function wakePrivacyLine(cloud: string | null, waits: string | null, text
   if (waits) return text(`Wake-word detection runs on this Mac, and so does the full request after it wakes, until you agree to ${waits}'s data terms.`, `喚醒詞偵測會在本機處理音訊；在你同意 ${waits} 的資料條款前，喚醒後的完整指示亦只在此 Mac 處理。`);
   return text('Wake-word detection runs on this Mac, and so does the full request after it wakes: the AI you chose has no cloud speech-to-text in JARVIS.', '喚醒詞偵測會在本機處理音訊，喚醒後的完整指示亦只在此 Mac 處理：你選擇的 AI 在 JARVIS 中沒有雲端語音辨識。');
 }
+
+/** A macOS voice as list_tts_voices returns it (src/lib/commands.ts TtsVoice). */
+export interface VoiceEntry { name: string; locale: string }
+
+/**
+ * Voices hidden from the lists: macOS sound effects and novelty voices, the
+ * 1980s voices, and the eight voices Apple ships once per language (Eddy and
+ * the rest), which sound robotic and filled the list with repeats. A voice
+ * already saved still shows (voiceChoices keeps it).
+ */
+export const HIDDEN_VOICES = new Set([
+  'Albert', 'Bad News', 'Bahh', 'Bells', 'Boing', 'Bubbles', 'Cellos', 'Fred', 'Good News', 'Jester', 'Junior', 'Kathy',
+  'Organ', 'Ralph', 'Superstar', 'Trinoids', 'Whisper', 'Wobble', 'Zarvox',
+  'Eddy', 'Flo', 'Grandma', 'Grandpa', 'Reed', 'Rocko', 'Sandy', 'Shelley',
+]);
+
+const ACCENTS: Record<string, [string, string]> = {
+  en_US: ['American English', '美式英語'], en_GB: ['British English', '英式英語'], en_AU: ['Australian English', '澳洲英語'],
+  en_IE: ['Irish English', '愛爾蘭英語'], en_ZA: ['South African English', '南非英語'], en_IN: ['Indian English', '印度英語'],
+  en_SC: ['Scottish English', '蘇格蘭英語'], en_NZ: ['New Zealand English', '紐西蘭英語'], zh_HK: ['Cantonese', '廣東話'],
+};
+
+/** Apple does not say which voices are female or male; these are the ones the lists show by default. */
+const GENDERS: Record<string, 'f' | 'm'> = {
+  Samantha: 'f', Daniel: 'm', Karen: 'f', Moira: 'f', Tessa: 'f', Rishi: 'm', Aman: 'm', Tara: 'f', Sinji: 'f',
+};
+
+/** The name saved and passed to `say -v`: "Daniel (English (UK))" becomes "Daniel"; "Ava (Premium)" stays whole. */
+export function voiceValue(name: string): string {
+  return name.replace(/ \([^()]*\([^()]*\)\)$/, '');
+}
+
+/**
+ * The options for one voice list: English voices for 'en', Hong Kong voices
+ * for 'yue', each once, hidden voices left out, labelled with accent and,
+ * where known, female or male. The saved voice is kept at the top when it is
+ * not in the list, so a choice made before this never disappears.
+ */
+export function voiceChoices(voices: VoiceEntry[], language: 'en' | 'yue', saved: string, text: Text): { value: string; label: string }[] {
+  const wanted = language === 'en' ? /^en[_-]/ : /^(zh[_-]HK|yue)/;
+  const seen = new Set<string>();
+  const options: { value: string; label: string }[] = [];
+  for (const voice of voices) {
+    const value = voiceValue(voice.name);
+    if (!wanted.test(voice.locale) || HIDDEN_VOICES.has(value) || seen.has(value)) continue;
+    seen.add(value);
+    const accent = ACCENTS[voice.locale.replace('-', '_')];
+    const gender = GENDERS[value] === 'f' ? text('female', '女聲') : GENDERS[value] === 'm' ? text('male', '男聲') : '';
+    const parts = [accent ? text(accent[0], accent[1]) : voice.locale, gender].filter(Boolean);
+    options.push({ value, label: text(`${value} (${parts.join(', ')})`, `${value}（${parts.join('，')}）`) });
+  }
+  options.sort((a, b) => a.value.localeCompare(b.value));
+  if (saved && !seen.has(saved)) options.unshift({ value: saved, label: saved });
+  return options;
+}
+
+/** Speaking speed in words per minute for `say -r`; 200 is what JARVIS has always used. */
+export const SPEECH_RATES = { slow: 160, normal: 200, fast: 240 } as const;
+export type SpeechRate = keyof typeof SPEECH_RATES;
+
+/** The speed option nearest a saved rate, so a rate saved some other way still shows one option selected. */
+export function speechRateChoice(rate: number): SpeechRate {
+  let best: SpeechRate = 'normal';
+  for (const key of Object.keys(SPEECH_RATES) as SpeechRate[]) {
+    if (Math.abs(SPEECH_RATES[key] - rate) < Math.abs(SPEECH_RATES[best] - rate)) best = key;
+  }
+  return best;
+}

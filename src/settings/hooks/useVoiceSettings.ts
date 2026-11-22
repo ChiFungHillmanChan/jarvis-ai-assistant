@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useState } from 'react';
 import { invoke } from '@tauri-apps/api/core';
 import { listen } from '@tauri-apps/api/event';
-import { disableWakeWord, enableWakeWord, getPreference, getVoiceSettings, getWakeWordStatus, listTtsVoices, setPreference, setVoiceSetting } from '../../lib/commands';
+import { disableWakeWord, enableWakeWord, getPreference, getVoiceSettings, getWakeWordStatus, listTtsVoices, setPreference, setVoiceSetting, type TtsVoice } from '../../lib/commands';
 import { currentAi, type CurrentAi } from '../../lib/ai-choice';
 import { voiceStateKind } from '../../lib/always-listening';
 import { useVoiceState } from '../../hooks/useVoiceState';
@@ -18,7 +18,7 @@ export function useVoiceSettings() {
   const { state } = useVoiceState();
   const [settings, setSettings] = useState<VoiceSettings | null>(null);
   const [stt, setStt] = useState('auto');
-  const [voices, setVoices] = useState<string[]>([]);
+  const [voices, setVoices] = useState<TtsVoice[]>([]);
   const [wake, setWake] = useState<WakeWordStatus | null>(null);
   const [wakeBusy, setWakeBusy] = useState(false);
   const [speech, setSpeech] = useState<CloudSpeech | null>(null);

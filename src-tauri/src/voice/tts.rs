@@ -541,19 +541,46 @@ impl TextToSpeech {
         Ok(())
     }
 
-    pub async fn list_voices() -> Result<Vec<String>, String> {
+    pub async fn list_voices() -> Result<Vec<VoiceInfo>, String> {
         let output = Command::new("say")
             .arg("-v")
             .arg("?")
             .output()
             .await
             .map_err(|e| format!("Failed to list voices: {}", e))?;
-        let text = String::from_utf8_lossy(&output.stdout);
-        Ok(text
-            .lines()
-            .filter_map(|line| line.split_whitespace().next().map(|s| s.to_string()))
-            .collect())
+        Ok(parse_voice_list(&String::from_utf8_lossy(&output.stdout)))
     }
+
+    /// Speak `text` once with `voice` at `rate`, for the Play sample button.
+    /// Not cancelled by stop_speaking and never touches the reply queue.
+    pub async fn preview(voice: &str, rate: u32, text: &str) -> Result<(), String> {
+        let status = spawn_say(voice, voice, rate.clamp(100, 300), text, &AtomicBool::new(false)).await?;
+        if status.success() { Ok(()) } else { Err("The voice could not be played.".into()) }
+    }
+}
+
+/// One macOS voice: the full name `say -v` accepts and its locale.
+#[derive(Debug, Clone, PartialEq, serde::Serialize)]
+pub struct VoiceInfo {
+    pub name: String,
+    pub locale: String,
+}
+
+/// Parse `say -v ?`. Each line is `<name>  <locale>  # <sample>`, and the name
+/// can hold spaces and brackets ("Bad News", "Eddy (English (UK))"), so the
+/// locale is the last word before `#`, not the second word. The same voice can
+/// be listed twice (standard and enhanced); it is kept once.
+pub fn parse_voice_list(text: &str) -> Vec<VoiceInfo> {
+    let mut voices: Vec<VoiceInfo> = Vec::new();
+    for line in text.lines() {
+        let head = line.split('#').next().unwrap_or("").trim_end();
+        let Some((name, locale)) = head.rsplit_once(char::is_whitespace) else { continue };
+        let name = name.trim();
+        if name.is_empty() || !locale.contains('_') { continue; }
+        let voice = VoiceInfo { name: name.to_string(), locale: locale.to_string() };
+        if !voices.contains(&voice) { voices.push(voice); }
+    }
+    voices
 }
 
 /// How often an in-flight `say` child is re-checked against the cancel flag.
@@ -840,6 +867,31 @@ fn split_sentences(text: &str) -> Vec<String> {
         sentences.push(trimmed);
     }
     sentences
+}
+
+#[cfg(test)]
+mod voice_list_tests {
+    use super::*;
+
+    #[test]
+    fn voice_names_keep_their_spaces_brackets_and_locale_and_repeats_are_dropped() {
+        let text = "Bad News            en_US    # Hello! My name is Bad News.\n\
+Eddy (English (UK)) en_GB    # Hello! My name is Eddy.\n\
+Eddy (English (US)) en_US    # Hello! My name is Eddy.\n\
+Samantha (English (US)) en_US    # Hello! My name is Samantha.\n\
+Samantha (English (US)) en_US    # Hello! My name is Samantha.\n\
+Sinji (Chinese (Hong Kong)) zh_HK    # 你好！我叫善怡。\n\
+\n";
+        let voices = parse_voice_list(text);
+        let pairs: Vec<(&str, &str)> = voices.iter().map(|v| (v.name.as_str(), v.locale.as_str())).collect();
+        assert_eq!(pairs, vec![
+            ("Bad News", "en_US"),
+            ("Eddy (English (UK))", "en_GB"),
+            ("Eddy (English (US))", "en_US"),
+            ("Samantha (English (US))", "en_US"),
+            ("Sinji (Chinese (Hong Kong))", "zh_HK"),
+        ]);
+    }
 }
 
 #[cfg(test)]

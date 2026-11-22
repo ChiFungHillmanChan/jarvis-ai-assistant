@@ -7,9 +7,10 @@ interface SegmentedProps<V extends string> {
   options: { value: V; label: string }[];
   onChange(v: V): void;
   label: string;
+  disabled?: boolean;
 }
 
-export default function Segmented<V extends string>({ value, options, onChange, label }: SegmentedProps<V>) {
+export default function Segmented<V extends string>({ value, options, onChange, label, disabled }: SegmentedProps<V>) {
   const buttons = useRef<(HTMLButtonElement | null)[]>([]);
   const selected = options.findIndex(o => o.value === value);
   const tabStop = selected === -1 ? 0 : selected;
@@ -23,7 +24,7 @@ export default function Segmented<V extends string>({ value, options, onChange, 
   }
 
   return (
-    <div className="ui-segmented" role="radiogroup" aria-label={label}>
+    <div className="ui-segmented" role="radiogroup" aria-label={label} aria-disabled={disabled || undefined}>
       {options.map((o, i) => (
         <button
           key={o.value}
@@ -31,6 +32,7 @@ export default function Segmented<V extends string>({ value, options, onChange, 
           type="button"
           role="radio"
           aria-checked={i === selected}
+          disabled={disabled}
           tabIndex={i === tabStop ? 0 : -1}
           onClick={() => onChange(o.value)}
           onKeyDown={e => onKeyDown(e, i)}

@@ -502,6 +502,7 @@ pub fn run() {
             voice::commands::get_voice_recording,
             voice::commands::set_voice_setting,
             voice::commands::list_tts_voices,
+            voice::commands::preview_tts_voice,
             voice::wake_commands::get_wake_word_status,
             voice::wake_commands::enable_wake_word,
             voice::wake_commands::disable_wake_word,

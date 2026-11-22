@@ -323,8 +323,17 @@ pub fn set_voice_setting(
 }
 
 #[tauri::command]
-pub async fn list_tts_voices() -> Result<Vec<String>, String> {
+pub async fn list_tts_voices() -> Result<Vec<crate::voice::tts::VoiceInfo>, String> {
     crate::voice::tts::TextToSpeech::list_voices().await
+}
+
+/// Settings > Voice, Play sample: one fixed sentence in the chosen voice and
+/// speed. The text is fixed here, so this cannot be used to speak anything else.
+#[tauri::command]
+pub async fn preview_tts_voice(voice: String, rate: u32, cantonese: bool) -> Result<(), String> {
+    if voice.trim().is_empty() { return Err("No voice chosen.".into()); }
+    let sample = if cantonese { "你好，我是 JARVIS。這是我朗讀回覆的聲音。" } else { "Hello, I'm JARVIS. This is how I will read your replies." };
+    crate::voice::tts::TextToSpeech::preview(&voice, rate, sample).await
 }
 
 #[derive(serde::Serialize)]
