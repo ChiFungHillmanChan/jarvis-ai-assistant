@@ -59,7 +59,7 @@ export function installWorkspacePreview() {
   const sampleModel = (provider: string, id: string, label: string, input: number, output: number) => ({ provider, id, label, family: false, status: 'active', max_output_tokens: null, price: { input_per_million: input, output_per_million: output, cache_read_per_million: 0, cache_write_per_million: 0 } });
   const sampleSetup = (id: string, en: string, model: string, keyPage: string | null) => ({ id, name: { en, 'zh-HK': en }, hint: { en: `Sample ${en} hint.`, 'zh-HK': `${en} 示範說明。` }, key_page: keyPage, model });
   const catalog = {
-    defaults: { openai: 'sample-luna', claude: 'sample-haiku', gemini_flash: 'sample-flash', gemini_pro: '', gemini_mail_sort: 'sample-lite', bedrock: '', whisper: '' },
+    defaults: { openai: 'sample-luna', claude: 'sample-haiku', gemini_flash: 'sample-flash', gemini_pro: '', gemini_mail_sort: 'sample-lite', bedrock: '', whisper: 'sample-whisper' },
     cloud: [sampleModel('gemini', 'sample-lite', 'Gemini Flash-Lite (sample)', 0.25, 1.5), sampleModel('gemini', 'sample-flash', 'Gemini Flash (sample)', 0.75, 3.75), sampleModel('gemini', 'sample-smart', 'Gemini Smart (sample)', 1.5, 7.5), sampleModel('gemini', 'sample-pro', 'Gemini Pro (sample)', 2, 12), sampleModel('openai', 'sample-luna', 'GPT Luna (sample)', 0.1, 0.5), sampleModel('claude', 'sample-haiku', 'Claude Haiku (sample)', 0.1, 0.5)],
     local: [], registry: { version: 7, issued_at: day + 'T00:00:00Z', source: 'bundled' }, registry_updates: false, app_version: '0.5.13 (preview)',
     presets: [{ id: 'sample_primary', label: { en: 'Gemini (sample preset)', 'zh-HK': 'Gemini（示範預設）' } }, { id: 'sample_local', label: { en: 'Local first (sample preset)', 'zh-HK': '本機優先（示範預設）' } }], default_preset: 'sample_primary',
@@ -186,7 +186,7 @@ export function installWorkspacePreview() {
       case 'cloud_speech': return null;
       case 'download_model': throw 'Preview: the speech model is not downloaded.';
       case 'get_preference': return '';
-      case 'is_model_downloaded': return false;
+      case 'is_model_downloaded': return true;
       case 'stop_speaking': return null;
       case 'google_accounts': return { main: { state: 'connected', name: 'Alex Chan', email: 'alex@example.com', gmail: true, calendar: true }, others: [] };
       case 'current_ai': return currentAiValue;
@@ -198,7 +198,11 @@ export function installWorkspacePreview() {
       case 'list_ai_consents': return consents;
       case 'revoke_ai_consent': consents = consents.filter(c => c.provider !== args.provider); void emit('ai-consent-changed'); return null;
       case 'notion_connection_status': case 'github_connection_status': case 'obsidian_connection_status': return integrations[command.split('_')[0]];
-      case 'notion_disconnect': case 'github_disconnect': case 'obsidian_disconnect': integrations[command.split('_')[0]].status = 'not_connected'; return null;
+      case 'notion_disconnect': case 'github_disconnect': case 'obsidian_disconnect': Object.assign(integrations[command.split('_')[0]], { status: 'not_connected', identity: null, method: null }); return null;
+      // Advanced > Integrations: the preview keeps no token, it only shows the method as saved.
+      case 'save_notion_token': case 'save_github_token': Object.assign(integrations[command.split('_')[1]], { status: 'configured', identity: null, method: 'token', message: null }); return null;
+      case 'save_obsidian_key': Object.assign(integrations.obsidian, { status: 'configured', identity: null, method: 'rest', message: null }); return null;
+      case 'github_set_client_id': integrations.github.oauth_ready = true; return null;
       case 'get_storage_usage': return { ...storage };
       case 'set_retention_policy': storage.retentionDays = args.days; storage.retentionEnabled = args.enabled; return null;
       case 'run_storage_sweep': return { mailBodiesCleared: 0, conversationsDeleted: 0, emailsDeleted: 0, usageRowsRolledUp: 0, briefingsDeleted: 0 };
