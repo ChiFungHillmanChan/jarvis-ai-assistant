@@ -93,7 +93,10 @@ function clearApiKey(provider: string): Promise<void> {
   return invoke("set_api_key", { provider, value: "", remove: true });
 }
 
-export default function Settings() {
+// `embedded`: the settings dialog's bridge (src/settings/LegacySection.tsx)
+// shows these old sections, in this file's order, without the nav or header
+// and without the workspace's saved section. Deleted with this file.
+export default function Settings({ embedded }: { embedded?: { sections: string[] } } = {}) {
   // Model ids, presets and services come from the model registry
   // (ai_models), never from this file.
   const models = useAiModels();
@@ -233,15 +236,16 @@ export default function Settings() {
   const [endpointHealth, setEndpointHealth] = useState<Record<string, EndpointHealth>>({});
   const [llmError, setLlmError] = useState<string | null>(null);
   const [section, setSection] = useWorkspaceValue<string>("section", "ai");
+  const shows = (id: string) => embedded ? embedded.sections.includes(id) : section === id;
 
   // A previous session can have left the workspace on "account"; once we know
   // that section is hidden in this build, land on the section right after it
   // instead of a nav page nothing renders for.
   useEffect(() => {
-    if (section === "account" && !accountSectionVisible(accountInfo)) {
+    if (!embedded && section === "account" && !accountSectionVisible(accountInfo)) {
       setSection("ai");
     }
-  }, [accountInfo, section, setSection]);
+  }, [embedded, accountInfo, section, setSection]);
 
   // Storage state
   const [storage, setStorage] = useState<StorageUsage | null>(null);
@@ -309,7 +313,7 @@ export default function Settings() {
   // second effect run included.
   const tabActive = useIsActiveTab();
   const userActed = useUserHasActed();
-  const bedrockOnScreen = tabActive && section === "ai" && chain.some((entry) => entry.provider_type === "bedrock");
+  const bedrockOnScreen = (embedded ? shows("ai") : tabActive && section === "ai") && chain.some((entry) => entry.provider_type === "bedrock");
   const [bedrockList, setBedrockList] = useState<BedrockListState>({ status: "idle" });
   const [bedrockAsk, setBedrockAsk] = useState(0);
   const bedrockAsked = useRef<number | null>(null);
@@ -333,7 +337,7 @@ export default function Settings() {
   // Reading the storage report walks the models and cache directories, so it is
   // deferred until the panel is actually opened rather than run on every mount.
   useEffect(() => {
-    if (section !== "storage" || storage) return;
+    if (!shows("storage") || storage) return;
     void refreshStorage();
   }, [section]);
 
@@ -813,8 +817,8 @@ export default function Settings() {
   const visibleSections = SECTIONS.filter((s) => s.id !== "account" || accountSectionVisible(accountInfo));
 
   return (
-    <div className="settings-workspace">
-      <nav className="settings-nav" aria-label={text('Settings categories', '設定分類')}>
+    <div className={embedded ? "settings-workspace settings-embedded" : "settings-workspace"}>
+      {!embedded && <nav className="settings-nav" aria-label={text('Settings categories', '設定分類')}>
         <div className="settings-nav-title">{t("navSettings")}</div>
         {visibleSections.map((s) => {
           const active = section === s.id;
@@ -826,15 +830,15 @@ export default function Settings() {
             </button>
           );
         })}
-      </nav>
+      </nav>}
       <div className="settings-content">
-        <header className="settings-page-header">
+        {!embedded && <header className="settings-page-header">
           <h1>{visibleSections.find((item) => item.id === section)?.label ?? t("navSettings")}</h1>
           <p>{text("Manage how JARVIS works on this Mac.", "管理 JARVIS 在此 Mac 上的運作方式。")}</p>
-        </header>
-        {integrationError && ["notion", "github", "obsidian"].includes(section) && <p role="alert" style={styles.errorText}>{integrationError}</p>}
-        {section === "account" && <AccountPanel />}
-        {section === "ai" && (<>
+        </header>}
+        {integrationError && ["notion", "github", "obsidian"].some(shows) && <p role="alert" style={styles.errorText}>{integrationError}</p>}
+        {shows("account") && <AccountPanel />}
+        {shows("ai") && (<>
           <div className="settings-info-row">
             <p>{text('The AI you choose here answers the assistant and analyses mail. Mail analysis can use a different AI in its own settings.', '你在此選擇的 AI 會處理助手對話及電郵分析。電郵分析亦可在其設定中另選 AI。')}</p>
             <button style={styles.saveBtn} onClick={() => open("email")}>{text('Mail analysis settings', '郵件分析設定')}</button>
@@ -969,7 +973,7 @@ export default function Settings() {
           </details>
         </>)}
 
-        {section === "keys" && (
+        {shows("keys") && (
           <div className="settings-panel">
             <h2 className="settings-heading">{text("Provider API keys", "供應商 API 密鑰")}</h2>
             <div style={styles.hint}>{t("keyHelp")}</div>
@@ -1010,7 +1014,7 @@ export default function Settings() {
           </div>
         )}
 
-        {section === "google" && (
+        {shows("google") && (
           <div className="settings-panel">
             <h2 className="settings-heading">{text('Google for Assistant and Calendar', '助手及日曆的 Google 連接')}</h2>
             <div style={styles.hint}>{text('The main account powers Assistant mail tools, Calendar and briefings, and is the only one JARVIS writes to (drafts and new events). Other accounts add their mail and calendar, read-only.', '主帳戶供助手郵件工具、日曆及簡報使用，亦是 JARVIS 唯一會寫入的帳戶（草稿及新活動）。其他帳戶會加入其郵件及日曆，權限為唯讀。')}</div>
@@ -1106,7 +1110,7 @@ export default function Settings() {
           </div>
         )}
 
-        {section === "notion" && (
+        {shows("notion") && (
           <div className="settings-panel">
             <IntegrationConnection service="notion" />
             <details className="integration-advanced"><summary>{text("Advanced: use an API token", "進階：使用 Notion 整合權杖")}</summary>
@@ -1119,7 +1123,7 @@ export default function Settings() {
           </div>
         )}
 
-        {section === "github" && (
+        {shows("github") && (
           <div className="settings-panel">
             <IntegrationConnection service="github" />
             <details className="integration-advanced"><summary>{text("Advanced: use an API token", "進階：使用個人存取權杖")}</summary>
@@ -1132,7 +1136,7 @@ export default function Settings() {
           </div>
         )}
 
-        {section === "obsidian" && (
+        {shows("obsidian") && (
           <div className="settings-panel">
             <IntegrationConnection service="obsidian" />
             <details className="integration-advanced"><summary>{text("Advanced: use an API token", "進階：使用 Local REST API 外掛")}</summary>
@@ -1162,7 +1166,7 @@ export default function Settings() {
           </div>
         )}
 
-        {section === "ai" && (
+        {shows("ai") && (
           <div className="settings-panel">
             <h2 className="settings-heading">AWS Bedrock</h2>
             <div style={styles.hint}>
@@ -1211,7 +1215,7 @@ export default function Settings() {
           </div>
         )}
 
-        {section === "voice" && (<>
+        {shows("voice") && (<>
           <div className="settings-panel">
             <h2 className="settings-heading">{text("Assistant language", "助手語言")}</h2>
             <div style={styles.hint}>
@@ -1316,7 +1320,7 @@ export default function Settings() {
           </div>
         </>)}
 
-        {section === "assistant" && (<>
+        {shows("assistant") && (<>
           <div className="settings-panel">
             <h2 className="settings-heading">{text('Personalisation', '個人化')}</h2>
             <div style={styles.hint}>{text('How JARVIS talks to you, in typed and spoken replies.', '設定 JARVIS 在文字及語音回覆中與你對話的方式。')}</div>
@@ -1356,9 +1360,9 @@ export default function Settings() {
           </div>
         </>)}
 
-        {section === "background" && <BackgroundSettings />}
+        {shows("background") && <BackgroundSettings />}
 
-        {section === "appearance" && (<>
+        {shows("appearance") && (<>
           <div className="settings-panel">
             <h2 className="settings-heading">{t("displayName")}</h2>
             <label style={{ display: "block", marginTop: 12 }}>
@@ -1422,7 +1426,7 @@ export default function Settings() {
           </div>
         </>)}
 
-        {section === "usage" && (
+        {shows("usage") && (
           <div className="settings-panel">
             <h2 className="settings-heading">{text("Usage recorded on this Mac", "此 Mac 記錄的用量")}</h2>
             <p className="settings-help" style={{ marginBottom: 14, maxWidth: "72ch" }}>
@@ -1434,7 +1438,7 @@ export default function Settings() {
             <CostPanel />
           </div>
         )}
-        {section === "storage" && (<>
+        {shows("storage") && (<>
           <div className="settings-panel">
             <h2 className="settings-heading">{text('On this Mac', '本機用量')}</h2>
             <p style={styles.hint}>
@@ -1598,7 +1602,7 @@ export default function Settings() {
           </div>
         </>)}
 
-        {section === "about" && <RegistryAbout catalog={models} />}
+        {shows("about") && <RegistryAbout catalog={models} />}
 
       </div>
     </div>
