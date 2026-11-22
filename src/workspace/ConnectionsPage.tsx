@@ -110,7 +110,7 @@ export default function ConnectionsPage() {
             <h2 id="connections-assistant-title">{text('Google for Assistant and Calendar', '助手及日曆的 Google 連接')}</h2>
             <p>{text('This separate Google connection provides Assistant mail tools, Calendar and briefings. A Gmail account added to Mail does not connect these tools.', '此獨立 Google 連接供助手郵件工具、日曆及簡報使用。在郵件頁加入 Gmail 帳戶不會自動連接這些工具。')}</p>
           </div>
-          <button onClick={() => openSettings("google")}>{text('Manage in Settings', '在設定頁管理')}</button>
+          <button onClick={() => openSettings("google")}>{text('Manage in Settings', '在設定中管理')}</button>
         </div>
         {googleError ? (
           <p role="alert" className="connections-message connections-error">{text('Could not read Assistant Google status. Refresh to try again.', '未能讀取助手 Google 狀態。請重新整理再試。')}</p>
@@ -135,7 +135,7 @@ export default function ConnectionsPage() {
           <IntegrationConnection service="obsidian" />
           <div className="connections-service">
             <div><h3>{text("AI providers", "AI 供應商")}</h3><p>{text("OpenAI, Gemini, Claude and AWS Bedrock credentials.", "OpenAI、Gemini、Claude 及 AWS Bedrock 憑證。")}</p></div>
-            <button onClick={() => openSettings("ai")}>{text("Manage in Settings", "在設定頁管理")}</button>
+            <button onClick={() => openSettings("ai")}>{text("Manage in Settings", "在設定中管理")}</button>
           </div>
         </div>
       </section>

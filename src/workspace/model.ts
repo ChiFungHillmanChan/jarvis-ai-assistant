@@ -83,6 +83,7 @@ export function restoreWorkspace(raw: string | undefined): WorkspaceState {
  * a layout saved before then can hold a 'settings' tab). If the active tab
  * goes, the first remaining tab becomes active, or home when none remain. A
  * state with nothing to drop is returned as it is.
+ * validTab already rejects a removed view; this is deliberate defence in depth.
  */
 export function dropRemovedViews(state: WorkspaceState): WorkspaceState {
   const known = (t: WorkspaceTab) => views.includes(t.view);
